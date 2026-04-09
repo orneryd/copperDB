@@ -1,0 +1,17 @@
+[package]
+name = "magnetdb-security"
+description = "Security utilities: TLS, certificate management, secure channels"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+magnetdb-auth = { workspace = true }
+magnetdb-encryption = { workspace = true }
+magnetdb-util = { workspace = true }

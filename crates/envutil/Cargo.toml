@@ -1,0 +1,12 @@
+[package]
+name = "magnetdb-envutil"
+description = "Environment variable utilities"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true

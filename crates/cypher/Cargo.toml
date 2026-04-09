@@ -1,0 +1,17 @@
+[package]
+name = "magnetdb-cypher"
+description = "Cypher query language parser and AST (replaces ANTLR4 grammar)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+pest = "2"
+pest_derive = "2"
+tracing.workspace = true
+magnetdb-util = { workspace = true }

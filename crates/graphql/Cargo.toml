@@ -1,0 +1,21 @@
+[package]
+name = "magnetdb-graphql"
+description = "GraphQL API layer (query/mutation/subscription) "
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+async-graphql.workspace = true
+async-graphql-axum.workspace = true
+tracing.workspace = true
+magnetdb-auth = { workspace = true }
+magnetdb-eval = { workspace = true }
+magnetdb-util = { workspace = true }
+uuid = { workspace = true }

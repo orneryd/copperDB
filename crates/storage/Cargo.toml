@@ -1,0 +1,22 @@
+[package]
+name = "magnetdb-storage"
+description = "Embedded key-value storage engine (replaces Badger/BadgerDB)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+rmp-serde.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+sled.workspace = true
+magnetdb-util = { workspace = true }

@@ -1,0 +1,16 @@
+[package]
+name = "magnetdb-retention"
+description = "Data retention policy enforcement (TTL, expiry)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tokio.workspace = true
+serde.workspace = true
+tracing.workspace = true
+magnetdb-storage = { workspace = true }
+magnetdb-util = { workspace = true }

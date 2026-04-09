@@ -1,0 +1,18 @@
+[package]
+name = "magnetdb-multidb"
+description = "Multi-database management: database isolation, routing"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+dashmap.workspace = true
+magnetdb-storage = { workspace = true }
+magnetdb-auth = { workspace = true }
+magnetdb-util = { workspace = true }

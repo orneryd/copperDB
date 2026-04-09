@@ -1,0 +1,25 @@
+[package]
+name = "magnetdb-auth"
+description = "Authentication: JWT, OAuth2, RBAC roles, privileges, allowlists"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+jsonwebtoken.workspace = true
+oauth2.workspace = true
+base64.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+rand.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+parking_lot.workspace = true
+magnetdb-util = { workspace = true }

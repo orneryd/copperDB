@@ -1,0 +1,21 @@
+[package]
+name = "magnetdb-embed"
+description = "Text embedding generation: OpenAI API and local GGUF model support"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+tracing.workspace = true
+libloading.workspace = true
+parking_lot.workspace = true
+magnetdb-util = { workspace = true }
+async-trait = "0.1"

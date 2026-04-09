@@ -1,0 +1,16 @@
+[package]
+name = "magnetdb-filter"
+description = "Result set filtering: predicate evaluation, type coercion"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+magnetdb-cypher = { workspace = true }
+magnetdb-util = { workspace = true }

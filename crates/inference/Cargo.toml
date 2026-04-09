@@ -1,0 +1,19 @@
+[package]
+name = "magnetdb-inference"
+description = "ML model inference pipeline: embedding, classification, generation"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+magnetdb-embed = { workspace = true }
+magnetdb-localllm = { workspace = true }
+magnetdb-util = { workspace = true }

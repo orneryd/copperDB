@@ -1,0 +1,16 @@
+[package]
+name = "magnetdb-pool"
+description = "Connection pool for database driver connections"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+magnetdb-util = { workspace = true }

@@ -1,0 +1,21 @@
+[package]
+name = "magnetdb-qdrantgrpc"
+description = "Qdrant vector database gRPC client integration"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+tracing.workspace = true
+magnetdb-util = { workspace = true }
+
+[build-dependencies]
+tonic-build = "0.12"

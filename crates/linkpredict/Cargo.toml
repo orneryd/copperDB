@@ -1,0 +1,17 @@
+[package]
+name = "magnetdb-linkpredict"
+description = "Graph link prediction algorithms (Common Neighbors, Adamic-Adar, etc.)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+tracing.workspace = true
+petgraph.workspace = true
+nalgebra.workspace = true
+magnetdb-indexing = { workspace = true }
+magnetdb-util = { workspace = true }

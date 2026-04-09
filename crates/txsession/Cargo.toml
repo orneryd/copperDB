@@ -1,0 +1,18 @@
+[package]
+name = "magnetdb-txsession"
+description = "Transaction session management (ACID properties)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tokio.workspace = true
+parking_lot.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+serde.workspace = true
+magnetdb-storage = { workspace = true }
+magnetdb-util = { workspace = true }

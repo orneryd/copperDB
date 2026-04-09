@@ -1,0 +1,15 @@
+[package]
+name = "magnetdb-simd"
+description = "SIMD-accelerated vector operations (x86 AVX2, ARM NEON)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+wide.workspace = true
+nalgebra.workspace = true
+tracing.workspace = true
+magnetdb-math = { workspace = true }

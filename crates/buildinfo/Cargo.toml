@@ -1,0 +1,16 @@
+[package]
+name = "magnetdb-buildinfo"
+description = "Build metadata and version information"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version = "1.70"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+# No build script needed; uses env! macros

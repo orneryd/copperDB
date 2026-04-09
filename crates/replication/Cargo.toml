@@ -1,0 +1,22 @@
+[package]
+name = "magnetdb-replication"
+description = "Raft-based consensus and replication: leader election, log replication, HA standby"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+prost.workspace = true
+tracing.workspace = true
+openraft.workspace = true
+rmp-serde.workspace = true
+magnetdb-storage = { workspace = true }
+magnetdb-util = { workspace = true }

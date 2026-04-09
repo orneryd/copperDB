@@ -1,0 +1,16 @@
+[package]
+name = "magnetdb-embeddingutil"
+description = "Embedding utility functions: normalization, similarity metrics"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+nalgebra.workspace = true
+tracing.workspace = true
+magnetdb-math = { workspace = true }
+magnetdb-util = { workspace = true }

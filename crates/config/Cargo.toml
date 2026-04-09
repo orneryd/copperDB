@@ -1,0 +1,17 @@
+[package]
+name = "magnetdb-config"
+description = "Configuration loading and management (YAML/TOML/env)"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+toml.workspace = true
+config.workspace = true
+clap.workspace = true
