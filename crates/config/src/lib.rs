@@ -18,6 +18,8 @@ pub enum ConfigError {
     Toml(#[from] toml::de::Error),
     #[error("missing required field: {0}")]
     MissingField(String),
+    #[error("config parse error: {0}")]
+    Parse(#[from] ::config::ConfigError),
 }
 
 /// Top-level magnetDB configuration.
@@ -32,6 +34,22 @@ pub struct Config {
     pub vectorspace: VectorSpaceConfig,
     pub gpu: GpuConfig,
     pub log_level: String,
+}
+
+impl Config {
+    /// Validate required fields that have no safe defaults.
+    ///
+    /// Returns `Err` if `auth.jwt_secret` is empty, which would allow any
+    /// operator-issued token to be accepted by all deployments sharing the
+    /// same (absent) key.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.auth.jwt_secret.is_empty() {
+            return Err(ConfigError::MissingField(
+                "auth.jwt_secret must be set (env: MAGNETDB_AUTH__JWT_SECRET)".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for Config {
@@ -108,7 +126,7 @@ pub struct AuthConfig {
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
-            jwt_secret: "change-me-in-production".into(),
+            jwt_secret: String::new(),
             token_expiry_secs: 3600,
             allow_anonymous: false,
         }
@@ -209,19 +227,22 @@ pub fn load_toml(path: impl AsRef<Path>) -> Result<Config, ConfigError> {
 }
 
 /// Load configuration from environment variables using the `config` crate.
+///
+/// Environment variable prefix: `MAGNETDB_`, separator `__`.
+/// Example: `MAGNETDB_STORAGE__PATH`, `MAGNETDB_AUTH__JWT_SECRET`.
+///
+/// Returns `Err` if any variable fails to parse **or** if required fields
+/// (e.g. `auth.jwt_secret`) are not set.
 pub fn load_from_env() -> Result<Config, ConfigError> {
-    // Environment variable prefix: MAGNETDB_
-    // e.g. MAGNETDB_STORAGE__PATH, MAGNETDB_BOLT__LISTEN_ADDR
-    let builder = ::config::Config::builder()
+    let cfg: Config = ::config::Config::builder()
         .add_source(
             ::config::Environment::with_prefix("MAGNETDB")
                 .separator("__")
                 .try_parsing(true),
-        );
-    let cfg: Config = builder
-        .build()
-        .and_then(|c| c.try_deserialize())
-        .unwrap_or_default();
+        )
+        .build()?
+        .try_deserialize()?;
+    cfg.validate()?;
     Ok(cfg)
 }
 
@@ -237,8 +258,30 @@ mod tests {
     }
 
     #[test]
-    fn test_load_from_env_returns_default_without_env_vars() {
-        let cfg = load_from_env().unwrap();
-        assert!(!cfg.log_level.is_empty());
+    fn test_default_jwt_secret_is_empty() {
+        let cfg = Config::default();
+        assert!(cfg.auth.jwt_secret.is_empty(), "default JWT secret must be empty");
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_jwt_secret() {
+        let cfg = Config::default();
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_accepts_non_empty_jwt_secret() {
+        let mut cfg = Config::default();
+        cfg.auth.jwt_secret = "super-secret-key-for-testing".into();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_load_from_env_requires_jwt_secret() {
+        // Without MAGNETDB_AUTH__JWT_SECRET set, load_from_env must error.
+        // (Guard against the env variable already being set in CI.)
+        if std::env::var("MAGNETDB_AUTH__JWT_SECRET").is_err() {
+            assert!(load_from_env().is_err());
+        }
     }
 }

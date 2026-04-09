@@ -44,25 +44,34 @@ pub fn chunk_by_chars(text: &str, chunk_size: usize, overlap: usize) -> Result<V
 }
 
 /// Split text by sentences (simple period/newline heuristic).
+///
+/// `max_chunk_size` and the returned `char_offset`/`char_length` are all
+/// measured in Unicode scalar values (chars), not bytes.
 pub fn chunk_by_sentences(text: &str, max_chunk_size: usize) -> Vec<Chunk> {
     let mut chunks = Vec::new();
     let mut current = String::new();
+    let mut current_char_len = 0usize;
     let mut chunk_start = 0usize;
-    let mut cursor = 0usize;
+    let mut char_cursor = 0usize;
 
     for sentence in text.split_inclusive(|c| c == '.' || c == '!' || c == '?' || c == '\n') {
-        if current.len() + sentence.len() > max_chunk_size && !current.is_empty() {
-            let len = current.len();
-            chunks.push(Chunk { text: current.clone(), char_offset: chunk_start, char_length: len });
-            chunk_start = cursor;
+        let sentence_char_len = sentence.chars().count();
+        if current_char_len + sentence_char_len > max_chunk_size && !current.is_empty() {
+            chunks.push(Chunk {
+                text: current.clone(),
+                char_offset: chunk_start,
+                char_length: current_char_len,
+            });
+            chunk_start = char_cursor;
             current.clear();
+            current_char_len = 0;
         }
         current.push_str(sentence);
-        cursor += sentence.len();
+        current_char_len += sentence_char_len;
+        char_cursor += sentence_char_len;
     }
     if !current.is_empty() {
-        let len = current.len();
-        chunks.push(Chunk { text: current, char_offset: chunk_start, char_length: len });
+        chunks.push(Chunk { text: current, char_offset: chunk_start, char_length: current_char_len });
     }
     chunks
 }
@@ -84,5 +93,25 @@ mod tests {
         let text = "Hello world. This is a test. Another sentence here.";
         let chunks = chunk_by_sentences(text, 25);
         assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn test_chunk_by_sentences_char_offsets_non_ascii() {
+        // "Héllo." is 6 chars but 7 bytes — offsets must be in chars.
+        let text = "Héllo. World!";
+        let chunks = chunk_by_sentences(text, 100);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].char_offset, 0);
+        assert_eq!(chunks[0].char_length, text.chars().count());
+    }
+
+    #[test]
+    fn test_chunk_by_sentences_split_tracking() {
+        // Force a split so we can verify the second chunk's char_offset.
+        let text = "Short. Another longer sentence here!";
+        let chunks = chunk_by_sentences(text, 10);
+        // Second chunk must start where the first ended (in chars).
+        let first_len = chunks[0].char_length;
+        assert_eq!(chunks[1].char_offset, first_len);
     }
 }
