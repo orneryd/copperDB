@@ -38,26 +38,8 @@ pub fn dot_f32(a: &[f32], b: &[f32]) -> Result<f32, SimdError> {
 
     for i in 0..chunks {
         let base = i * 8;
-        let va = f32x8::new([
-            *a.get(base).unwrap_or(&0.0),
-            *a.get(base + 1).unwrap_or(&0.0),
-            *a.get(base + 2).unwrap_or(&0.0),
-            *a.get(base + 3).unwrap_or(&0.0),
-            *a.get(base + 4).unwrap_or(&0.0),
-            *a.get(base + 5).unwrap_or(&0.0),
-            *a.get(base + 6).unwrap_or(&0.0),
-            *a.get(base + 7).unwrap_or(&0.0),
-        ]);
-        let vb = f32x8::new([
-            *b.get(base).unwrap_or(&0.0),
-            *b.get(base + 1).unwrap_or(&0.0),
-            *b.get(base + 2).unwrap_or(&0.0),
-            *b.get(base + 3).unwrap_or(&0.0),
-            *b.get(base + 4).unwrap_or(&0.0),
-            *b.get(base + 5).unwrap_or(&0.0),
-            *b.get(base + 6).unwrap_or(&0.0),
-            *b.get(base + 7).unwrap_or(&0.0),
-        ]);
+        let va = f32x8::new([a[base], a[base+1], a[base+2], a[base+3], a[base+4], a[base+5], a[base+6], a[base+7]]);
+        let vb = f32x8::new([b[base], b[base+1], b[base+2], b[base+3], b[base+4], b[base+5], b[base+6], b[base+7]]);
         acc += va * vb;
     }
 
@@ -88,26 +70,8 @@ pub fn l2_distance_sq_f32(a: &[f32], b: &[f32]) -> Result<f32, SimdError> {
 
     for i in 0..chunks {
         let base = i * 8;
-        let va = f32x8::new([
-            *a.get(base).unwrap_or(&0.0),
-            *a.get(base + 1).unwrap_or(&0.0),
-            *a.get(base + 2).unwrap_or(&0.0),
-            *a.get(base + 3).unwrap_or(&0.0),
-            *a.get(base + 4).unwrap_or(&0.0),
-            *a.get(base + 5).unwrap_or(&0.0),
-            *a.get(base + 6).unwrap_or(&0.0),
-            *a.get(base + 7).unwrap_or(&0.0),
-        ]);
-        let vb = f32x8::new([
-            *b.get(base).unwrap_or(&0.0),
-            *b.get(base + 1).unwrap_or(&0.0),
-            *b.get(base + 2).unwrap_or(&0.0),
-            *b.get(base + 3).unwrap_or(&0.0),
-            *b.get(base + 4).unwrap_or(&0.0),
-            *b.get(base + 5).unwrap_or(&0.0),
-            *b.get(base + 6).unwrap_or(&0.0),
-            *b.get(base + 7).unwrap_or(&0.0),
-        ]);
+        let va = f32x8::new([a[base], a[base+1], a[base+2], a[base+3], a[base+4], a[base+5], a[base+6], a[base+7]]);
+        let vb = f32x8::new([b[base], b[base+1], b[base+2], b[base+3], b[base+4], b[base+5], b[base+6], b[base+7]]);
         let diff = va - vb;
         acc += diff * diff;
     }

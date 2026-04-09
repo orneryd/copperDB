@@ -47,20 +47,22 @@ pub fn chunk_by_chars(text: &str, chunk_size: usize, overlap: usize) -> Result<V
 pub fn chunk_by_sentences(text: &str, max_chunk_size: usize) -> Vec<Chunk> {
     let mut chunks = Vec::new();
     let mut current = String::new();
-    let mut offset = 0usize;
+    let mut chunk_start = 0usize;
+    let mut cursor = 0usize;
 
     for sentence in text.split_inclusive(|c| c == '.' || c == '!' || c == '?' || c == '\n') {
         if current.len() + sentence.len() > max_chunk_size && !current.is_empty() {
             let len = current.len();
-            chunks.push(Chunk { text: current.clone(), char_offset: offset - len, char_length: len });
+            chunks.push(Chunk { text: current.clone(), char_offset: chunk_start, char_length: len });
+            chunk_start = cursor;
             current.clear();
         }
         current.push_str(sentence);
-        offset += sentence.len();
+        cursor += sentence.len();
     }
     if !current.is_empty() {
         let len = current.len();
-        chunks.push(Chunk { text: current, char_offset: offset - len, char_length: len });
+        chunks.push(Chunk { text: current, char_offset: chunk_start, char_length: len });
     }
     chunks
 }
