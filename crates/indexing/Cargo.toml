@@ -1,0 +1,17 @@
+[package]
+name = "magnetdb-indexing"
+description = "Graph index management: B-tree, composite, full-text indexes"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+petgraph.workspace = true
+magnetdb-storage = { workspace = true }
+magnetdb-util = { workspace = true }

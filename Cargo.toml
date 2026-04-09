@@ -1,0 +1,206 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/audit",
+    "crates/auth",
+    "crates/bolt",
+    "crates/buildinfo",
+    "crates/cache",
+    "crates/compliance",
+    "crates/config",
+    "crates/convert",
+    "crates/cypher",
+    "crates/decay",
+    "crates/embed",
+    "crates/embeddingutil",
+    "crates/encryption",
+    "crates/envutil",
+    "crates/eval",
+    "crates/fabric",
+    "crates/filter",
+    "crates/gpu",
+    "crates/graphql",
+    "crates/heimdall",
+    "crates/indexing",
+    "crates/inference",
+    "crates/kms",
+    "crates/linkpredict",
+    "crates/localllm",
+    "crates/math",
+    "crates/mcp",
+    "crates/multidb",
+    "crates/magnetdb",
+    "crates/nornicgrpc",
+    "crates/pool",
+    "crates/qdrantgrpc",
+    "crates/replication",
+    "crates/retention",
+    "crates/search",
+    "crates/security",
+    "crates/server",
+    "crates/simd",
+    "crates/storage",
+    "crates/temporal",
+    "crates/textchunk",
+    "crates/txsession",
+    "crates/util",
+    "crates/vectorspace",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["magnetDB contributors"]
+license = "Apache-2.0"
+repository = "https://github.com/orneryd/magnetDB"
+
+# Shared dependency versions across workspace
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+rmp-serde = "1"          # MessagePack (replaces vmihailenco/msgpack)
+toml = "0.8"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Cryptography (replaces golang.org/x/crypto)
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+argon2 = "0.5"
+sha2 = "0.10"
+hmac = "0.12"
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+
+# UUIDs (replaces github.com/google/uuid)
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# JWT (replaces github.com/golang-jwt/jwt)
+jsonwebtoken = "9"
+
+# HTTP client / server
+reqwest = { version = "0.12", features = ["json", "stream"] }
+axum = "0.7"
+hyper = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# WebSocket (replaces github.com/gorilla/websocket)
+tokio-tungstenite = "0.24"
+
+# gRPC (replaces google.golang.org/grpc)
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+
+# GraphQL (replaces github.com/99designs/gqlgen)
+async-graphql = "7"
+async-graphql-axum = "7"
+
+# Storage engine (replaces github.com/dgraph-io/badger)
+sled = "0.34"
+
+# Configuration (replaces github.com/spf13/cobra / gopkg.in/yaml.v3)
+clap = { version = "4", features = ["derive"] }
+config = "0.14"
+
+# Graph algorithms (for linkpredict, indexing)
+petgraph = "0.6"
+
+# Numeric / linear algebra
+nalgebra = "0.32"
+ndarray = "0.16"
+
+# SIMD / vectorized math (replaces github.com/viterin/vek)
+wide = "0.7"
+
+# GPU compute (replaces CUDA/Metal/Vulkan/OpenCL backends)
+wgpu = "0.20"
+
+# Full-text search (replaces Bleve / custom search)
+tantivy = "0.22"
+
+# Bytes / encoding utilities
+bytes = "1"
+base64 = "0.22"
+hex = "0.4"
+
+# Hashing (replaces hash/fnv in Go std)
+fnv = "1"
+twox-hash = "1"
+
+# Concurrency primitives
+parking_lot = "0.12"
+dashmap = "5"
+
+# Dynamic library loading (replaces github.com/ebitengine/purego FFI)
+libloading = "0.8"
+
+# Consensus / Raft (replaces hashicorp/raft implicitly used in replication)
+openraft = "0.9"
+
+# KMS provider clients
+aws-config = "1"
+aws-sdk-kms = "1"
+
+# OAuth2 (replaces auth OAuth flows)
+oauth2 = "4"
+
+# Inter-crate dependencies within this workspace
+magnetdb-util = { path = "crates/util" }
+magnetdb-storage = { path = "crates/storage" }
+magnetdb-cypher = { path = "crates/cypher" }
+magnetdb-auth = { path = "crates/auth" }
+magnetdb-encryption = { path = "crates/encryption" }
+magnetdb-cache = { path = "crates/cache" }
+magnetdb-simd = { path = "crates/simd" }
+magnetdb-vectorspace = { path = "crates/vectorspace" }
+magnetdb-decay = { path = "crates/decay" }
+magnetdb-temporal = { path = "crates/temporal" }
+magnetdb-indexing = { path = "crates/indexing" }
+magnetdb-replication = { path = "crates/replication" }
+magnetdb-bolt = { path = "crates/bolt" }
+magnetdb-embed = { path = "crates/embed" }
+magnetdb-gpu = { path = "crates/gpu" }
+magnetdb-kms = { path = "crates/kms" }
+magnetdb-config = { path = "crates/config" }
+magnetdb-server = { path = "crates/server" }
+magnetdb-graphql = { path = "crates/graphql" }
+magnetdb-pool = { path = "crates/pool" }
+magnetdb-txsession = { path = "crates/txsession" }
+magnetdb-eval = { path = "crates/eval" }
+magnetdb-filter = { path = "crates/filter" }
+magnetdb-math = { path = "crates/math" }
+magnetdb-search = { path = "crates/search" }
+magnetdb-audit = { path = "crates/audit" }
+magnetdb-compliance = { path = "crates/compliance" }
+magnetdb-security = { path = "crates/security" }
+magnetdb-heimdall = { path = "crates/heimdall" }
+magnetdb-fabric = { path = "crates/fabric" }
+magnetdb-multidb = { path = "crates/multidb" }
+magnetdb-mcp = { path = "crates/mcp" }
+magnetdb-inference = { path = "crates/inference" }
+magnetdb-localllm = { path = "crates/localllm" }
+magnetdb-linkpredict = { path = "crates/linkpredict" }
+magnetdb-embeddingutil = { path = "crates/embeddingutil" }
+magnetdb-textchunk = { path = "crates/textchunk" }
+magnetdb-retention = { path = "crates/retention" }
+magnetdb-convert = { path = "crates/convert" }
+magnetdb-envutil = { path = "crates/envutil" }
+magnetdb-buildinfo = { path = "crates/buildinfo" }
+magnetdb-nornicgrpc = { path = "crates/nornicgrpc" }
+magnetdb-qdrantgrpc = { path = "crates/qdrantgrpc" }
+magnetdb = { path = "crates/magnetdb" }

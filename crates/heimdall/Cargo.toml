@@ -1,0 +1,17 @@
+[package]
+name = "magnetdb-heimdall"
+description = "Security monitoring: anomaly detection, threat response"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+magnetdb-auth = { workspace = true }
+magnetdb-audit = { workspace = true }
+magnetdb-util = { workspace = true }

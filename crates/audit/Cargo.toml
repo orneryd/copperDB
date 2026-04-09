@@ -1,0 +1,18 @@
+[package]
+name = "magnetdb-audit"
+description = "Audit logging: structured event recording for compliance"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+magnetdb-auth = { workspace = true }
+magnetdb-util = { workspace = true }

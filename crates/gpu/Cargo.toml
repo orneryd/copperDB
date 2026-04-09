@@ -1,0 +1,19 @@
+[package]
+name = "magnetdb-gpu"
+description = "GPU-accelerated computation: CUDA, Metal, Vulkan, OpenCL backends"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+wgpu.workspace = true
+nalgebra.workspace = true
+magnetdb-simd = { workspace = true }
+magnetdb-util = { workspace = true }

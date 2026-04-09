@@ -1,0 +1,39 @@
+[package]
+name = "magnetdb-magnetdb"
+description = "magnetDB core engine: integrates all subsystems into a unified database"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+uuid.workspace = true
+magnetdb-storage = { workspace = true }
+magnetdb-cypher = { workspace = true }
+magnetdb-eval = { workspace = true }
+magnetdb-bolt = { workspace = true }
+magnetdb-auth = { workspace = true }
+magnetdb-encryption = { workspace = true }
+magnetdb-cache = { workspace = true }
+magnetdb-replication = { workspace = true }
+magnetdb-temporal = { workspace = true }
+magnetdb-decay = { workspace = true }
+magnetdb-vectorspace = { workspace = true }
+magnetdb-embed = { workspace = true }
+magnetdb-indexing = { workspace = true }
+magnetdb-server = { workspace = true }
+magnetdb-graphql = { workspace = true }
+magnetdb-pool = { workspace = true }
+magnetdb-txsession = { workspace = true }
+magnetdb-audit = { workspace = true }
+magnetdb-config = { workspace = true }
+magnetdb-util = { workspace = true }

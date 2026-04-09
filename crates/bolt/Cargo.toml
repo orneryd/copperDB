@@ -1,0 +1,22 @@
+[package]
+name = "magnetdb-bolt"
+description = "Neo4j Bolt protocol server: PackStream encoding, connection handling"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+rmp-serde.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+magnetdb-auth = { workspace = true }
+magnetdb-eval = { workspace = true }
+magnetdb-util = { workspace = true }

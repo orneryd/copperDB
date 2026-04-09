@@ -1,0 +1,14 @@
+[package]
+name = "magnetdb-textchunk"
+description = "Text chunking strategies for embedding pipelines"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+tracing.workspace = true
+magnetdb-util = { workspace = true }
