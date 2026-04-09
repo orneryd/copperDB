@@ -1,8 +1,17 @@
-# magnetDB
+<p align="center">
+  <img src="https://raw.githubusercontent.com/orneryd/NornicDB/refs/heads/main/logo.svg" alt="copperDB Logo" width="200"/>
+</p>
+
+<h1 align="center">copperDB</h1>
+
+<p align="center">
+  <strong>The Graph Database That Learns <br/> Achieving Psygnosis for AI</strong><br/>
+  Neo4j-compatible • GPU-accelerated • Memory that evolves
+</p>
 
 A Rust implementation of the [NornicDB](https://github.com/orneryd/NornicDB) graph database engine.
 
-magnetDB provides the same capabilities as NornicDB — a property-graph database with
+copperDB provides the same capabilities as NornicDB — a property-graph database with
 Cypher query support, vector embeddings, temporal data, Raft replication, and GPU
 acceleration — implemented idiomatically in Rust.
 
@@ -14,7 +23,7 @@ The repository is organized as a Cargo workspace. Each crate under `crates/` cor
 directly to a Go package under `pkg/` in NornicDB:
 
 ```
-magnetDB/
+copperDB/
 ├── Cargo.toml          # Workspace manifest (all shared dependency versions here)
 └── crates/
     ├── audit/          # ← pkg/audit
@@ -42,7 +51,7 @@ magnetDB/
     ├── kms/            # ← pkg/kms
     ├── linkpredict/    # ← pkg/linkpredict
     ├── localllm/       # ← pkg/embed (local GGUF)
-    ├── magnetdb/       # ← pkg/nornicdb  (main engine)
+    ├── copperDB/       # ← pkg/nornicdb  (main engine)
     ├── math/           # ← pkg/math
     ├── mcp/            # ← pkg/mcp
     ├── multidb/        # ← pkg/multidb
@@ -229,7 +238,7 @@ See `crates/nornicgrpc/src/lib.rs` for the build.rs example.
 ## Architecture Notes
 
 ### Storage Engine
-magnetDB uses `sled` (an embedded Rust key-value store) instead of BadgerDB.
+copperDB uses `sled` (an embedded Rust key-value store) instead of BadgerDB.
 Both are LSM-tree based and offer similar performance characteristics.
 Key differences:
 - `sled` uses lock-free B-trees internally (not pure LSM)
@@ -238,13 +247,13 @@ Key differences:
 
 ### Replication
 NornicDB's replication module is built around `hashicorp/raft` (the Go standard).
-magnetDB uses `openraft` (TiKV's modern, async-native Raft library).
+copperDB uses `openraft` (TiKV's modern, async-native Raft library).
 `openraft` requires implementing three traits: `RaftStateMachine`, `RaftStorage`, and
 `RaftNetwork`. These are stubs in `crates/replication/src/lib.rs`.
 
 ### GPU Acceleration
 NornicDB has four separate GPU backends (CUDA/Metal/Vulkan/OpenCL) each with CGo wrappers.
-magnetDB consolidates these under `wgpu` (WebGPU-based, cross-platform compute):
+copperDB consolidates these under `wgpu` (WebGPU-based, cross-platform compute):
 - On macOS: uses Metal backend automatically
 - On Linux/Windows with NVIDIA: uses Vulkan backend
 - For direct CUDA access: add `cudarc` as an optional feature dependency
@@ -305,7 +314,7 @@ integrate the `instant-distance` or `hnsw_rs` crate for approximate nearest neig
 | `inference` | 🔧 Stub | Pipeline wiring needed |
 | `search` | 🔧 Stub | Tantivy integration needed |
 | `security` | 🔧 Stub | rustls integration needed |
-| `magnetdb` | 🔧 Stub | Requires all above |
+| `copperdb` | 🔧 Stub | Requires all above |
 
 ---
 
