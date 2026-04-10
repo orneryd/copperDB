@@ -11,7 +11,5 @@ repository.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-pest = "2"
-pest_derive = "2"
 tracing.workspace = true
 magnetdb-util = { workspace = true }
