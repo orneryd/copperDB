@@ -69,6 +69,125 @@ pub enum NodeRole {
 // Reference: NornicDB pkg/replication/raft.go, storage_adapter.go, transport.go
 // openraft docs: https://datafuselabs.github.io/openraft/
 
+/// Raft node roles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RaftRole {
+    Follower,
+    Candidate,
+    Leader,
+}
+
+/// Commands that can be replicated through Raft.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RaftCommand {
+    Noop,
+    Write { key: Vec<u8>, value: Vec<u8> },
+    Delete { key: Vec<u8> },
+}
+
+/// Raft node state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RaftState {
+    pub node_id: String,
+    pub term: u64,
+    pub role: RaftRole,
+    pub commit_index: u64,
+    pub last_applied: u64,
+    pub voted_for: Option<String>,
+}
+
+impl RaftState {
+    pub fn new(node_id: impl Into<String>) -> Self {
+        Self {
+            node_id: node_id.into(),
+            term: 0,
+            role: RaftRole::Follower,
+            commit_index: 0,
+            last_applied: 0,
+            voted_for: None,
+        }
+    }
+}
+
+use std::sync::{Arc, RwLock};
+
+/// A Raft node managing distributed consensus state.
+pub struct RaftNode {
+    state: Arc<RwLock<RaftState>>,
+    log: Arc<RwLock<Vec<LogEntry>>>,
+}
+
+impl RaftNode {
+    pub fn new(node_id: impl Into<String>) -> Self {
+        Self {
+            state: Arc::new(RwLock::new(RaftState::new(node_id))),
+            log: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    pub fn current_term(&self) -> u64 {
+        self.state.read().unwrap().term
+    }
+
+    pub fn role(&self) -> RaftRole {
+        self.state.read().unwrap().role
+    }
+
+    pub fn node_id(&self) -> String {
+        self.state.read().unwrap().node_id.clone()
+    }
+
+    /// Propose a command. Only succeeds when this node is the leader.
+    pub fn propose(&self, cmd: RaftCommand) -> Result<(), ReplicationError> {
+        let state = self.state.read().unwrap();
+        if state.role != RaftRole::Leader {
+            return Err(ReplicationError::NotLeader(state.node_id.clone()));
+        }
+        drop(state);
+        let mut log = self.log.write().unwrap();
+        let index = log.len() as u64 + 1;
+        let term = self.state.read().unwrap().term;
+        log.push(LogEntry {
+            index,
+            term,
+            payload: LogPayload::CypherMutation {
+                database: "default".into(),
+                query: format!("{cmd:?}"),
+                params: serde_json::Value::Null,
+            },
+        });
+        drop(log);
+        let mut s = self.state.write().unwrap();
+        s.commit_index = index;
+        s.last_applied = index;
+        Ok(())
+    }
+
+    /// Step down to follower (e.g., after seeing a higher term).
+    pub fn step_down(&self) {
+        let mut s = self.state.write().unwrap();
+        s.role = RaftRole::Follower;
+    }
+
+    /// Become leader (after winning an election).
+    pub fn become_leader(&self) {
+        let mut s = self.state.write().unwrap();
+        s.role = RaftRole::Leader;
+    }
+
+    /// Transition to candidate and start a new election term.
+    pub fn start_election(&self) {
+        let mut s = self.state.write().unwrap();
+        s.term += 1;
+        s.role = RaftRole::Candidate;
+        s.voted_for = Some(s.node_id.clone());
+    }
+
+    pub fn log_len(&self) -> usize {
+        self.log.read().unwrap().len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,5 +206,66 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         let restored: LogEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.index, 1);
+    }
+
+    #[test]
+    fn test_raft_node_initial_state() {
+        let node = RaftNode::new("node-1");
+        assert_eq!(node.current_term(), 0);
+        assert_eq!(node.role(), RaftRole::Follower);
+    }
+
+    #[test]
+    fn test_raft_node_become_leader() {
+        let node = RaftNode::new("node-1");
+        node.become_leader();
+        assert_eq!(node.role(), RaftRole::Leader);
+    }
+
+    #[test]
+    fn test_raft_node_step_down() {
+        let node = RaftNode::new("node-1");
+        node.become_leader();
+        node.step_down();
+        assert_eq!(node.role(), RaftRole::Follower);
+    }
+
+    #[test]
+    fn test_raft_node_propose_as_leader() {
+        let node = RaftNode::new("node-1");
+        node.become_leader();
+        let result = node.propose(RaftCommand::Write {
+            key: b"hello".to_vec(),
+            value: b"world".to_vec(),
+        });
+        assert!(result.is_ok());
+        assert_eq!(node.log_len(), 1);
+    }
+
+    #[test]
+    fn test_raft_node_propose_as_follower_fails() {
+        let node = RaftNode::new("node-1");
+        let result = node.propose(RaftCommand::Noop);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_raft_node_election() {
+        let node = RaftNode::new("node-1");
+        node.start_election();
+        assert_eq!(node.role(), RaftRole::Candidate);
+        assert_eq!(node.current_term(), 1);
+    }
+
+    #[test]
+    fn test_raft_command_noop() {
+        let cmd = RaftCommand::Noop;
+        assert!(matches!(cmd, RaftCommand::Noop));
+    }
+
+    #[test]
+    fn test_raft_command_delete() {
+        let cmd = RaftCommand::Delete { key: b"k".to_vec() };
+        assert!(matches!(cmd, RaftCommand::Delete { .. }));
     }
 }

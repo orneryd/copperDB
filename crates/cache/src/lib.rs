@@ -186,4 +186,45 @@ mod tests {
         assert_eq!(stats.hits, 1);
         assert_eq!(stats.misses, 1);
     }
+
+    #[test]
+    fn test_hit_rate() {
+        let cache: QueryCache<i32> = QueryCache::new(10, None);
+        cache.put(1, 10);
+        cache.get(1);
+        cache.get(1);
+        cache.get(2); // miss
+        let stats = cache.stats();
+        let rate = stats.hit_rate();
+        assert!((rate - 2.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_overwrite_existing_key() {
+        let cache: QueryCache<i32> = QueryCache::new(10, None);
+        cache.put(1, 10);
+        cache.put(1, 99);
+        assert_eq!(cache.get(1), Some(99));
+        assert_eq!(cache.stats().size, 1);
+    }
+
+    #[test]
+    fn test_empty_hit_rate() {
+        let cache: QueryCache<i32> = QueryCache::new(10, None);
+        assert_eq!(cache.stats().hit_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_lru_order_maintained_on_access() {
+        let cache: QueryCache<i32> = QueryCache::new(2, None);
+        cache.put(1, 10);
+        cache.put(2, 20);
+        // Access key=1 to make it recently used
+        cache.get(1);
+        // Now insert key=3: should evict key=2 (LRU)
+        cache.put(3, 30);
+        assert_eq!(cache.get(1), Some(10));
+        assert!(cache.get(2).is_none());
+        assert_eq!(cache.get(3), Some(30));
+    }
 }

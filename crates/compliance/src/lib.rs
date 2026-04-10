@@ -91,4 +91,40 @@ mod tests {
         let result = policies.check_property_access("ssn", &["admin".to_string()]);
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn test_no_policy_allows_all() {
+        let policies = PolicySet::new();
+        assert!(policies.check_property_access("name", &["reader".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn test_multiple_policies() {
+        let mut policies = PolicySet::new();
+        policies.add(Policy::MaskProperty {
+            property: "ssn".into(),
+            allowed_roles: vec!["admin".into()],
+        });
+        policies.add(Policy::RestrictLabel {
+            label: "Patient".into(),
+            allowed_roles: vec!["doctor".into()],
+        });
+        assert_eq!(policies.policies.len(), 2);
+    }
+
+    #[test]
+    fn test_policy_serialization() {
+        let mut ps = PolicySet::new();
+        ps.add(Policy::RequireAudit { label: "Finance".into() });
+        let json = serde_json::to_string(&ps).unwrap();
+        let decoded: PolicySet = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.policies.len(), 1);
+    }
+
+    #[test]
+    fn test_retention_policy_in_policy_set() {
+        let mut ps = PolicySet::new();
+        ps.add(Policy::RetentionPolicy { label: "Log".into(), max_age_days: 30 });
+        assert_eq!(ps.policies.len(), 1);
+    }
 }

@@ -96,6 +96,60 @@ impl<T: Send> ConnectionPool<T> {
     }
 }
 
+/// A simpler, non-RAII generic connection pool.
+///
+/// Connections are manually acquired and released; there is no automatic
+/// return-on-drop. Useful for simple resource management scenarios.
+pub struct Pool<C: Send + 'static> {
+    connections: std::sync::Arc<Mutex<VecDeque<C>>>,
+    max_size: usize,
+    created: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl<C: Send + 'static> Pool<C> {
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            connections: std::sync::Arc::new(Mutex::new(VecDeque::new())),
+            max_size,
+            created: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+
+    /// Acquire a connection from the pool (returns `None` if empty).
+    pub fn acquire(&self) -> Option<C> {
+        self.connections.lock().pop_front()
+    }
+
+    /// Return a connection to the pool. Drops it if the pool is at capacity.
+    pub fn release(&self, conn: C) {
+        let mut guard = self.connections.lock();
+        if guard.len() < self.max_size {
+            guard.push_back(conn);
+        }
+    }
+
+    /// Number of connections currently in the pool (available).
+    pub fn available(&self) -> usize {
+        self.connections.lock().len()
+    }
+
+    /// Track how many connections have been created externally.
+    pub fn record_created(&self) {
+        self.created.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Number of connections currently in use (created but not in pool).
+    pub fn in_use(&self) -> usize {
+        let created = self.created.load(std::sync::atomic::Ordering::Relaxed);
+        let avail = self.available();
+        created.saturating_sub(avail)
+    }
+
+    pub fn max_size(&self) -> usize {
+        self.max_size
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +171,44 @@ mod tests {
     fn test_pool_exhausted() {
         let pool: std::sync::Arc<ConnectionPool<i32>> = ConnectionPool::new(2);
         assert!(matches!(pool.acquire(), Err(PoolError::Exhausted(2))));
+    }
+
+    #[test]
+    fn test_simple_pool_acquire_release() {
+        let pool: Pool<i32> = Pool::new(3);
+        pool.release(10);
+        pool.release(20);
+        assert_eq!(pool.available(), 2);
+        let v = pool.acquire().unwrap();
+        assert_eq!(v, 10);
+        assert_eq!(pool.available(), 1);
+        pool.release(v);
+        assert_eq!(pool.available(), 2);
+    }
+
+    #[test]
+    fn test_simple_pool_capacity() {
+        let pool: Pool<i32> = Pool::new(2);
+        pool.release(1);
+        pool.release(2);
+        // Releasing a 3rd connection to a full pool drops it
+        pool.release(3);
+        assert_eq!(pool.available(), 2);
+    }
+
+    #[test]
+    fn test_simple_pool_empty_acquire() {
+        let pool: Pool<i32> = Pool::new(2);
+        assert!(pool.acquire().is_none());
+    }
+
+    #[test]
+    fn test_simple_pool_in_use() {
+        let pool: Pool<i32> = Pool::new(3);
+        pool.record_created();
+        pool.record_created();
+        pool.release(1);
+        // 2 created, 1 in pool => 1 in use
+        assert_eq!(pool.in_use(), 1);
     }
 }
