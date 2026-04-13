@@ -2,6 +2,24 @@
 //!
 //! Hand-rolled recursive-descent parser for a subset of the openCypher grammar,
 //! equivalent to the ANTLR4-based parser in NornicDB (Go).
+//!
+//! # v1.0.40 (Kiyote) — hot-path optimization
+//!
+//! All regex-based keyword detection and pattern matching has been replaced with
+//! the scanner-based modules introduced in NornicDB v1.0.40:
+//!
+//! - [`keyword_scan`] — allocation-free keyword finder (respects string
+//!   literals, comments, nested parentheses)
+//! - [`string_patterns`] — `split_by_keyword`, `extract_limit/skip`,
+//!   `parse_aggregation`, `extract_parameters` — all without regex
+//! - [`query_patterns`] — pre-execution pattern detection for optimised routing
+//! - [`hot_path_trace`] — per-query hot-path execution tracing
+
+// ─── Sub-modules (NornicDB v1.0.40 additions) ─────────────────────────────────
+pub mod hot_path_trace;
+pub mod keyword_scan;
+pub mod query_patterns;
+pub mod string_patterns;
 
 use std::collections::HashMap;
 
@@ -191,66 +209,93 @@ const SINGLE_CHAR_TOKENS: &[char] = &[
 /// - Split on whitespace.
 /// - Split on single-char tokens (see `SINGLE_CHAR_TOKENS`), each becomes its own token.
 /// - Quoted strings (`'…'` or `"…"`) are kept as a single token including the quotes.
+///   String scanning uses the same escape-aware logic as [`keyword_scan`] so that
+///   keywords inside quoted values are never mistaken for clause delimiters.
 /// - `<>`, `<=`, `>=` are kept as two-character tokens.
 pub fn tokenize(input: &str) -> Result<Vec<String>, CypherError> {
+    use crate::keyword_scan::is_ascii_space;
+
+    let sb = input.as_bytes();
+    let len = sb.len();
     let mut tokens: Vec<String> = Vec::new();
-    let chars: Vec<char> = input.chars().collect();
-    let len = chars.len();
     let mut i = 0;
 
     while i < len {
-        let ch = chars[i];
+        let b = sb[i];
 
-        // Skip whitespace
-        if ch.is_whitespace() {
+        // Skip whitespace (using scanner helper for consistency)
+        if is_ascii_space(b) {
             i += 1;
             continue;
         }
 
-        // Quoted string – keep quote chars in token
-        if ch == '\'' || ch == '"' {
-            let quote = ch;
+        // Quoted string — use escape-aware scanning (same as keyword_scan)
+        if b == b'\'' || b == b'"' {
+            let quote = b;
             let mut s = String::new();
-            s.push(quote);
+            s.push(b as char);
             i += 1;
-            while i < len && chars[i] != quote {
-                s.push(chars[i]);
+            loop {
+                if i >= len {
+                    return Err(CypherError::UnterminatedString);
+                }
+                let c = sb[i];
+                if c == b'\\' && i + 1 < len {
+                    s.push(c as char);
+                    s.push(sb[i + 1] as char);
+                    i += 2;
+                    continue;
+                }
+                if c == quote {
+                    // SQL-style doubled quote ('Alice''s')
+                    if i + 1 < len && sb[i + 1] == quote {
+                        s.push(c as char);
+                        s.push(c as char);
+                        i += 2;
+                        continue;
+                    }
+                    s.push(c as char);
+                    i += 1;
+                    break;
+                }
+                s.push(c as char);
                 i += 1;
             }
-            if i >= len {
-                return Err(CypherError::UnterminatedString);
-            }
-            s.push(quote);
-            i += 1; // consume closing quote
             tokens.push(s);
             continue;
         }
 
         // Two-character comparison operators
         if i + 1 < len {
-            let two: String = [ch, chars[i + 1]].iter().collect();
-            if two == "<>" || two == "<=" || two == ">=" {
-                tokens.push(two);
+            let pair = (b, sb[i + 1]);
+            if matches!(pair, (b'<', b'>') | (b'<', b'=') | (b'>', b'=')) {
+                tokens.push(format!("{}{}", b as char, sb[i + 1] as char));
                 i += 2;
                 continue;
             }
         }
 
-        // Single-char tokens
-        if SINGLE_CHAR_TOKENS.contains(&ch) {
-            tokens.push(ch.to_string());
+        // Single-char tokens (ASCII fast path)
+        if b.is_ascii() && SINGLE_CHAR_TOKENS.contains(&(b as char)) {
+            tokens.push((b as char).to_string());
             i += 1;
             continue;
         }
 
-        // Word / identifier / number – accumulate until whitespace or single-char token
-        let mut word = String::new();
-        while i < len && !chars[i].is_whitespace() && !SINGLE_CHAR_TOKENS.contains(&chars[i]) {
-            word.push(chars[i]);
+        // Word / identifier / number — accumulate until whitespace or single-char token.
+        let start = i;
+        while i < len {
+            let c = sb[i];
+            if is_ascii_space(c) {
+                break;
+            }
+            if c.is_ascii() && SINGLE_CHAR_TOKENS.contains(&(c as char)) {
+                break;
+            }
             i += 1;
         }
-        if !word.is_empty() {
-            tokens.push(word);
+        if i > start {
+            tokens.push(input[start..i].to_owned());
         }
     }
 
