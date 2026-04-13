@@ -235,12 +235,15 @@ impl EvalEngine {
 
                 Clause::Where(where_clause) => {
                     let expr = &where_clause.expression;
-                    current_rows = current_rows
-                        .into_iter()
-                        .filter(|row| {
-                            eval_predicate(expr, row, params).unwrap_or(false)
-                        })
-                        .collect();
+                    let mut filtered = Vec::with_capacity(current_rows.len());
+                    for row in current_rows {
+                        match eval_predicate(expr, &row, params) {
+                            Ok(true) => filtered.push(row),
+                            Ok(false) => {}
+                            Err(e) => return Err(EvalError::FilterError(e.to_string())),
+                        }
+                    }
+                    current_rows = filtered;
                 }
 
                 Clause::Return(ret) => {

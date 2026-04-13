@@ -161,9 +161,11 @@ fn numeric_cmp(a: &Value, b: &Value) -> Result<i32, FilterError> {
             let f2 = n2.as_f64().unwrap_or(f64::NAN);
             if f1 < f2 { Ok(-1) } else if f1 > f2 { Ok(1) } else { Ok(0) }
         }
-        (Value::String(s1), Value::String(s2)) => {
-            Ok(s1.cmp(s2) as i32)
-        }
+        (Value::String(s1), Value::String(s2)) => match s1.cmp(s2) {
+            std::cmp::Ordering::Less => Ok(-1),
+            std::cmp::Ordering::Equal => Ok(0),
+            std::cmp::Ordering::Greater => Ok(1),
+        },
         _ => Err(FilterError::TypeError(format!(
             "cannot compare {:?} with {:?}",
             a, b
@@ -680,5 +682,53 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("name".to_string(), json!("Alice"));
         assert_eq!(eval_expression(&expr, &row, &params).unwrap(), json!("Alice"));
+    }
+
+    #[test]
+    fn test_string_ordering() {
+        // "apple" < "banana" in lexicographic order
+        let expr_lt = Expression::Comparison {
+            left: Box::new(Expression::Literal(json!("apple"))),
+            op: "<".to_string(),
+            right: Box::new(Expression::Literal(json!("banana"))),
+        };
+        assert_eq!(
+            eval_expression(&expr_lt, &HashMap::new(), &HashMap::new()).unwrap(),
+            json!(true)
+        );
+
+        // "zebra" > "ant"
+        let expr_gt = Expression::Comparison {
+            left: Box::new(Expression::Literal(json!("zebra"))),
+            op: ">".to_string(),
+            right: Box::new(Expression::Literal(json!("ant"))),
+        };
+        assert_eq!(
+            eval_expression(&expr_gt, &HashMap::new(), &HashMap::new()).unwrap(),
+            json!(true)
+        );
+
+        // equal strings
+        let expr_eq = Expression::Comparison {
+            left: Box::new(Expression::Literal(json!("same"))),
+            op: "=".to_string(),
+            right: Box::new(Expression::Literal(json!("same"))),
+        };
+        assert_eq!(
+            eval_expression(&expr_eq, &HashMap::new(), &HashMap::new()).unwrap(),
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn test_type_error_propagated_from_predicate() {
+        // Comparing a number and a string with < should return a FilterError,
+        // not silently return false.
+        let expr = Expression::Comparison {
+            left: Box::new(Expression::Literal(json!(42))),
+            op: "<".to_string(),
+            right: Box::new(Expression::Literal(json!("text"))),
+        };
+        assert!(eval_predicate(&expr, &HashMap::new(), &HashMap::new()).is_err());
     }
 }

@@ -268,7 +268,7 @@ pub fn tokenize(input: &str) -> Result<Vec<String>, CypherError> {
         // Two-character comparison operators
         if i + 1 < len {
             let pair = (b, sb[i + 1]);
-            if matches!(pair, (b'<', b'>') | (b'<', b'=') | (b'>', b'=')) {
+            if matches!(pair, (b'<', b'>') | (b'<', b'=') | (b'>', b'=') | (b'!', b'=')) {
                 tokens.push(format!("{}{}", b as char, sb[i + 1] as char));
                 i += 2;
                 continue;
@@ -726,7 +726,7 @@ impl ParseContext {
 
         let edge = self.parse_edge_inner(prefix_incoming)?;
 
-        self.advance(); // consume `]`
+        self.expect("]")?;
 
         // Direction suffix: `->` (outgoing) or `-` (both/incoming)
         let suffix_arrow = if self.peek() == Some("-") {
@@ -931,10 +931,51 @@ impl ParseContext {
             return Ok(Expression::IsNull(Box::new(left)));
         }
 
-        // Comparison operators
+        // Keyword comparison operators: CONTAINS, STARTS WITH, ENDS WITH
+        if let Some(kw) = self.peek_upper() {
+            match kw.as_str() {
+                "CONTAINS" => {
+                    self.advance();
+                    let right = self.parse_primary()?;
+                    return Ok(Expression::Comparison {
+                        left: Box::new(left),
+                        op: "CONTAINS".to_string(),
+                        right: Box::new(right),
+                    });
+                }
+                "STARTS" => {
+                    self.advance();
+                    self.expect("WITH")?;
+                    let right = self.parse_primary()?;
+                    return Ok(Expression::Comparison {
+                        left: Box::new(left),
+                        op: "STARTS WITH".to_string(),
+                        right: Box::new(right),
+                    });
+                }
+                "ENDS" => {
+                    self.advance();
+                    self.expect("WITH")?;
+                    let right = self.parse_primary()?;
+                    return Ok(Expression::Comparison {
+                        left: Box::new(left),
+                        op: "ENDS WITH".to_string(),
+                        right: Box::new(right),
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // Symbolic comparison operators
         let op = match self.peek() {
             Some("=") | Some("<") | Some(">") | Some("<=") | Some(">=") | Some("<>") => {
                 self.advance().unwrap().to_string()
+            }
+            // != is an alias for <> — tokenizer emits it as a single token if present
+            Some("!=") => {
+                self.advance();
+                "<>".to_string()
             }
             _ => return Ok(left),
         };
@@ -1063,6 +1104,7 @@ fn is_keyword(s: &str) -> bool {
             | "WITH" | "MERGE" | "UNWIND" | "ORDER" | "BY" | "LIMIT" | "SKIP" | "AS"
             | "AND" | "OR" | "NOT" | "NULL" | "TRUE" | "FALSE" | "IS" | "IN"
             | "DISTINCT" | "ASC" | "DESC" | "ASCENDING" | "DESCENDING"
+            | "CONTAINS" | "STARTS" | "ENDS"
     )
 }
 
@@ -1439,5 +1481,74 @@ mod tests {
         let p = Parser::new();
         let q = p.parse("MERGE (n:Person {name: 'Alice'})").unwrap();
         assert!(matches!(q.query_type, QueryType::Merge));
+    }
+
+    #[test]
+    fn test_parse_where_contains() {
+        let p = Parser::new();
+        let q = p
+            .parse("MATCH (n) WHERE n.name CONTAINS 'Ali' RETURN n")
+            .unwrap();
+        let where_clause = q.clauses.iter().find_map(|c| {
+            if let Clause::Where(w) = c { Some(w) } else { None }
+        });
+        assert!(matches!(
+            where_clause.unwrap().expression,
+            Expression::Comparison { ref op, .. } if op == "CONTAINS"
+        ));
+    }
+
+    #[test]
+    fn test_parse_where_starts_with() {
+        let p = Parser::new();
+        let q = p
+            .parse("MATCH (n) WHERE n.name STARTS WITH 'Al' RETURN n")
+            .unwrap();
+        let where_clause = q.clauses.iter().find_map(|c| {
+            if let Clause::Where(w) = c { Some(w) } else { None }
+        });
+        assert!(matches!(
+            where_clause.unwrap().expression,
+            Expression::Comparison { ref op, .. } if op == "STARTS WITH"
+        ));
+    }
+
+    #[test]
+    fn test_parse_where_ends_with() {
+        let p = Parser::new();
+        let q = p
+            .parse("MATCH (n) WHERE n.name ENDS WITH 'ice' RETURN n")
+            .unwrap();
+        let where_clause = q.clauses.iter().find_map(|c| {
+            if let Clause::Where(w) = c { Some(w) } else { None }
+        });
+        assert!(matches!(
+            where_clause.unwrap().expression,
+            Expression::Comparison { ref op, .. } if op == "ENDS WITH"
+        ));
+    }
+
+    #[test]
+    fn test_parse_where_not_equal() {
+        let p = Parser::new();
+        // != should be normalised to <>
+        let q = p
+            .parse("MATCH (n) WHERE n.age != 0 RETURN n")
+            .unwrap();
+        let where_clause = q.clauses.iter().find_map(|c| {
+            if let Clause::Where(w) = c { Some(w) } else { None }
+        });
+        assert!(matches!(
+            where_clause.unwrap().expression,
+            Expression::Comparison { ref op, .. } if op == "<>"
+        ));
+    }
+
+    #[test]
+    fn test_edge_missing_close_bracket_is_error() {
+        let p = Parser::new();
+        // Missing `]` — should produce a parse error, not silently desync
+        let result = p.parse("MATCH (a)-[r:KNOWS-(b) RETURN a");
+        assert!(result.is_err());
     }
 }
