@@ -124,6 +124,10 @@ impl Transaction {
     }
 
     pub fn commit(&mut self) -> Result<(), TxError> {
+        if self.is_expired() {
+            self.state = TransactionState::Failed;
+            return Err(TxError::TimedOut);
+        }
         match self.state {
             TransactionState::Active => {
                 self.state = TransactionState::Committed;
@@ -216,19 +220,33 @@ impl TransactionManager {
     }
 
     /// Commit the transaction with the given ID.
+    /// Removes the transaction from `active` on success.
     pub fn commit(&self, id: Uuid) -> Result<(), TxError> {
-        let mut entry = self.active
-            .get_mut(&id)
+        let (_, mut tx) = self.active
+            .remove(&id)
             .ok_or_else(|| TxError::NotFound(id.to_string()))?;
-        entry.commit()
+        match tx.commit() {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.active.insert(id, tx);
+                Err(err)
+            }
+        }
     }
 
     /// Rollback the transaction with the given ID.
+    /// Removes the transaction from `active` on success.
     pub fn rollback(&self, id: Uuid) -> Result<(), TxError> {
-        let mut entry = self.active
-            .get_mut(&id)
+        let (_, mut tx) = self.active
+            .remove(&id)
             .ok_or_else(|| TxError::NotFound(id.to_string()))?;
-        entry.rollback()
+        match tx.rollback() {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.active.insert(id, tx);
+                Err(err)
+            }
+        }
     }
 
     /// Check if a transaction is active.

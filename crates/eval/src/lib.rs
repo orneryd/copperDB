@@ -356,12 +356,15 @@ impl EvalEngine {
                         .collect::<Result<Vec<_>, _>>()?;
 
                     if let Some(where_clause) = &with.where_clause {
-                        current_rows = projected
-                            .into_iter()
-                            .filter(|row| {
-                                eval_predicate(&where_clause.expression, row, params).unwrap_or(false)
-                            })
-                            .collect();
+                        let mut filtered_rows = Vec::new();
+                        for row in projected {
+                            if eval_predicate(&where_clause.expression, &row, params)
+                                .map_err(|e| EvalError::FilterError(e.to_string()))?
+                            {
+                                filtered_rows.push(row);
+                            }
+                        }
+                        current_rows = filtered_rows;
                     } else {
                         current_rows = projected;
                     }

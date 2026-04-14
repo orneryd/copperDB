@@ -200,8 +200,8 @@ impl MagnetDB {
             tracing::info!(query = cypher, "executing query");
         }
 
-        // Check cache
-        let hash = fnv_hash(cypher);
+        // Check cache — use the same FNV-1a hasher as QueryCache internally
+        let hash = QueryCache::<magnetdb_cypher::Query>::key(cypher, &[]);
         let parsed = if let Some(cached) = self.query_cache.get(hash) {
             cached
         } else {
@@ -246,12 +246,6 @@ impl MagnetDB {
     }
 }
 
-fn fnv_hash(s: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut hasher);
-    hasher.finish()
-}
 
 // ─── Legacy MagnetDb (full-server async variant) ──────────────────────────────
 
