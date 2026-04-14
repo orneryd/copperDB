@@ -145,7 +145,15 @@ impl EvalEngine {
                 }
 
                 Clause::Match(match_clause) => {
-                    let mut new_rows: Vec<Row> = vec![];
+                    // Edge patterns cannot be evaluated without an adjacency index.
+                    if !match_clause.pattern.edges.is_empty() {
+                        return Err(EvalError::ExecutionError(
+                            "relationship patterns in MATCH are not yet supported".to_string(),
+                        ));
+                    }
+
+                    // Iteratively cross-join each node pattern so that bindings from
+                    // earlier patterns are visible when processing later ones.
                     for node_pat in &match_clause.pattern.nodes {
                         let label = node_pat.labels.first().cloned().unwrap_or_default();
                         let prefix = if label.is_empty() {
@@ -155,6 +163,7 @@ impl EvalEngine {
                         };
 
                         let scan_iter: Vec<_> = self.storage.scan_nodes_with_prefix(&prefix).collect();
+                        let mut new_rows: Vec<Row> = vec![];
                         for item in scan_iter {
                             let (_key, val) = item.map_err(|e| EvalError::StorageError(e.to_string()))?;
                             let props: HashMap<String, Value> = rmp_serde::from_slice(&val)
@@ -171,7 +180,8 @@ impl EvalEngine {
                             let node_val = serde_json::to_value(&props)
                                 .map_err(|e| EvalError::SerializationError(e.to_string()))?;
 
-                            // Combine with all current rows
+                            // Combine with all current rows (which already carry
+                            // bindings from prior node patterns in this MATCH).
                             for base_row in &current_rows {
                                 let mut row = base_row.clone();
                                 if let Some(var) = &node_pat.variable {
@@ -180,15 +190,20 @@ impl EvalEngine {
                                 new_rows.push(row);
                             }
                         }
-                    }
-                    if !match_clause.pattern.nodes.is_empty() {
                         current_rows = new_rows;
                     }
                 }
 
                 Clause::OptionalMatch(match_clause) => {
-                    // Like MATCH but preserve rows that don't match
-                    let mut new_rows: Vec<Row> = vec![];
+                    // Edge patterns cannot be evaluated without an adjacency index.
+                    if !match_clause.pattern.edges.is_empty() {
+                        return Err(EvalError::ExecutionError(
+                            "relationship patterns in OPTIONAL MATCH are not yet supported".to_string(),
+                        ));
+                    }
+
+                    // Iteratively cross-join each node pattern, preserving rows
+                    // with null bindings when no matching node exists.
                     for node_pat in &match_clause.pattern.nodes {
                         let label = node_pat.labels.first().cloned().unwrap_or_default();
                         let prefix = if label.is_empty() {
@@ -197,6 +212,7 @@ impl EvalEngine {
                             format!("{label}:")
                         };
                         let scan_iter: Vec<_> = self.storage.scan_nodes_with_prefix(&prefix).collect();
+                        let mut new_rows: Vec<Row> = vec![];
                         let mut found_any = false;
                         for item in scan_iter {
                             let (_key, val) = item.map_err(|e| EvalError::StorageError(e.to_string()))?;
@@ -227,8 +243,6 @@ impl EvalEngine {
                                 new_rows.push(row);
                             }
                         }
-                    }
-                    if !match_clause.pattern.nodes.is_empty() {
                         current_rows = new_rows;
                     }
                 }
@@ -632,6 +646,40 @@ mod tests {
         let q = parser.parse("MATCH (n:Num) RETURN n LIMIT 3").unwrap();
         let result = engine.execute(&q, &HashMap::new()).unwrap();
         assert_eq!(result.rows.len(), 3);
+    }
+
+    #[test]
+    fn test_match_multi_node_cross_join() {
+        // MATCH (a:A), (b:B) should produce a cross-join: 2 A nodes × 3 B nodes = 6 rows,
+        // and each row must carry bindings for BOTH `a` and `b`.
+        let engine = make_engine();
+        let parser = Parser::new();
+        engine.execute(&parser.parse("CREATE (n:A {v: 1})").unwrap(), &HashMap::new()).unwrap();
+        engine.execute(&parser.parse("CREATE (n:A {v: 2})").unwrap(), &HashMap::new()).unwrap();
+        engine.execute(&parser.parse("CREATE (n:B {v: 10})").unwrap(), &HashMap::new()).unwrap();
+        engine.execute(&parser.parse("CREATE (n:B {v: 20})").unwrap(), &HashMap::new()).unwrap();
+        engine.execute(&parser.parse("CREATE (n:B {v: 30})").unwrap(), &HashMap::new()).unwrap();
+
+        let q = parser.parse("MATCH (a:A), (b:B) RETURN a, b").unwrap();
+        let result = engine.execute(&q, &HashMap::new()).unwrap();
+
+        // 2 × 3 = 6 rows
+        assert_eq!(result.rows.len(), 6, "expected 6 cross-join rows");
+        // every row must have both bindings
+        for row in &result.rows {
+            assert!(row.contains_key("a"), "row missing 'a' binding");
+            assert!(row.contains_key("b"), "row missing 'b' binding");
+        }
+    }
+
+    #[test]
+    fn test_match_with_edge_pattern_returns_error() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        // Relationship patterns in MATCH are not yet supported.
+        let q = parser.parse("MATCH (a)-[r:KNOWS]->(b) RETURN a").unwrap();
+        let result = engine.execute(&q, &HashMap::new());
+        assert!(result.is_err(), "expected error for relationship pattern in MATCH");
     }
 }
 

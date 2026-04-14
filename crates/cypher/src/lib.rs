@@ -643,23 +643,33 @@ impl ParseContext {
         let mut nodes: Vec<NodePattern> = Vec::new();
         let mut edges: Vec<EdgePattern> = Vec::new();
 
-        // Expect at least one node
-        self.expect("(")?;
-        nodes.push(self.parse_node_inner()?);
-
-        // Try to parse edges: `-[…]->` / `<-[…]-` / `-[…]-`
+        // Parse one or more comma-separated path segments: `(a), (b)-[r]->(c), …`
         loop {
-            // Check for relationship arrow start: `-` or `<`
-            let next = self.peek();
-            if next == Some("-") || next == Some("<") {
-                if let Some(edge) = self.try_parse_edge()? {
-                    edges.push(edge);
-                    // Next must be a node
-                    self.expect("(")?;
-                    nodes.push(self.parse_node_inner()?);
+            // Expect at least one node
+            self.expect("(")?;
+            nodes.push(self.parse_node_inner()?);
+
+            // Try to parse edges: `-[…]->` / `<-[…]-` / `-[…]-`
+            loop {
+                // Check for relationship arrow start: `-` or `<`
+                let next = self.peek();
+                if next == Some("-") || next == Some("<") {
+                    if let Some(edge) = self.try_parse_edge()? {
+                        edges.push(edge);
+                        // Next must be a node
+                        self.expect("(")?;
+                        nodes.push(self.parse_node_inner()?);
+                    } else {
+                        break;
+                    }
                 } else {
                     break;
                 }
+            }
+
+            // Comma separates additional path segments: `MATCH (a), (b)`
+            if self.peek() == Some(",") {
+                self.advance(); // consume ','
             } else {
                 break;
             }
