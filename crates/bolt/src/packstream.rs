@@ -333,11 +333,12 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), crate::BoltError> {
             let sig = data[1];
             decode_struct_body(data, 2, fields, sig)
         }
-        // Tiny int: -16..=127 encoded as raw i8
-        b => {
-            let v = b as i8 as i64;
-            Ok((Value::Integer(v), 1))
-        }
+        // Tiny int: 0..=127 encoded as raw u8, and -16..=-1 encoded as 0xF0..=0xFF.
+        b @ 0x00..=0x7F => Ok((Value::Integer(b as i64), 1)),
+        b @ 0xF0..=0xFF => Ok((Value::Integer(b as i8 as i64), 1)),
+        b => Err(crate::BoltError::PackStream(format!(
+            "unknown or reserved marker: 0x{b:02X}"
+        ))),
     }
 }
 
