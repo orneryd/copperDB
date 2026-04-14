@@ -15,6 +15,7 @@ tracing.workspace = true
 sha2.workspace = true
 hex.workspace = true
 rand.workspace = true
+argon2.workspace = true
 magnetdb-auth = { workspace = true }
 magnetdb-encryption = { workspace = true }
 magnetdb-util = { workspace = true }

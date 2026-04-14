@@ -110,22 +110,28 @@ pub fn validate_property_key(key: &str) -> Result<(), SecurityError> {
     Ok(())
 }
 
-/// Hash a password using SHA-256, returning a hex-encoded digest.
-/// In production, prefer Argon2 (available via the `argon2` crate in workspace).
+/// Hash a password using Argon2id with a random salt, returning a PHC string.
+/// The returned string encodes the algorithm, parameters, salt, and hash and
+/// can be stored directly. Use [`verify_password`] to check a candidate.
 pub fn hash_password(password: &str) -> Result<String, SecurityError> {
-    use sha2::{Sha256, Digest};
-    let mut hasher = Sha256::new();
-    hasher.update(password.as_bytes());
-    let result = hasher.finalize();
-    Ok(hex::encode(result))
+    use argon2::{password_hash::{rand_core::OsRng, PasswordHasher, SaltString}, Argon2};
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = Argon2::default();
+    argon2
+        .hash_password(password.as_bytes(), &salt)
+        .map(|h| h.to_string())
+        .map_err(|e| SecurityError::HashingError(e.to_string()))
 }
 
-/// Verify a password against a SHA-256 hex hash.
+/// Verify a password against an Argon2id PHC hash produced by [`hash_password`].
+/// Uses constant-time comparison internally.
 pub fn verify_password(password: &str, hash: &str) -> bool {
-    match hash_password(password) {
-        Ok(computed) => computed == hash,
-        Err(_) => false,
-    }
+    use argon2::{password_hash::{PasswordHash, PasswordVerifier}, Argon2};
+    let parsed = match PasswordHash::new(hash) {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok()
 }
 
 /// Generate a random 32-byte hex token.
@@ -197,10 +203,18 @@ mod tests {
     }
 
     #[test]
-    fn test_hash_password_is_hex() {
+    fn test_hash_password_is_argon2_phc() {
         let hash = hash_password("test").unwrap();
-        assert_eq!(hash.len(), 64); // SHA-256 = 32 bytes = 64 hex chars
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+        // Argon2id PHC strings start with "$argon2id$"
+        assert!(hash.starts_with("$argon2id$"), "expected Argon2id PHC string, got: {hash}");
+    }
+
+    #[test]
+    fn test_hash_password_different_salts() {
+        // Each call produces a different hash (random salt)
+        let h1 = hash_password("same").unwrap();
+        let h2 = hash_password("same").unwrap();
+        assert_ne!(h1, h2, "two hashes of the same password must differ (different salts)");
     }
 
     #[test]
