@@ -263,16 +263,12 @@ impl EvalEngine {
                 Clause::Return(ret) => {
                     columns = ret.items.iter().map(|item| column_name(item)).collect();
 
-                    let mut rows: Vec<Row> = current_rows
-                        .iter()
-                        .map(|row| project_row(row, &ret.items, params))
-                        .collect::<Result<Vec<_>, _>>()?;
-
-                    // ORDER BY
+                    // ORDER BY must be evaluated against the full pre-projection row so
+                    // that ORDER BY expressions can reference variables not in RETURN.
                     if !ret.order_by.is_empty() {
                         let order = ret.order_by.clone();
                         let params_clone = params.clone();
-                        rows.sort_by(|a, b| {
+                        current_rows.sort_by(|a, b| {
                             for item in &order {
                                 let av = eval_expression(&item.expression, a, &params_clone)
                                     .unwrap_or(Value::Null);
@@ -287,17 +283,25 @@ impl EvalEngine {
                         });
                     }
 
-                    // SKIP / LIMIT
+                    // SKIP / LIMIT applied before projection so we page over the
+                    // correct pre-projection rows.
                     if let Some(skip) = ret.skip {
                         let skip = skip.max(0) as usize;
-                        rows = rows.into_iter().skip(skip).collect();
+                        current_rows = current_rows.into_iter().skip(skip).collect();
                     }
                     if let Some(limit) = ret.limit {
                         let limit = limit.max(0) as usize;
-                        rows.truncate(limit);
+                        current_rows.truncate(limit);
                     }
 
-                    // DISTINCT
+                    // Project down to only the returned columns.
+                    let mut rows: Vec<Row> = current_rows
+                        .iter()
+                        .map(|row| project_row(row, &ret.items, params))
+                        .collect::<Result<Vec<_>, _>>()?;
+
+                    // DISTINCT applied after projection (deduplication is over
+                    // projected values, which is standard Cypher semantics).
                     if ret.distinct {
                         let mut seen = std::collections::HashSet::new();
                         rows = rows
