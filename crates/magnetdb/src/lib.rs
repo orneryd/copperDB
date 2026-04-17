@@ -200,6 +200,14 @@ impl MagnetDB {
             tracing::info!(query = cypher, "executing query");
         }
 
+        // Hold an async-flush guard for the duration of this implicit transaction.
+        //
+        // Mirrors NornicDB v1.0.42's `asyncEngine.HoldFlush()` pattern (commit
+        // `82ec5b5`): preventing background flushes from advancing MVCC heads
+        // while the query is executing.  For our sled backend the guard is a
+        // no-op, but the pattern is correct and ready for future extension.
+        let _flush_guard = self.storage.hold_flush();
+
         // Check cache — use the same FNV-1a hasher as QueryCache internally
         let hash = QueryCache::<magnetdb_cypher::Query>::key(cypher, &[]);
         let parsed = if let Some(cached) = self.query_cache.get(hash) {
