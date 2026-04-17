@@ -114,10 +114,10 @@ impl Default for QueryPattern {
 pub fn detect_query_pattern(query: &str) -> PatternInfo {
     let mut info = PatternInfo::default();
 
-    // Queries with WITH have complex aggregation semantics that the optimised
-    // executors do not handle.  Use word-boundary check to avoid matching
-    // "STARTS WITH" or "ENDS WITH".
-    if contains_keyword_outside_strings(query, "WITH") {
+    // Queries with a clause-level WITH have complex aggregation semantics that
+    // the optimised executors do not handle.  We check whether WITH appears as
+    // a clause boundary (vs. as part of STARTS WITH / ENDS WITH operators).
+    if contains_clause_level_with(query) {
         return info;
     }
 
@@ -545,11 +545,57 @@ fn extract_match_clause(query: &str) -> Option<&str> {
     Some(&query[match_idx..end])
 }
 
-/// `contains_keyword_outside_strings` — check for keyword while respecting
-/// quoted string literals (so "STARTS WITH" data values don't false-positive).
-fn contains_keyword_outside_strings(query: &str, keyword: &str) -> bool {
-    use crate::keyword_scan::keyword_index;
-    keyword_index(query, keyword).is_some()
+/// Returns `true` if `query` contains a clause-level `WITH` keyword — i.e. a
+/// `WITH` that is **not** part of the `STARTS WITH` or `ENDS WITH` string
+/// operators.
+///
+/// This function skips over quoted string literals and comments before testing
+/// each candidate, so data values like `'ENDS WITH'` inside strings do not
+/// produce false positives.  It also checks the token immediately before every
+/// `WITH` occurrence: if that token is `STARTS` or `ENDS` the `WITH` is treated
+/// as an operator suffix, not a clause boundary.
+fn contains_clause_level_with(query: &str) -> bool {
+    use crate::keyword_scan::{keyword_index_from, KeywordScanOpts};
+    let opts = KeywordScanOpts::default();
+    let qb = query.as_bytes();
+    let mut from = 0;
+    loop {
+        match keyword_index_from(query, "WITH", from, opts) {
+            None => return false,
+            Some(pos) => {
+                if !with_is_operator_suffix(qb, pos) {
+                    return true;
+                }
+                from = pos + 4; // len("WITH")
+            }
+        }
+    }
+}
+
+/// Returns `true` if the `WITH` at byte `with_pos` is the second word of a
+/// `STARTS WITH` or `ENDS WITH` operator (and therefore not a clause boundary).
+fn with_is_operator_suffix(qb: &[u8], with_pos: usize) -> bool {
+    use crate::keyword_scan::{ascii_upper, is_ident_byte};
+    // Walk backwards past whitespace.
+    let mut pos = with_pos;
+    while pos > 0 && matches!(qb[pos - 1], b' ' | b'\t' | b'\n' | b'\r') {
+        pos -= 1;
+    }
+    let tok_end = pos;
+    // Walk backwards over identifier characters to find the preceding token.
+    while pos > 0 && is_ident_byte(qb[pos - 1]) {
+        pos -= 1;
+    }
+    let tok = &qb[pos..tok_end];
+    // Case-insensitive comparison against "STARTS" and "ENDS" (no allocation).
+    let eq_ci = |kw: &[u8]| {
+        tok.len() == kw.len()
+            && tok
+                .iter()
+                .zip(kw.iter())
+                .all(|(&a, &b)| ascii_upper(a) == b)
+    };
+    eq_ci(b"STARTS") || eq_ci(b"ENDS")
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -585,6 +631,25 @@ mod tests {
             "MATCH (n) WITH n MATCH (m) RETURN n, m",
         );
         assert_eq!(info.pattern, QueryPattern::Generic);
+    }
+
+    #[test]
+    fn test_starts_with_operator_does_not_bypass_optimization() {
+        // STARTS WITH is a string operator, not a clause boundary; optimization should proceed.
+        let info = detect_query_pattern(
+            "MATCH (n) WHERE n.name STARTS WITH 'A' RETURN n LIMIT 200",
+        );
+        // Should be optimizable (LargeResultSet) because STARTS WITH is an operator, not a WITH clause.
+        assert_eq!(info.pattern, QueryPattern::LargeResultSet);
+    }
+
+    #[test]
+    fn test_ends_with_operator_does_not_bypass_optimization() {
+        // ENDS WITH is a string operator, not a clause boundary.
+        let info = detect_query_pattern(
+            "MATCH (n) WHERE n.email ENDS WITH '@example.com' RETURN n LIMIT 200",
+        );
+        assert_eq!(info.pattern, QueryPattern::LargeResultSet);
     }
 
     #[test]
