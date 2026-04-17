@@ -126,10 +126,10 @@ impl EvalEngine {
                 if let Ok(live_props) =
                     rmp_serde::from_slice::<HashMap<String, Value>>(&bytes)
                 {
-                    let still_matches = props
+                    let all_props_match = props
                         .iter()
                         .all(|(k, v)| live_props.get(k).map(|pv| pv == v).unwrap_or(false));
-                    if still_matches {
+                    if all_props_match {
                         return Some(cached);
                     }
                 }
@@ -639,6 +639,11 @@ impl Default for Executor {
 ///
 /// Labels are sorted so that `[:A:B]` and `[:B:A]` produce the same key,
 /// matching NornicDB v1.0.42's `mergeLookupCacheKey`.
+///
+/// The pipe (`|`) delimiter is used between label names because it does not
+/// appear in valid Neo4j identifiers, avoiding ambiguity between a two-label
+/// key `A|B:prop=val` and a single-label key where the label itself contains
+/// a colon or pipe character.
 fn merge_cache_key(labels: &[String], prop: &str, val: &Value) -> String {
     let mut sorted_labels = labels.to_vec();
     sorted_labels.sort();
@@ -934,40 +939,51 @@ mod tests {
     /// Mirrors NornicDB v1.0.42 commit `6283009` (make hot paths n-ary and generic).
     #[test]
     fn test_match_multi_label_filters_correctly() {
-        let engine = make_engine();
-        let parser = Parser::new();
+        let storage = Arc::new(StorageEngine::open_temporary().unwrap());
+        let engine = EvalEngine::new(Arc::clone(&storage));
 
-        // A node with both labels.
-        engine.execute(
-            &parser.parse("CREATE (n:Person {name: 'Alice', role: 'eng'})").unwrap(),
-            &HashMap::new(),
-        ).unwrap();
-        // Manually inject the second label by modifying storage isn't possible
-        // here, so we create a node that has _labels: [Person, Employee] directly
-        // via two separate CREATE statements – then verify the filter.
-        // Instead, test with a node that only has :Person and one that only has :Employee
-        // to confirm the multi-label MATCH returns nothing for non-matching nodes.
-        engine.execute(
-            &parser.parse("CREATE (n:Employee {name: 'Bob'})").unwrap(),
-            &HashMap::new(),
-        ).unwrap();
-
-        // MATCH (n:Person) should return only Alice, not Bob.
-        let q = parser.parse("MATCH (n:Person) RETURN n").unwrap();
-        let result = engine.execute(&q, &HashMap::new()).unwrap();
-        assert_eq!(result.rows.len(), 1);
-        if let Some(Value::Object(p)) = result.rows[0].get("n") {
-            assert_eq!(p.get("name"), Some(&Value::String("Alice".into())));
-        } else {
-            panic!("expected object row");
+        // Directly insert a node with two labels [:Person, :Employee].
+        {
+            let mut props: HashMap<String, Value> = HashMap::new();
+            props.insert("_id".to_string(), Value::String("Person:alice-id".to_string()));
+            props.insert("name".to_string(), Value::String("Alice".to_string()));
+            props.insert(
+                "_labels".to_string(),
+                Value::Array(vec![
+                    Value::String("Person".to_string()),
+                    Value::String("Employee".to_string()),
+                ]),
+            );
+            let bytes = rmp_serde::to_vec_named(&props).unwrap();
+            storage.put_node("Person:alice-id", &bytes).unwrap();
         }
 
-        // MATCH (n:Employee) should return only Bob.
-        let q2 = parser.parse("MATCH (n:Employee) RETURN n").unwrap();
-        let result2 = engine.execute(&q2, &HashMap::new()).unwrap();
-        assert_eq!(result2.rows.len(), 1);
-        if let Some(Value::Object(p)) = result2.rows[0].get("n") {
-            assert_eq!(p.get("name"), Some(&Value::String("Bob".into())));
+        // Directly insert a node with only [:Person].
+        {
+            let mut props: HashMap<String, Value> = HashMap::new();
+            props.insert("_id".to_string(), Value::String("Person:bob-id".to_string()));
+            props.insert("name".to_string(), Value::String("Bob".to_string()));
+            props.insert(
+                "_labels".to_string(),
+                Value::Array(vec![Value::String("Person".to_string())]),
+            );
+            let bytes = rmp_serde::to_vec_named(&props).unwrap();
+            storage.put_node("Person:bob-id", &bytes).unwrap();
+        }
+
+        let parser = Parser::new();
+
+        // MATCH (n:Person) should return BOTH Alice and Bob (prefix = "Person:").
+        let q_person = parser.parse("MATCH (n:Person) RETURN n").unwrap();
+        let result = engine.execute(&q_person, &HashMap::new()).unwrap();
+        assert_eq!(result.rows.len(), 2, "MATCH :Person should return both nodes");
+
+        // MATCH (n:Person:Employee) should return ONLY Alice.
+        let q_both = parser.parse("MATCH (n:Person:Employee) RETURN n").unwrap();
+        let result_both = engine.execute(&q_both, &HashMap::new()).unwrap();
+        assert_eq!(result_both.rows.len(), 1, "MATCH :Person:Employee should return only Alice");
+        if let Some(Value::Object(p)) = result_both.rows[0].get("n") {
+            assert_eq!(p.get("name"), Some(&Value::String("Alice".into())));
         } else {
             panic!("expected object row");
         }
