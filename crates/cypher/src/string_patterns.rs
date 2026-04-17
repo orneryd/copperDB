@@ -2,10 +2,11 @@
 //!
 //! Equivalent to Go's `pkg/cypher/string_patterns.go` in NornicDB v1.0.40.
 //!
-//! Provides fast, allocation-minimising alternatives to regex for operations
-//! that are called on every query execution.  All public functions work
-//! directly on `&str` byte slices and avoid heap allocation on the common
-//! path.
+//! Provides fast alternatives to regex for operations that are called on every
+//! query execution.  Most public functions work directly on `&str` byte slices.
+//! Some functions (e.g. `split_by_keyword`) do allocate a small internal buffer
+//! to canonicalise the keyword to uppercase; the input string itself is never
+//! copied on the hot path.
 //!
 //! # Performance
 //!
@@ -426,22 +427,31 @@ pub fn replace_parameters(query: &str, mut replacer: impl FnMut(&str) -> String)
     let sb = query.as_bytes();
     let mut result = String::with_capacity(query.len());
     let mut i = 0;
+    // `copy_start` tracks the beginning of a pending unchanged slice.
+    let mut copy_start = 0;
 
     while i < sb.len() {
         if sb[i] != b'$' {
-            result.push(sb[i] as char);
             i += 1;
             continue;
         }
+
+        // Flush unchanged bytes up to (but not including) the `$`.
+        // Using `push_str` on a valid UTF-8 sub-slice preserves multi-byte chars.
+        result.push_str(&query[copy_start..i]);
+
         let start = i + 1;
         if start >= sb.len() {
             result.push('$');
-            break;
+            i = start;
+            copy_start = start;
+            continue;
         }
         let first = sb[start];
         if !first.is_ascii_alphabetic() && first != b'_' {
             result.push('$');
             i = start;
+            copy_start = start;
             continue;
         }
         let end = sb[start..]
@@ -452,8 +462,11 @@ pub fn replace_parameters(query: &str, mut replacer: impl FnMut(&str) -> String)
         let param_name = &query[start..end];
         result.push_str(&replacer(param_name));
         i = end;
+        copy_start = end;
     }
 
+    // Flush any remaining unchanged tail.
+    result.push_str(&query[copy_start..]);
     result
 }
 

@@ -266,9 +266,8 @@ impl EvalEngine {
                             format!("{label}:")
                         };
 
-                        let scan_iter: Vec<_> = self.storage.scan_nodes_with_prefix(&prefix).collect();
                         let mut new_rows: Vec<Row> = vec![];
-                        for item in scan_iter {
+                        for item in self.storage.scan_nodes_with_prefix(&prefix) {
                             let (_key, val) = item.map_err(|e| EvalError::StorageError(e.to_string()))?;
                             let props: HashMap<String, Value> = rmp_serde::from_slice(&val)
                                 .map_err(|e| EvalError::SerializationError(e.to_string()))?;
@@ -324,10 +323,9 @@ impl EvalEngine {
                         } else {
                             format!("{label}:")
                         };
-                        let scan_iter: Vec<_> = self.storage.scan_nodes_with_prefix(&prefix).collect();
                         let mut new_rows: Vec<Row> = vec![];
                         let mut found_any = false;
-                        for item in scan_iter {
+                        for item in self.storage.scan_nodes_with_prefix(&prefix) {
                             let (_key, val) = item.map_err(|e| EvalError::StorageError(e.to_string()))?;
                             let props: HashMap<String, Value> = rmp_serde::from_slice(&val)
                                 .map_err(|e| EvalError::SerializationError(e.to_string()))?;
@@ -384,22 +382,35 @@ impl EvalEngine {
 
                     // ORDER BY must be evaluated against the full pre-projection row so
                     // that ORDER BY expressions can reference variables not in RETURN.
+                    // Sort keys are precomputed in a fallible pass to propagate errors
+                    // instead of silently treating them as Null.
                     if !ret.order_by.is_empty() {
-                        let order = ret.order_by.clone();
-                        let params_clone = params.clone();
-                        current_rows.sort_by(|a, b| {
-                            for item in &order {
-                                let av = eval_expression(&item.expression, a, &params_clone)
-                                    .unwrap_or(Value::Null);
-                                let bv = eval_expression(&item.expression, b, &params_clone)
-                                    .unwrap_or(Value::Null);
-                                let ord = compare_json(&av, &bv);
+                        let order = &ret.order_by;
+                        let mut rows_with_keys: Vec<(Row, Vec<Value>)> = current_rows
+                            .into_iter()
+                            .map(|row| {
+                                let keys = order
+                                    .iter()
+                                    .map(|item| {
+                                        eval_expression(&item.expression, &row, params)
+                                            .map_err(|e| EvalError::FilterError(e.to_string()))
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?;
+                                Ok((row, keys))
+                            })
+                            .collect::<Result<Vec<_>, EvalError>>()?;
+
+                        rows_with_keys.sort_by(|(_, keys_a), (_, keys_b)| {
+                            for (idx, item) in order.iter().enumerate() {
+                                let ord = compare_json(&keys_a[idx], &keys_b[idx]);
                                 if ord != std::cmp::Ordering::Equal {
                                     return if item.descending { ord.reverse() } else { ord };
                                 }
                             }
                             std::cmp::Ordering::Equal
                         });
+
+                        current_rows = rows_with_keys.into_iter().map(|(row, _)| row).collect();
                     }
 
                     // SKIP / LIMIT applied before projection so we page over the
@@ -540,8 +551,7 @@ impl EvalEngine {
 
                         // --- Storage scan ---
                         let mut found_node: Option<Value> = None;
-                        let scan_iter: Vec<_> = self.storage.scan_nodes_with_prefix(&prefix).collect();
-                        for item in scan_iter {
+                        for item in self.storage.scan_nodes_with_prefix(&prefix) {
                             let (_key, val) = item.map_err(|e| EvalError::StorageError(e.to_string()))?;
                             let props: HashMap<String, Value> = rmp_serde::from_slice(&val)
                                 .map_err(|e| EvalError::SerializationError(e.to_string()))?;

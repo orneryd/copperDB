@@ -37,4 +37,3 @@ magnetdb-txsession = { workspace = true }
 magnetdb-audit = { workspace = true }
 magnetdb-config = { workspace = true }
 magnetdb-util = { workspace = true }
-rmp-serde.workspace = true

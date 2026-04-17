@@ -533,10 +533,11 @@ fn parse_rel_inner(inner: &str) -> (String, String) {
 // ─── MATCH clause extraction ──────────────────────────────────────────────────
 
 fn extract_match_clause(query: &str) -> Option<&str> {
-    let match_idx = find_keyword_index(query, "MATCH")?;
+    use crate::keyword_scan::keyword_index;
+    let match_idx = keyword_index(query, "MATCH")?;
     let end = ["WHERE", "RETURN", "WITH", "ORDER", "LIMIT", "SKIP"]
         .iter()
-        .filter_map(|kw| find_keyword_index(&query[match_idx..], kw))
+        .filter_map(|kw| keyword_index(&query[match_idx..], kw))
         .filter(|&p| p > 0)
         .min()
         .map(|p| match_idx + p)

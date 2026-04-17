@@ -101,13 +101,35 @@ impl SearchIndex {
         if let Some(fields) = self.documents.remove(id) {
             for (_field, text) in &fields {
                 for word in Self::tokenize(text) {
-                    if let Some(set) = self.inverted.get_mut(&word) {
+                    // Prune empty inverted-index entries (avoids unbounded memory
+                    // growth when documents are frequently added/removed).
+                    let remove_inverted = if let Some(set) = self.inverted.get_mut(&word) {
                         set.remove(id);
+                        set.is_empty()
+                    } else {
+                        false
+                    };
+                    if remove_inverted {
+                        self.inverted.remove(&word);
                     }
-                    if let Some(field_map) = self.field_inverted.get_mut(&word) {
-                        for set in field_map.values_mut() {
-                            set.remove(id);
-                        }
+
+                    let remove_field_word =
+                        if let Some(field_map) = self.field_inverted.get_mut(&word) {
+                            let remove_field = if let Some(set) = field_map.get_mut(_field) {
+                                set.remove(id);
+                                set.is_empty()
+                            } else {
+                                false
+                            };
+                            if remove_field {
+                                field_map.remove(_field);
+                            }
+                            field_map.is_empty()
+                        } else {
+                            false
+                        };
+                    if remove_field_word {
+                        self.field_inverted.remove(&word);
                     }
                 }
             }

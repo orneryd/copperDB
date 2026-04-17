@@ -126,6 +126,7 @@ impl Transaction {
     pub fn commit(&mut self) -> Result<(), TxError> {
         if self.is_expired() {
             self.state = TransactionState::Failed;
+            self.pending.clear();
             return Err(TxError::TimedOut);
         }
         match self.state {
@@ -220,7 +221,9 @@ impl TransactionManager {
     }
 
     /// Commit the transaction with the given ID.
-    /// Removes the transaction from `active` on success.
+    /// Removes the transaction from `active` on success or terminal failure.
+    /// Re-inserts only when the error is transient (i.e. the transaction
+    /// remains Active so the caller can retry).
     pub fn commit(&self, id: Uuid) -> Result<(), TxError> {
         let (_, mut tx) = self.active
             .remove(&id)
@@ -228,14 +231,20 @@ impl TransactionManager {
         match tx.commit() {
             Ok(()) => Ok(()),
             Err(err) => {
-                self.active.insert(id, tx);
+                // Only re-insert if the transaction is still Active (Conflict or
+                // other transient error).  Terminal states (TimedOut → Failed,
+                // AlreadyCommitted, AlreadyRolledBack, NotActive) are not retryable
+                // and we drop the transaction to avoid accumulating finished entries.
+                if tx.is_active() {
+                    self.active.insert(id, tx);
+                }
                 Err(err)
             }
         }
     }
 
     /// Rollback the transaction with the given ID.
-    /// Removes the transaction from `active` on success.
+    /// Removes the transaction from `active` on success or terminal failure.
     pub fn rollback(&self, id: Uuid) -> Result<(), TxError> {
         let (_, mut tx) = self.active
             .remove(&id)
@@ -243,7 +252,10 @@ impl TransactionManager {
         match tx.rollback() {
             Ok(()) => Ok(()),
             Err(err) => {
-                self.active.insert(id, tx);
+                // Same policy: only keep the transaction around if it's still active.
+                if tx.is_active() {
+                    self.active.insert(id, tx);
+                }
                 Err(err)
             }
         }
