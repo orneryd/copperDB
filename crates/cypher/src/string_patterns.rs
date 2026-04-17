@@ -3,10 +3,9 @@
 //! Equivalent to Go's `pkg/cypher/string_patterns.go` in NornicDB v1.0.40.
 //!
 //! Provides fast alternatives to regex for operations that are called on every
-//! query execution.  Most public functions work directly on `&str` byte slices.
-//! Some functions (e.g. `split_by_keyword`) do allocate a small internal buffer
-//! to canonicalise the keyword to uppercase; the input string itself is never
-//! copied on the hot path.
+//! query execution.  All public functions work directly on `&str` byte slices
+//! without heap allocation on the common path; keyword comparison is done
+//! byte-by-byte using `to_ascii_uppercase()`.
 //!
 //! # Performance
 //!
@@ -42,9 +41,8 @@ pub fn split_by_keyword<'a>(s: &'a str, keyword: &str) -> Vec<&'a str> {
         return vec![s];
     }
 
-    // Pre-uppercase the keyword for comparison
-    let keyword_upper: Vec<u8> = keyword.bytes().map(|b| b.to_ascii_uppercase()).collect();
-    let first_upper = keyword_upper[0];
+    let kb = keyword.as_bytes();
+    let first_upper = kb[0].to_ascii_uppercase();
 
     let mut result: Vec<&'a str> = Vec::new();
     let mut last_end = 0usize;
@@ -56,11 +54,11 @@ pub fn split_by_keyword<'a>(s: &'a str, keyword: &str) -> Vec<&'a str> {
             continue;
         }
 
-        // Check all keyword bytes case-insensitively
+        // Check all keyword bytes case-insensitively (no heap allocation)
         if !sb[i..i + klen]
             .iter()
-            .zip(keyword_upper.iter())
-            .all(|(s_b, k_b)| s_b.to_ascii_uppercase() == *k_b)
+            .zip(kb.iter())
+            .all(|(s_b, k_b)| s_b.to_ascii_uppercase() == k_b.to_ascii_uppercase())
         {
             i += 1;
             continue;
