@@ -191,6 +191,7 @@ copperdb-multidb = { path = "crates/multidb" }
 copperdb-mcp = { path = "crates/mcp" }
 copperdb-inference = { path = "crates/inference" }
 copperdb-localllm = { path = "crates/localllm" }
+copperdb-copperdb = { path = "crates/magnetdb" }
 copperdb-linkpredict = { path = "crates/linkpredict" }
 copperdb-embeddingutil = { path = "crates/embeddingutil" }
 copperdb-textchunk = { path = "crates/textchunk" }

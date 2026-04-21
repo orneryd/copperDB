@@ -1,5 +1,5 @@
 {
-  "name": "copperdb-ui",
+  "name": "nornicdb-ui",
   "version": "0.1.0",
   "description": "NornicDB Browser - Neo4j-compatible graph database UI",
   "type": "module",

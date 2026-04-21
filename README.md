@@ -77,13 +77,56 @@ copperDB/
 ## Building
 
 ```bash
-cargo build --workspace
+make build
 ```
 
 ## Testing
 
 ```bash
-cargo test --workspace
+make test
+```
+
+## Running
+
+```bash
+make run
+```
+
+`make build` also prints the exact environment variables and `cargo run` command
+needed to start the server manually.
+
+By default, copperDB now mirrors NornicDB's startup ports:
+
+- HTTP/UI: `http://localhost:7474`
+- Bolt: `bolt://localhost:7687`
+
+Configuration precedence matches NornicDB's pattern:
+
+1. CLI flags
+2. `COPPERDB_*` environment variables
+3. Config file (`--config`, `COPPERDB_CONFIG`, `./copperdb.yaml`, `./copperdb.yml`, `./copperdb.toml`)
+4. Built-in defaults
+
+Supported listener flags and env vars:
+
+- `--address` / `COPPERDB_ADDRESS`
+- `--http-address` / `COPPERDB_HTTP_ADDRESS`
+- `--bolt-address` / `COPPERDB_BOLT_ADDRESS`
+- `--http-port` / `COPPERDB_HTTP_PORT`
+- `--bolt-port` / `COPPERDB_BOLT_PORT`
+- `--headless` / `COPPERDB_HEADLESS`
+- `--base-path` / `COPPERDB_BASE_PATH`
+- `--config` / `COPPERDB_CONFIG`
+
+Neo4j compatibility fallbacks for port env vars are also supported:
+
+- `NEO4J_dbms_connector_http_listen__address_port`
+- `NEO4J_dbms_connector_bolt_listen__address_port`
+
+If you want to override the defaults:
+
+```bash
+make run ADDRESS=127.0.0.1 HTTP_PORT=4000 BOLT_PORT=8687 DB_NAME=devdb RUST_LOG=debug BASE_PATH=/copperdb
 ```
 
 ---

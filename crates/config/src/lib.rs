@@ -27,6 +27,7 @@ pub enum ConfigError {
 #[serde(default)]
 pub struct Config {
     pub storage: StorageConfig,
+    pub server: ServerConfig,
     pub bolt: BoltConfig,
     pub auth: AuthConfig,
     pub replication: ReplicationConfig,
@@ -56,6 +57,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             storage: StorageConfig::default(),
+            server: ServerConfig::default(),
             bolt: BoltConfig::default(),
             auth: AuthConfig::default(),
             replication: ReplicationConfig::default(),
@@ -63,6 +65,48 @@ impl Default for Config {
             vectorspace: VectorSpaceConfig::default(),
             gpu: GpuConfig::default(),
             log_level: "info".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerConfig {
+    /// Shared bind address for HTTP and Bolt unless overridden.
+    pub address: String,
+    /// Dedicated HTTP bind address override.
+    pub http_address: Option<String>,
+    /// Dedicated Bolt bind address override.
+    pub bolt_address: Option<String>,
+    /// HTTP/UI port.
+    pub http_port: u16,
+    /// Neo4j-compatible Bolt port.
+    pub bolt_port: u16,
+    /// Enable the HTTP server.
+    pub http_enabled: bool,
+    /// Enable the Bolt server.
+    pub bolt_enabled: bool,
+    /// Disable browser/UI routes when true.
+    pub headless: bool,
+    /// Base path for reverse proxy deployments.
+    pub base_path: String,
+    /// Optional static UI directory.
+    pub static_dir: Option<String>,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            address: "0.0.0.0".into(),
+            http_address: None,
+            bolt_address: None,
+            http_port: 7474,
+            bolt_port: 7687,
+            http_enabled: true,
+            bolt_enabled: true,
+            headless: false,
+            base_path: "/".into(),
+            static_dir: None,
         }
     }
 }
@@ -103,8 +147,9 @@ pub struct BoltConfig {
 
 impl Default for BoltConfig {
     fn default() -> Self {
+        let server = ServerConfig::default();
         Self {
-            listen_addr: "0.0.0.0:7687".into(),
+            listen_addr: format!("{}:{}", server.address, server.bolt_port),
             tls_cert: None,
             tls_key: None,
             max_connections: 256,
@@ -253,6 +298,8 @@ mod tests {
     #[test]
     fn test_default_config() {
         let cfg = Config::default();
+        assert_eq!(cfg.server.address, "0.0.0.0");
+        assert_eq!(cfg.server.http_port, 7474);
         assert_eq!(cfg.bolt.listen_addr, "0.0.0.0:7687");
         assert_eq!(cfg.storage.path, "./data");
     }

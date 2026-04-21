@@ -2,6 +2,7 @@ import { useState, useEffect, useId, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Lock, User } from 'lucide-react';
 import { api, type AuthConfig } from '../utils/api';
+import { BASE_PATH, joinBasePath } from '../utils/basePath';
 import { PageLayout } from '../components/common/PageLayout';
 import { FormInput } from '../components/common/FormInput';
 import { Button } from '../components/common/Button';
@@ -74,9 +75,9 @@ export function Login() {
             {/* Logo */}
             <div className="text-center mb-8">
               <div className="inline-flex items-center justify-center mb-4">
-                <img src="/copperdb.svg" alt="copperDB" className="w-16 h-16" />
+                <img src={joinBasePath(BASE_PATH, '/nornicdb.svg')} alt="NornicDB" className="w-16 h-16" />
               </div>
-              <h1 className="text-2xl font-bold text-white">copperDB</h1>
+              <h1 className="text-2xl font-bold text-white">NornicDB</h1>
               <p className="text-norse-silver text-sm mt-1">Graph Database Browser</p>
             </div>
 

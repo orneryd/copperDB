@@ -23,6 +23,8 @@ parking_lot.workspace = true
 uuid.workspace = true
 copperdb-auth = { workspace = true }
 copperdb-bolt = { workspace = true }
+copperdb-copperdb = { workspace = true }
 copperdb-graphql = { workspace = true }
+copperdb-multidb = { workspace = true }
 copperdb-util = { workspace = true }
 copperdb-retention = { workspace = true }

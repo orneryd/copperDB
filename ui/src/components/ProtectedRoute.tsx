@@ -30,7 +30,7 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
       <div className="min-h-screen flex items-center justify-center bg-norse-night">
         <div className="flex flex-col items-center gap-4">
           <div className="w-12 h-12 border-4 border-nornic-primary border-t-transparent rounded-full animate-spin" />
-          <span className="text-norse-silver">Connecting to copperDB...</span>
+          <span className="text-norse-silver">Connecting to NornicDB...</span>
         </div>
       </div>
     );

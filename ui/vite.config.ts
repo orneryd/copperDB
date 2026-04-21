@@ -24,26 +24,26 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 5174,
       proxy: {
-        // Proxy API requests to copperDB server
+        // Proxy API requests to NornicDB server
         '/api': {
-          target: 'http://localhost:7474',
+          target: 'http://localhost:7475',
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/api/, ''),
         },
         '/db': {
-          target: 'http://localhost:7474',
+          target: 'http://localhost:7475',
           changeOrigin: true,
         },
         '/auth': {
-          target: 'http://localhost:7474',
+          target: 'http://localhost:7475',
           changeOrigin: true,
         },
-        '/copperdb': {
-          target: 'http://localhost:7474',
+        '/nornicdb': {
+          target: 'http://localhost:7475',
           changeOrigin: true,
         },
         '/admin': {
-          target: 'http://localhost:7474',
+          target: 'http://localhost:7475',
           changeOrigin: true,
         },
       },

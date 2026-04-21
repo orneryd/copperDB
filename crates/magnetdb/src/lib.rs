@@ -258,11 +258,11 @@ impl copperdb {
 // ─── Legacy copperdb (full-server async variant) ──────────────────────────────
 
 /// Full-server async variant that integrates all subsystems.
-pub struct copperdb {
+pub struct CopperDbServer {
     pub config: copperdb_config::Config,
 }
 
-impl copperdb {
+impl CopperDbServer {
     /// Initialize and start the database engine.
     pub async fn start(config: copperdb_config::Config) -> Result<Self, copperdbError> {
         tracing::info!("Starting copperdb v{}", env!("CARGO_PKG_VERSION"));
@@ -285,7 +285,7 @@ mod tests {
     #[tokio::test]
     async fn test_start_with_default_config() {
         let config = copperdb_config::Config::default();
-        let db = copperdb::start(config).await.unwrap();
+        let db = CopperDbServer::start(config).await.unwrap();
         db.shutdown().await.unwrap();
     }
 

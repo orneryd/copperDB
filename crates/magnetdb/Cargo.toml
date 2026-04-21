@@ -30,7 +30,6 @@ copperdb-decay = { workspace = true }
 copperdb-vectorspace = { workspace = true }
 copperdb-embed = { workspace = true }
 copperdb-indexing = { workspace = true }
-copperdb-server = { workspace = true }
 copperdb-graphql = { workspace = true }
 copperdb-pool = { workspace = true }
 copperdb-txsession = { workspace = true }
@@ -42,3 +41,4 @@ copperdb-util = { workspace = true }
 tempfile.workspace = true
 tower.workspace = true
 axum.workspace = true
+copperdb-server = { workspace = true }
