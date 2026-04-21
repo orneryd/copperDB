@@ -37,3 +37,8 @@ magnetdb-txsession = { workspace = true }
 magnetdb-audit = { workspace = true }
 magnetdb-config = { workspace = true }
 magnetdb-util = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tower.workspace = true
+axum.workspace = true

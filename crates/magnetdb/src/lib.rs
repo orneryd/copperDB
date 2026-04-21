@@ -380,3 +380,148 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod smoke_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use serde_json::Value;
+
+    /// Smoke: create a node, flush to disk, reopen the DB, verify node persists.
+    #[test]
+    fn test_node_persists_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_string();
+
+        // Phase 1: write
+        {
+            let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
+            let db = MagnetDB::open(cfg).unwrap();
+            let result = db.execute(
+                "CREATE (n:Person {name: 'Alice', age: 30}) RETURN n",
+                HashMap::new(),
+            ).unwrap();
+            assert_eq!(result.stats.nodes_created, 1, "should create exactly 1 node");
+            db.flush().unwrap();
+        }
+
+        // Phase 2: reopen and verify
+        {
+            let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
+            let db = MagnetDB::open(cfg).unwrap();
+            let result = db.execute("MATCH (n:Person) RETURN n", HashMap::new()).unwrap();
+            assert_eq!(result.rows.len(), 1, "reopened DB should have 1 Person node");
+            let row = &result.rows[0];
+            let n = row.get("n").expect("row must have 'n' key");
+            match n {
+                Value::Object(props) => {
+                    assert_eq!(
+                        props.get("name"),
+                        Some(&Value::String("Alice".into())),
+                        "name must be Alice"
+                    );
+                    assert_eq!(
+                        props.get("age"),
+                        Some(&Value::Number(30.into())),
+                        "age must be 30"
+                    );
+                }
+                _ => panic!("expected object node, got {n:?}"),
+            }
+        }
+    }
+
+    /// Smoke: create multiple nodes and verify everything persists.
+    #[test]
+    fn test_edge_persists_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_string();
+
+        {
+            let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
+            let db = MagnetDB::open(cfg).unwrap();
+            db.execute("CREATE (a:City {name: 'London', pop: 9000000})", HashMap::new()).unwrap();
+            db.execute("CREATE (b:City {name: 'Paris', pop: 2100000})", HashMap::new()).unwrap();
+            let r = db.execute("MATCH (c:City) RETURN c", HashMap::new()).unwrap();
+            assert_eq!(r.rows.len(), 2, "should have 2 City nodes before flush");
+            db.flush().unwrap();
+        }
+
+        {
+            let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
+            let db = MagnetDB::open(cfg).unwrap();
+            let result = db.execute("MATCH (c:City) RETURN c", HashMap::new()).unwrap();
+            assert_eq!(result.rows.len(), 2, "should still have 2 City nodes after reopen");
+
+            let mut names: Vec<String> = result.rows.iter().filter_map(|row| {
+                row.get("c").and_then(|v| v.as_object())
+                    .and_then(|o| o.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string())
+            }).collect();
+            names.sort();
+            assert_eq!(names, vec!["London", "Paris"], "both cities must be present");
+        }
+    }
+
+    /// Smoke: MATCH/WHERE filter works after disk round-trip.
+    #[test]
+    fn test_where_filter_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_string();
+
+        {
+            let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
+            let db = MagnetDB::open(cfg).unwrap();
+            for (name, age) in &[("Alice", 30), ("Bob", 20), ("Carol", 35)] {
+                db.execute(
+                    &format!("CREATE (n:User {{name: '{name}', age: {age}}})"),
+                    HashMap::new(),
+                ).unwrap();
+            }
+            db.flush().unwrap();
+        }
+
+        {
+            let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
+            let db = MagnetDB::open(cfg).unwrap();
+            let result = db.execute(
+                "MATCH (n:User) WHERE n.age > 25 RETURN n",
+                HashMap::new(),
+            ).unwrap();
+            assert_eq!(result.rows.len(), 2, "Alice (30) and Carol (35) should match age > 25");
+
+            let mut names: Vec<String> = result.rows.iter().filter_map(|row| {
+                row.get("n").and_then(|v| v.as_object())
+                    .and_then(|o| o.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string())
+            }).collect();
+            names.sort();
+            assert_eq!(names, vec!["Alice", "Carol"]);
+        }
+    }
+
+    /// Smoke: the REST API layer (axum) responds correctly.
+    #[tokio::test]
+    async fn test_rest_api_health_check() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let state = Arc::new(magnetdb_server::AppState::default());
+        let app = magnetdb_server::build_router(Arc::clone(&state));
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "health check should return 200");
+
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let health: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(health["status"], "ok", "health status should be 'ok'");
+    }
+}
+
