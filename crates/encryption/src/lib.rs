@@ -1,4 +1,4 @@
-//! Envelope encryption for magnetDB.
+//! Envelope encryption for copperdb.
 //!
 //! Equivalent to Go's `pkg/encryption` in NornicDB.
 //! Implements AES-256-GCM envelope encryption with a DEK/KEK key hierarchy.

@@ -56,13 +56,13 @@ mod tests {
 
     #[test]
     fn test_optional_missing() {
-        assert!(optional("__MAGNETDB_NONEXISTENT_VAR__").is_none());
+        assert!(optional("__copperdb_NONEXISTENT_VAR__").is_none());
     }
 
     #[test]
     fn test_require_missing() {
         assert!(matches!(
-            require("__MAGNETDB_NONEXISTENT_VAR__"),
+            require("__copperdb_NONEXISTENT_VAR__"),
             Err(EnvError::Missing(_))
         ));
     }

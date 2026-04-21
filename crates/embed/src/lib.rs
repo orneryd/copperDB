@@ -1,4 +1,4 @@
-//! Text embedding generation for magnetDB.
+//! Text embedding generation for copperdb.
 //!
 //! Equivalent to Go's `pkg/embed` in NornicDB.
 //! Supports:
@@ -7,7 +7,7 @@
 //!
 //! NornicDB uses `github.com/hybridgroup/yzma` (WASM) for local models.
 //! This crate uses `libloading` to call a native llama.cpp shared library instead.
-//! See `magnetdb-localllm` for the llama.cpp wrapper.
+//! See `copperdb-localllm` for the llama.cpp wrapper.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

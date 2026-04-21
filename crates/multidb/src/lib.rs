@@ -1,7 +1,7 @@
-//! Multi-database management for magnetDB.
+//! Multi-database management for copperdb.
 //!
 //! Equivalent to Go's `pkg/multidb` in NornicDB.
-//! Manages multiple isolated database instances within a single magnetDB
+//! Manages multiple isolated database instances within a single copperdb
 //! server, with per-database auth, storage, and index spaces.
 
 use dashmap::DashMap;

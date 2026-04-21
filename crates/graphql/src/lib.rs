@@ -1,4 +1,4 @@
-//! GraphQL API layer for magnetDB.
+//! GraphQL API layer for copperdb.
 //!
 //! Equivalent to Go's `pkg/graphql` in NornicDB (uses `github.com/99designs/gqlgen`).
 //! Exposes a GraphQL interface for querying and mutating the graph database.
@@ -61,7 +61,7 @@ impl MutationRoot {
     }
 }
 
-/// Build the magnetDB GraphQL schema.
+/// Build the copperdb GraphQL schema.
 pub fn build_schema() -> Schema<QueryRoot, MutationRoot, async_graphql::EmptySubscription> {
     Schema::new(QueryRoot, MutationRoot, async_graphql::EmptySubscription)
 }

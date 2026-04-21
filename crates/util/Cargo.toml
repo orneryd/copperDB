@@ -1,6 +1,6 @@
 [package]
-name = "magnetdb-util"
-description = "General-purpose utilities for magnetDB"
+name = "copperdb-util"
+description = "General-purpose utilities for copperdb"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

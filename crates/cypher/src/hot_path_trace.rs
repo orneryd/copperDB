@@ -1,4 +1,4 @@
-//! Hot-path execution tracing for magnetDB.
+//! Hot-path execution tracing for copperdb.
 //!
 //! Equivalent to Go's `pkg/cypher/executor_hotpath_trace.go` in NornicDB v1.0.40.
 //!

@@ -26,7 +26,7 @@ use crate::keyword_scan::{is_ascii_space, is_ident_byte};
 /// Equivalent to Go's `SplitByKeyword`.
 ///
 /// ```
-/// use magnetdb_cypher::string_patterns::split_by_keyword;
+/// use copperdb_cypher::string_patterns::split_by_keyword;
 /// let parts = split_by_keyword("MATCH (a) MATCH (b)", "MATCH");
 /// assert_eq!(parts, vec!["", "(a) ", "(b)"]);
 /// ```
@@ -110,7 +110,7 @@ pub fn split_by_create(s: &str) -> Vec<&str> {
 /// Approximately 6× faster than regex equivalent.
 ///
 /// ```
-/// use magnetdb_cypher::string_patterns::extract_limit;
+/// use copperdb_cypher::string_patterns::extract_limit;
 /// assert_eq!(extract_limit("MATCH (n) RETURN n LIMIT 10"), Some(10));
 /// assert_eq!(extract_limit("MATCH (n) RETURN n"), None);
 /// ```
@@ -271,7 +271,7 @@ const AGG_FUNCTIONS: &[&str] = &["COLLECT", "COUNT", "SUM", "AVG", "MIN", "MAX"]
 /// Returns `None` if `expr` is not a valid aggregation.
 ///
 /// ```
-/// use magnetdb_cypher::string_patterns::parse_aggregation;
+/// use copperdb_cypher::string_patterns::parse_aggregation;
 /// let r = parse_aggregation("COUNT(n.age)").unwrap();
 /// assert_eq!(r.function, "COUNT");
 /// assert_eq!(r.variable, "n");
@@ -382,7 +382,7 @@ pub fn parse_aggregation_property(expr: &str) -> (String, String) {
 /// Approximately 5× faster than regex `FindAllStringSubmatch`.
 ///
 /// ```
-/// use magnetdb_cypher::string_patterns::extract_parameters;
+/// use copperdb_cypher::string_patterns::extract_parameters;
 /// let params = extract_parameters("MATCH (n) WHERE n.name = $name AND n.age > $minAge");
 /// assert_eq!(params, vec!["name", "minAge"]);
 /// ```

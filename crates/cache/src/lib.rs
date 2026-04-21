@@ -7,7 +7,7 @@
 //!
 //! # Example
 //! ```
-//! use magnetdb_cache::QueryCache;
+//! use copperdb_cache::QueryCache;
 //! use std::time::Duration;
 //!
 //! let cache = QueryCache::new(1000, Some(Duration::from_secs(300)));

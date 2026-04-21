@@ -1,6 +1,6 @@
 [package]
-name = "magnetdb-nornicgrpc"
-description = "gRPC server interface for magnetDB (Protobuf service definitions)"
+name = "copperdb-nornicgrpc"
+description = "gRPC server interface for copperdb (Protobuf service definitions)"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -16,5 +16,5 @@ tonic.workspace = true
 prost.workspace = true
 prost-types.workspace = true
 tracing.workspace = true
-magnetdb-auth = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-auth = { workspace = true }
+copperdb-util = { workspace = true }

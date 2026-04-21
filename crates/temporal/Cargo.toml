@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-temporal"
+name = "copperdb-temporal"
 description = "Temporal graph data: versioned relationships, time-travel queries"
 version.workspace = true
 edition.workspace = true
@@ -13,6 +13,6 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-magnetdb-decay = { workspace = true }
-magnetdb-storage = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-decay = { workspace = true }
+copperdb-storage = { workspace = true }
+copperdb-util = { workspace = true }

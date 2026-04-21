@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-convert"
+name = "copperdb-convert"
 description = "Data-type conversion utilities (numbers, strings, graph types)"
 version.workspace = true
 edition.workspace = true

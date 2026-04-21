@@ -1,10 +1,10 @@
-//! ML model inference pipeline for magnetDB.
+//! ML model inference pipeline for copperdb.
 //!
 //! Equivalent to Go's `pkg/inference` in NornicDB.
 //! Orchestrates the embedding + inference pipeline:
-//! 1. Chunk text (magnetdb-textchunk)
-//! 2. Embed chunks (magnetdb-embed)
-//! 3. Run optional classification or generation (magnetdb-localllm)
+//! 1. Chunk text (copperdb-textchunk)
+//! 2. Embed chunks (copperdb-embed)
+//! 3. Run optional classification or generation (copperdb-localllm)
 
 use thiserror::Error;
 

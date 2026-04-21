@@ -1,8 +1,8 @@
-//! Full-text and semantic search for magnetDB.
+//! Full-text and semantic search for copperdb.
 //!
 //! Equivalent to Go's `pkg/search` in NornicDB.
 //! Combines in-memory inverted-index full-text search with optional
-//! vector similarity search via magnetdb-vectorspace.
+//! vector similarity search via copperdb-vectorspace.
 
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;

@@ -1,4 +1,4 @@
-//! HTTP/REST API server for magnetDB.
+//! HTTP/REST API server for copperdb.
 //!
 //! Equivalent to Go's `pkg/server` in NornicDB.
 //! Provides a management REST API and serves the GraphQL endpoint.
@@ -11,7 +11,7 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use magnetdb_retention::{Manager as RetentionManager, Policy, ErasureRequest, LegalHold, RetentionError};
+use copperdb_retention::{Manager as RetentionManager, Policy, ErasureRequest, LegalHold, RetentionError};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -36,7 +36,7 @@ pub struct AppState {
 impl Default for AppState {
     fn default() -> Self {
         Self {
-            db_name: "magnetdb".into(),
+            db_name: "copperdb".into(),
             retention: Arc::new(RwLock::new(RetentionManager::new())),
             static_dir: None,
         }
@@ -162,7 +162,7 @@ async fn create_policy(
 }
 
 async fn load_default_policies(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let defaults = magnetdb_retention::default_policies();
+    let defaults = copperdb_retention::default_policies();
     let mut mgr = state.retention.write();
     let mut loaded = 0usize;
     for p in defaults {

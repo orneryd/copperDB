@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-auth"
+name = "copperdb-auth"
 description = "Authentication: JWT, OAuth2, RBAC roles, privileges, allowlists"
 version.workspace = true
 edition.workspace = true
@@ -22,4 +22,4 @@ rand.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 parking_lot.workspace = true
-magnetdb-util = { workspace = true }
+copperdb-util = { workspace = true }

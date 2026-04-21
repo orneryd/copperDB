@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-indexing"
+name = "copperdb-indexing"
 description = "Graph index management: B-tree, composite, full-text indexes"
 version.workspace = true
 edition.workspace = true
@@ -13,5 +13,5 @@ serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 petgraph.workspace = true
-magnetdb-storage = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-storage = { workspace = true }
+copperdb-util = { workspace = true }

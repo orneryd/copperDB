@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-cache"
+name = "copperdb-cache"
 description = "Thread-safe LRU query plan cache with TTL expiration"
 version.workspace = true
 edition.workspace = true
@@ -13,4 +13,4 @@ parking_lot.workspace = true
 dashmap.workspace = true
 fnv.workspace = true
 tracing.workspace = true
-magnetdb-util = { workspace = true }
+copperdb-util = { workspace = true }

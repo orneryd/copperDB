@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-filter"
+name = "copperdb-filter"
 description = "Result set filtering: predicate evaluation, type coercion"
 version.workspace = true
 edition.workspace = true
@@ -12,5 +12,5 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-magnetdb-cypher = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-cypher = { workspace = true }
+copperdb-util = { workspace = true }

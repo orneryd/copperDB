@@ -1,4 +1,4 @@
-//! Distributed fabric for magnetDB.
+//! Distributed fabric for copperdb.
 //!
 //! Equivalent to Go's `pkg/fabric` in NornicDB.
 //! Provides multi-datacenter routing, workload distribution, and

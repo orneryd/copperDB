@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-textchunk"
+name = "copperdb-textchunk"
 description = "Text chunking strategies for embedding pipelines"
 version.workspace = true
 edition.workspace = true
@@ -11,4 +11,4 @@ repository.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 tracing.workspace = true
-magnetdb-util = { workspace = true }
+copperdb-util = { workspace = true }

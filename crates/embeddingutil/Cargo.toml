@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-embeddingutil"
+name = "copperdb-embeddingutil"
 description = "Embedding utility functions: normalization, similarity metrics"
 version.workspace = true
 edition.workspace = true
@@ -12,5 +12,5 @@ thiserror.workspace = true
 serde.workspace = true
 nalgebra.workspace = true
 tracing.workspace = true
-magnetdb-math = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-math = { workspace = true }
+copperdb-util = { workspace = true }

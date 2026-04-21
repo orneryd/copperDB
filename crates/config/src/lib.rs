@@ -22,7 +22,7 @@ pub enum ConfigError {
     Parse(#[from] ::config::ConfigError),
 }
 
-/// Top-level magnetDB configuration.
+/// Top-level copperdb configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -45,7 +45,7 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.auth.jwt_secret.is_empty() {
             return Err(ConfigError::MissingField(
-                "auth.jwt_secret must be set (env: MAGNETDB_AUTH__JWT_SECRET)".into(),
+                "auth.jwt_secret must be set (env: copperdb_AUTH__JWT_SECRET)".into(),
             ));
         }
         Ok(())
@@ -228,15 +228,15 @@ pub fn load_toml(path: impl AsRef<Path>) -> Result<Config, ConfigError> {
 
 /// Load configuration from environment variables using the `config` crate.
 ///
-/// Environment variable prefix: `MAGNETDB_`, separator `__`.
-/// Example: `MAGNETDB_STORAGE__PATH`, `MAGNETDB_AUTH__JWT_SECRET`.
+/// Environment variable prefix: `copperdb_`, separator `__`.
+/// Example: `copperdb_STORAGE__PATH`, `copperdb_AUTH__JWT_SECRET`.
 ///
 /// Returns `Err` if any variable fails to parse **or** if required fields
 /// (e.g. `auth.jwt_secret`) are not set.
 pub fn load_from_env() -> Result<Config, ConfigError> {
     let cfg: Config = ::config::Config::builder()
         .add_source(
-            ::config::Environment::with_prefix("MAGNETDB")
+            ::config::Environment::with_prefix("copperdb")
                 .separator("__")
                 .try_parsing(true),
         )
@@ -278,9 +278,9 @@ mod tests {
 
     #[test]
     fn test_load_from_env_requires_jwt_secret() {
-        // Without MAGNETDB_AUTH__JWT_SECRET set, load_from_env must error.
+        // Without copperdb_AUTH__JWT_SECRET set, load_from_env must error.
         // (Guard against the env variable already being set in CI.)
-        if std::env::var("MAGNETDB_AUTH__JWT_SECRET").is_err() {
+        if std::env::var("copperdb_AUTH__JWT_SECRET").is_err() {
             assert!(load_from_env().is_err());
         }
     }

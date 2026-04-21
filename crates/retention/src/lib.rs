@@ -1,4 +1,4 @@
-//! Data retention policy enforcement for magnetDB.
+//! Data retention policy enforcement for copperdb.
 //!
 //! Equivalent to Go's `pkg/retention` in NornicDB.
 //! Automatically expires nodes and relationships that exceed their TTL.

@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-txsession"
+name = "copperdb-txsession"
 description = "Transaction session management (ACID properties)"
 version.workspace = true
 edition.workspace = true
@@ -15,5 +15,5 @@ dashmap.workspace = true
 uuid.workspace = true
 tracing.workspace = true
 serde.workspace = true
-magnetdb-storage = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-storage = { workspace = true }
+copperdb-util = { workspace = true }

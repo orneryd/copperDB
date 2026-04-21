@@ -1,4 +1,4 @@
-//! SIMD-accelerated vector operations for magnetDB.
+//! SIMD-accelerated vector operations for copperdb.
 //!
 //! Equivalent to Go's `pkg/simd` in NornicDB.
 //! NornicDB uses custom C++ NEON (ARM) and x86 AVX2 implementations via

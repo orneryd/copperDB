@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-fabric"
+name = "copperdb-fabric"
 description = "Distributed fabric: multi-datacenter routing and workload distribution"
 version.workspace = true
 edition.workspace = true
@@ -13,5 +13,5 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-magnetdb-replication = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-replication = { workspace = true }
+copperdb-util = { workspace = true }

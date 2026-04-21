@@ -1,4 +1,4 @@
-//! Compliance policy enforcement for magnetDB.
+//! Compliance policy enforcement for copperdb.
 //!
 //! Equivalent to Go's `pkg/compliance` in NornicDB.
 //! Enforces GDPR data masking, HIPAA access controls, and configurable

@@ -3,7 +3,7 @@
 //! Equivalent to Go's `pkg/filter` in NornicDB.
 //! Applies WHERE clause predicates and result projections to query output rows.
 
-use magnetdb_cypher::Expression;
+use copperdb_cypher::Expression;
 use serde_json::Value;
 use std::collections::HashMap;
 use thiserror::Error;
@@ -482,7 +482,7 @@ impl Predicate for EqPredicate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use magnetdb_cypher::Expression;
+    use copperdb_cypher::Expression;
     use serde_json::json;
 
     #[test]

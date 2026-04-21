@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-localllm"
+name = "copperdb-localllm"
 description = "Local LLM inference: GGUF model loading via llama.cpp FFI"
 version.workspace = true
 edition.workspace = true
@@ -15,4 +15,4 @@ serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 libloading.workspace = true
-magnetdb-util = { workspace = true }
+copperdb-util = { workspace = true }

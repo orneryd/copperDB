@@ -1,4 +1,4 @@
-//! Key Management Service (KMS) integration for magnetDB.
+//! Key Management Service (KMS) integration for copperdb.
 //!
 //! Equivalent to Go's `pkg/kms` in NornicDB.
 //! Wraps and unwraps Data Encryption Keys (DEKs) using:
@@ -38,7 +38,7 @@ pub trait KmsProvider: Send + Sync {
 
 /// Local (in-memory) KMS provider for development and testing.
 ///
-/// Uses AES-256-GCM for key wrapping (same as `magnetdb-encryption`).
+/// Uses AES-256-GCM for key wrapping (same as `copperdb-encryption`).
 #[derive(Debug)]
 pub struct LocalKms {
     master_key: Vec<u8>,

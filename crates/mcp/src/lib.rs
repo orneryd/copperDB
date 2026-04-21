@@ -1,7 +1,7 @@
-//! Model Context Protocol (MCP) server for magnetDB.
+//! Model Context Protocol (MCP) server for copperdb.
 //!
 //! Equivalent to Go's `pkg/mcp` in NornicDB.
-//! Exposes magnetDB as an MCP tool provider, allowing LLMs (Claude, GPT-4, etc.)
+//! Exposes copperdb as an MCP tool provider, allowing LLMs (Claude, GPT-4, etc.)
 //! to query the graph database directly via tool calling.
 //!
 //! ## MCP Overview
@@ -106,7 +106,7 @@ impl Default for ToolRegistry {
 impl ToolRegistry {
     pub fn new() -> Self {
         let mut registry = Self { tools: HashMap::new() };
-        for tool in magnetdb_tools() {
+        for tool in copperdb_tools() {
             registry.register(tool);
         }
         registry
@@ -170,7 +170,7 @@ impl ToolRegistry {
                 serde_json::json!({
                     "protocolVersion": "2024-11-05",
                     "capabilities": { "tools": {} },
-                    "serverInfo": { "name": "magnetdb", "version": env!("CARGO_PKG_VERSION") }
+                    "serverInfo": { "name": "copperdb", "version": env!("CARGO_PKG_VERSION") }
                 }),
             ),
             _ => McpResponse::error(request.id.clone(), -32601, "method not found"),
@@ -178,12 +178,12 @@ impl ToolRegistry {
     }
 }
 
-/// Built-in magnetDB MCP tools.
-pub fn magnetdb_tools() -> Vec<Tool> {
+/// Built-in copperdb MCP tools.
+pub fn copperdb_tools() -> Vec<Tool> {
     vec![
         Tool {
             name: "run_cypher".into(),
-            description: "Execute a Cypher query against the magnetDB graph database".into(),
+            description: "Execute a Cypher query against the copperdb graph database".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

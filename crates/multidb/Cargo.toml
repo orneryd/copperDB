@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-multidb"
+name = "copperdb-multidb"
 description = "Multi-database management: database isolation, routing"
 version.workspace = true
 edition.workspace = true
@@ -13,6 +13,6 @@ serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 dashmap.workspace = true
-magnetdb-storage = { workspace = true }
-magnetdb-auth = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-storage = { workspace = true }
+copperdb-auth = { workspace = true }
+copperdb-util = { workspace = true }

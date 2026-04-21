@@ -1,4 +1,4 @@
-//! Vector space registry for magnetDB.
+//! Vector space registry for copperdb.
 //!
 //! Equivalent to Go's `pkg/vectorspace` in NornicDB.
 //! Manages named embedding spaces (collections of high-dimensional vectors)

@@ -1,4 +1,4 @@
-//! Mathematical utilities for magnetDB.
+//! Mathematical utilities for copperdb.
 //!
 //! Equivalent to Go's `pkg/math` in NornicDB.
 //! Provides vector math used in SIMD acceleration, embeddings, and

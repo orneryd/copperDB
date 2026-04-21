@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-kms"
+name = "copperdb-kms"
 description = "Key Management Service integration (AWS KMS, Azure Key Vault, GCP KMS)"
 version.workspace = true
 edition.workspace = true
@@ -16,7 +16,7 @@ tokio.workspace = true
 tracing.workspace = true
 aws-config.workspace = true
 aws-sdk-kms.workspace = true
-magnetdb-encryption = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-encryption = { workspace = true }
+copperdb-util = { workspace = true }
 async-trait = "0.1"
 aes-gcm = { workspace = true }

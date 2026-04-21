@@ -1,4 +1,4 @@
-//! Graph link prediction algorithms for magnetDB.
+//! Graph link prediction algorithms for copperdb.
 //!
 //! Equivalent to Go's `pkg/linkpredict` in NornicDB.
 //! Implements classic graph-based link prediction heuristics:

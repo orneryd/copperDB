@@ -1,4 +1,4 @@
-//! Embedded key-value storage engine for magnetDB.
+//! Embedded key-value storage engine for copperdb.
 //!
 //! Equivalent to Go's `pkg/storage` in NornicDB (which uses BadgerDB).
 //! Uses `sled` as the embedded key-value store, providing:
@@ -32,7 +32,7 @@ pub enum StorageError {
     Conflict,
 }
 
-/// A single opened magnetDB storage instance.
+/// A single opened copperdb storage instance.
 pub struct StorageEngine {
     db: Db,
     nodes: Tree,

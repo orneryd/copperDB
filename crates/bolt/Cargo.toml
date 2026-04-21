@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-bolt"
+name = "copperdb-bolt"
 description = "Neo4j Bolt protocol server: PackStream encoding, connection handling"
 version.workspace = true
 edition.workspace = true
@@ -17,6 +17,6 @@ bytes.workspace = true
 rmp-serde.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
-magnetdb-auth = { workspace = true }
-magnetdb-eval = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-auth = { workspace = true }
+copperdb-eval = { workspace = true }
+copperdb-util = { workspace = true }

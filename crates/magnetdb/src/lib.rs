@@ -1,4 +1,4 @@
-//! magnetDB core engine.
+//! copperdb core engine.
 //!
 //! This is the primary entry point crate that integrates all subsystems
 //! into a unified graph database engine. It is the Rust equivalent of
@@ -7,7 +7,7 @@
 //! # Architecture
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────┐
-//! │                        magnetDB                              │
+//! │                        copperdb                              │
 //! │                                                             │
 //! │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────┐  │
 //! │  │  server  │  │   bolt   │  │  graphql │  │    mcp    │  │
@@ -38,11 +38,11 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-use magnetdb_cache::QueryCache;
-use magnetdb_cypher::Parser;
-use magnetdb_eval::{EvalEngine, QueryStats};
-use magnetdb_storage::StorageEngine;
-use magnetdb_txsession::TransactionManager;
+use copperdb_cache::QueryCache;
+use copperdb_cypher::Parser;
+use copperdb_eval::{EvalEngine, QueryStats};
+use copperdb_storage::StorageEngine;
+use copperdb_txsession::TransactionManager;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -63,20 +63,20 @@ pub enum MagnetError {
     Init(String),
 }
 
-impl From<magnetdb_storage::StorageError> for MagnetError {
-    fn from(e: magnetdb_storage::StorageError) -> Self {
+impl From<copperdb_storage::StorageError> for MagnetError {
+    fn from(e: copperdb_storage::StorageError) -> Self {
         MagnetError::Storage(e.to_string())
     }
 }
 
-impl From<magnetdb_cypher::CypherError> for MagnetError {
-    fn from(e: magnetdb_cypher::CypherError) -> Self {
+impl From<copperdb_cypher::CypherError> for MagnetError {
+    fn from(e: copperdb_cypher::CypherError) -> Self {
         MagnetError::Parse(e.to_string())
     }
 }
 
-impl From<magnetdb_eval::EvalError> for MagnetError {
-    fn from(e: magnetdb_eval::EvalError) -> Self {
+impl From<copperdb_eval::EvalError> for MagnetError {
+    fn from(e: copperdb_eval::EvalError) -> Self {
         MagnetError::Eval(e.to_string())
     }
 }
@@ -84,7 +84,7 @@ impl From<magnetdb_eval::EvalError> for MagnetError {
 // ─── Legacy error (kept for existing tests) ──────────────────────────────────
 
 #[derive(Debug, Error)]
-pub enum MagnetDbError {
+pub enum copperdbError {
     #[error("storage error: {0}")]
     Storage(String),
     #[error("auth error: {0}")]
@@ -111,7 +111,7 @@ impl Default for DatabaseConfig {
         Self {
             data_dir: "data".to_string(),
             max_connections: 100,
-            default_database: "magnetdb".to_string(),
+            default_database: "copperdb".to_string(),
             auth_enabled: false,
             log_queries: false,
         }
@@ -150,18 +150,18 @@ impl From<QueryStats> for ResultStats {
     }
 }
 
-// ─── MagnetDB (embedded sync engine) ─────────────────────────────────────────
+// ─── copperdb (embedded sync engine) ─────────────────────────────────────────
 
 /// The primary embedded database engine.
-pub struct MagnetDB {
+pub struct copperdb {
     config: DatabaseConfig,
     storage: Arc<StorageEngine>,
     eval: EvalEngine,
     tx_manager: Arc<TransactionManager>,
-    query_cache: Arc<QueryCache<magnetdb_cypher::Query>>,
+    query_cache: Arc<QueryCache<copperdb_cypher::Query>>,
 }
 
-impl MagnetDB {
+impl copperdb {
     /// Create a new in-memory (temporary) database instance.
     pub fn open_temporary() -> Result<Self, MagnetError> {
         let storage = Arc::new(StorageEngine::open_temporary()?);
@@ -209,7 +209,7 @@ impl MagnetDB {
         let _flush_guard = self.storage.hold_flush();
 
         // Check cache — use the same FNV-1a hasher as QueryCache internally
-        let hash = QueryCache::<magnetdb_cypher::Query>::key(cypher, &[]);
+        let hash = QueryCache::<copperdb_cypher::Query>::key(cypher, &[]);
         let parsed = if let Some(cached) = self.query_cache.get(hash) {
             cached
         } else {
@@ -255,23 +255,23 @@ impl MagnetDB {
 }
 
 
-// ─── Legacy MagnetDb (full-server async variant) ──────────────────────────────
+// ─── Legacy copperdb (full-server async variant) ──────────────────────────────
 
 /// Full-server async variant that integrates all subsystems.
-pub struct MagnetDb {
-    pub config: magnetdb_config::Config,
+pub struct copperdb {
+    pub config: copperdb_config::Config,
 }
 
-impl MagnetDb {
+impl copperdb {
     /// Initialize and start the database engine.
-    pub async fn start(config: magnetdb_config::Config) -> Result<Self, MagnetDbError> {
-        tracing::info!("Starting magnetDB v{}", env!("CARGO_PKG_VERSION"));
+    pub async fn start(config: copperdb_config::Config) -> Result<Self, copperdbError> {
+        tracing::info!("Starting copperdb v{}", env!("CARGO_PKG_VERSION"));
         Ok(Self { config })
     }
 
     /// Gracefully shut down all subsystems.
-    pub async fn shutdown(&self) -> Result<(), MagnetDbError> {
-        tracing::info!("Shutting down magnetDB");
+    pub async fn shutdown(&self) -> Result<(), copperdbError> {
+        tracing::info!("Shutting down copperdb");
         Ok(())
     }
 }
@@ -284,22 +284,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_with_default_config() {
-        let config = magnetdb_config::Config::default();
-        let db = MagnetDb::start(config).await.unwrap();
+        let config = copperdb_config::Config::default();
+        let db = copperdb::start(config).await.unwrap();
         db.shutdown().await.unwrap();
     }
 
-    // ── Embedded MagnetDB tests ───────────────────────────────────────────────
+    // ── Embedded copperdb tests ───────────────────────────────────────────────
 
     #[test]
     fn test_open_temporary() {
-        let db = MagnetDB::open_temporary().unwrap();
-        assert_eq!(db.config.default_database, "magnetdb");
+        let db = copperdb::open_temporary().unwrap();
+        assert_eq!(db.config.default_database, "copperdb");
     }
 
     #[test]
     fn test_create_and_match() {
-        let db = MagnetDB::open_temporary().unwrap();
+        let db = copperdb::open_temporary().unwrap();
 
         let result = db
             .execute(
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn test_match_with_where() {
-        let db = MagnetDB::open_temporary().unwrap();
+        let db = copperdb::open_temporary().unwrap();
         db.execute(
             "CREATE (n:Person {name: 'Alice', age: 30})",
             Default::default(),
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn test_flush_and_size() {
-        let db = MagnetDB::open_temporary().unwrap();
+        let db = copperdb::open_temporary().unwrap();
         db.execute("CREATE (n:Test {x: 1})", Default::default()).unwrap();
         db.flush().unwrap();
         // size should be non-zero after flush
@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_query_caching() {
-        let db = MagnetDB::open_temporary().unwrap();
+        let db = copperdb::open_temporary().unwrap();
         db.execute("CREATE (n:Cached {v: 1})", Default::default()).unwrap();
         // Second identical query hits cache
         let r1 = db.execute("MATCH (n:Cached) RETURN n", Default::default()).unwrap();
@@ -371,7 +371,7 @@ mod tests {
 
     #[test]
     fn test_multiple_creates_and_match() {
-        let db = MagnetDB::open_temporary().unwrap();
+        let db = copperdb::open_temporary().unwrap();
         for i in 0..5 {
             db.execute(&format!("CREATE (n:Item {{idx: {i}}})", i = i), Default::default()).unwrap();
         }
@@ -395,7 +395,7 @@ mod smoke_tests {
         // Phase 1: write
         {
             let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
-            let db = MagnetDB::open(cfg).unwrap();
+            let db = copperdb::open(cfg).unwrap();
             let result = db.execute(
                 "CREATE (n:Person {name: 'Alice', age: 30}) RETURN n",
                 HashMap::new(),
@@ -407,7 +407,7 @@ mod smoke_tests {
         // Phase 2: reopen and verify
         {
             let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
-            let db = MagnetDB::open(cfg).unwrap();
+            let db = copperdb::open(cfg).unwrap();
             let result = db.execute("MATCH (n:Person) RETURN n", HashMap::new()).unwrap();
             assert_eq!(result.rows.len(), 1, "reopened DB should have 1 Person node");
             let row = &result.rows[0];
@@ -438,7 +438,7 @@ mod smoke_tests {
 
         {
             let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
-            let db = MagnetDB::open(cfg).unwrap();
+            let db = copperdb::open(cfg).unwrap();
             db.execute("CREATE (a:City {name: 'London', pop: 9000000})", HashMap::new()).unwrap();
             db.execute("CREATE (b:City {name: 'Paris', pop: 2100000})", HashMap::new()).unwrap();
             let r = db.execute("MATCH (c:City) RETURN c", HashMap::new()).unwrap();
@@ -448,7 +448,7 @@ mod smoke_tests {
 
         {
             let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
-            let db = MagnetDB::open(cfg).unwrap();
+            let db = copperdb::open(cfg).unwrap();
             let result = db.execute("MATCH (c:City) RETURN c", HashMap::new()).unwrap();
             assert_eq!(result.rows.len(), 2, "should still have 2 City nodes after reopen");
 
@@ -471,7 +471,7 @@ mod smoke_tests {
 
         {
             let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
-            let db = MagnetDB::open(cfg).unwrap();
+            let db = copperdb::open(cfg).unwrap();
             for (name, age) in &[("Alice", 30), ("Bob", 20), ("Carol", 35)] {
                 db.execute(
                     &format!("CREATE (n:User {{name: '{name}', age: {age}}})"),
@@ -483,7 +483,7 @@ mod smoke_tests {
 
         {
             let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
-            let db = MagnetDB::open(cfg).unwrap();
+            let db = copperdb::open(cfg).unwrap();
             let result = db.execute(
                 "MATCH (n:User) WHERE n.age > 25 RETURN n",
                 HashMap::new(),
@@ -508,8 +508,8 @@ mod smoke_tests {
         use axum::http::{Request, StatusCode};
         use tower::ServiceExt;
 
-        let state = Arc::new(magnetdb_server::AppState::default());
-        let app = magnetdb_server::build_router(Arc::clone(&state));
+        let state = Arc::new(copperdb_server::AppState::default());
+        let app = copperdb_server::build_router(Arc::clone(&state));
 
         let req = Request::builder()
             .method("GET")

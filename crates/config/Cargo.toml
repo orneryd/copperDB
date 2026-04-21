@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-config"
+name = "copperdb-config"
 description = "Configuration loading and management (YAML/TOML/env)"
 version.workspace = true
 edition.workspace = true

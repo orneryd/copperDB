@@ -29,7 +29,7 @@ const BUILD_DATE_STR: &str = match option_env!("BUILD_DATE") {
     Some(s) => s,
     None => "unknown",
 };
-const TARGET_STR: &str = match option_env!("MAGNETDB_TARGET") {
+const TARGET_STR: &str = match option_env!("copperdb_TARGET") {
     Some(s) => s,
     None => "unknown",
 };
@@ -42,7 +42,7 @@ const RUST_VERSION_STR: &str = match option_env!("CARGO_PKG_RUST_VERSION") {
 ///
 /// `GIT_COMMIT` and `BUILD_DATE` are optionally injected by CI (e.g.
 /// `GIT_COMMIT=$(git rev-parse --short HEAD) cargo build`).
-/// `MAGNETDB_TARGET` can be set to the target triple in a build script if needed.
+/// `copperdb_TARGET` can be set to the target triple in a build script if needed.
 pub const BUILD_INFO: BuildInfo = BuildInfo {
     version: env!("CARGO_PKG_VERSION"),
     git_commit: GIT_COMMIT_STR,
@@ -54,7 +54,7 @@ pub const BUILD_INFO: BuildInfo = BuildInfo {
 /// Return a human-readable build summary string.
 pub fn summary() -> String {
     format!(
-        "magnetDB v{} ({}) built {} for {}",
+        "copperdb v{} ({}) built {} for {}",
         BUILD_INFO.version,
         BUILD_INFO.git_commit,
         BUILD_INFO.build_date,

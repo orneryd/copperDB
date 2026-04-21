@@ -1,9 +1,9 @@
-//! Embedding utility functions for magnetDB.
+//! Embedding utility functions for copperdb.
 //!
 //! Equivalent to Go's `pkg/embeddingutil` in NornicDB.
 //! Helpers for normalizing, comparing, and batching embeddings.
 
-pub use magnetdb_math::{cosine_similarity, dot, l2_norm, normalize, MathError};
+pub use copperdb_math::{cosine_similarity, dot, l2_norm, normalize, MathError};
 
 /// Batch-normalize a collection of embedding vectors in place.
 pub fn normalize_batch(embeddings: &mut [Vec<f32>]) -> Result<(), MathError> {

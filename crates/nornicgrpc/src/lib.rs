@@ -1,4 +1,4 @@
-//! gRPC server interface for magnetDB.
+//! gRPC server interface for copperdb.
 //!
 //! Equivalent to Go's `pkg/nornicgrpc` in NornicDB.
 //! Exposes a Protobuf/gRPC API as an alternative to the Bolt protocol.

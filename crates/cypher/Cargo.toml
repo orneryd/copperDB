@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-cypher"
+name = "copperdb-cypher"
 description = "Cypher query language parser and AST (replaces ANTLR4 grammar)"
 version.workspace = true
 edition.workspace = true
@@ -12,4 +12,4 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-magnetdb-util = { workspace = true }
+copperdb-util = { workspace = true }

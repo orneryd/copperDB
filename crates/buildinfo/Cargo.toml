@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-buildinfo"
+name = "copperdb-buildinfo"
 description = "Build metadata and version information"
 version.workspace = true
 edition.workspace = true

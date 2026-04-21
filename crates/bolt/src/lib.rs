@@ -1,9 +1,9 @@
-//! Neo4j Bolt protocol server for magnetDB.
+//! Neo4j Bolt protocol server for copperdb.
 //!
 //! Equivalent to Go's `pkg/bolt` in NornicDB.
 //! Implements the Bolt wire protocol (v1–v5) allowing any Neo4j-compatible
 //! client (Python neo4j driver, JavaScript driver, cypher-shell, etc.) to
-//! connect to magnetDB.
+//! connect to copperdb.
 //!
 //! # Protocol Overview
 //! - TCP transport with optional TLS

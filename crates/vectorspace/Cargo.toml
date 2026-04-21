@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-vectorspace"
+name = "copperdb-vectorspace"
 description = "Vector space registry: manages embedding collections and indexes"
 version.workspace = true
 edition.workspace = true
@@ -15,6 +15,6 @@ tokio.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
 nalgebra.workspace = true
-magnetdb-embeddingutil = { workspace = true }
-magnetdb-storage = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-embeddingutil = { workspace = true }
+copperdb-storage = { workspace = true }
+copperdb-util = { workspace = true }

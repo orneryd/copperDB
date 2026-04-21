@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-math"
+name = "copperdb-math"
 description = "Mathematical utilities: vector norms, dot products, statistics"
 version.workspace = true
 edition.workspace = true

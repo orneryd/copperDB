@@ -1,4 +1,4 @@
-//! General-purpose utilities for magnetDB.
+//! General-purpose utilities for copperdb.
 //!
 //! Equivalent to Go's `pkg/util` in NornicDB.
 //! Provides common helpers used across all other crates.
@@ -24,7 +24,7 @@ pub fn new_id() -> String {
 ///
 /// # Example
 /// ```
-/// use magnetdb_util::flatten_map;
+/// use copperdb_util::flatten_map;
 /// let mut map = std::collections::HashMap::new();
 /// map.insert("key".to_string(), serde_json::json!({"nested": "value"}));
 /// let flat = flatten_map(&map, "");

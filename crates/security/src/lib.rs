@@ -1,4 +1,4 @@
-//! Security utilities for magnetDB.
+//! Security utilities for copperdb.
 //!
 //! Equivalent to Go's `pkg/security` in NornicDB.
 //! Provides input sanitization, identifier validation, password hashing,

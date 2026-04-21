@@ -1,4 +1,4 @@
-//! Transaction session management for magnetDB.
+//! Transaction session management for copperdb.
 //!
 //! Provides ACID transaction handling with begin, commit, rollback, and
 //! pending-write buffering.

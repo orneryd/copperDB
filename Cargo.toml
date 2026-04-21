@@ -29,7 +29,7 @@ members = [
     "crates/math",
     "crates/mcp",
     "crates/multidb",
-    "crates/magnetdb",
+    "crates/copperdb",
     "crates/nornicgrpc",
     "crates/pool",
     "crates/qdrantgrpc",
@@ -50,9 +50,9 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["magnetDB contributors"]
+authors = ["copperdb contributors"]
 license = "Apache-2.0"
-repository = "https://github.com/orneryd/magnetDB"
+repository = "https://github.com/orneryd/copperdb"
 
 # Shared dependency versions across workspace
 [workspace.dependencies]
@@ -160,47 +160,47 @@ aws-sdk-kms = "1"
 oauth2 = "4"
 
 # Inter-crate dependencies within this workspace
-magnetdb-util = { path = "crates/util" }
-magnetdb-storage = { path = "crates/storage" }
-magnetdb-cypher = { path = "crates/cypher" }
-magnetdb-auth = { path = "crates/auth" }
-magnetdb-encryption = { path = "crates/encryption" }
-magnetdb-cache = { path = "crates/cache" }
-magnetdb-simd = { path = "crates/simd" }
-magnetdb-vectorspace = { path = "crates/vectorspace" }
-magnetdb-decay = { path = "crates/decay" }
-magnetdb-temporal = { path = "crates/temporal" }
-magnetdb-indexing = { path = "crates/indexing" }
-magnetdb-replication = { path = "crates/replication" }
-magnetdb-bolt = { path = "crates/bolt" }
-magnetdb-embed = { path = "crates/embed" }
-magnetdb-gpu = { path = "crates/gpu" }
-magnetdb-kms = { path = "crates/kms" }
-magnetdb-config = { path = "crates/config" }
-magnetdb-server = { path = "crates/server" }
-magnetdb-graphql = { path = "crates/graphql" }
-magnetdb-pool = { path = "crates/pool" }
-magnetdb-txsession = { path = "crates/txsession" }
-magnetdb-eval = { path = "crates/eval" }
-magnetdb-filter = { path = "crates/filter" }
-magnetdb-math = { path = "crates/math" }
-magnetdb-search = { path = "crates/search" }
-magnetdb-audit = { path = "crates/audit" }
-magnetdb-compliance = { path = "crates/compliance" }
-magnetdb-security = { path = "crates/security" }
-magnetdb-heimdall = { path = "crates/heimdall" }
-magnetdb-fabric = { path = "crates/fabric" }
-magnetdb-multidb = { path = "crates/multidb" }
-magnetdb-mcp = { path = "crates/mcp" }
-magnetdb-inference = { path = "crates/inference" }
-magnetdb-localllm = { path = "crates/localllm" }
-magnetdb-linkpredict = { path = "crates/linkpredict" }
-magnetdb-embeddingutil = { path = "crates/embeddingutil" }
-magnetdb-textchunk = { path = "crates/textchunk" }
-magnetdb-retention = { path = "crates/retention" }
-magnetdb-convert = { path = "crates/convert" }
-magnetdb-envutil = { path = "crates/envutil" }
-magnetdb-buildinfo = { path = "crates/buildinfo" }
-magnetdb-nornicgrpc = { path = "crates/nornicgrpc" }
-magnetdb-qdrantgrpc = { path = "crates/qdrantgrpc" }
-magnetdb = { path = "crates/magnetdb" }
+copperdb-util = { path = "crates/util" }
+copperdb-storage = { path = "crates/storage" }
+copperdb-cypher = { path = "crates/cypher" }
+copperdb-auth = { path = "crates/auth" }
+copperdb-encryption = { path = "crates/encryption" }
+copperdb-cache = { path = "crates/cache" }
+copperdb-simd = { path = "crates/simd" }
+copperdb-vectorspace = { path = "crates/vectorspace" }
+copperdb-decay = { path = "crates/decay" }
+copperdb-temporal = { path = "crates/temporal" }
+copperdb-indexing = { path = "crates/indexing" }
+copperdb-replication = { path = "crates/replication" }
+copperdb-bolt = { path = "crates/bolt" }
+copperdb-embed = { path = "crates/embed" }
+copperdb-gpu = { path = "crates/gpu" }
+copperdb-kms = { path = "crates/kms" }
+copperdb-config = { path = "crates/config" }
+copperdb-server = { path = "crates/server" }
+copperdb-graphql = { path = "crates/graphql" }
+copperdb-pool = { path = "crates/pool" }
+copperdb-txsession = { path = "crates/txsession" }
+copperdb-eval = { path = "crates/eval" }
+copperdb-filter = { path = "crates/filter" }
+copperdb-math = { path = "crates/math" }
+copperdb-search = { path = "crates/search" }
+copperdb-audit = { path = "crates/audit" }
+copperdb-compliance = { path = "crates/compliance" }
+copperdb-security = { path = "crates/security" }
+copperdb-heimdall = { path = "crates/heimdall" }
+copperdb-fabric = { path = "crates/fabric" }
+copperdb-multidb = { path = "crates/multidb" }
+copperdb-mcp = { path = "crates/mcp" }
+copperdb-inference = { path = "crates/inference" }
+copperdb-localllm = { path = "crates/localllm" }
+copperdb-linkpredict = { path = "crates/linkpredict" }
+copperdb-embeddingutil = { path = "crates/embeddingutil" }
+copperdb-textchunk = { path = "crates/textchunk" }
+copperdb-retention = { path = "crates/retention" }
+copperdb-convert = { path = "crates/convert" }
+copperdb-envutil = { path = "crates/envutil" }
+copperdb-buildinfo = { path = "crates/buildinfo" }
+copperdb-nornicgrpc = { path = "crates/nornicgrpc" }
+copperdb-qdrantgrpc = { path = "crates/qdrantgrpc" }
+copperdb = { path = "crates/copperdb" }

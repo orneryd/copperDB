@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-pool"
+name = "copperdb-pool"
 description = "Connection pool for database driver connections"
 version.workspace = true
 edition.workspace = true
@@ -13,4 +13,4 @@ anyhow.workspace = true
 tokio.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
-magnetdb-util = { workspace = true }
+copperdb-util = { workspace = true }

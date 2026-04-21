@@ -1,4 +1,4 @@
-//! Graph index management for magnetDB.
+//! Graph index management for copperdb.
 //!
 //! Equivalent to Go's `pkg/indexing` in NornicDB.
 //! Manages B-tree property indexes, composite indexes, and full-text indexes

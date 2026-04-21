@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-server"
+name = "copperdb-server"
 description = "HTTP/REST API server (routing, middleware, request handling)"
 version.workspace = true
 edition.workspace = true
@@ -21,8 +21,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 parking_lot.workspace = true
 uuid.workspace = true
-magnetdb-auth = { workspace = true }
-magnetdb-bolt = { workspace = true }
-magnetdb-graphql = { workspace = true }
-magnetdb-util = { workspace = true }
-magnetdb-retention = { workspace = true }
+copperdb-auth = { workspace = true }
+copperdb-bolt = { workspace = true }
+copperdb-graphql = { workspace = true }
+copperdb-util = { workspace = true }
+copperdb-retention = { workspace = true }

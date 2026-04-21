@@ -1,4 +1,4 @@
-//! Connection pool for magnetDB driver connections.
+//! Connection pool for copperdb driver connections.
 //!
 //! Equivalent to Go's `pkg/pool` in NornicDB.
 //! Manages a pool of reusable database connections to reduce handshake overhead.

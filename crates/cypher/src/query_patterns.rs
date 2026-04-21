@@ -1,4 +1,4 @@
-//! Query optimization pattern detection for magnetDB.
+//! Query optimization pattern detection for copperdb.
 //!
 //! Equivalent to Go's `pkg/cypher/query_patterns.go` in NornicDB v1.0.40.
 //!

@@ -1,4 +1,4 @@
-//! Cypher query language parser and AST for magnetDB.
+//! Cypher query language parser and AST for copperdb.
 //!
 //! Hand-rolled recursive-descent parser for a subset of the openCypher grammar,
 //! equivalent to the ANTLR4-based parser in NornicDB (Go).

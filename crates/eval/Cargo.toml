@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-eval"
+name = "copperdb-eval"
 description = "Cypher query evaluator: AST execution against the storage engine"
 version.workspace = true
 edition.workspace = true
@@ -16,8 +16,8 @@ tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 rmp-serde.workspace = true
-magnetdb-cypher = { workspace = true }
-magnetdb-storage = { workspace = true }
-magnetdb-cache = { workspace = true }
-magnetdb-filter = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-cypher = { workspace = true }
+copperdb-storage = { workspace = true }
+copperdb-cache = { workspace = true }
+copperdb-filter = { workspace = true }
+copperdb-util = { workspace = true }

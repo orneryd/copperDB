@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-envutil"
+name = "copperdb-envutil"
 description = "Environment variable utilities"
 version.workspace = true
 edition.workspace = true

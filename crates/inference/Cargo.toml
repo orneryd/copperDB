@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-inference"
+name = "copperdb-inference"
 description = "ML model inference pipeline: embedding, classification, generation"
 version.workspace = true
 edition.workspace = true
@@ -14,6 +14,6 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-magnetdb-embed = { workspace = true }
-magnetdb-localllm = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-embed = { workspace = true }
+copperdb-localllm = { workspace = true }
+copperdb-util = { workspace = true }

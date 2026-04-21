@@ -1,17 +1,17 @@
-//! Cypher query evaluator for magnetDB.
+//! Cypher query evaluator for copperdb.
 //!
-//! Executes Cypher ASTs from `magnetdb-cypher` against the storage engine.
+//! Executes Cypher ASTs from `copperdb-cypher` against the storage engine.
 
-use magnetdb_cypher::{Clause, Expression, Query, ReturnItem};
-use magnetdb_filter::{eval_predicate, eval_expression};
-use magnetdb_storage::StorageEngine;
+use copperdb_cypher::{Clause, Expression, Query, ReturnItem};
+use copperdb_filter::{eval_predicate, eval_expression};
+use copperdb_storage::StorageEngine;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub use magnetdb_filter::Row;
+pub use copperdb_filter::Row;
 
 #[derive(Debug, Error)]
 pub enum EvalError {
@@ -27,14 +27,14 @@ pub enum EvalError {
     SerializationError(String),
 }
 
-impl From<magnetdb_storage::StorageError> for EvalError {
-    fn from(e: magnetdb_storage::StorageError) -> Self {
+impl From<copperdb_storage::StorageError> for EvalError {
+    fn from(e: copperdb_storage::StorageError) -> Self {
         EvalError::StorageError(e.to_string())
     }
 }
 
-impl From<magnetdb_filter::FilterError> for EvalError {
-    fn from(e: magnetdb_filter::FilterError) -> Self {
+impl From<copperdb_filter::FilterError> for EvalError {
+    fn from(e: copperdb_filter::FilterError) -> Self {
         EvalError::FilterError(e.to_string())
     }
 }
@@ -730,8 +730,8 @@ fn row_key(row: &Row) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use magnetdb_cypher::Parser;
-    use magnetdb_storage::StorageEngine;
+    use copperdb_cypher::Parser;
+    use copperdb_storage::StorageEngine;
 
     fn make_engine() -> EvalEngine {
         let storage = Arc::new(StorageEngine::open_temporary().unwrap());

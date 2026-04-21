@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-security"
+name = "copperdb-security"
 description = "Security utilities: TLS, certificate management, secure channels"
 version.workspace = true
 edition.workspace = true
@@ -15,6 +15,6 @@ tracing.workspace = true
 hex.workspace = true
 rand.workspace = true
 argon2.workspace = true
-magnetdb-auth = { workspace = true }
-magnetdb-encryption = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-auth = { workspace = true }
+copperdb-encryption = { workspace = true }
+copperdb-util = { workspace = true }

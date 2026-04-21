@@ -1,4 +1,4 @@
-//! GPU-accelerated computation for magnetDB.
+//! GPU-accelerated computation for copperdb.
 //!
 //! Equivalent to Go's `pkg/gpu` in NornicDB.
 //! NornicDB supports four GPU backends:
@@ -66,7 +66,7 @@ impl GpuAccelerator {
 
     /// Batch cosine similarity: compute similarity between `query` and all `candidates`.
     ///
-    /// Falls back to CPU SIMD via `magnetdb-simd` when GPU is unavailable.
+    /// Falls back to CPU SIMD via `copperdb-simd` when GPU is unavailable.
     pub fn batch_cosine_similarity(
         &self,
         query: &[f32],

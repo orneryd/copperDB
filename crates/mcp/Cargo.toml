@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-mcp"
+name = "copperdb-mcp"
 description = "Model Context Protocol: LLM tool/function calling interface"
 version.workspace = true
 edition.workspace = true
@@ -15,5 +15,5 @@ tokio.workspace = true
 axum.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
-magnetdb-auth = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-auth = { workspace = true }
+copperdb-util = { workspace = true }

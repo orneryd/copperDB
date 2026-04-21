@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-decay"
+name = "copperdb-decay"
 description = "Memory/weight decay system with Kalman filter adaptation"
 version.workspace = true
 edition.workspace = true
@@ -15,5 +15,5 @@ tokio.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
 nalgebra.workspace = true
-magnetdb-math = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-math = { workspace = true }
+copperdb-util = { workspace = true }

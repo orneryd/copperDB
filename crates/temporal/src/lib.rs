@@ -1,4 +1,4 @@
-//! Temporal graph data for magnetDB.
+//! Temporal graph data for copperdb.
 //!
 //! Equivalent to Go's `pkg/temporal` in NornicDB.
 //! Provides:

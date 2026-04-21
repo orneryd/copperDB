@@ -1,4 +1,4 @@
-//! Raft-based consensus and replication for magnetDB.
+//! Raft-based consensus and replication for copperdb.
 //!
 //! Equivalent to Go's `pkg/replication` in NornicDB.
 //! Uses `openraft` (TiKV's modern Raft library) as the consensus engine,
@@ -9,7 +9,7 @@
 //! - Log replication across cluster nodes
 //! - Snapshot installation
 //! - HA standby (passive hot-standby nodes)
-//! - Multi-region routing via `magnetdb-fabric`
+//! - Multi-region routing via `copperdb-fabric`
 //!
 //! # Rust vs Go
 //! NornicDB uses `github.com/hashicorp/raft`.

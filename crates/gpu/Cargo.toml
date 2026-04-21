@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-gpu"
+name = "copperdb-gpu"
 description = "GPU-accelerated computation: CUDA, Metal, Vulkan, OpenCL backends"
 version.workspace = true
 edition.workspace = true
@@ -15,5 +15,5 @@ tokio.workspace = true
 tracing.workspace = true
 wgpu.workspace = true
 nalgebra.workspace = true
-magnetdb-simd = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-simd = { workspace = true }
+copperdb-util = { workspace = true }

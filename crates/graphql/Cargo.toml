@@ -1,5 +1,5 @@
 [package]
-name = "magnetdb-graphql"
+name = "copperdb-graphql"
 description = "GraphQL API layer (query/mutation/subscription) "
 version.workspace = true
 edition.workspace = true
@@ -15,7 +15,7 @@ tokio.workspace = true
 async-graphql.workspace = true
 async-graphql-axum.workspace = true
 tracing.workspace = true
-magnetdb-auth = { workspace = true }
-magnetdb-eval = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-auth = { workspace = true }
+copperdb-eval = { workspace = true }
+copperdb-util = { workspace = true }
 uuid = { workspace = true }

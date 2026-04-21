@@ -1,6 +1,6 @@
 [package]
-name = "magnetdb-magnetdb"
-description = "magnetDB core engine: integrates all subsystems into a unified database"
+name = "copperdb-copperdb"
+description = "copperdb core engine: integrates all subsystems into a unified database"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -17,26 +17,26 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
 uuid.workspace = true
-magnetdb-storage = { workspace = true }
-magnetdb-cypher = { workspace = true }
-magnetdb-eval = { workspace = true }
-magnetdb-bolt = { workspace = true }
-magnetdb-auth = { workspace = true }
-magnetdb-encryption = { workspace = true }
-magnetdb-cache = { workspace = true }
-magnetdb-replication = { workspace = true }
-magnetdb-temporal = { workspace = true }
-magnetdb-decay = { workspace = true }
-magnetdb-vectorspace = { workspace = true }
-magnetdb-embed = { workspace = true }
-magnetdb-indexing = { workspace = true }
-magnetdb-server = { workspace = true }
-magnetdb-graphql = { workspace = true }
-magnetdb-pool = { workspace = true }
-magnetdb-txsession = { workspace = true }
-magnetdb-audit = { workspace = true }
-magnetdb-config = { workspace = true }
-magnetdb-util = { workspace = true }
+copperdb-storage = { workspace = true }
+copperdb-cypher = { workspace = true }
+copperdb-eval = { workspace = true }
+copperdb-bolt = { workspace = true }
+copperdb-auth = { workspace = true }
+copperdb-encryption = { workspace = true }
+copperdb-cache = { workspace = true }
+copperdb-replication = { workspace = true }
+copperdb-temporal = { workspace = true }
+copperdb-decay = { workspace = true }
+copperdb-vectorspace = { workspace = true }
+copperdb-embed = { workspace = true }
+copperdb-indexing = { workspace = true }
+copperdb-server = { workspace = true }
+copperdb-graphql = { workspace = true }
+copperdb-pool = { workspace = true }
+copperdb-txsession = { workspace = true }
+copperdb-audit = { workspace = true }
+copperdb-config = { workspace = true }
+copperdb-util = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

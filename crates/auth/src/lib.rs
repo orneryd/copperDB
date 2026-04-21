@@ -1,4 +1,4 @@
-//! Authentication, authorization, and RBAC for magnetDB.
+//! Authentication, authorization, and RBAC for copperdb.
 //!
 //! Equivalent to Go's `pkg/auth` in NornicDB.
 //! Provides JWT authentication, OAuth2 integration, RBAC roles/privileges,
@@ -66,7 +66,7 @@ impl User {
     }
 }
 
-/// JWT claims for magnetDB tokens.
+/// JWT claims for copperdb tokens.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
