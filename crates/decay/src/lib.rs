@@ -127,20 +127,37 @@ impl KalmanAdapter {
 
     /// Update the filter with a new observed weight and elapsed time (seconds).
     pub fn update(&mut self, observed_weight: f64, dt: f64) {
-        let [w, lambda] = self.state;
+        let state = Vector2::new(self.state[0], self.state[1]);
+        let covariance = Matrix2::new(
+            self.covariance[0][0],
+            self.covariance[0][1],
+            self.covariance[1][0],
+            self.covariance[1][1],
+        );
 
-        // Predict: w_{k+1} = w_k * e^(-lambda * dt)
-        let predicted_w = w * (-lambda * dt).exp();
-        let predicted_lambda = lambda;
+        let transition = Matrix2::new((-state[1] * dt).exp(), 0.0, 0.0, 1.0);
+        let process_noise = Matrix2::new(self.q, 0.0, 0.0, self.q);
+        let predicted_state = transition * state;
+        let predicted_covariance = transition * covariance * transition.transpose() + process_noise;
 
-        // Simplified scalar Kalman update (ignore off-diagonal for now)
-        let p00 = self.covariance[0][0] + self.q;
-        let k = p00 / (p00 + self.r);
+        let innovation = observed_weight - predicted_state[0];
+        let innovation_variance = predicted_covariance[(0, 0)] + self.r;
+        let kalman_gain = Vector2::new(
+            predicted_covariance[(0, 0)] / innovation_variance,
+            predicted_covariance[(1, 0)] / innovation_variance,
+        );
 
-        let innovation = observed_weight - predicted_w;
-        self.state[0] = predicted_w + k * innovation;
-        self.state[1] = predicted_lambda;
-        self.covariance[0][0] = (1.0 - k) * p00;
+        let updated_state = predicted_state + kalman_gain * innovation;
+        let measurement_projection = Matrix2::new(1.0, 0.0, 0.0, 0.0);
+        let updated_covariance = (Matrix2::identity() - kalman_gain * Vector2::new(1.0, 0.0).transpose())
+            * predicted_covariance;
+
+        self.state = [updated_state[0], updated_state[1].max(0.0)];
+        self.covariance = [
+            [updated_covariance[(0, 0)], updated_covariance[(0, 1)]],
+            [updated_covariance[(1, 0)], updated_covariance[(1, 1)]],
+        ];
+        let _ = measurement_projection;
     }
 
     /// Return the current estimated weight.

@@ -1,0 +1,17 @@
+[package]
+name = "copperdb"
+description = "copperdb executable server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+copperdb-server = { workspace = true }

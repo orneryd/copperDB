@@ -18,5 +18,6 @@ aws-config.workspace = true
 aws-sdk-kms.workspace = true
 copperdb-encryption = { workspace = true }
 copperdb-util = { workspace = true }
-async-trait = "0.1"
+async-trait.workspace = true
 aes-gcm = { workspace = true }
+getrandom.workspace = true

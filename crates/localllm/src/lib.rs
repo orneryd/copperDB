@@ -69,12 +69,21 @@ impl LocalModel {
         Ok(Self { config })
     }
 
+    pub fn config(&self) -> &GgufConfig {
+        &self.config
+    }
+
+    pub fn model_path(&self) -> &str {
+        &self.config.model_path
+    }
+
     /// Generate an embedding vector for the given text.
     pub fn embed(&self, _text: &str) -> Result<Vec<f32>, LocalLlmError> {
         Err(LocalLlmError::InferenceError(
-            "llama.cpp FFI not yet implemented. \
-             Build libllama and complete FFI bindings."
-                .into(),
+            format!(
+                "llama.cpp FFI not yet implemented for model {}. Build libllama and complete FFI bindings.",
+                self.config.model_path
+            ),
         ))
     }
 }

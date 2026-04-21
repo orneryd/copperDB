@@ -9,14 +9,10 @@ repository.workspace = true
 
 [dependencies]
 thiserror.workspace = true
-anyhow.workspace = true
+async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+hex.workspace = true
 tokio.workspace = true
-tonic.workspace = true
-prost.workspace = true
 tracing.workspace = true
-openraft.workspace = true
-rmp-serde.workspace = true
 copperdb-storage = { workspace = true }
-copperdb-util = { workspace = true }

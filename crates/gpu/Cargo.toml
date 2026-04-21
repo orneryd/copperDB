@@ -13,7 +13,7 @@ anyhow.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-wgpu.workspace = true
+libloading.workspace = true
 nalgebra.workspace = true
 copperdb-simd = { workspace = true }
 copperdb-util = { workspace = true }

@@ -18,7 +18,6 @@ oauth2.workspace = true
 base64.workspace = true
 sha2.workspace = true
 hmac.workspace = true
-rand.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 parking_lot.workspace = true

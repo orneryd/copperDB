@@ -6,7 +6,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-rust-version = "1.70"
+rust-version.workspace = true
 
 [dependencies]
 serde = { workspace = true }

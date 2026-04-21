@@ -15,13 +15,14 @@
 
 use bytes::Bytes;
 use sled::{Db, Tree};
+use std::io;
 use std::path::Path;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("sled error: {0}")]
-    Sled(#[from] sled::Error),
+    Sled(#[from] io::Error),
     #[error("serialization error: {0}")]
     Serialization(#[from] rmp_serde::encode::Error),
     #[error("deserialization error: {0}")]
@@ -57,7 +58,7 @@ impl StorageEngine {
 
     /// Open an in-memory (temporary) storage engine for testing.
     pub fn open_temporary() -> Result<Self, StorageError> {
-        let config = sled::Config::new().temporary(true);
+        let config = sled::Config::tmp()?;
         let db = config.open()?;
         let nodes = db.open_tree("nodes")?;
         let edges = db.open_tree("edges")?;

@@ -113,7 +113,9 @@ pub fn base64_to_bytes(s: &str) -> Result<Vec<u8>, ConvertError> {
 /// Pack a `Value` into MessagePack bytes (used in Bolt protocol).
 pub fn pack_msgpack(value: &Value) -> Result<Bytes, rmp_serde::encode::Error> {
     let encoded = rmp_serde::to_vec(value)?;
-    Ok(Bytes::from(encoded))
+    let mut buffer = BytesMut::with_capacity(encoded.len());
+    buffer.put_slice(&encoded);
+    Ok(buffer.freeze())
 }
 
 /// Unpack MessagePack bytes into a `Value`.

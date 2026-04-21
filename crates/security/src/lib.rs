@@ -114,11 +114,10 @@ pub fn validate_property_key(key: &str) -> Result<(), SecurityError> {
 /// The returned string encodes the algorithm, parameters, salt, and hash and
 /// can be stored directly. Use [`verify_password`] to check a candidate.
 pub fn hash_password(password: &str) -> Result<String, SecurityError> {
-    use argon2::{password_hash::{rand_core::OsRng, PasswordHasher, SaltString}, Argon2};
-    let salt = SaltString::generate(&mut OsRng);
+    use argon2::{password_hash::PasswordHasher, Argon2};
     let argon2 = Argon2::default();
     argon2
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map(|h| h.to_string())
         .map_err(|e| SecurityError::HashingError(e.to_string()))
 }
@@ -126,7 +125,7 @@ pub fn hash_password(password: &str) -> Result<String, SecurityError> {
 /// Verify a password against an Argon2id PHC hash produced by [`hash_password`].
 /// Uses constant-time comparison internally.
 pub fn verify_password(password: &str, hash: &str) -> bool {
-    use argon2::{password_hash::{PasswordHash, PasswordVerifier}, Argon2};
+    use argon2::{password_hash::{phc::PasswordHash, PasswordVerifier}, Argon2};
     let parsed = match PasswordHash::new(hash) {
         Ok(h) => h,
         Err(_) => return false,
@@ -136,9 +135,9 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
 
 /// Generate a random 32-byte hex token.
 pub fn generate_token() -> String {
-    use rand::RngCore;
+    use getrandom::fill as fill_random;
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    fill_random(&mut bytes).expect("os rng should be available");
     hex::encode(bytes)
 }
 

@@ -59,10 +59,16 @@ impl LocalKms {
 #[async_trait::async_trait]
 impl KmsProvider for LocalKms {
     async fn wrap_key(&self, _key_id: &str, plaintext_dek: &[u8]) -> Result<Vec<u8>, KmsError> {
-        use aes_gcm::{aead::{Aead, AeadCore, KeyInit, OsRng}, Aes256Gcm, Key, Nonce};
-        let key = Key::<Aes256Gcm>::from_slice(&self.master_key);
-        let cipher = Aes256Gcm::new(key);
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Key, Nonce};
+        use getrandom::fill as fill_random;
+
+        let key = Key::<Aes256Gcm>::try_from(self.master_key.as_slice())
+            .map_err(|_| KmsError::ProviderError("invalid master key length".into()))?;
+        let cipher = Aes256Gcm::new(&key);
+        let mut nonce_bytes = [0u8; 12];
+        fill_random(&mut nonce_bytes)
+            .map_err(|_| KmsError::ProviderError("nonce generation failed".into()))?;
+        let nonce = Nonce::from(nonce_bytes);
         let ciphertext = cipher.encrypt(&nonce, plaintext_dek)
             .map_err(|_| KmsError::ProviderError("AES-GCM wrap failed".into()))?;
         let mut result = nonce.to_vec();
@@ -76,10 +82,11 @@ impl KmsProvider for LocalKms {
             return Err(KmsError::DecryptFailed);
         }
         let (nonce_bytes, ciphertext) = encrypted_dek.split_at(12);
-        let key = Key::<Aes256Gcm>::from_slice(&self.master_key);
-        let cipher = Aes256Gcm::new(key);
-        let nonce = Nonce::from_slice(nonce_bytes);
-        cipher.decrypt(nonce, ciphertext).map_err(|_| KmsError::DecryptFailed)
+        let key = Key::<Aes256Gcm>::try_from(self.master_key.as_slice())
+            .map_err(|_| KmsError::ProviderError("invalid master key length".into()))?;
+        let cipher = Aes256Gcm::new(&key);
+        let nonce = Nonce::try_from(nonce_bytes).map_err(|_| KmsError::DecryptFailed)?;
+        cipher.decrypt(&nonce, ciphertext).map_err(|_| KmsError::DecryptFailed)
     }
 }
 

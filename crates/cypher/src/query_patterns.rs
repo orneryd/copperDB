@@ -391,51 +391,6 @@ fn parse_pattern_chain(s: &str) -> Option<PatternChain> {
     Some(PatternChain { nodes, edges })
 }
 
-// ─── Relationship segment parser ─────────────────────────────────────────────
-
-#[derive(Debug)]
-struct RelSegment {
-    from_var: String,
-    rel_var: String,
-    rel_type: String,
-    /// `"outgoing"`, `"incoming"`, or `"both"`
-    direction: String,
-    to_var: String,
-}
-
-/// Parse one `(from)-[:TYPE]->(to)` segment from the front of `s`.
-/// Returns `(segment, remainder)` or `None`.
-fn parse_relationship_segment(s: &str) -> Option<(RelSegment, &str)> {
-    let s = s.trim();
-    let sb = s.as_bytes();
-    if sb.is_empty() || sb[0] != b'(' {
-        return None;
-    }
-
-    // Parse from-node
-    let (from_var, after_from) = parse_node_variable(s)?;
-
-    let rest = after_from.trim();
-    if rest.is_empty() {
-        return None;
-    }
-
-    // Direction and relationship
-    let (rel_var, rel_type, direction, after_rel) = parse_relationship_part(rest)?;
-
-    let rest = after_rel.trim();
-    if rest.is_empty() || rest.as_bytes()[0] != b'(' {
-        return None;
-    }
-
-    let (to_var, after_to) = parse_node_variable(rest)?;
-
-    Some((
-        RelSegment { from_var, rel_var, rel_type, direction, to_var },
-        after_to,
-    ))
-}
-
 /// Parse `(var)` or `(var:Label)` and return `(variable, rest)`.
 fn parse_node_variable(s: &str) -> Option<(String, &str)> {
     let sb = s.as_bytes();

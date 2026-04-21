@@ -9,9 +9,10 @@
 //! The encrypted envelope contains: `[ encrypted_dek | nonce | ciphertext ]`
 
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
+    aead::{Aead, KeyInit},
     Aes256Gcm, Key, Nonce,
 };
+use getrandom::fill as fill_random;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -50,20 +51,28 @@ pub fn encrypt(plaintext: &[u8], kek: &[u8]) -> Result<Envelope, EncryptionError
     }
 
     // Generate a fresh 256-bit DEK.
-    let dek = Zeroizing::new(Aes256Gcm::generate_key(&mut OsRng).to_vec());
-    let dek_key = Key::<Aes256Gcm>::from_slice(&dek);
-    let cipher = Aes256Gcm::new(dek_key);
+    let mut dek_bytes = [0u8; 32];
+    fill_random(&mut dek_bytes).map_err(|_| EncryptionError::EncryptFailed)?;
+    let dek = Zeroizing::new(dek_bytes.to_vec());
+    let dek_key = Key::<Aes256Gcm>::try_from(dek.as_slice())
+        .map_err(|_| EncryptionError::InvalidKeyLength(dek.len()))?;
+    let cipher = Aes256Gcm::new(&dek_key);
 
     // Encrypt plaintext with DEK.
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let mut nonce_bytes = [0u8; 12];
+    fill_random(&mut nonce_bytes).map_err(|_| EncryptionError::EncryptFailed)?;
+    let nonce = Nonce::from(nonce_bytes);
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)
         .map_err(|_| EncryptionError::EncryptFailed)?;
 
     // Wrap DEK with KEK (also using AES-GCM key-wrapping).
-    let kek_key = Key::<Aes256Gcm>::from_slice(kek);
-    let kek_cipher = Aes256Gcm::new(kek_key);
-    let kek_nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let kek_key = Key::<Aes256Gcm>::try_from(kek)
+        .map_err(|_| EncryptionError::InvalidKeyLength(kek.len()))?;
+    let kek_cipher = Aes256Gcm::new(&kek_key);
+    let mut kek_nonce_bytes = [0u8; 12];
+    fill_random(&mut kek_nonce_bytes).map_err(|_| EncryptionError::EncryptFailed)?;
+    let kek_nonce = Nonce::from(kek_nonce_bytes);
     let mut encrypted_dek = kek_nonce.to_vec();
     encrypted_dek.extend(
         kek_cipher
@@ -89,24 +98,28 @@ pub fn decrypt(envelope: &Envelope, kek: &[u8]) -> Result<Vec<u8>, EncryptionErr
         return Err(EncryptionError::InvalidNonce);
     }
     let (kek_nonce_bytes, dek_ciphertext) = envelope.encrypted_dek.split_at(12);
-    let kek_key = Key::<Aes256Gcm>::from_slice(kek);
-    let kek_cipher = Aes256Gcm::new(kek_key);
-    let kek_nonce = Nonce::from_slice(kek_nonce_bytes);
+    let kek_key = Key::<Aes256Gcm>::try_from(kek)
+        .map_err(|_| EncryptionError::InvalidKeyLength(kek.len()))?;
+    let kek_cipher = Aes256Gcm::new(&kek_key);
+    let kek_nonce = Nonce::try_from(kek_nonce_bytes)
+        .map_err(|_| EncryptionError::InvalidNonce)?;
     let dek = Zeroizing::new(
         kek_cipher
-            .decrypt(kek_nonce, dek_ciphertext)
+            .decrypt(&kek_nonce, dek_ciphertext)
             .map_err(|_| EncryptionError::DecryptFailed)?,
     );
 
     // Decrypt the data with the DEK.
-    let dek_key = Key::<Aes256Gcm>::from_slice(&dek);
-    let cipher = Aes256Gcm::new(dek_key);
+    let dek_key = Key::<Aes256Gcm>::try_from(dek.as_slice())
+        .map_err(|_| EncryptionError::InvalidKeyLength(dek.len()))?;
+    let cipher = Aes256Gcm::new(&dek_key);
     if envelope.nonce.len() != 12 {
         return Err(EncryptionError::InvalidNonce);
     }
-    let nonce = Nonce::from_slice(&envelope.nonce);
+    let nonce = Nonce::try_from(envelope.nonce.as_slice())
+        .map_err(|_| EncryptionError::InvalidNonce)?;
     cipher
-        .decrypt(nonce, envelope.ciphertext.as_ref())
+        .decrypt(&nonce, envelope.ciphertext.as_ref())
         .map_err(|_| EncryptionError::DecryptFailed)
 }
 

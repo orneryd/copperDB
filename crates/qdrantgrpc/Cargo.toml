@@ -18,4 +18,4 @@ tracing.workspace = true
 copperdb-util = { workspace = true }
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-build.workspace = true

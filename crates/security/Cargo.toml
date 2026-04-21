@@ -13,8 +13,8 @@ serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 hex.workspace = true
-rand.workspace = true
 argon2.workspace = true
+getrandom.workspace = true
 copperdb-auth = { workspace = true }
 copperdb-encryption = { workspace = true }
 copperdb-util = { workspace = true }
