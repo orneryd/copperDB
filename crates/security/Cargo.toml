@@ -12,6 +12,9 @@ thiserror.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+hex.workspace = true
+rand.workspace = true
+argon2.workspace = true
 magnetdb-auth = { workspace = true }
 magnetdb-encryption = { workspace = true }
 magnetdb-util = { workspace = true }

@@ -86,4 +86,37 @@ mod tests {
         assert!(limiter.check("alice").is_ok());
         assert!(limiter.check("alice").is_err());
     }
+
+    #[test]
+    fn test_rate_limiter_error_type() {
+        let limiter = RateLimiter::new(1);
+        let _ = limiter.check("bob");
+        let err = limiter.check("bob").unwrap_err();
+        assert!(matches!(err, HeimdallError::RateLimitExceeded(_)));
+    }
+
+    #[test]
+    fn test_anomaly_levels() {
+        let anomaly = Anomaly {
+            level: AnomalyLevel::High,
+            description: "unusual query pattern".into(),
+            username: "alice".into(),
+            source_ip: Some("10.0.0.1".into()),
+        };
+        assert_eq!(anomaly.level, AnomalyLevel::High);
+    }
+
+    #[test]
+    fn test_anomaly_serialization() {
+        let anomaly = Anomaly {
+            level: AnomalyLevel::Critical,
+            description: "brute force".into(),
+            username: "attacker".into(),
+            source_ip: None,
+        };
+        let json = serde_json::to_string(&anomaly).unwrap();
+        let decoded: Anomaly = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.level, AnomalyLevel::Critical);
+        assert_eq!(decoded.username, "attacker");
+    }
 }

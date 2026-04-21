@@ -39,6 +39,7 @@ pub trait KmsProvider: Send + Sync {
 /// Local (in-memory) KMS provider for development and testing.
 ///
 /// Uses AES-256-GCM for key wrapping (same as `magnetdb-encryption`).
+#[derive(Debug)]
 pub struct LocalKms {
     master_key: Vec<u8>,
 }
@@ -94,5 +95,44 @@ mod tests {
         let wrapped = kms.wrap_key("key-1", dek).await.unwrap();
         let unwrapped = kms.unwrap_key("key-1", &wrapped).await.unwrap();
         assert_eq!(unwrapped, dek);
+    }
+
+    #[test]
+    fn test_local_kms_invalid_key_length() {
+        let result = LocalKms::new(vec![0u8; 16]);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), KmsError::ProviderError(_)));
+    }
+
+    #[tokio::test]
+    async fn test_local_kms_different_keys_each_wrap() {
+        let master_key = vec![0x99u8; 32];
+        let kms = LocalKms::new(master_key).unwrap();
+        let dek = b"my-encryption-key";
+        let w1 = kms.wrap_key("k1", dek).await.unwrap();
+        let w2 = kms.wrap_key("k1", dek).await.unwrap();
+        // Nonces should be random, so ciphertexts differ
+        assert_ne!(w1, w2);
+    }
+
+    #[tokio::test]
+    async fn test_local_kms_tampered_ciphertext_fails() {
+        let master_key = vec![0x11u8; 32];
+        let kms = LocalKms::new(master_key).unwrap();
+        let dek = b"plaintext-key";
+        let mut wrapped = kms.wrap_key("k", dek).await.unwrap();
+        // Flip a byte in the ciphertext
+        let last = wrapped.len() - 1;
+        wrapped[last] ^= 0xFF;
+        let result = kms.unwrap_key("k", &wrapped).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_local_kms_too_short_encrypted_fails() {
+        let master_key = vec![0xABu8; 32];
+        let kms = LocalKms::new(master_key).unwrap();
+        let result = kms.unwrap_key("k", &[0u8; 5]).await;
+        assert!(matches!(result, Err(KmsError::DecryptFailed)));
     }
 }

@@ -11,6 +11,8 @@ repository.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 magnetdb-storage = { workspace = true }
 magnetdb-util = { workspace = true }

@@ -81,4 +81,53 @@ mod tests {
         assert!(node.is_some());
         assert_eq!(node.unwrap().id, 1);
     }
+
+    #[test]
+    fn test_router_find_readable() {
+        let mut router = Router::new();
+        router.add_node(ClusterNode {
+            id: 1,
+            address: "us-east:7687".into(),
+            region: "us-east".into(),
+            role: NodeRole::Primary,
+            databases: vec!["default".into()],
+        });
+        router.add_node(ClusterNode {
+            id: 2,
+            address: "eu-west:7687".into(),
+            region: "eu-west".into(),
+            role: NodeRole::ReadReplica,
+            databases: vec!["default".into()],
+        });
+        // Prefer local region
+        let node = router.readable_for("default", "eu-west").unwrap();
+        assert_eq!(node.id, 2);
+    }
+
+    #[test]
+    fn test_router_no_primary() {
+        let router = Router::new();
+        assert!(router.primary_for("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_cluster_node_serialization() {
+        let node = ClusterNode {
+            id: 42,
+            address: "host:7687".into(),
+            region: "ap-south".into(),
+            role: NodeRole::Secondary,
+            databases: vec!["db1".into(), "db2".into()],
+        };
+        let json = serde_json::to_string(&node).unwrap();
+        let decoded: ClusterNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.id, 42);
+        assert_eq!(decoded.databases.len(), 2);
+    }
+
+    #[test]
+    fn test_node_roles() {
+        assert_ne!(NodeRole::Primary, NodeRole::Secondary);
+        assert_ne!(NodeRole::Secondary, NodeRole::ReadReplica);
+    }
 }

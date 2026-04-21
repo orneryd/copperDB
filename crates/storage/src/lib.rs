@@ -140,9 +140,36 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// Acquire a flush guard that prevents background flushes while held.
+    ///
+    /// Mirrors NornicDB v1.0.42's `AsyncEngine.HoldFlush()` (`82ec5b5`): callers
+    /// that start an implicit transaction should hold the guard for its lifetime
+    /// so that no asynchronous flush can advance the MVCC head mid-transaction.
+    ///
+    /// # Note
+    /// `sled` performs ACID transactions internally and does not have a separate
+    /// async write queue, so there is no background flush to suppress.  The guard
+    /// is a no-op here but exists so that the call-site pattern is correct and
+    /// can be extended if the storage backend changes.
+    pub fn hold_flush(&self) -> FlushGuard {
+        FlushGuard
+    }
+
     /// Return the on-disk size in bytes.
     pub fn size_on_disk(&self) -> u64 {
         self.db.size_on_disk().unwrap_or(0)
+    }
+}
+
+/// A RAII guard that signals "no flush should occur while I am alive".
+///
+/// Mirrors NornicDB v1.0.42's flush-hold release pattern.  Drop this value
+/// to indicate that it is safe for the engine to flush again.
+pub struct FlushGuard;
+
+impl Drop for FlushGuard {
+    fn drop(&mut self) {
+        // No-op: sled handles durability automatically.
     }
 }
 
