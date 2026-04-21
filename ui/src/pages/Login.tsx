@@ -74,9 +74,9 @@ export function Login() {
             {/* Logo */}
             <div className="text-center mb-8">
               <div className="inline-flex items-center justify-center mb-4">
-                <img src="/nornicdb.svg" alt="NornicDB" className="w-16 h-16" />
+                <img src="/copperdb.svg" alt="copperDB" className="w-16 h-16" />
               </div>
-              <h1 className="text-2xl font-bold text-white">NornicDB</h1>
+              <h1 className="text-2xl font-bold text-white">copperDB</h1>
               <p className="text-norse-silver text-sm mt-1">Graph Database Browser</p>
             </div>
 

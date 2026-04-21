@@ -1050,7 +1050,7 @@ export function RetentionAdmin() {
               label="Archive path"
               value={policyForm.archivePath}
               onChange={(value) => setPolicyForm((current) => ({ ...current, archivePath: value }))}
-              placeholder="/var/lib/nornicdb/archive"
+              placeholder="/var/lib/copperdb/archive"
               disabled={!policyForm.archiveBeforeDelete}
             />
             <FormInput
