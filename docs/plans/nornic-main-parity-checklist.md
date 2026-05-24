@@ -14,17 +14,17 @@
 - [ ] Prefix delete / namespace deletion parity
 
 ### MVCC and lifecycle
-- [ ] MVCC version/head model parity
-- [ ] Snapshot-visible read selectors parity
+- [x] MVCC version/head model parity (baseline in `crates/storage::MvccStore`)
+- [x] Snapshot-visible read selectors parity (snapshot timestamp reads in `MvccStore::read`)
 - [ ] MVCC pruning/rebuild lifecycle parity
 - [ ] Snapshot reader registry parity
 - [ ] Lifecycle debt/scheduling controller parity
 
 ### WAL and durability
-- [ ] WAL engine wrapper parity
+- [x] WAL engine wrapper parity (baseline in `crates/storage::WAL`)
 - [ ] WAL segmenting, diagnostics, degraded mode parity
 - [ ] Snapshot + compaction orchestration parity
-- [ ] Atomic record/batch replay parity
+- [x] Atomic record/batch replay parity (baseline batch append/replay in `WAL::append_batch/replay_after`)
 
 ### Async engine
 - [ ] Async write-behind cache parity
@@ -33,9 +33,9 @@
 - [ ] Async count/read-path consistency parity
 
 ### Schema and constraints
-- [ ] Constraint contracts (unique/existence/node-key/type/relationship) parity
-- [ ] Constraint validation and namespaced validation parity
-- [ ] Schema persistence/index catalog parity
+- [x] Constraint contracts (unique/existence/node-key/type/relationship) parity (baseline types in `ConstraintType`)
+- [x] Constraint validation and namespaced validation parity (baseline unique/exists/node-key checks in `SchemaManager`)
+- [x] Schema persistence/index catalog parity (baseline persistence in `StorageEngine::persist_constraint/load_constraints`)
 - [ ] Knowledge policy schema hooks parity
 
 ### Indexing and query support
@@ -46,8 +46,22 @@
 
 ### Transaction model
 - [ ] Badger transaction behavior parity (atomic commit/rollback semantics)
-- [ ] Conflict handling/message parity
+- [x] Conflict handling/message parity (baseline NornicDB-compatible error messages in `crates/txsession`)
 - [ ] Namespace-pin transaction semantics parity
+
+## Detailed parity status (implemented vs stubbed)
+
+### Implemented baselines
+- [x] `crates/txsession`: transaction lifecycle/error surface updated to include NornicDB messages (`no active transaction`, `transaction already closed`, `transaction rolled back`) with error-path tests.
+- [x] `crates/storage`: MVCC snapshot isolation primitives (`MvccStore`, `MvccSnapshot`, head encode/decode) with pruning + error-path tests.
+- [x] `crates/storage`: WAL primitives (`WAL`, `WALEntry`, `WALSegment`) including batch append/replay, checksum verification, degraded-mode signaling, and close/error-path tests.
+- [x] `crates/storage`: schema primitives (`SchemaManager`, `Constraint`) including unique/existence/node-key validation and persistent catalog round-trip tests.
+
+### Still stubbed / not yet parity-complete
+- [ ] `crates/storage`: full MVCC lifecycle debt scheduler + reader registry parity with upstream.
+- [ ] `crates/storage`: WAL snapshot compaction/truncation orchestration parity with upstream.
+- [ ] `crates/storage`: full schema contract bundles/type constraints/relationship cardinality enforcement parity with upstream.
+- [ ] `crates/replication`, `crates/search`, `crates/fabric`: integration wiring to consume the new MVCC/WAL/schema baselines.
 
 ### Data model and serialization
 - [ ] Node/Edge model parity (metadata, embeddings, named embeddings)

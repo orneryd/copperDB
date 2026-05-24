@@ -5,10 +5,12 @@
 //! opening databases whose manifest declares layout version 0.
 
 use bytes::Bytes;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use sled::{Db, Tree};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -16,6 +18,7 @@ pub const STORAGE_LAYOUT_VERSION: u8 = 0;
 const META_LAYOUT_MANIFEST_KEY: &[u8] = b"layout_manifest";
 const META_SEARCH_PEER_PREFIX: &[u8] = b"search_peer/";
 const META_HYPERSCALER_PROFILE_PREFIX: &[u8] = b"hyperscaler_profile/";
+const META_SCHEMA_CONSTRAINT_PREFIX: &[u8] = b"schema_constraint/";
 const IDX_LABEL_PREFIX: &str = "label_nodes";
 const IDX_EDGE_TYPE_PREFIX: &str = "edge_type";
 
@@ -33,6 +36,440 @@ pub enum StorageError {
     NotFound(String),
     #[error("invalid utf8 in key")]
     InvalidUtf8,
+    #[error("mvcc head truncated: {0} bytes")]
+    MvccHeadTruncated(usize),
+    #[error("mvcc head missing floor: {0} bytes")]
+    MvccHeadMissingFloor(usize),
+    #[error("wal: closed")]
+    WalClosed,
+    #[error("wal: corrupted entry")]
+    WalCorruptedEntry,
+    #[error("wal: partial write detected")]
+    WalPartialWriteDetected,
+    #[error("wal: checksum verification failed")]
+    WalChecksumVerificationFailed,
+    #[error("wal: missing or invalid trailer (incomplete write)")]
+    WalMissingOrInvalidTrailer,
+    #[error("constraint \"{0}\" already exists")]
+    ConstraintAlreadyExists(String),
+    #[error("constraint \"{0}\" not found")]
+    ConstraintNotFound(String),
+    #[error("constraint \"{constraint}\" violated: missing required property \"{property}\"")]
+    ConstraintMissingProperty { constraint: String, property: String },
+    #[error("Node({label}) already exists with {property} = {value}")]
+    UniqueConstraintViolation {
+        label: String,
+        property: String,
+        value: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MvccSnapshot {
+    pub id: u64,
+    pub read_ts: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MvccVersion {
+    pub version: u64,
+    pub value: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MvccHead {
+    pub floor: u64,
+    pub head: u64,
+}
+
+#[derive(Debug, Default)]
+pub struct MvccStore {
+    current_version: AtomicU64,
+    floor: AtomicU64,
+    values: RwLock<BTreeMap<String, Vec<MvccVersion>>>,
+}
+
+impl MvccStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn begin_snapshot(&self) -> MvccSnapshot {
+        let read_ts = self.current_version.load(Ordering::SeqCst);
+        MvccSnapshot { id: read_ts, read_ts }
+    }
+
+    pub fn commit_batch<I>(&self, writes: I) -> u64
+    where
+        I: IntoIterator<Item = (String, Option<Vec<u8>>)>,
+    {
+        let version = self.current_version.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut guard = self.values.write();
+        for (key, value) in writes {
+            guard.entry(key).or_default().push(MvccVersion { version, value });
+        }
+        version
+    }
+
+    pub fn read(&self, snapshot: &MvccSnapshot, key: &str) -> Option<Vec<u8>> {
+        let guard = self.values.read();
+        guard.get(key).and_then(|versions| {
+            versions
+                .iter()
+                .rev()
+                .find(|v| v.version <= snapshot.read_ts)
+                .and_then(|v| v.value.clone())
+        })
+    }
+
+    pub fn prune_versions_older_than(&self, min_version: u64) {
+        self.floor.store(min_version, Ordering::SeqCst);
+        let mut guard = self.values.write();
+        for versions in guard.values_mut() {
+            if versions.len() <= 1 {
+                continue;
+            }
+            let keep_from = versions
+                .iter()
+                .position(|v| v.version >= min_version)
+                .unwrap_or(versions.len().saturating_sub(1));
+            if keep_from > 0 {
+                versions.drain(0..keep_from);
+            }
+        }
+    }
+
+    pub fn head(&self) -> MvccHead {
+        MvccHead {
+            floor: self.floor.load(Ordering::SeqCst),
+            head: self.current_version.load(Ordering::SeqCst),
+        }
+    }
+
+    pub fn encode_head(head: &MvccHead) -> [u8; 16] {
+        let mut out = [0u8; 16];
+        out[..8].copy_from_slice(&head.floor.to_be_bytes());
+        out[8..].copy_from_slice(&head.head.to_be_bytes());
+        out
+    }
+
+    pub fn decode_head(raw: &[u8]) -> Result<MvccHead, StorageError> {
+        if raw.len() < 8 {
+            return Err(StorageError::MvccHeadTruncated(raw.len()));
+        }
+        if raw.len() < 16 {
+            return Err(StorageError::MvccHeadMissingFloor(raw.len()));
+        }
+        let floor = u64::from_be_bytes(raw[..8].try_into().expect("slice length checked"));
+        let head = u64::from_be_bytes(raw[8..16].try_into().expect("slice length checked"));
+        Ok(MvccHead { floor, head })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WALEntry {
+    pub seq: u64,
+    pub op: String,
+    pub key: String,
+    pub payload: Vec<u8>,
+    pub checksum: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WALSegment {
+    pub segment_id: u64,
+    pub start_seq: u64,
+    pub end_seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WALConfig {
+    pub enabled: bool,
+    pub max_entries_per_segment: usize,
+}
+
+impl Default for WALConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_entries_per_segment: 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WALStats {
+    pub entries: usize,
+    pub segments: usize,
+    pub degraded: bool,
+}
+
+#[derive(Debug)]
+pub struct WAL {
+    config: WALConfig,
+    next_seq: AtomicU64,
+    closed: AtomicBool,
+    degraded: AtomicBool,
+    entries: Mutex<Vec<WALEntry>>,
+    segments: Mutex<Vec<WALSegment>>,
+}
+
+impl WAL {
+    pub fn new(config: WALConfig) -> Self {
+        Self {
+            config,
+            next_seq: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
+            degraded: AtomicBool::new(false),
+            entries: Mutex::new(Vec::new()),
+            segments: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn append(&self, op: &str, key: &str, payload: &[u8]) -> Result<WALEntry, StorageError> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(StorageError::WalClosed);
+        }
+        if !self.config.enabled {
+            return Ok(WALEntry {
+                seq: 0,
+                op: op.to_string(),
+                key: key.to_string(),
+                payload: payload.to_vec(),
+                checksum: wal_checksum(op, key, payload),
+            });
+        }
+        let seq = self.next_seq.fetch_add(1, Ordering::SeqCst) + 1;
+        let entry = WALEntry {
+            seq,
+            op: op.to_string(),
+            key: key.to_string(),
+            payload: payload.to_vec(),
+            checksum: wal_checksum(op, key, payload),
+        };
+        {
+            let mut entries = self.entries.lock();
+            entries.push(entry.clone());
+            self.recompute_segments(entries.len());
+        }
+        Ok(entry)
+    }
+
+    pub fn append_batch(
+        &self,
+        records: Vec<(String, String, Vec<u8>)>,
+    ) -> Result<(u64, u64), StorageError> {
+        if records.is_empty() {
+            return Ok((0, 0));
+        }
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(StorageError::WalClosed);
+        }
+        let mut staged = Vec::with_capacity(records.len());
+        for (op, key, payload) in records {
+            let seq = self.next_seq.fetch_add(1, Ordering::SeqCst) + 1;
+            staged.push(WALEntry {
+                seq,
+                checksum: wal_checksum(&op, &key, &payload),
+                op,
+                key,
+                payload,
+            });
+        }
+        let first = staged.first().map(|e| e.seq).unwrap_or(0);
+        let last = staged.last().map(|e| e.seq).unwrap_or(0);
+        let mut entries = self.entries.lock();
+        entries.extend(staged);
+        self.recompute_segments(entries.len());
+        Ok((first, last))
+    }
+
+    pub fn replay_after(&self, after_seq: u64) -> Result<Vec<WALEntry>, StorageError> {
+        let entries = self.entries.lock();
+        let mut out = Vec::new();
+        for entry in entries.iter().filter(|e| e.seq > after_seq) {
+            let expected = wal_checksum(&entry.op, &entry.key, &entry.payload);
+            if entry.checksum != expected {
+                self.degraded.store(true, Ordering::SeqCst);
+                return Err(StorageError::WalChecksumVerificationFailed);
+            }
+            out.push(entry.clone());
+        }
+        Ok(out)
+    }
+
+    pub fn inject_corruption_for_test(&self, seq: u64) -> Result<(), StorageError> {
+        let mut entries = self.entries.lock();
+        let target = entries
+            .iter_mut()
+            .find(|entry| entry.seq == seq)
+            .ok_or(StorageError::WalCorruptedEntry)?;
+        target.checksum ^= 0xFFFF_FFFF;
+        Ok(())
+    }
+
+    pub fn mark_partial_write_detected(&self) -> Result<(), StorageError> {
+        self.degraded.store(true, Ordering::SeqCst);
+        Err(StorageError::WalPartialWriteDetected)
+    }
+
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_degraded(&self) -> bool {
+        self.degraded.load(Ordering::SeqCst)
+    }
+
+    pub fn stats(&self) -> WALStats {
+        WALStats {
+            entries: self.entries.lock().len(),
+            segments: self.segments.lock().len(),
+            degraded: self.is_degraded(),
+        }
+    }
+
+    fn recompute_segments(&self, total_entries: usize) {
+        if !self.config.enabled || self.config.max_entries_per_segment == 0 {
+            return;
+        }
+        let segment_len = self.config.max_entries_per_segment as u64;
+        let mut segments = self.segments.lock();
+        segments.clear();
+        let total_entries = total_entries as u64;
+        if total_entries == 0 {
+            return;
+        }
+        let mut start = 1u64;
+        let mut id = 1u64;
+        while start <= total_entries {
+            let end = (start + segment_len - 1).min(total_entries);
+            segments.push(WALSegment {
+                segment_id: id,
+                start_seq: start,
+                end_seq: end,
+            });
+            id += 1;
+            start = end + 1;
+        }
+    }
+}
+
+fn wal_checksum(op: &str, key: &str, payload: &[u8]) -> u32 {
+    let mut checksum = 2166136261u32;
+    for b in op.bytes().chain(key.bytes()).chain(payload.iter().copied()) {
+        checksum ^= b as u32;
+        checksum = checksum.wrapping_mul(16777619);
+    }
+    checksum
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ConstraintType {
+    Unique,
+    Exists,
+    NodeKey,
+    Type,
+    Relationship,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ConstraintEntityType {
+    Node,
+    Relationship,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Constraint {
+    pub name: String,
+    pub constraint_type: ConstraintType,
+    pub entity_type: ConstraintEntityType,
+    pub label: String,
+    pub properties: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct SchemaManager {
+    constraints: RwLock<BTreeMap<String, Constraint>>,
+    unique_values: RwLock<BTreeMap<(String, String, String), String>>,
+}
+
+impl SchemaManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add_constraint(&self, constraint: Constraint) -> Result<(), StorageError> {
+        let mut guard = self.constraints.write();
+        if guard.contains_key(&constraint.name) {
+            return Err(StorageError::ConstraintAlreadyExists(constraint.name));
+        }
+        guard.insert(constraint.name.clone(), constraint);
+        Ok(())
+    }
+
+    pub fn remove_constraint(&self, name: &str) -> Result<(), StorageError> {
+        let mut guard = self.constraints.write();
+        guard
+            .remove(name)
+            .ok_or_else(|| StorageError::ConstraintNotFound(name.to_string()))?;
+        Ok(())
+    }
+
+    pub fn list_constraints(&self) -> Vec<Constraint> {
+        self.constraints.read().values().cloned().collect()
+    }
+
+    pub fn validate_node(
+        &self,
+        node_id: &str,
+        label: &str,
+        properties: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<(), StorageError> {
+        let constraints = self.constraints.read();
+        for constraint in constraints.values().filter(|c| c.label == label) {
+            match constraint.constraint_type {
+                ConstraintType::Exists | ConstraintType::NodeKey => {
+                    for property in &constraint.properties {
+                        if !properties.contains_key(property) {
+                            return Err(StorageError::ConstraintMissingProperty {
+                                constraint: constraint.name.clone(),
+                                property: property.clone(),
+                            });
+                        }
+                    }
+                }
+                ConstraintType::Unique => {
+                    for property in &constraint.properties {
+                        if let Some(value) = properties.get(property) {
+                            let value_key = value.to_string();
+                            let key = (label.to_string(), property.clone(), value_key.clone());
+                            let mut unique = self.unique_values.write();
+                            unique.retain(|(existing_label, existing_property, existing_value), existing_node| {
+                                !(existing_label == label
+                                    && existing_property == property
+                                    && existing_value != &value_key
+                                    && existing_node == node_id)
+                            });
+                            if let Some(existing) = unique.get(&key) {
+                                if existing != node_id {
+                                    return Err(StorageError::UniqueConstraintViolation {
+                                        label: label.to_string(),
+                                        property: property.clone(),
+                                        value: value_key,
+                                    });
+                                }
+                            } else {
+                                unique.insert(key, node_id.to_string());
+                            }
+                        }
+                    }
+                }
+                ConstraintType::Type | ConstraintType::Relationship => {}
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -371,6 +808,22 @@ impl StorageEngine {
         }
         profiles.sort_by(|a, b| a.profile_id.cmp(&b.profile_id));
         Ok(profiles)
+    }
+
+    pub fn persist_constraint(&self, constraint: &Constraint) -> Result<(), StorageError> {
+        let key = [META_SCHEMA_CONSTRAINT_PREFIX, constraint.name.as_bytes()].concat();
+        self.meta.insert(key, rmp_serde::to_vec(constraint)?)?;
+        Ok(())
+    }
+
+    pub fn load_constraints(&self) -> Result<Vec<Constraint>, StorageError> {
+        let mut constraints: Vec<Constraint> = Vec::new();
+        for entry in self.meta.scan_prefix(META_SCHEMA_CONSTRAINT_PREFIX) {
+            let (_, value) = entry?;
+            constraints.push(rmp_serde::from_slice(value.as_ref())?);
+        }
+        constraints.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(constraints)
     }
 
     // --- Generic index operations ---
@@ -721,5 +1174,135 @@ mod tests {
         }
         engine.flush().unwrap();
         assert!(engine.size_on_disk() <= u64::MAX);
+    }
+
+    #[test]
+    fn mvcc_snapshot_isolation_and_pruning_work() {
+        let mvcc = MvccStore::new();
+        let snapshot0 = mvcc.begin_snapshot();
+        assert_eq!(snapshot0.read_ts, 0);
+
+        let v1 = mvcc.commit_batch(vec![("node:1".to_string(), Some(b"alice".to_vec()))]);
+        assert_eq!(v1, 1);
+        let snapshot1 = mvcc.begin_snapshot();
+
+        let v2 = mvcc.commit_batch(vec![("node:1".to_string(), Some(b"bob".to_vec()))]);
+        assert_eq!(v2, 2);
+        let snapshot2 = mvcc.begin_snapshot();
+
+        assert_eq!(mvcc.read(&snapshot0, "node:1"), None);
+        assert_eq!(mvcc.read(&snapshot1, "node:1"), Some(b"alice".to_vec()));
+        assert_eq!(mvcc.read(&snapshot2, "node:1"), Some(b"bob".to_vec()));
+
+        mvcc.prune_versions_older_than(2);
+        assert_eq!(mvcc.read(&snapshot2, "node:1"), Some(b"bob".to_vec()));
+        let head = mvcc.head();
+        assert_eq!(head.floor, 2);
+        assert_eq!(head.head, 2);
+    }
+
+    #[test]
+    fn mvcc_head_decode_errors_match_contract() {
+        let err = MvccStore::decode_head(&[1, 2, 3]).unwrap_err();
+        assert!(matches!(err, StorageError::MvccHeadTruncated(3)));
+        assert_eq!(err.to_string(), "mvcc head truncated: 3 bytes");
+
+        let err = MvccStore::decode_head(&[0; 10]).unwrap_err();
+        assert!(matches!(err, StorageError::MvccHeadMissingFloor(10)));
+        assert_eq!(err.to_string(), "mvcc head missing floor: 10 bytes");
+    }
+
+    #[test]
+    fn wal_batch_replay_and_checksum_error_paths_work() {
+        let wal = WAL::new(WALConfig {
+            enabled: true,
+            max_entries_per_segment: 2,
+        });
+        let (start, end) = wal
+            .append_batch(vec![
+                ("put".to_string(), "node:1".to_string(), b"a".to_vec()),
+                ("put".to_string(), "node:2".to_string(), b"b".to_vec()),
+                ("delete".to_string(), "node:1".to_string(), Vec::new()),
+            ])
+            .unwrap();
+        assert_eq!((start, end), (1, 3));
+        assert_eq!(wal.stats().segments, 2);
+
+        let replay = wal.replay_after(1).unwrap();
+        assert_eq!(replay.len(), 2);
+        assert_eq!(replay[0].key, "node:2");
+        assert_eq!(replay[1].op, "delete");
+
+        wal.inject_corruption_for_test(2).unwrap();
+        let err = wal.replay_after(0).unwrap_err();
+        assert!(matches!(err, StorageError::WalChecksumVerificationFailed));
+        assert!(wal.is_degraded());
+    }
+
+    #[test]
+    fn wal_close_and_partial_write_errors_match_contract() {
+        let wal = WAL::new(WALConfig::default());
+        let err = wal.mark_partial_write_detected().unwrap_err();
+        assert!(matches!(err, StorageError::WalPartialWriteDetected));
+        assert_eq!(err.to_string(), "wal: partial write detected");
+
+        wal.close();
+        let err = wal.append("put", "node:1", b"x").unwrap_err();
+        assert!(matches!(err, StorageError::WalClosed));
+        assert_eq!(err.to_string(), "wal: closed");
+    }
+
+    #[test]
+    fn schema_constraints_validate_and_persist() {
+        let schema = SchemaManager::new();
+        schema
+            .add_constraint(Constraint {
+                name: "person_email_unique".to_string(),
+                constraint_type: ConstraintType::Unique,
+                entity_type: ConstraintEntityType::Node,
+                label: "Person".to_string(),
+                properties: vec!["email".to_string()],
+            })
+            .unwrap();
+        schema
+            .add_constraint(Constraint {
+                name: "person_email_exists".to_string(),
+                constraint_type: ConstraintType::Exists,
+                entity_type: ConstraintEntityType::Node,
+                label: "Person".to_string(),
+                properties: vec!["email".to_string()],
+            })
+            .unwrap();
+
+        let missing = BTreeMap::new();
+        let err = schema.validate_node("n1", "Person", &missing).unwrap_err();
+        assert!(matches!(err, StorageError::ConstraintMissingProperty { .. }));
+
+        let mut alice = BTreeMap::new();
+        alice.insert("email".to_string(), json!("alice@example.com"));
+        schema.validate_node("n1", "Person", &alice).unwrap();
+
+        let mut duplicate = BTreeMap::new();
+        duplicate.insert("email".to_string(), json!("alice@example.com"));
+        let err = schema.validate_node("n2", "Person", &duplicate).unwrap_err();
+        assert!(matches!(err, StorageError::UniqueConstraintViolation { .. }));
+        assert_eq!(
+            err.to_string(),
+            "Node(Person) already exists with email = \"alice@example.com\""
+        );
+
+        let mut updated = BTreeMap::new();
+        updated.insert("email".to_string(), json!("alice+new@example.com"));
+        schema.validate_node("n1", "Person", &updated).unwrap();
+        schema.validate_node("n2", "Person", &duplicate).unwrap();
+
+        let engine = StorageEngine::open_temporary().unwrap();
+        for constraint in schema.list_constraints() {
+            engine.persist_constraint(&constraint).unwrap();
+        }
+        let loaded = engine.load_constraints().unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].name, "person_email_exists");
+        assert_eq!(loaded[1].name, "person_email_unique");
     }
 }
