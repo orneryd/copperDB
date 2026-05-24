@@ -5,8 +5,8 @@
 use copperdb_cypher::{Clause, ConstraintKind, Expression, Query, ReturnItem};
 use copperdb_filter::{eval_expression, eval_predicate};
 use copperdb_storage::{
-    Constraint, ConstraintEntityType, ConstraintType, IndexDefinition, IndexEntityType,
-    DecayProfileSchema, PromotionPolicySchema, PromotionProfileSchema, PromotionWhenClauseSchema,
+    Constraint, ConstraintEntityType, ConstraintType, DecayProfileSchema, IndexDefinition,
+    IndexEntityType, PromotionPolicySchema, PromotionProfileSchema, PromotionWhenClauseSchema,
     StorageEngine,
 };
 use serde_json::Value;
@@ -383,7 +383,10 @@ impl EvalEngine {
                         .map(|p| {
                             let mut row = Row::new();
                             row.insert("name".to_string(), Value::String(p.name));
-                            row.insert("halfLifeSeconds".to_string(), Value::from(p.half_life_seconds));
+                            row.insert(
+                                "halfLifeSeconds".to_string(),
+                                Value::from(p.half_life_seconds),
+                            );
                             row.insert(
                                 "visibilityThreshold".to_string(),
                                 Value::from(p.visibility_threshold),
@@ -472,7 +475,8 @@ impl EvalEngine {
                 }
 
                 Clause::AlterPromotionPolicy(alter) => {
-                    let updates = BTreeMap::from([("enabled".to_string(), Value::Bool(alter.enabled))]);
+                    let updates =
+                        BTreeMap::from([("enabled".to_string(), Value::Bool(alter.enabled))]);
                     self.storage
                         .alter_promotion_policy_schema(&alter.name, &updates)?;
                 }
@@ -1052,7 +1056,11 @@ fn options_to_btreemap(options: &HashMap<String, Value>) -> BTreeMap<String, Val
         .collect::<BTreeMap<_, _>>()
 }
 
-fn option_string(options: &HashMap<String, Value>, key: &str, default: &str) -> Result<String, EvalError> {
+fn option_string(
+    options: &HashMap<String, Value>,
+    key: &str,
+    default: &str,
+) -> Result<String, EvalError> {
     match options.get(key) {
         Some(v) => v
             .as_str()
@@ -1062,7 +1070,11 @@ fn option_string(options: &HashMap<String, Value>, key: &str, default: &str) -> 
     }
 }
 
-fn option_bool(options: &HashMap<String, Value>, key: &str, default: bool) -> Result<bool, EvalError> {
+fn option_bool(
+    options: &HashMap<String, Value>,
+    key: &str,
+    default: bool,
+) -> Result<bool, EvalError> {
     match options.get(key) {
         Some(v) => v
             .as_bool()
@@ -1705,7 +1717,10 @@ mod tests {
             .unwrap();
         engine.execute(&alter, &HashMap::new()).unwrap();
         let shown = engine.execute(&show, &HashMap::new()).unwrap();
-        assert_eq!(shown.rows[0].get("visibilityThreshold"), Some(&Value::from(0.2)));
+        assert_eq!(
+            shown.rows[0].get("visibilityThreshold"),
+            Some(&Value::from(0.2))
+        );
     }
 
     #[test]

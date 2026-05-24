@@ -982,10 +982,9 @@ impl StorageEngine {
         updates: &BTreeMap<String, serde_json::Value>,
     ) -> Result<(), StorageError> {
         let key = [META_KP_DECAY_PROFILE_PREFIX, name.as_bytes()].concat();
-        let raw = self
-            .meta
-            .get(&key)?
-            .ok_or_else(|| StorageError::KnowledgePolicyNotFound(format!("decay profile {}", name)))?;
+        let raw = self.meta.get(&key)?.ok_or_else(|| {
+            StorageError::KnowledgePolicyNotFound(format!("decay profile {}", name))
+        })?;
         let mut profile: DecayProfileSchema = rmp_serde::from_slice(raw.as_ref())?;
         for (k, v) in updates {
             match k.as_str() {
@@ -1155,7 +1154,9 @@ impl StorageEngine {
         Ok(())
     }
 
-    pub fn load_promotion_policy_schemas(&self) -> Result<Vec<PromotionPolicySchema>, StorageError> {
+    pub fn load_promotion_policy_schemas(
+        &self,
+    ) -> Result<Vec<PromotionPolicySchema>, StorageError> {
         let mut policies: Vec<PromotionPolicySchema> = Vec::new();
         for entry in self.meta.scan_prefix(META_KP_PROMOTION_POLICY_PREFIX) {
             let (_, value) = entry?;
@@ -1299,9 +1300,9 @@ fn value_as_f64(value: &serde_json::Value, field: &str) -> Result<f64, StorageEr
 }
 
 fn value_as_i64(value: &serde_json::Value, field: &str) -> Result<i64, StorageError> {
-    value
-        .as_i64()
-        .ok_or_else(|| StorageError::KnowledgePolicyInvalid(format!("{} must be an integer", field)))
+    value.as_i64().ok_or_else(|| {
+        StorageError::KnowledgePolicyInvalid(format!("{} must be an integer", field))
+    })
 }
 
 fn value_as_bool(value: &serde_json::Value, field: &str) -> Result<bool, StorageError> {

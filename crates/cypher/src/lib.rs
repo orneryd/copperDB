@@ -583,8 +583,7 @@ impl ParseContext {
                                 }
                                 None => {
                                     return Err(CypherError::ParseError(
-                                        "expected CREATE PROMOTION target, got end of input"
-                                            .into(),
+                                        "expected CREATE PROMOTION target, got end of input".into(),
                                     ));
                                 }
                             }
@@ -649,7 +648,8 @@ impl ParseContext {
                         }
                         Some("DECAY") => {
                             self.advance();
-                            clauses.push(Clause::DropDecayProfile(self.parse_drop_decay_profile()?));
+                            clauses
+                                .push(Clause::DropDecayProfile(self.parse_drop_decay_profile()?));
                         }
                         Some("PROMOTION") => {
                             self.advance();
@@ -705,7 +705,8 @@ impl ParseContext {
                         }
                         Some("DECAY") => {
                             self.advance();
-                            clauses.push(Clause::ShowDecayProfiles(self.parse_show_decay_profiles()?));
+                            clauses
+                                .push(Clause::ShowDecayProfiles(self.parse_show_decay_profiles()?));
                         }
                         Some("PROMOTION") => {
                             self.advance();
@@ -753,7 +754,8 @@ impl ParseContext {
                     match self.peek_upper().as_deref() {
                         Some("DECAY") => {
                             self.advance();
-                            clauses.push(Clause::AlterDecayProfile(self.parse_alter_decay_profile()?));
+                            clauses
+                                .push(Clause::AlterDecayProfile(self.parse_alter_decay_profile()?));
                         }
                         Some("PROMOTION") => {
                             self.advance();
@@ -1184,7 +1186,9 @@ impl ParseContext {
         Ok(CreatePromotionProfileClause { name, options })
     }
 
-    fn parse_alter_promotion_profile(&mut self) -> Result<AlterPromotionProfileClause, CypherError> {
+    fn parse_alter_promotion_profile(
+        &mut self,
+    ) -> Result<AlterPromotionProfileClause, CypherError> {
         let name = self.advance_identifier()?;
         self.expect("SET")?;
         self.expect("OPTIONS")?;
@@ -1201,7 +1205,6 @@ impl ParseContext {
     fn parse_show_promotion_profiles(
         &mut self,
     ) -> Result<ShowPromotionProfilesClause, CypherError> {
-        self.expect("PROFILES")?;
         if self.peek().is_some() {
             return Err(CypherError::ParseError(format!(
                 "unexpected token '{}' after SHOW PROMOTION PROFILES",
@@ -1211,7 +1214,9 @@ impl ParseContext {
         Ok(ShowPromotionProfilesClause)
     }
 
-    fn parse_create_promotion_policy(&mut self) -> Result<CreatePromotionPolicyClause, CypherError> {
+    fn parse_create_promotion_policy(
+        &mut self,
+    ) -> Result<CreatePromotionPolicyClause, CypherError> {
         let name = self.advance_identifier()?;
         self.expect("FOR")?;
         self.expect("(")?;
@@ -1258,9 +1263,8 @@ impl ParseContext {
         let token = self.advance().ok_or_else(|| {
             CypherError::ParseError("expected boolean value after SET ENABLED".into())
         })?;
-        let enabled = parse_bool_token(token).ok_or_else(|| {
-            CypherError::ParseError(format!("invalid boolean value '{}'", token))
-        })?;
+        let enabled = parse_bool_token(token)
+            .ok_or_else(|| CypherError::ParseError(format!("invalid boolean value '{}'", token)))?;
         Ok(AlterPromotionPolicyClause { name, enabled })
     }
 
@@ -1273,7 +1277,6 @@ impl ParseContext {
     fn parse_show_promotion_policies(
         &mut self,
     ) -> Result<ShowPromotionPoliciesClause, CypherError> {
-        self.expect("POLICIES")?;
         if self.peek().is_some() {
             return Err(CypherError::ParseError(format!(
                 "unexpected token '{}' after SHOW PROMOTION POLICIES",
@@ -1326,11 +1329,22 @@ impl ParseContext {
             self.expect("]")?;
             return Ok(Value::Array(values));
         }
+        if let Ok(i) = token.parse::<i64>() {
+            if self.peek() == Some(".") {
+                self.advance();
+                let frac = self.advance().ok_or_else(|| {
+                    CypherError::ParseError("expected fractional digits after '.'".into())
+                })?;
+                let number = format!("{}.{}", i, frac);
+                let parsed = number.parse::<f64>().map_err(|_| {
+                    CypherError::ParseError(format!("invalid numeric option '{}'", number))
+                })?;
+                return Ok(Value::from(parsed));
+            }
+            return Ok(Value::from(i));
+        }
         if let Some(bool_value) = parse_bool_token(token) {
             return Ok(Value::Bool(bool_value));
-        }
-        if let Ok(i) = token.parse::<i64>() {
-            return Ok(Value::from(i));
         }
         if let Ok(f) = token.parse::<f64>() {
             return Ok(Value::from(f));
@@ -1606,7 +1620,22 @@ impl ParseContext {
                 let t = t.to_string();
                 self.advance();
                 if let Ok(i) = t.parse::<i64>() {
-                    Ok(Value::Number(i.into()))
+                    if self.peek() == Some(".") {
+                        self.advance();
+                        let frac = self.advance().ok_or_else(|| {
+                            CypherError::ParseError("expected fractional digits after '.'".into())
+                        })?;
+                        let composed = format!("{}.{}", i, frac);
+                        let f: f64 = composed.parse().map_err(|_| {
+                            CypherError::ParseError(format!("invalid float '{}'", composed))
+                        })?;
+                        let n = serde_json::Number::from_f64(f).ok_or_else(|| {
+                            CypherError::ParseError(format!("invalid float value '{}'", composed))
+                        })?;
+                        Ok(Value::Number(n))
+                    } else {
+                        Ok(Value::Number(i.into()))
+                    }
                 } else if let Ok(f) = t.parse::<f64>() {
                     let n = serde_json::Number::from_f64(f).ok_or_else(|| {
                         CypherError::ParseError(format!("invalid float value '{}'", t))
@@ -1777,19 +1806,31 @@ impl ParseContext {
                     .unwrap_or(false) =>
             {
                 let t = self.advance().unwrap().to_string();
-                if t.contains('.') {
+                if let Ok(i) = t.parse::<i64>() {
+                    if self.peek() == Some(".") {
+                        self.advance();
+                        let frac = self.advance().ok_or_else(|| {
+                            CypherError::ParseError("expected fractional digits after '.'".into())
+                        })?;
+                        let composed = format!("{}.{}", i, frac);
+                        let f: f64 = composed.parse().map_err(|_| {
+                            CypherError::ParseError(format!("invalid float '{}'", composed))
+                        })?;
+                        let n = serde_json::Number::from_f64(f).ok_or_else(|| {
+                            CypherError::ParseError(format!("invalid float value '{}'", composed))
+                        })?;
+                        Ok(Expression::Literal(Value::Number(n)))
+                    } else {
+                        Ok(Expression::Literal(Value::Number(i.into())))
+                    }
+                } else {
                     let f: f64 = t
                         .parse()
-                        .map_err(|_| CypherError::ParseError(format!("invalid float '{}'", t)))?;
+                        .map_err(|_| CypherError::ParseError(format!("invalid number '{}'", t)))?;
                     let n = serde_json::Number::from_f64(f).ok_or_else(|| {
                         CypherError::ParseError(format!("invalid float value '{}'", t))
                     })?;
                     Ok(Expression::Literal(Value::Number(n)))
-                } else {
-                    let i: i64 = t
-                        .parse()
-                        .map_err(|_| CypherError::ParseError(format!("invalid integer '{}'", t)))?;
-                    Ok(Expression::Literal(Value::Number(i.into())))
                 }
             }
             // Identifier: variable, property access, or function call
@@ -1854,7 +1895,9 @@ impl ParseContext {
 
 /// Returns `true` if `s` is an openCypher keyword that cannot be a bare variable name.
 fn trim_quotes(token: &str) -> &str {
-    if (token.starts_with('\'') && token.ends_with('\'')) || (token.starts_with('"') && token.ends_with('"')) {
+    if (token.starts_with('\'') && token.ends_with('\''))
+        || (token.starts_with('"') && token.ends_with('"'))
+    {
         &token[1..token.len().saturating_sub(1)]
     } else {
         token
@@ -2561,7 +2604,10 @@ mod tests {
         if let Clause::CreateDecayProfile(c) = q.clauses.first().expect("clause missing") {
             assert_eq!(c.name, "slow_decay");
             assert_eq!(c.options.get("halfLifeSeconds"), Some(&Value::from(604800)));
-            assert_eq!(c.options.get("scope"), Some(&Value::String("NODE".to_string())));
+            assert_eq!(
+                c.options.get("scope"),
+                Some(&Value::String("NODE".to_string()))
+            );
         } else {
             panic!("expected CreateDecayProfile clause");
         }
