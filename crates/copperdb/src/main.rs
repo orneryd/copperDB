@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use copperdb_bolt::server::BoltServer;
 use copperdb_config::{load_toml, load_yaml, Config};
+use copperdb_otel::Telemetry;
 use copperdb_server::{build_router, AppState};
 use tokio::net::TcpListener;
 use tracing::info;
@@ -69,11 +70,14 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let startup = resolve_startup_config(&cli)?;
+    let telemetry = Arc::new(Telemetry::new());
+    telemetry.mock_unimplemented_catalog_metrics();
     let state = Arc::new(AppState {
         db_name: startup.db_name.clone(),
         static_dir: startup.static_dir.clone(),
         base_path: startup.base_path.clone(),
         headless: startup.headless,
+        telemetry: Arc::clone(&telemetry),
         ..Default::default()
     });
 
@@ -98,7 +102,7 @@ async fn main() -> Result<()> {
     };
 
     let bolt_task = if startup.bolt_enabled {
-        let bolt_server = BoltServer::new(startup.bolt_address.clone());
+        let bolt_server = BoltServer::new(startup.bolt_address.clone(), telemetry);
         let bolt_addr = startup.bolt_address.clone();
         Some(tokio::spawn(async move {
             info!(listen_addr = %bolt_addr, "copperdb Bolt server listening");

@@ -20,3 +20,4 @@ parking_lot.workspace = true
 copperdb-auth = { workspace = true }
 copperdb-eval = { workspace = true }
 copperdb-util = { workspace = true }
+copperdb-otel = { workspace = true }

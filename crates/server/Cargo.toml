@@ -28,3 +28,4 @@ copperdb-graphql = { workspace = true }
 copperdb-multidb = { workspace = true }
 copperdb-util = { workspace = true }
 copperdb-retention = { workspace = true }
+copperdb-otel = { workspace = true }

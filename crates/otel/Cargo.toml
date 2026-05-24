@@ -1,0 +1,12 @@
+[package]
+name = "copperdb-otel"
+description = "NornicDB observability catalog and mock telemetry surface"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+

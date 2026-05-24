@@ -31,6 +31,7 @@ members = [
     "crates/multidb",
     "crates/copperdb",
     "crates/nornicgrpc",
+    "crates/otel",
     "crates/pool",
     "crates/qdrantgrpc",
     "crates/replication",
@@ -201,4 +202,5 @@ copperdb-envutil = { path = "crates/envutil" }
 copperdb-buildinfo = { path = "crates/buildinfo" }
 copperdb-nornicgrpc = { path = "crates/nornicgrpc" }
 copperdb-qdrantgrpc = { path = "crates/qdrantgrpc" }
+copperdb-otel = { path = "crates/otel" }
 copperdb = { path = "crates/copperdb" }

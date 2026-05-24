@@ -17,3 +17,4 @@ tracing-subscriber.workspace = true
 copperdb-bolt = { workspace = true }
 copperdb-config = { workspace = true }
 copperdb-server = { workspace = true }
+copperdb-otel = { workspace = true }
