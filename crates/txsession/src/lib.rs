@@ -65,8 +65,15 @@ pub enum IsolationLevel {
 /// A single pending storage operation buffered by a transaction.
 #[derive(Debug, Clone)]
 pub enum TxOperation {
-    Put { tree: String, key: Vec<u8>, value: Vec<u8> },
-    Delete { tree: String, key: Vec<u8> },
+    Put {
+        tree: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    Delete {
+        tree: String,
+        key: Vec<u8>,
+    },
 }
 
 // ─── Transaction ─────────────────────────────────────────────────────────────
@@ -170,7 +177,9 @@ impl Transaction {
         }
         match self.state {
             TransactionState::Active => Ok(()),
-            TransactionState::Committed | TransactionState::Failed => Err(TxError::TransactionClosed),
+            TransactionState::Committed | TransactionState::Failed => {
+                Err(TxError::TransactionClosed)
+            }
             TransactionState::RolledBack => Err(TxError::TransactionRolledBack),
         }
     }
@@ -237,7 +246,8 @@ impl TransactionManager {
     /// Re-inserts only when the error is transient (i.e. the transaction
     /// remains Active so the caller can retry).
     pub fn commit(&self, id: Uuid) -> Result<(), TxError> {
-        let (_, mut tx) = self.active
+        let (_, mut tx) = self
+            .active
             .remove(&id)
             .ok_or(TxError::NoActiveTransaction)?;
         match tx.commit() {
@@ -258,7 +268,8 @@ impl TransactionManager {
     /// Rollback the transaction with the given ID.
     /// Removes the transaction from `active` on success or terminal failure.
     pub fn rollback(&self, id: Uuid) -> Result<(), TxError> {
-        let (_, mut tx) = self.active
+        let (_, mut tx) = self
+            .active
             .remove(&id)
             .ok_or(TxError::NoActiveTransaction)?;
         match tx.rollback() {
@@ -275,12 +286,16 @@ impl TransactionManager {
 
     /// Check if a transaction is active.
     pub fn is_active(&self, id: &Uuid) -> bool {
-        self.active.get(id).map(|tx| tx.is_active()).unwrap_or(false)
+        self.active
+            .get(id)
+            .map(|tx| tx.is_active())
+            .unwrap_or(false)
     }
 
     /// Add an operation to a transaction's pending list.
     pub fn add_operation(&self, id: &Uuid, op: TxOperation) -> Result<(), TxError> {
-        let mut entry = self.active
+        let mut entry = self
+            .active
             .get_mut(id)
             .ok_or(TxError::NoActiveTransaction)?;
         entry.add_operation(op)
@@ -292,7 +307,10 @@ impl TransactionManager {
     }
 
     /// Get mutable access to a transaction.
-    pub fn get_mut(&self, id: &Uuid) -> Option<dashmap::mapref::one::RefMut<'_, Uuid, Transaction>> {
+    pub fn get_mut(
+        &self,
+        id: &Uuid,
+    ) -> Option<dashmap::mapref::one::RefMut<'_, Uuid, Transaction>> {
         self.active.get_mut(id)
     }
 
@@ -365,11 +383,15 @@ mod tests {
         let mgr = TransactionManager::new();
         let config = SessionConfig::default();
         let id = mgr.begin(&config).unwrap();
-        mgr.add_operation(&id, TxOperation::Put {
-            tree: "nodes".to_string(),
-            key: b"k".to_vec(),
-            value: b"v".to_vec(),
-        }).unwrap();
+        mgr.add_operation(
+            &id,
+            TxOperation::Put {
+                tree: "nodes".to_string(),
+                key: b"k".to_vec(),
+                value: b"v".to_vec(),
+            },
+        )
+        .unwrap();
         let tx = mgr.get(&id).unwrap();
         assert_eq!(tx.pending.len(), 1);
     }
@@ -395,11 +417,26 @@ mod tests {
 
     #[test]
     fn test_error_messages_match_nornicdb_transaction_contract() {
-        assert_eq!(TxError::NoActiveTransaction.to_string(), "no active transaction");
-        assert_eq!(TxError::TransactionActive.to_string(), "transaction already active");
-        assert_eq!(TxError::TransactionClosed.to_string(), "transaction already closed");
-        assert_eq!(TxError::TransactionRolledBack.to_string(), "transaction rolled back");
-        assert_eq!(TxError::TransactionReadOnly.to_string(), "transaction is read-only");
+        assert_eq!(
+            TxError::NoActiveTransaction.to_string(),
+            "no active transaction"
+        );
+        assert_eq!(
+            TxError::TransactionActive.to_string(),
+            "transaction already active"
+        );
+        assert_eq!(
+            TxError::TransactionClosed.to_string(),
+            "transaction already closed"
+        );
+        assert_eq!(
+            TxError::TransactionRolledBack.to_string(),
+            "transaction rolled back"
+        );
+        assert_eq!(
+            TxError::TransactionReadOnly.to_string(),
+            "transaction is read-only"
+        );
     }
 
     #[test]

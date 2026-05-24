@@ -20,9 +20,9 @@
 //! There is no existing Rust Bolt *server* library. The `neo4rs` crate is
 //! a Bolt *client*, not a server. Full server implementation is required.
 
+pub mod messages;
 pub mod packstream;
 pub mod server;
-pub mod messages;
 
 use thiserror::Error;
 

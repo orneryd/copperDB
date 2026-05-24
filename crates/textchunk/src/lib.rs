@@ -21,7 +21,11 @@ pub struct Chunk {
 }
 
 /// Split text into overlapping fixed-size character chunks.
-pub fn chunk_by_chars(text: &str, chunk_size: usize, overlap: usize) -> Result<Vec<Chunk>, ChunkError> {
+pub fn chunk_by_chars(
+    text: &str,
+    chunk_size: usize,
+    overlap: usize,
+) -> Result<Vec<Chunk>, ChunkError> {
     if chunk_size == 0 {
         return Err(ChunkError::InvalidChunkSize(0));
     }
@@ -37,7 +41,9 @@ pub fn chunk_by_chars(text: &str, chunk_size: usize, overlap: usize) -> Result<V
             char_offset: start,
             char_length: end - start,
         });
-        if end == chars.len() { break; }
+        if end == chars.len() {
+            break;
+        }
         start += step;
     }
     Ok(chunks)
@@ -71,7 +77,11 @@ pub fn chunk_by_sentences(text: &str, max_chunk_size: usize) -> Vec<Chunk> {
         char_cursor += sentence_char_len;
     }
     if !current.is_empty() {
-        chunks.push(Chunk { text: current, char_offset: chunk_start, char_length: current_char_len });
+        chunks.push(Chunk {
+            text: current,
+            char_offset: chunk_start,
+            char_length: current_char_len,
+        });
     }
     chunks
 }

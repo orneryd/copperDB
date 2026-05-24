@@ -26,7 +26,7 @@ pub struct TemporalEdge {
     pub to_id: String,
     pub rel_type: String,
     pub properties: serde_json::Value,
-    pub valid_from: u64,  // Unix seconds
+    pub valid_from: u64, // Unix seconds
     pub valid_until: Option<u64>,
     pub weight: f64,
 }
@@ -34,8 +34,7 @@ pub struct TemporalEdge {
 impl TemporalEdge {
     /// Check if this edge is valid at the given Unix timestamp.
     pub fn is_valid_at(&self, ts: u64) -> bool {
-        ts >= self.valid_from
-            && self.valid_until.map_or(true, |end| ts < end)
+        ts >= self.valid_from && self.valid_until.map_or(true, |end| ts < end)
     }
 
     /// Expire this edge at the current time.
@@ -59,11 +58,17 @@ pub struct TemporalSession {
 
 impl TemporalSession {
     pub fn live(session_id: impl Into<String>) -> Self {
-        Self { session_id: session_id.into(), as_of: None }
+        Self {
+            session_id: session_id.into(),
+            as_of: None,
+        }
     }
 
     pub fn as_of(session_id: impl Into<String>, ts: u64) -> Self {
-        Self { session_id: session_id.into(), as_of: Some(ts) }
+        Self {
+            session_id: session_id.into(),
+            as_of: Some(ts),
+        }
     }
 
     pub fn effective_time(&self) -> u64 {
@@ -105,14 +110,22 @@ mod tests {
     fn test_edges_at() {
         let edges = vec![
             TemporalEdge {
-                from_id: "a".into(), to_id: "b".into(), rel_type: "KNOWS".into(),
+                from_id: "a".into(),
+                to_id: "b".into(),
+                rel_type: "KNOWS".into(),
                 properties: serde_json::json!({}),
-                valid_from: 0, valid_until: Some(100), weight: 1.0,
+                valid_from: 0,
+                valid_until: Some(100),
+                weight: 1.0,
             },
             TemporalEdge {
-                from_id: "b".into(), to_id: "c".into(), rel_type: "KNOWS".into(),
+                from_id: "b".into(),
+                to_id: "c".into(),
+                rel_type: "KNOWS".into(),
                 properties: serde_json::json!({}),
-                valid_from: 50, valid_until: None, weight: 1.0,
+                valid_from: 50,
+                valid_until: None,
+                weight: 1.0,
             },
         ];
         let at_75 = edges_at(&edges, 75);

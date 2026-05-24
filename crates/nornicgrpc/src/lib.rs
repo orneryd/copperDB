@@ -93,11 +93,19 @@ pub struct GrpcCypherResponse {
 
 impl GrpcCypherResponse {
     pub fn ok(columns: Vec<String>, rows: Vec<GrpcCypherRow>) -> Self {
-        Self { columns, rows, error: None }
+        Self {
+            columns,
+            rows,
+            error: None,
+        }
     }
 
     pub fn error(msg: impl Into<String>) -> Self {
-        Self { columns: vec![], rows: vec![], error: Some(msg.into()) }
+        Self {
+            columns: vec![],
+            rows: vec![],
+            error: Some(msg.into()),
+        }
     }
 }
 
@@ -135,7 +143,9 @@ mod tests {
     fn test_grpc_cypher_response_ok() {
         let resp = GrpcCypherResponse::ok(
             vec!["n".into()],
-            vec![GrpcCypherRow { values: vec![serde_json::json!(1)] }],
+            vec![GrpcCypherRow {
+                values: vec![serde_json::json!(1)],
+            }],
         );
         assert!(resp.error.is_none());
         assert_eq!(resp.columns.len(), 1);

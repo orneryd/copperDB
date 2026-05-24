@@ -210,7 +210,10 @@ pub struct RetentionSweepConfig {
 
 impl Default for RetentionSweepConfig {
     fn default() -> Self {
-        Self { batch_size: 1000, dry_run: false }
+        Self {
+            batch_size: 1000,
+            dry_run: false,
+        }
     }
 }
 
@@ -254,7 +257,9 @@ impl Manager {
     }
 
     pub fn delete_policy(&mut self, id: &str) -> Result<(), RetentionError> {
-        self.policies.remove(id).ok_or_else(|| RetentionError::PolicyNotFound(id.to_string()))?;
+        self.policies
+            .remove(id)
+            .ok_or_else(|| RetentionError::PolicyNotFound(id.to_string()))?;
         Ok(())
     }
 
@@ -278,7 +283,10 @@ impl Manager {
     }
 
     pub fn release_legal_hold(&mut self, id: &str) -> Result<(), RetentionError> {
-        let hold = self.holds.get_mut(id).ok_or_else(|| RetentionError::HoldNotFound(id.to_string()))?;
+        let hold = self
+            .holds
+            .get_mut(id)
+            .ok_or_else(|| RetentionError::HoldNotFound(id.to_string()))?;
         hold.active = false;
         hold.released_at = Some(std::time::SystemTime::now());
         Ok(())
@@ -289,7 +297,9 @@ impl Manager {
     }
 
     pub fn has_active_hold(&self, subject_id: &str) -> bool {
-        self.holds.values().any(|h| h.active && h.subject_id == subject_id)
+        self.holds
+            .values()
+            .any(|h| h.active && h.subject_id == subject_id)
     }
 
     // ── Erasure requests ─────────────────────────────────────────────────────
@@ -325,7 +335,10 @@ impl Manager {
 
     /// Mark an erasure request as processed.
     pub fn process_erasure(&mut self, id: &str) -> Result<(), RetentionError> {
-        let req = self.erasures.get_mut(id).ok_or_else(|| RetentionError::ErasureNotFound(id.to_string()))?;
+        let req = self
+            .erasures
+            .get_mut(id)
+            .ok_or_else(|| RetentionError::ErasureNotFound(id.to_string()))?;
         req.status = ErasureStatus::Completed;
         req.processed_at = Some(std::time::SystemTime::now());
         Ok(())
@@ -443,7 +456,7 @@ mod tests {
     fn test_retention_manager_is_expired() {
         let mut mgr = RetentionManager::new();
         mgr.add_policy(RetentionPolicy::new("Log", 60)); // 1-minute TTL
-        // Created 2 minutes ago
+                                                         // Created 2 minutes ago
         let old = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
         assert!(mgr.is_expired("Log", old));
         // Created 10 seconds ago

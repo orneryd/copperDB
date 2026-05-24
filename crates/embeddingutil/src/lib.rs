@@ -30,10 +30,7 @@ mod tests {
     #[test]
     fn test_nearest() {
         let query = vec![1.0f32, 0.0, 0.0];
-        let candidates = vec![
-            vec![0.0f32, 1.0, 0.0],
-            vec![1.0f32, 0.0, 0.0],
-        ];
+        let candidates = vec![vec![0.0f32, 1.0, 0.0], vec![1.0f32, 0.0, 0.0]];
         assert_eq!(nearest(&query, &candidates), Some(1));
     }
 }

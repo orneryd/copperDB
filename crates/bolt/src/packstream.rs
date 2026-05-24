@@ -172,7 +172,9 @@ pub enum Value {
 /// Decode a PackStream value from a byte slice. Returns the value and bytes consumed.
 pub fn decode(data: &[u8]) -> Result<(Value, usize), crate::BoltError> {
     if data.is_empty() {
-        return Err(crate::BoltError::PackStream("unexpected end of data".into()));
+        return Err(crate::BoltError::PackStream(
+            "unexpected end of data".into(),
+        ));
     }
     let marker = data[0];
     match marker {
@@ -215,63 +217,81 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), crate::BoltError> {
         }
         markers::BYTES_8 => {
             if data.len() < 2 {
-                return Err(crate::BoltError::PackStream("truncated bytes8 header".into()));
+                return Err(crate::BoltError::PackStream(
+                    "truncated bytes8 header".into(),
+                ));
             }
             let len = data[1] as usize;
             decode_bytes_body(data, 2, len)
         }
         markers::BYTES_16 => {
             if data.len() < 3 {
-                return Err(crate::BoltError::PackStream("truncated bytes16 header".into()));
+                return Err(crate::BoltError::PackStream(
+                    "truncated bytes16 header".into(),
+                ));
             }
             let len = u16::from_be_bytes([data[1], data[2]]) as usize;
             decode_bytes_body(data, 3, len)
         }
         markers::BYTES_32 => {
             if data.len() < 5 {
-                return Err(crate::BoltError::PackStream("truncated bytes32 header".into()));
+                return Err(crate::BoltError::PackStream(
+                    "truncated bytes32 header".into(),
+                ));
             }
             let len = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
             decode_bytes_body(data, 5, len)
         }
         markers::STRING_8 => {
             if data.len() < 2 {
-                return Err(crate::BoltError::PackStream("truncated string8 header".into()));
+                return Err(crate::BoltError::PackStream(
+                    "truncated string8 header".into(),
+                ));
             }
             let len = data[1] as usize;
             decode_string_body(data, 2, len)
         }
         markers::STRING_16 => {
             if data.len() < 3 {
-                return Err(crate::BoltError::PackStream("truncated string16 header".into()));
+                return Err(crate::BoltError::PackStream(
+                    "truncated string16 header".into(),
+                ));
             }
             let len = u16::from_be_bytes([data[1], data[2]]) as usize;
             decode_string_body(data, 3, len)
         }
         markers::STRING_32 => {
             if data.len() < 5 {
-                return Err(crate::BoltError::PackStream("truncated string32 header".into()));
+                return Err(crate::BoltError::PackStream(
+                    "truncated string32 header".into(),
+                ));
             }
             let len = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
             decode_string_body(data, 5, len)
         }
         markers::LIST_8 => {
             if data.len() < 2 {
-                return Err(crate::BoltError::PackStream("truncated list8 header".into()));
+                return Err(crate::BoltError::PackStream(
+                    "truncated list8 header".into(),
+                ));
             }
             let count = data[1] as usize;
             decode_list_body(data, 2, count)
         }
         markers::LIST_16 => {
             if data.len() < 3 {
-                return Err(crate::BoltError::PackStream("truncated list16 header".into()));
+                return Err(crate::BoltError::PackStream(
+                    "truncated list16 header".into(),
+                ));
             }
             let count = u16::from_be_bytes([data[1], data[2]]) as usize;
             decode_list_body(data, 3, count)
         }
         markers::LIST_32 => {
             if data.len() < 5 {
-                return Err(crate::BoltError::PackStream("truncated list32 header".into()));
+                return Err(crate::BoltError::PackStream(
+                    "truncated list32 header".into(),
+                ));
             }
             let count = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
             decode_list_body(data, 5, count)
@@ -285,21 +305,27 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), crate::BoltError> {
         }
         markers::MAP_16 => {
             if data.len() < 3 {
-                return Err(crate::BoltError::PackStream("truncated map16 header".into()));
+                return Err(crate::BoltError::PackStream(
+                    "truncated map16 header".into(),
+                ));
             }
             let count = u16::from_be_bytes([data[1], data[2]]) as usize;
             decode_map_body(data, 3, count)
         }
         markers::MAP_32 => {
             if data.len() < 5 {
-                return Err(crate::BoltError::PackStream("truncated map32 header".into()));
+                return Err(crate::BoltError::PackStream(
+                    "truncated map32 header".into(),
+                ));
             }
             let count = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
             decode_map_body(data, 5, count)
         }
         markers::STRUCT_8 => {
             if data.len() < 3 {
-                return Err(crate::BoltError::PackStream("truncated struct8 header".into()));
+                return Err(crate::BoltError::PackStream(
+                    "truncated struct8 header".into(),
+                ));
             }
             let fields = data[1] as usize;
             let sig = data[2];
@@ -307,7 +333,9 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), crate::BoltError> {
         }
         markers::STRUCT_16 => {
             if data.len() < 4 {
-                return Err(crate::BoltError::PackStream("truncated struct16 header".into()));
+                return Err(crate::BoltError::PackStream(
+                    "truncated struct16 header".into(),
+                ));
             }
             let fields = u16::from_be_bytes([data[1], data[2]]) as usize;
             let sig = data[3];
@@ -342,14 +370,25 @@ pub fn decode(data: &[u8]) -> Result<(Value, usize), crate::BoltError> {
     }
 }
 
-fn decode_bytes_body(data: &[u8], offset: usize, len: usize) -> Result<(Value, usize), crate::BoltError> {
+fn decode_bytes_body(
+    data: &[u8],
+    offset: usize,
+    len: usize,
+) -> Result<(Value, usize), crate::BoltError> {
     if data.len() < offset + len {
         return Err(crate::BoltError::PackStream("truncated bytes body".into()));
     }
-    Ok((Value::Bytes(data[offset..offset + len].to_vec()), offset + len))
+    Ok((
+        Value::Bytes(data[offset..offset + len].to_vec()),
+        offset + len,
+    ))
 }
 
-fn decode_string_body(data: &[u8], offset: usize, len: usize) -> Result<(Value, usize), crate::BoltError> {
+fn decode_string_body(
+    data: &[u8],
+    offset: usize,
+    len: usize,
+) -> Result<(Value, usize), crate::BoltError> {
     if data.len() < offset + len {
         return Err(crate::BoltError::PackStream("truncated string body".into()));
     }
@@ -358,7 +397,11 @@ fn decode_string_body(data: &[u8], offset: usize, len: usize) -> Result<(Value, 
     Ok((Value::String(s.to_string()), offset + len))
 }
 
-fn decode_list_body(data: &[u8], offset: usize, count: usize) -> Result<(Value, usize), crate::BoltError> {
+fn decode_list_body(
+    data: &[u8],
+    offset: usize,
+    count: usize,
+) -> Result<(Value, usize), crate::BoltError> {
     let mut items = Vec::with_capacity(count);
     let mut pos = offset;
     for _ in 0..count {
@@ -369,7 +412,11 @@ fn decode_list_body(data: &[u8], offset: usize, count: usize) -> Result<(Value, 
     Ok((Value::List(items), pos))
 }
 
-fn decode_map_body(data: &[u8], offset: usize, count: usize) -> Result<(Value, usize), crate::BoltError> {
+fn decode_map_body(
+    data: &[u8],
+    offset: usize,
+    count: usize,
+) -> Result<(Value, usize), crate::BoltError> {
     let mut pairs = Vec::with_capacity(count);
     let mut pos = offset;
     for _ in 0..count {
@@ -377,7 +424,11 @@ fn decode_map_body(data: &[u8], offset: usize, count: usize) -> Result<(Value, u
         pos += key_consumed;
         let key = match key_val {
             Value::String(s) => s,
-            _ => return Err(crate::BoltError::PackStream("map key must be string".into())),
+            _ => {
+                return Err(crate::BoltError::PackStream(
+                    "map key must be string".into(),
+                ))
+            }
         };
         let (val, val_consumed) = decode(&data[pos..])?;
         pos += val_consumed;
@@ -386,7 +437,12 @@ fn decode_map_body(data: &[u8], offset: usize, count: usize) -> Result<(Value, u
     Ok((Value::Map(pairs), pos))
 }
 
-fn decode_struct_body(data: &[u8], offset: usize, field_count: usize, signature: u8) -> Result<(Value, usize), crate::BoltError> {
+fn decode_struct_body(
+    data: &[u8],
+    offset: usize,
+    field_count: usize,
+    signature: u8,
+) -> Result<(Value, usize), crate::BoltError> {
     let mut fields = Vec::with_capacity(field_count);
     let mut pos = offset;
     for _ in 0..field_count {
@@ -494,7 +550,10 @@ mod tests {
 
     #[test]
     fn test_round_trip_int32() {
-        assert_eq!(round_trip(&Value::Integer(100_000)), Value::Integer(100_000));
+        assert_eq!(
+            round_trip(&Value::Integer(100_000)),
+            Value::Integer(100_000)
+        );
     }
 
     #[test]
@@ -535,7 +594,11 @@ mod tests {
 
     #[test]
     fn test_round_trip_tiny_list() {
-        let v = Value::List(vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)]);
+        let v = Value::List(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::Integer(3),
+        ]);
         assert_eq!(round_trip(&v), v);
     }
 
@@ -558,8 +621,12 @@ mod tests {
     #[test]
     fn test_round_trip_struct() {
         let v = Value::Struct {
-            signature: 0x4E,  // Node signature
-            fields: vec![Value::Integer(1), Value::List(vec![Value::String("Person".into())]), Value::Map(vec![])],
+            signature: 0x4E, // Node signature
+            fields: vec![
+                Value::Integer(1),
+                Value::List(vec![Value::String("Person".into())]),
+                Value::Map(vec![]),
+            ],
         };
         assert_eq!(round_trip(&v), v);
     }
@@ -567,8 +634,14 @@ mod tests {
     #[test]
     fn test_round_trip_nested() {
         let v = Value::Map(vec![
-            ("list".into(), Value::List(vec![Value::Null, Value::Bool(true), Value::Integer(-5)])),
-            ("nested".into(), Value::Map(vec![("key".into(), Value::String("val".into()))])),
+            (
+                "list".into(),
+                Value::List(vec![Value::Null, Value::Bool(true), Value::Integer(-5)]),
+            ),
+            (
+                "nested".into(),
+                Value::Map(vec![("key".into(), Value::String("val".into()))]),
+            ),
         ]);
         assert_eq!(round_trip(&v), v);
     }

@@ -307,7 +307,10 @@ mod tests {
     #[test]
     fn test_default_jwt_secret_is_empty() {
         let cfg = Config::default();
-        assert!(cfg.auth.jwt_secret.is_empty(), "default JWT secret must be empty");
+        assert!(
+            cfg.auth.jwt_secret.is_empty(),
+            "default JWT secret must be empty"
+        );
     }
 
     #[test]

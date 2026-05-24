@@ -76,9 +76,18 @@ impl Default for ReplicationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Command {
     Noop,
-    Put { key: Vec<u8>, value: Vec<u8> },
-    Delete { key: Vec<u8> },
-    CypherMutation { database: String, query: String, params: Value },
+    Put {
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    Delete {
+        key: Vec<u8>,
+    },
+    CypherMutation {
+        database: String,
+        query: String,
+        params: Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,8 +100,15 @@ pub enum ConfigAction {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum LogPayload {
     Command(Command),
-    ConfigChange { action: ConfigAction, node_id: String, address: String },
-    SnapshotMarker { snapshot_id: String, checksum: String },
+    ConfigChange {
+        action: ConfigAction,
+        node_id: String,
+        address: String,
+    },
+    SnapshotMarker {
+        snapshot_id: String,
+        checksum: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -200,8 +216,14 @@ impl ReplicationStorage for MemoryStorage {
             Command::Delete { key } => {
                 state.kv.remove(key);
             }
-            Command::CypherMutation { database, query, params } => {
-                state.cypher.push((database.clone(), query.clone(), params.clone()));
+            Command::CypherMutation {
+                database,
+                query,
+                params,
+            } => {
+                state
+                    .cypher
+                    .push((database.clone(), query.clone(), params.clone()));
             }
         }
         Ok(())
@@ -213,8 +235,8 @@ impl ReplicationStorage for MemoryStorage {
     }
 
     fn restore_snapshot(&self, snapshot: &[u8]) -> Result<(), ReplicationError> {
-        let restored: MemorySnapshot =
-            serde_json::from_slice(snapshot).map_err(|error| ReplicationError::Storage(error.to_string()))?;
+        let restored: MemorySnapshot = serde_json::from_slice(snapshot)
+            .map_err(|error| ReplicationError::Storage(error.to_string()))?;
         *self.state.write().unwrap() = restored;
         Ok(())
     }
@@ -250,10 +272,17 @@ impl ReplicationStorage for StorageEngineAdapter {
         let engine = self.engine.lock().unwrap();
         match command {
             Command::Noop => Ok(()),
-            Command::Put { key, value } => engine.put_node(&Self::data_key(key), value).map_err(Into::into),
+            Command::Put { key, value } => engine
+                .put_node(&Self::data_key(key), value)
+                .map_err(Into::into),
             Command::Delete { key } => engine.delete_node(&Self::data_key(key)).map_err(Into::into),
-            Command::CypherMutation { database, query, params } => {
-                let payload = serde_json::to_vec(params).map_err(|error| ReplicationError::Storage(error.to_string()))?;
+            Command::CypherMutation {
+                database,
+                query,
+                params,
+            } => {
+                let payload = serde_json::to_vec(params)
+                    .map_err(|error| ReplicationError::Storage(error.to_string()))?;
                 engine
                     .put_node(&Self::cypher_key(database, query, params), &payload)
                     .map_err(Into::into)
@@ -273,8 +302,8 @@ impl ReplicationStorage for StorageEngineAdapter {
 
     fn restore_snapshot(&self, snapshot: &[u8]) -> Result<(), ReplicationError> {
         let engine = self.engine.lock().unwrap();
-        let restored: BTreeMap<Vec<u8>, Vec<u8>> =
-            serde_json::from_slice(snapshot).map_err(|error| ReplicationError::Storage(error.to_string()))?;
+        let restored: BTreeMap<Vec<u8>, Vec<u8>> = serde_json::from_slice(snapshot)
+            .map_err(|error| ReplicationError::Storage(error.to_string()))?;
 
         let existing: Vec<Vec<u8>> = engine
             .scan_nodes_with_prefix("replication:")
@@ -282,12 +311,14 @@ impl ReplicationStorage for StorageEngineAdapter {
             .collect::<Result<_, _>>()?;
 
         for key in existing {
-            let key = String::from_utf8(key).map_err(|error| ReplicationError::Storage(error.to_string()))?;
+            let key = String::from_utf8(key)
+                .map_err(|error| ReplicationError::Storage(error.to_string()))?;
             engine.delete_node(&key)?;
         }
 
         for (key, value) in restored {
-            let key = String::from_utf8(key).map_err(|error| ReplicationError::Storage(error.to_string()))?;
+            let key = String::from_utf8(key)
+                .map_err(|error| ReplicationError::Storage(error.to_string()))?;
             engine.put_node(&key, &value)?;
         }
 
@@ -299,7 +330,11 @@ impl ReplicationStorage for StorageEngineAdapter {
 pub trait Replicator: Send + Sync {
     async fn start(&self) -> Result<(), ReplicationError>;
     async fn apply(&self, command: Command, timeout: Duration) -> Result<(), ReplicationError>;
-    async fn apply_batch(&self, commands: Vec<Command>, timeout: Duration) -> Result<(), ReplicationError>;
+    async fn apply_batch(
+        &self,
+        commands: Vec<Command>,
+        timeout: Duration,
+    ) -> Result<(), ReplicationError>;
     fn is_leader(&self) -> bool;
     fn leader_id(&self) -> Option<String>;
     fn health(&self) -> HealthStatus;
@@ -316,7 +351,10 @@ pub struct ReplicatedEngine {
 
 impl ReplicatedEngine {
     pub fn new(replicator: Arc<dyn Replicator>, apply_timeout: Duration) -> Self {
-        Self { replicator, apply_timeout }
+        Self {
+            replicator,
+            apply_timeout,
+        }
     }
 
     pub async fn apply_command(&self, command: Command) -> Result<(), ReplicationError> {
@@ -324,7 +362,9 @@ impl ReplicatedEngine {
     }
 
     pub async fn apply_batch(&self, commands: Vec<Command>) -> Result<(), ReplicationError> {
-        self.replicator.apply_batch(commands, self.apply_timeout).await
+        self.replicator
+            .apply_batch(commands, self.apply_timeout)
+            .await
     }
 
     pub fn replicator(&self) -> &Arc<dyn Replicator> {
@@ -362,7 +402,11 @@ impl Replicator for StandaloneReplicator {
         self.apply_batch(vec![command], timeout).await
     }
 
-    async fn apply_batch(&self, commands: Vec<Command>, timeout: Duration) -> Result<(), ReplicationError> {
+    async fn apply_batch(
+        &self,
+        commands: Vec<Command>,
+        timeout: Duration,
+    ) -> Result<(), ReplicationError> {
         tokio::time::timeout(timeout, async {
             let running = self.state.read().unwrap().0;
             if !running {
@@ -426,16 +470,34 @@ impl Replicator for StandaloneReplicator {
 #[async_trait]
 pub trait ReplicationRpc: Send + Sync {
     fn node_id(&self) -> String;
-    async fn request_vote_rpc(&self, request: VoteRequest) -> Result<VoteResponse, ReplicationError>;
-    async fn append_entries_rpc(&self, request: AppendEntriesRequest) -> Result<AppendEntriesResponse, ReplicationError>;
+    async fn request_vote_rpc(
+        &self,
+        request: VoteRequest,
+    ) -> Result<VoteResponse, ReplicationError>;
+    async fn append_entries_rpc(
+        &self,
+        request: AppendEntriesRequest,
+    ) -> Result<AppendEntriesResponse, ReplicationError>;
     async fn install_snapshot_rpc(&self, snapshot: Snapshot) -> Result<(), ReplicationError>;
 }
 
 #[async_trait]
 pub trait ClusterTransport: Send + Sync {
-    async fn request_vote(&self, target: &str, request: VoteRequest) -> Result<VoteResponse, ReplicationError>;
-    async fn append_entries(&self, target: &str, request: AppendEntriesRequest) -> Result<AppendEntriesResponse, ReplicationError>;
-    async fn install_snapshot(&self, target: &str, snapshot: Snapshot) -> Result<(), ReplicationError>;
+    async fn request_vote(
+        &self,
+        target: &str,
+        request: VoteRequest,
+    ) -> Result<VoteResponse, ReplicationError>;
+    async fn append_entries(
+        &self,
+        target: &str,
+        request: AppendEntriesRequest,
+    ) -> Result<AppendEntriesResponse, ReplicationError>;
+    async fn install_snapshot(
+        &self,
+        target: &str,
+        snapshot: Snapshot,
+    ) -> Result<(), ReplicationError>;
 }
 
 #[derive(Default)]
@@ -464,15 +526,27 @@ impl InMemoryTransport {
 
 #[async_trait]
 impl ClusterTransport for InMemoryTransport {
-    async fn request_vote(&self, target: &str, request: VoteRequest) -> Result<VoteResponse, ReplicationError> {
+    async fn request_vote(
+        &self,
+        target: &str,
+        request: VoteRequest,
+    ) -> Result<VoteResponse, ReplicationError> {
         self.lookup(target)?.request_vote_rpc(request).await
     }
 
-    async fn append_entries(&self, target: &str, request: AppendEntriesRequest) -> Result<AppendEntriesResponse, ReplicationError> {
+    async fn append_entries(
+        &self,
+        target: &str,
+        request: AppendEntriesRequest,
+    ) -> Result<AppendEntriesResponse, ReplicationError> {
         self.lookup(target)?.append_entries_rpc(request).await
     }
 
-    async fn install_snapshot(&self, target: &str, snapshot: Snapshot) -> Result<(), ReplicationError> {
+    async fn install_snapshot(
+        &self,
+        target: &str,
+        snapshot: Snapshot,
+    ) -> Result<(), ReplicationError> {
         self.lookup(target)?.install_snapshot_rpc(snapshot).await
     }
 }
@@ -623,7 +697,12 @@ impl QuorumReplicator {
     }
 
     fn last_log_index(&self) -> u64 {
-        self.log.read().unwrap().last().map(|entry| entry.index).unwrap_or(0)
+        self.log
+            .read()
+            .unwrap()
+            .last()
+            .map(|entry| entry.index)
+            .unwrap_or(0)
     }
 
     fn last_log_position(&self) -> (u64, u64) {
@@ -645,7 +724,8 @@ impl QuorumReplicator {
     }
 
     fn leader_target(&self) -> String {
-        self.leader_id().unwrap_or_else(|| self.config.node_id.clone())
+        self.leader_id()
+            .unwrap_or_else(|| self.config.node_id.clone())
     }
 
     fn is_running(&self) -> bool {
@@ -704,7 +784,11 @@ impl QuorumReplicator {
         Ok(acks)
     }
 
-    async fn replicate_to_peer(&self, peer: &str, committed_through: u64) -> Result<bool, ReplicationError> {
+    async fn replicate_to_peer(
+        &self,
+        peer: &str,
+        committed_through: u64,
+    ) -> Result<bool, ReplicationError> {
         loop {
             let (next_index, current_term, current_commit) = {
                 let state = self.state.read().unwrap();
@@ -727,8 +811,12 @@ impl QuorumReplicator {
 
             if response.success {
                 let mut state = self.state.write().unwrap();
-                state.peer_match_index.insert(peer.to_string(), response.match_index);
-                state.peer_next_index.insert(peer.to_string(), response.match_index + 1);
+                state
+                    .peer_match_index
+                    .insert(peer.to_string(), response.match_index);
+                state
+                    .peer_next_index
+                    .insert(peer.to_string(), response.match_index + 1);
                 return Ok(response.match_index >= committed_through);
             }
 
@@ -759,7 +847,10 @@ impl QuorumReplicator {
         let entries = if next_index == 0 {
             log.clone()
         } else {
-            log.iter().skip(next_index.saturating_sub(1) as usize).cloned().collect()
+            log.iter()
+                .skip(next_index.saturating_sub(1) as usize)
+                .cloned()
+                .collect()
         };
 
         AppendEntriesRequest {
@@ -808,7 +899,9 @@ impl QuorumReplicator {
             let entry = self.log.read().unwrap()[(next_index - 1) as usize].clone();
             match entry.payload {
                 LogPayload::Command(command) => self.storage.apply_command(&command)?,
-                LogPayload::ConfigChange { action, node_id, .. } => {
+                LogPayload::ConfigChange {
+                    action, node_id, ..
+                } => {
                     let mut membership = self.membership.write().unwrap();
                     match action {
                         ConfigAction::AddNode | ConfigAction::UpdateNode => {
@@ -837,7 +930,10 @@ impl QuorumReplicator {
             || (request.last_log_term == last_term && request.last_log_index >= last_index)
     }
 
-    async fn wait_for_leader_inner(&self, timeout_duration: Duration) -> Result<String, ReplicationError> {
+    async fn wait_for_leader_inner(
+        &self,
+        timeout_duration: Duration,
+    ) -> Result<String, ReplicationError> {
         let deadline = Instant::now() + timeout_duration;
 
         loop {
@@ -847,7 +943,9 @@ impl QuorumReplicator {
 
             let now = Instant::now();
             if now >= deadline {
-                return Err(ReplicationError::Timeout("leader election timed out".into()));
+                return Err(ReplicationError::Timeout(
+                    "leader election timed out".into(),
+                ));
             }
 
             let remaining = deadline.saturating_duration_since(now);
@@ -864,7 +962,10 @@ impl ReplicationRpc for QuorumReplicator {
         self.config.node_id.clone()
     }
 
-    async fn request_vote_rpc(&self, request: VoteRequest) -> Result<VoteResponse, ReplicationError> {
+    async fn request_vote_rpc(
+        &self,
+        request: VoteRequest,
+    ) -> Result<VoteResponse, ReplicationError> {
         let mut state = self.state.write().unwrap();
 
         if request.term < state.current_term {
@@ -882,7 +983,11 @@ impl ReplicationRpc for QuorumReplicator {
             state.leader_id = None;
         }
 
-        let can_vote = state.voted_for.as_ref().map(|vote| vote == &request.candidate_id).unwrap_or(true);
+        let can_vote = state
+            .voted_for
+            .as_ref()
+            .map(|vote| vote == &request.candidate_id)
+            .unwrap_or(true);
         let vote_granted = can_vote && self.is_up_to_date(&request);
         if vote_granted {
             state.voted_for = Some(request.candidate_id.clone());
@@ -895,7 +1000,10 @@ impl ReplicationRpc for QuorumReplicator {
         })
     }
 
-    async fn append_entries_rpc(&self, request: AppendEntriesRequest) -> Result<AppendEntriesResponse, ReplicationError> {
+    async fn append_entries_rpc(
+        &self,
+        request: AppendEntriesRequest,
+    ) -> Result<AppendEntriesResponse, ReplicationError> {
         {
             let mut state = self.state.write().unwrap();
             if request.term < state.current_term {
@@ -957,7 +1065,9 @@ impl ReplicationRpc for QuorumReplicator {
         let last_index = self.last_log_index();
         {
             let mut state = self.state.write().unwrap();
-            state.commit_index = state.commit_index.max(request.leader_commit.min(last_index));
+            state.commit_index = state
+                .commit_index
+                .max(request.leader_commit.min(last_index));
         }
         self.apply_committed_entries()?;
 
@@ -986,7 +1096,11 @@ impl Replicator for QuorumReplicator {
         self.apply_batch(vec![command], timeout).await
     }
 
-    async fn apply_batch(&self, commands: Vec<Command>, timeout: Duration) -> Result<(), ReplicationError> {
+    async fn apply_batch(
+        &self,
+        commands: Vec<Command>,
+        timeout: Duration,
+    ) -> Result<(), ReplicationError> {
         tokio::time::timeout(timeout, self.apply_inner(commands))
             .await
             .map_err(|_| ReplicationError::Timeout("replication apply timed out".into()))?
@@ -1056,7 +1170,10 @@ mod tests {
     #[tokio::test]
     async fn standalone_replicator_applies_commands() {
         let storage = Arc::new(MemoryStorage::new());
-        let replicator = Arc::new(StandaloneReplicator::new(ReplicationConfig::default(), storage.clone()));
+        let replicator = Arc::new(StandaloneReplicator::new(
+            ReplicationConfig::default(),
+            storage.clone(),
+        ));
         replicator.start().await.unwrap();
 
         replicator
@@ -1082,9 +1199,21 @@ mod tests {
         let storage2 = Arc::new(MemoryStorage::new());
         let storage3 = Arc::new(MemoryStorage::new());
 
-        let node1 = Arc::new(QuorumReplicator::new(cluster_config("node-1", &["node-2", "node-3"]), storage1.clone(), transport.clone()));
-        let node2 = Arc::new(QuorumReplicator::new(cluster_config("node-2", &["node-1", "node-3"]), storage2.clone(), transport.clone()));
-        let node3 = Arc::new(QuorumReplicator::new(cluster_config("node-3", &["node-1", "node-2"]), storage3.clone(), transport.clone()));
+        let node1 = Arc::new(QuorumReplicator::new(
+            cluster_config("node-1", &["node-2", "node-3"]),
+            storage1.clone(),
+            transport.clone(),
+        ));
+        let node2 = Arc::new(QuorumReplicator::new(
+            cluster_config("node-2", &["node-1", "node-3"]),
+            storage2.clone(),
+            transport.clone(),
+        ));
+        let node3 = Arc::new(QuorumReplicator::new(
+            cluster_config("node-3", &["node-1", "node-2"]),
+            storage3.clone(),
+            transport.clone(),
+        ));
 
         transport.register(node1.clone());
         transport.register(node2.clone());
@@ -1096,7 +1225,10 @@ mod tests {
         node1.start_election().await.unwrap();
 
         assert!(node1.is_leader());
-        assert_eq!(node2.wait_for_leader(Duration::from_secs(1)).await.unwrap(), "node-1");
+        assert_eq!(
+            node2.wait_for_leader(Duration::from_secs(1)).await.unwrap(),
+            "node-1"
+        );
 
         node1
             .apply(
@@ -1169,8 +1301,16 @@ mod tests {
         let storage1 = Arc::new(MemoryStorage::new());
         let storage2 = Arc::new(MemoryStorage::new());
         let restored_storage = Arc::new(MemoryStorage::new());
-        let node1 = Arc::new(QuorumReplicator::new(cluster_config("node-1", &["node-2"]), storage1.clone(), transport.clone()));
-        let node2 = Arc::new(QuorumReplicator::new(cluster_config("node-2", &["node-1"]), storage2.clone(), transport.clone()));
+        let node1 = Arc::new(QuorumReplicator::new(
+            cluster_config("node-1", &["node-2"]),
+            storage1.clone(),
+            transport.clone(),
+        ));
+        let node2 = Arc::new(QuorumReplicator::new(
+            cluster_config("node-2", &["node-1"]),
+            storage2.clone(),
+            transport.clone(),
+        ));
 
         transport.register(node1.clone());
         transport.register(node2.clone());

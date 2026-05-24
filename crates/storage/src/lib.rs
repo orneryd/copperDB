@@ -56,7 +56,10 @@ pub enum StorageError {
     #[error("constraint \"{0}\" not found")]
     ConstraintNotFound(String),
     #[error("constraint \"{constraint}\" violated: missing required property \"{property}\"")]
-    ConstraintMissingProperty { constraint: String, property: String },
+    ConstraintMissingProperty {
+        constraint: String,
+        property: String,
+    },
     #[error("Node({label}) already exists with {property} = {value}")]
     UniqueConstraintViolation {
         label: String,
@@ -97,7 +100,10 @@ impl MvccStore {
 
     pub fn begin_snapshot(&self) -> MvccSnapshot {
         let read_ts = self.current_version.load(Ordering::SeqCst);
-        MvccSnapshot { id: read_ts, read_ts }
+        MvccSnapshot {
+            id: read_ts,
+            read_ts,
+        }
     }
 
     pub fn commit_batch<I>(&self, writes: I) -> u64
@@ -107,7 +113,10 @@ impl MvccStore {
         let version = self.current_version.fetch_add(1, Ordering::SeqCst) + 1;
         let mut guard = self.values.write();
         for (key, value) in writes {
-            guard.entry(key).or_default().push(MvccVersion { version, value });
+            guard
+                .entry(key)
+                .or_default()
+                .push(MvccVersion { version, value });
         }
         version
     }
@@ -461,7 +470,11 @@ impl SchemaManager {
                             let key = (label.to_string(), property.clone(), value_key.clone());
                             let mut unique = self.unique_values.write();
                             cleanup_stale_unique_values_for_node(
-                                &mut unique, label, property, &value_key, node_id,
+                                &mut unique,
+                                label,
+                                property,
+                                &value_key,
+                                node_id,
                             );
                             if let Some(existing) = unique.get(&key) {
                                 if existing != node_id {
@@ -719,7 +732,8 @@ impl StorageEngine {
 
         for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
             let (key, _) = entry?;
-            let key_str = std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            let key_str =
+                std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
             if let Some(node_id) = key_str.rsplit('/').next() {
                 if let Some(node) = self.get_node_record(node_id)? {
                     out.push(node);
@@ -766,7 +780,8 @@ impl StorageEngine {
 
         for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
             let (key, _) = entry?;
-            let key_str = std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            let key_str =
+                std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
             if let Some(edge_id) = key_str.rsplit('/').next() {
                 if let Some(edge) = self.get_edge_record(edge_id)? {
                     out.push(edge);
@@ -824,7 +839,11 @@ impl StorageEngine {
         &self,
         profile: &HyperscalerProfile,
     ) -> Result<(), StorageError> {
-        let key = [META_HYPERSCALER_PROFILE_PREFIX, profile.profile_id.as_bytes()].concat();
+        let key = [
+            META_HYPERSCALER_PROFILE_PREFIX,
+            profile.profile_id.as_bytes(),
+        ]
+        .concat();
         self.meta.insert(key, rmp_serde::to_vec(profile)?)?;
         Ok(())
     }
@@ -920,14 +939,17 @@ impl StorageEngine {
 
     fn unindex_node_labels(&self, node: &NodeRecord) -> Result<(), StorageError> {
         for label in &node.labels {
-            self.indexes.remove(label_index_key(label, &node.id).as_bytes())?;
+            self.indexes
+                .remove(label_index_key(label, &node.id).as_bytes())?;
         }
         Ok(())
     }
 
     fn index_edge_type(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
-        self.indexes
-            .insert(edge_type_index_key(&edge.edge_type, &edge.id).as_bytes(), &[])?;
+        self.indexes.insert(
+            edge_type_index_key(&edge.edge_type, &edge.id).as_bytes(),
+            &[],
+        )?;
         Ok(())
     }
 
@@ -1018,8 +1040,10 @@ mod tests {
 
     #[test]
     fn rejects_non_v0_layout_manifest() {
-        let test_dir =
-            std::env::temp_dir().join(format!("copperdb-storage-layout-version-rejection-test-{}", uuid::Uuid::new_v4()));
+        let test_dir = std::env::temp_dir().join(format!(
+            "copperdb-storage-layout-version-rejection-test-{}",
+            uuid::Uuid::new_v4()
+        ));
         fs::create_dir_all(&test_dir).unwrap();
         let db = sled::open(&test_dir).unwrap();
         let meta = db.open_tree("meta").unwrap();
@@ -1054,8 +1078,14 @@ mod tests {
         engine.put_node("node:1", b"node_data").unwrap();
         engine.put_edge("edge:1", b"edge_data").unwrap();
 
-        assert_eq!(engine.get_node("node:1").unwrap(), Some(b"node_data".to_vec()));
-        assert_eq!(engine.get_edge("edge:1").unwrap(), Some(b"edge_data".to_vec()));
+        assert_eq!(
+            engine.get_node("node:1").unwrap(),
+            Some(b"node_data".to_vec())
+        );
+        assert_eq!(
+            engine.get_edge("edge:1").unwrap(),
+            Some(b"edge_data".to_vec())
+        );
 
         engine.delete_node("node:1").unwrap();
         engine.delete_edge("edge:1").unwrap();
@@ -1126,9 +1156,15 @@ mod tests {
     fn prefix_scan_counts_and_namespace_listing_are_deterministic() {
         let engine = StorageEngine::open_temporary().unwrap();
 
-        engine.put_node_record(&sample_node("alpha:n1", &["Person"])).unwrap();
-        engine.put_node_record(&sample_node("alpha:n2", &["Person"])).unwrap();
-        engine.put_node_record(&sample_node("beta:n1", &["Robot"])).unwrap();
+        engine
+            .put_node_record(&sample_node("alpha:n1", &["Person"]))
+            .unwrap();
+        engine
+            .put_node_record(&sample_node("alpha:n2", &["Person"]))
+            .unwrap();
+        engine
+            .put_node_record(&sample_node("beta:n1", &["Robot"]))
+            .unwrap();
 
         engine
             .put_edge_record(&sample_edge("alpha:e1", "LINKS", "alpha:n1", "alpha:n2"))
@@ -1204,7 +1240,10 @@ mod tests {
     fn index_and_prefix_scan_apis_work() {
         let engine = StorageEngine::open_temporary().unwrap();
         engine.put_index(b"idx:key", b"idx:value").unwrap();
-        assert_eq!(engine.get_index(b"idx:key").unwrap(), Some(b"idx:value".to_vec()));
+        assert_eq!(
+            engine.get_index(b"idx:key").unwrap(),
+            Some(b"idx:value".to_vec())
+        );
 
         engine.put_node("Person:1", b"alice").unwrap();
         engine.put_node("Person:2", b"bob").unwrap();
@@ -1331,7 +1370,10 @@ mod tests {
 
         let missing = BTreeMap::new();
         let err = schema.validate_node("n1", "Person", &missing).unwrap_err();
-        assert!(matches!(err, StorageError::ConstraintMissingProperty { .. }));
+        assert!(matches!(
+            err,
+            StorageError::ConstraintMissingProperty { .. }
+        ));
 
         let mut alice = BTreeMap::new();
         alice.insert("email".to_string(), json!("alice@example.com"));
@@ -1339,8 +1381,13 @@ mod tests {
 
         let mut duplicate = BTreeMap::new();
         duplicate.insert("email".to_string(), json!("alice@example.com"));
-        let err = schema.validate_node("n2", "Person", &duplicate).unwrap_err();
-        assert!(matches!(err, StorageError::UniqueConstraintViolation { .. }));
+        let err = schema
+            .validate_node("n2", "Person", &duplicate)
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            StorageError::UniqueConstraintViolation { .. }
+        ));
         assert_eq!(
             err.to_string(),
             "Node(Person) already exists with email = \"alice@example.com\""

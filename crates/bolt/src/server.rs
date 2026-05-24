@@ -13,7 +13,9 @@ pub struct BoltServer {
 
 impl BoltServer {
     pub fn new(listen_addr: impl Into<String>) -> Self {
-        Self { listen_addr: listen_addr.into() }
+        Self {
+            listen_addr: listen_addr.into(),
+        }
     }
 
     /// Start accepting Bolt connections.
@@ -37,7 +39,9 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), BoltError> {
     stream.read_exact(&mut preamble).await?;
 
     if preamble[..4] != [0x60, 0x60, 0xB0, 0x17] {
-        return Err(BoltError::ProtocolViolation("invalid bolt magic preamble".into()));
+        return Err(BoltError::ProtocolViolation(
+            "invalid bolt magic preamble".into(),
+        ));
     }
 
     // Advertise Bolt 4.4 so clients can complete version negotiation.

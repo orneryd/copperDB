@@ -145,7 +145,11 @@ fn extract_int_after_keyword(s: &str, keyword: &str) -> Option<usize> {
             break;
         }
     }
-    if found_digit { Some(result) } else { None }
+    if found_digit {
+        Some(result)
+    } else {
+        None
+    }
 }
 
 fn extract_str_after_keyword<'a>(s: &'a str, keyword: &str) -> Option<&'a str> {
@@ -558,7 +562,10 @@ mod tests {
         assert!(contains_keyword("MATCH (n) RETURN n", "RETURN"));
         assert!(!contains_keyword("MATCH (n)", "RETURN"));
         // "WITH" in "STARTS WITH" should still be found at its own position
-        assert!(contains_keyword("MATCH (n) WHERE n.name STARTS WITH 'A'", "WITH"));
+        assert!(contains_keyword(
+            "MATCH (n) WHERE n.name STARTS WITH 'A'",
+            "WITH"
+        ));
     }
 
     // ── parse_aggregation ─────────────────────────────────────────────────────

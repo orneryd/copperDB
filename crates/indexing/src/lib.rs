@@ -64,7 +64,9 @@ impl IndexRegistry {
     }
 
     pub fn drop(&mut self, name: &str) -> Result<(), IndexError> {
-        self.indexes.remove(name).ok_or_else(|| IndexError::NotFound(name.to_owned()))?;
+        self.indexes
+            .remove(name)
+            .ok_or_else(|| IndexError::NotFound(name.to_owned()))?;
         Ok(())
     }
 
@@ -80,13 +82,15 @@ mod tests {
     #[test]
     fn test_create_and_get_index() {
         let mut registry = IndexRegistry::new();
-        registry.create(IndexDefinition {
-            name: "person_name".into(),
-            label: "Person".into(),
-            properties: vec!["name".into()],
-            index_type: IndexType::BTree,
-            unique: false,
-        }).unwrap();
+        registry
+            .create(IndexDefinition {
+                name: "person_name".into(),
+                label: "Person".into(),
+                properties: vec!["name".into()],
+                index_type: IndexType::BTree,
+                unique: false,
+            })
+            .unwrap();
         assert!(registry.get("person_name").is_some());
     }
 

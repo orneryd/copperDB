@@ -184,7 +184,10 @@ impl copperdb {
             storage,
             eval,
             tx_manager: Arc::new(TransactionManager::new()),
-            query_cache: Arc::new(QueryCache::new(1024, Some(std::time::Duration::from_secs(300)))),
+            query_cache: Arc::new(QueryCache::new(
+                1024,
+                Some(std::time::Duration::from_secs(300)),
+            )),
         }
     }
 
@@ -253,7 +256,6 @@ impl copperdb {
         &self.storage
     }
 }
-
 
 // ─── Legacy copperdb (full-server async variant) ──────────────────────────────
 
@@ -346,7 +348,8 @@ mod tests {
     #[test]
     fn test_flush_and_size() {
         let db = copperdb::open_temporary().unwrap();
-        db.execute("CREATE (n:Test {x: 1})", Default::default()).unwrap();
+        db.execute("CREATE (n:Test {x: 1})", Default::default())
+            .unwrap();
         db.flush().unwrap();
         // size should be non-zero after flush
         let _ = db.size_on_disk();
@@ -355,10 +358,15 @@ mod tests {
     #[test]
     fn test_query_caching() {
         let db = copperdb::open_temporary().unwrap();
-        db.execute("CREATE (n:Cached {v: 1})", Default::default()).unwrap();
+        db.execute("CREATE (n:Cached {v: 1})", Default::default())
+            .unwrap();
         // Second identical query hits cache
-        let r1 = db.execute("MATCH (n:Cached) RETURN n", Default::default()).unwrap();
-        let r2 = db.execute("MATCH (n:Cached) RETURN n", Default::default()).unwrap();
+        let r1 = db
+            .execute("MATCH (n:Cached) RETURN n", Default::default())
+            .unwrap();
+        let r2 = db
+            .execute("MATCH (n:Cached) RETURN n", Default::default())
+            .unwrap();
         assert_eq!(r1.rows.len(), r2.rows.len());
     }
 
@@ -373,9 +381,15 @@ mod tests {
     fn test_multiple_creates_and_match() {
         let db = copperdb::open_temporary().unwrap();
         for i in 0..5 {
-            db.execute(&format!("CREATE (n:Item {{idx: {i}}})", i = i), Default::default()).unwrap();
+            db.execute(
+                &format!("CREATE (n:Item {{idx: {i}}})", i = i),
+                Default::default(),
+            )
+            .unwrap();
         }
-        let result = db.execute("MATCH (n:Item) RETURN n", Default::default()).unwrap();
+        let result = db
+            .execute("MATCH (n:Item) RETURN n", Default::default())
+            .unwrap();
         assert_eq!(result.rows.len(), 5);
     }
 }
@@ -383,8 +397,8 @@ mod tests {
 #[cfg(test)]
 mod smoke_tests {
     use super::*;
-    use std::collections::HashMap;
     use serde_json::Value;
+    use std::collections::HashMap;
 
     /// Smoke: create a node, flush to disk, reopen the DB, verify node persists.
     #[test]
@@ -394,22 +408,39 @@ mod smoke_tests {
 
         // Phase 1: write
         {
-            let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
+            let cfg = DatabaseConfig {
+                data_dir: path.clone(),
+                ..Default::default()
+            };
             let db = copperdb::open(cfg).unwrap();
-            let result = db.execute(
-                "CREATE (n:Person {name: 'Alice', age: 30}) RETURN n",
-                HashMap::new(),
-            ).unwrap();
-            assert_eq!(result.stats.nodes_created, 1, "should create exactly 1 node");
+            let result = db
+                .execute(
+                    "CREATE (n:Person {name: 'Alice', age: 30}) RETURN n",
+                    HashMap::new(),
+                )
+                .unwrap();
+            assert_eq!(
+                result.stats.nodes_created, 1,
+                "should create exactly 1 node"
+            );
             db.flush().unwrap();
         }
 
         // Phase 2: reopen and verify
         {
-            let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
+            let cfg = DatabaseConfig {
+                data_dir: path.clone(),
+                ..Default::default()
+            };
             let db = copperdb::open(cfg).unwrap();
-            let result = db.execute("MATCH (n:Person) RETURN n", HashMap::new()).unwrap();
-            assert_eq!(result.rows.len(), 1, "reopened DB should have 1 Person node");
+            let result = db
+                .execute("MATCH (n:Person) RETURN n", HashMap::new())
+                .unwrap();
+            assert_eq!(
+                result.rows.len(),
+                1,
+                "reopened DB should have 1 Person node"
+            );
             let row = &result.rows[0];
             let n = row.get("n").expect("row must have 'n' key");
             match n {
@@ -437,29 +468,60 @@ mod smoke_tests {
         let path = dir.path().to_str().unwrap().to_string();
 
         {
-            let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
+            let cfg = DatabaseConfig {
+                data_dir: path.clone(),
+                ..Default::default()
+            };
             let db = copperdb::open(cfg).unwrap();
-            db.execute("CREATE (a:City {name: 'London', pop: 9000000})", HashMap::new()).unwrap();
-            db.execute("CREATE (b:City {name: 'Paris', pop: 2100000})", HashMap::new()).unwrap();
-            let r = db.execute("MATCH (c:City) RETURN c", HashMap::new()).unwrap();
+            db.execute(
+                "CREATE (a:City {name: 'London', pop: 9000000})",
+                HashMap::new(),
+            )
+            .unwrap();
+            db.execute(
+                "CREATE (b:City {name: 'Paris', pop: 2100000})",
+                HashMap::new(),
+            )
+            .unwrap();
+            let r = db
+                .execute("MATCH (c:City) RETURN c", HashMap::new())
+                .unwrap();
             assert_eq!(r.rows.len(), 2, "should have 2 City nodes before flush");
             db.flush().unwrap();
         }
 
         {
-            let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
+            let cfg = DatabaseConfig {
+                data_dir: path.clone(),
+                ..Default::default()
+            };
             let db = copperdb::open(cfg).unwrap();
-            let result = db.execute("MATCH (c:City) RETURN c", HashMap::new()).unwrap();
-            assert_eq!(result.rows.len(), 2, "should still have 2 City nodes after reopen");
+            let result = db
+                .execute("MATCH (c:City) RETURN c", HashMap::new())
+                .unwrap();
+            assert_eq!(
+                result.rows.len(),
+                2,
+                "should still have 2 City nodes after reopen"
+            );
 
-            let mut names: Vec<String> = result.rows.iter().filter_map(|row| {
-                row.get("c").and_then(|v| v.as_object())
-                    .and_then(|o| o.get("name"))
-                    .and_then(|n| n.as_str())
-                    .map(|s| s.to_string())
-            }).collect();
+            let mut names: Vec<String> = result
+                .rows
+                .iter()
+                .filter_map(|row| {
+                    row.get("c")
+                        .and_then(|v| v.as_object())
+                        .and_then(|o| o.get("name"))
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect();
             names.sort();
-            assert_eq!(names, vec!["London", "Paris"], "both cities must be present");
+            assert_eq!(
+                names,
+                vec!["London", "Paris"],
+                "both cities must be present"
+            );
         }
     }
 
@@ -470,32 +532,47 @@ mod smoke_tests {
         let path = dir.path().to_str().unwrap().to_string();
 
         {
-            let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
+            let cfg = DatabaseConfig {
+                data_dir: path.clone(),
+                ..Default::default()
+            };
             let db = copperdb::open(cfg).unwrap();
             for (name, age) in &[("Alice", 30), ("Bob", 20), ("Carol", 35)] {
                 db.execute(
                     &format!("CREATE (n:User {{name: '{name}', age: {age}}})"),
                     HashMap::new(),
-                ).unwrap();
+                )
+                .unwrap();
             }
             db.flush().unwrap();
         }
 
         {
-            let cfg = DatabaseConfig { data_dir: path.clone(), ..Default::default() };
+            let cfg = DatabaseConfig {
+                data_dir: path.clone(),
+                ..Default::default()
+            };
             let db = copperdb::open(cfg).unwrap();
-            let result = db.execute(
-                "MATCH (n:User) WHERE n.age > 25 RETURN n",
-                HashMap::new(),
-            ).unwrap();
-            assert_eq!(result.rows.len(), 2, "Alice (30) and Carol (35) should match age > 25");
+            let result = db
+                .execute("MATCH (n:User) WHERE n.age > 25 RETURN n", HashMap::new())
+                .unwrap();
+            assert_eq!(
+                result.rows.len(),
+                2,
+                "Alice (30) and Carol (35) should match age > 25"
+            );
 
-            let mut names: Vec<String> = result.rows.iter().filter_map(|row| {
-                row.get("n").and_then(|v| v.as_object())
-                    .and_then(|o| o.get("name"))
-                    .and_then(|n| n.as_str())
-                    .map(|s| s.to_string())
-            }).collect();
+            let mut names: Vec<String> = result
+                .rows
+                .iter()
+                .filter_map(|row| {
+                    row.get("n")
+                        .and_then(|v| v.as_object())
+                        .and_then(|o| o.get("name"))
+                        .and_then(|n| n.as_str())
+                        .map(|s| s.to_string())
+                })
+                .collect();
             names.sort();
             assert_eq!(names, vec!["Alice", "Carol"]);
         }
@@ -517,11 +594,16 @@ mod smoke_tests {
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK, "health check should return 200");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "health check should return 200"
+        );
 
-        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body_bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
         let health: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         assert_eq!(health["status"], "ok", "health status should be 'ok'");
     }
 }
-

@@ -211,11 +211,22 @@ pub enum EdgeDirection {
 
 #[derive(Debug, Clone)]
 pub enum Expression {
-    PropertyAccess { variable: String, property: String },
-    Comparison { left: Box<Expression>, op: String, right: Box<Expression> },
+    PropertyAccess {
+        variable: String,
+        property: String,
+    },
+    Comparison {
+        left: Box<Expression>,
+        op: String,
+        right: Box<Expression>,
+    },
     Literal(Value),
     Parameter(String),
-    FunctionCall { name: String, args: Vec<Expression>, distinct: bool },
+    FunctionCall {
+        name: String,
+        args: Vec<Expression>,
+        distinct: bool,
+    },
     Variable(String),
     And(Box<Expression>, Box<Expression>),
     Or(Box<Expression>, Box<Expression>),
@@ -316,7 +327,10 @@ pub fn tokenize(input: &str) -> Result<Vec<String>, CypherError> {
         // Two-character comparison operators
         if i + 1 < len {
             let pair = (b, sb[i + 1]);
-            if matches!(pair, (b'<', b'>') | (b'<', b'=') | (b'>', b'=') | (b'!', b'=')) {
+            if matches!(
+                pair,
+                (b'<', b'>') | (b'<', b'=') | (b'>', b'=') | (b'!', b'=')
+            ) {
                 tokens.push(format!("{}{}", b as char, sb[i + 1] as char));
                 i += 2;
                 continue;
@@ -421,7 +435,6 @@ impl ParseContext {
             ))),
         }
     }
-
 
     // ── Top-level dispatcher ─────────────────────────────────────────────────
 
@@ -642,7 +655,13 @@ impl ParseContext {
             }
         }
 
-        Ok(ReturnClause { items, order_by, skip, limit, distinct })
+        Ok(ReturnClause {
+            items,
+            order_by,
+            skip,
+            limit,
+            distinct,
+        })
     }
 
     fn parse_return_item(&mut self) -> Result<ReturnItem, CypherError> {
@@ -658,21 +677,32 @@ impl ParseContext {
 
     fn parse_order_item(&mut self) -> Result<OrderItem, CypherError> {
         let expression = self.parse_expression()?;
-        let descending = matches!(self.peek_upper().as_deref(), Some("DESC") | Some("DESCENDING"));
+        let descending = matches!(
+            self.peek_upper().as_deref(),
+            Some("DESC") | Some("DESCENDING")
+        );
         if descending {
             self.advance();
-        } else if matches!(self.peek_upper().as_deref(), Some("ASC") | Some("ASCENDING")) {
+        } else if matches!(
+            self.peek_upper().as_deref(),
+            Some("ASC") | Some("ASCENDING")
+        ) {
             self.advance();
         }
-        Ok(OrderItem { expression, descending })
+        Ok(OrderItem {
+            expression,
+            descending,
+        })
     }
 
     fn parse_i64(&mut self) -> Result<i64, CypherError> {
         match self.advance() {
-            Some(t) => t.parse::<i64>().map_err(|_| {
-                CypherError::ParseError(format!("expected integer, got '{}'", t))
-            }),
-            None => Err(CypherError::ParseError("expected integer, got end of input".into())),
+            Some(t) => t
+                .parse::<i64>()
+                .map_err(|_| CypherError::ParseError(format!("expected integer, got '{}'", t))),
+            None => Err(CypherError::ParseError(
+                "expected integer, got end of input".into(),
+            )),
         }
     }
 
@@ -701,7 +731,11 @@ impl ParseContext {
         let property = self.advance_identifier()?;
         self.expect("=")?;
         let value = self.parse_expression()?;
-        Ok(SetItem { variable, property, value })
+        Ok(SetItem {
+            variable,
+            property,
+            value,
+        })
     }
 
     // ── DELETE ───────────────────────────────────────────────────────────────
@@ -733,7 +767,10 @@ impl ParseContext {
             None
         };
 
-        Ok(WithClause { items, where_clause })
+        Ok(WithClause {
+            items,
+            where_clause,
+        })
     }
 
     // ── UNWIND ───────────────────────────────────────────────────────────────
@@ -742,7 +779,10 @@ impl ParseContext {
         let expression = self.parse_expression()?;
         self.expect("AS")?;
         let variable = self.advance_identifier()?;
-        Ok(UnwindClause { expression, variable })
+        Ok(UnwindClause {
+            expression,
+            variable,
+        })
     }
 
     fn parse_create_constraint(&mut self) -> Result<CreateConstraintClause, CypherError> {
@@ -966,7 +1006,11 @@ impl ParseContext {
 
         self.expect(")")?;
 
-        Ok(NodePattern { variable, labels, properties })
+        Ok(NodePattern {
+            variable,
+            labels,
+            properties,
+        })
     }
 
     /// Try to parse an edge pattern. Returns `None` if it isn't a valid edge start.
@@ -1048,7 +1092,7 @@ impl ParseContext {
         // The tokenizer splits `1..3` into `1`, `.`, `.`, `3`
         if self.peek() == Some("*") {
             self.advance(); // consume `*`
-            // Try to read optional min value
+                            // Try to read optional min value
             if let Some(t) = self.peek() {
                 if t != "]" && t != "{" {
                     if let Ok(min) = t.parse::<u32>() {
@@ -1146,7 +1190,9 @@ impl ParseContext {
                     )))
                 }
             }
-            None => Err(CypherError::ParseError("expected value, got end of input".into())),
+            None => Err(CypherError::ParseError(
+                "expected value, got end of input".into(),
+            )),
         }
     }
 
@@ -1295,20 +1341,25 @@ impl ParseContext {
                 Ok(Expression::Literal(Value::Null))
             }
             // Number: integer or float
-            Some(t) if t.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) => {
+            Some(t)
+                if t.chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false) =>
+            {
                 let t = self.advance().unwrap().to_string();
                 if t.contains('.') {
-                    let f: f64 = t.parse().map_err(|_| {
-                        CypherError::ParseError(format!("invalid float '{}'", t))
-                    })?;
+                    let f: f64 = t
+                        .parse()
+                        .map_err(|_| CypherError::ParseError(format!("invalid float '{}'", t)))?;
                     let n = serde_json::Number::from_f64(f).ok_or_else(|| {
                         CypherError::ParseError(format!("invalid float value '{}'", t))
                     })?;
                     Ok(Expression::Literal(Value::Number(n)))
                 } else {
-                    let i: i64 = t.parse().map_err(|_| {
-                        CypherError::ParseError(format!("invalid integer '{}'", t))
-                    })?;
+                    let i: i64 = t
+                        .parse()
+                        .map_err(|_| CypherError::ParseError(format!("invalid integer '{}'", t)))?;
                     Ok(Expression::Literal(Value::Number(i.into())))
                 }
             }
@@ -1334,7 +1385,11 @@ impl ParseContext {
                         }
                     }
                     self.expect(")")?;
-                    return Ok(Expression::FunctionCall { name, args, distinct });
+                    return Ok(Expression::FunctionCall {
+                        name,
+                        args,
+                        distinct,
+                    });
                 }
 
                 // Property access: `var.prop`
@@ -1349,7 +1404,9 @@ impl ParseContext {
 
                 Ok(Expression::Variable(name))
             }
-            None => Err(CypherError::ParseError("unexpected end of expression".into())),
+            None => Err(CypherError::ParseError(
+                "unexpected end of expression".into(),
+            )),
         }
     }
 
@@ -1370,13 +1427,49 @@ impl ParseContext {
 fn is_keyword(s: &str) -> bool {
     matches!(
         s.to_uppercase().as_str(),
-        "MATCH" | "OPTIONAL" | "CREATE" | "RETURN" | "WHERE" | "SET" | "DELETE" | "DETACH"
-            | "WITH" | "MERGE" | "UNWIND" | "ORDER" | "BY" | "LIMIT" | "SKIP" | "AS"
-            | "AND" | "OR" | "NOT" | "NULL" | "TRUE" | "FALSE" | "IS" | "IN"
-            | "DISTINCT" | "ASC" | "DESC" | "ASCENDING" | "DESCENDING"
-            | "CONTAINS" | "STARTS" | "ENDS" | "DROP" | "SHOW" | "CONSTRAINT"
-            | "CONSTRAINTS" | "INDEX" | "INDEXES" | "FOR" | "REQUIRE" | "UNIQUE"
-            | "EXISTS" | "ON"
+        "MATCH"
+            | "OPTIONAL"
+            | "CREATE"
+            | "RETURN"
+            | "WHERE"
+            | "SET"
+            | "DELETE"
+            | "DETACH"
+            | "WITH"
+            | "MERGE"
+            | "UNWIND"
+            | "ORDER"
+            | "BY"
+            | "LIMIT"
+            | "SKIP"
+            | "AS"
+            | "AND"
+            | "OR"
+            | "NOT"
+            | "NULL"
+            | "TRUE"
+            | "FALSE"
+            | "IS"
+            | "IN"
+            | "DISTINCT"
+            | "ASC"
+            | "DESC"
+            | "ASCENDING"
+            | "DESCENDING"
+            | "CONTAINS"
+            | "STARTS"
+            | "ENDS"
+            | "DROP"
+            | "SHOW"
+            | "CONSTRAINT"
+            | "CONSTRAINTS"
+            | "INDEX"
+            | "INDEXES"
+            | "FOR"
+            | "REQUIRE"
+            | "UNIQUE"
+            | "EXISTS"
+            | "ON"
     )
 }
 
@@ -1439,7 +1532,9 @@ pub struct Executor {
 
 impl Executor {
     pub fn new() -> Self {
-        Executor { parser: Parser::new() }
+        Executor {
+            parser: Parser::new(),
+        }
     }
 
     /// Parse `cypher`, apply optional `params`, and return an (empty) result set.
@@ -1453,7 +1548,10 @@ impl Executor {
         if let Some(p) = params {
             query.parameters = p;
         }
-        Ok(QueryResult { columns: vec![], rows: vec![] })
+        Ok(QueryResult {
+            columns: vec![],
+            rows: vec![],
+        })
     }
 }
 
@@ -1540,7 +1638,9 @@ mod tests {
     #[test]
     fn test_parse_where_clause() {
         let p = Parser::new();
-        let q = p.parse("MATCH (n) WHERE n.name = 'Alice' RETURN n").unwrap();
+        let q = p
+            .parse("MATCH (n) WHERE n.name = 'Alice' RETURN n")
+            .unwrap();
         let has_where = q.clauses.iter().any(|c| matches!(c, Clause::Where(_)));
         assert!(has_where);
     }
@@ -1709,7 +1809,10 @@ mod tests {
         let p = Parser::new();
         let q = p.parse("MATCH (n) RETURN count(n) AS total").unwrap();
         if let Some(Clause::Return(r)) = q.clauses.iter().find(|c| matches!(c, Clause::Return(_))) {
-            assert!(matches!(r.items[0].expression, Expression::FunctionCall { .. }));
+            assert!(matches!(
+                r.items[0].expression,
+                Expression::FunctionCall { .. }
+            ));
         } else {
             panic!("expected Return clause");
         }
@@ -1774,7 +1877,11 @@ mod tests {
             .parse("MATCH (n) WHERE n.name CONTAINS 'Ali' RETURN n")
             .unwrap();
         let where_clause = q.clauses.iter().find_map(|c| {
-            if let Clause::Where(w) = c { Some(w) } else { None }
+            if let Clause::Where(w) = c {
+                Some(w)
+            } else {
+                None
+            }
         });
         assert!(matches!(
             where_clause.unwrap().expression,
@@ -1789,7 +1896,11 @@ mod tests {
             .parse("MATCH (n) WHERE n.name STARTS WITH 'Al' RETURN n")
             .unwrap();
         let where_clause = q.clauses.iter().find_map(|c| {
-            if let Clause::Where(w) = c { Some(w) } else { None }
+            if let Clause::Where(w) = c {
+                Some(w)
+            } else {
+                None
+            }
         });
         assert!(matches!(
             where_clause.unwrap().expression,
@@ -1804,7 +1915,11 @@ mod tests {
             .parse("MATCH (n) WHERE n.name ENDS WITH 'ice' RETURN n")
             .unwrap();
         let where_clause = q.clauses.iter().find_map(|c| {
-            if let Clause::Where(w) = c { Some(w) } else { None }
+            if let Clause::Where(w) = c {
+                Some(w)
+            } else {
+                None
+            }
         });
         assert!(matches!(
             where_clause.unwrap().expression,
@@ -1816,11 +1931,13 @@ mod tests {
     fn test_parse_where_not_equal() {
         let p = Parser::new();
         // != should be normalised to <>
-        let q = p
-            .parse("MATCH (n) WHERE n.age != 0 RETURN n")
-            .unwrap();
+        let q = p.parse("MATCH (n) WHERE n.age != 0 RETURN n").unwrap();
         let where_clause = q.clauses.iter().find_map(|c| {
-            if let Clause::Where(w) = c { Some(w) } else { None }
+            if let Clause::Where(w) = c {
+                Some(w)
+            } else {
+                None
+            }
         });
         assert!(matches!(
             where_clause.unwrap().expression,
@@ -1860,7 +1977,9 @@ mod tests {
     fn test_parse_create_exists_constraint() {
         let p = Parser::new();
         let q = p
-            .parse("CREATE CONSTRAINT person_email_exists FOR (n:Person) REQUIRE n.email IS NOT NULL")
+            .parse(
+                "CREATE CONSTRAINT person_email_exists FOR (n:Person) REQUIRE n.email IS NOT NULL",
+            )
             .unwrap();
         if let Clause::CreateConstraint(c) = q.clauses.first().expect("clause missing") {
             assert!(matches!(c.kind, ConstraintKind::Exists));
@@ -1881,7 +2000,9 @@ mod tests {
     #[test]
     fn test_parse_drop_constraint_if_exists() {
         let p = Parser::new();
-        let q = p.parse("DROP CONSTRAINT person_email_unique IF EXISTS").unwrap();
+        let q = p
+            .parse("DROP CONSTRAINT person_email_unique IF EXISTS")
+            .unwrap();
         if let Clause::DropConstraint(c) = q.clauses.first().expect("clause missing") {
             assert_eq!(c.name, "person_email_unique");
             assert!(c.if_exists);

@@ -40,7 +40,7 @@ pub enum DecayModel {
 pub struct DecayState {
     pub initial_weight: f64,
     pub current_weight: f64,
-    pub last_accessed: u64,  // Unix timestamp in seconds
+    pub last_accessed: u64, // Unix timestamp in seconds
     pub access_count: u64,
     pub model: DecayModel,
 }
@@ -149,7 +149,8 @@ impl KalmanAdapter {
 
         let updated_state = predicted_state + kalman_gain * innovation;
         let measurement_projection = Matrix2::new(1.0, 0.0, 0.0, 0.0);
-        let updated_covariance = (Matrix2::identity() - kalman_gain * Vector2::new(1.0, 0.0).transpose())
+        let updated_covariance = (Matrix2::identity()
+            - kalman_gain * Vector2::new(1.0, 0.0).transpose())
             * predicted_covariance;
 
         self.state = [updated_state[0], updated_state[1].max(0.0)];

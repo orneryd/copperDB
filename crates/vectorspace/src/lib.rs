@@ -45,7 +45,11 @@ impl VectorSpace {
     }
 
     /// Insert a vector with the given ID.
-    pub fn insert(&mut self, id: impl Into<String>, vector: Vec<f32>) -> Result<(), VectorSpaceError> {
+    pub fn insert(
+        &mut self,
+        id: impl Into<String>,
+        vector: Vec<f32>,
+    ) -> Result<(), VectorSpaceError> {
         if vector.len() != self.dimensions {
             return Err(VectorSpaceError::DimensionMismatch {
                 expected: self.dimensions,
@@ -66,14 +70,18 @@ impl VectorSpace {
                 got: query.len(),
             });
         }
-        let mut scores: Vec<(String, f32)> = self.entries.iter().map(|(id, v)| {
-            let score = match self.metric {
-                SimilarityMetric::Cosine => cosine(query, v),
-                SimilarityMetric::Euclidean => -euclidean(query, v),
-                SimilarityMetric::DotProduct => dot(query, v),
-            };
-            (id.clone(), score)
-        }).collect();
+        let mut scores: Vec<(String, f32)> = self
+            .entries
+            .iter()
+            .map(|(id, v)| {
+                let score = match self.metric {
+                    SimilarityMetric::Cosine => cosine(query, v),
+                    SimilarityMetric::Euclidean => -euclidean(query, v),
+                    SimilarityMetric::DotProduct => dot(query, v),
+                };
+                (id.clone(), score)
+            })
+            .collect();
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scores.truncate(k);
         Ok(scores)
@@ -96,11 +104,19 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let d = dot(a, b);
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 { 0.0 } else { d / (na * nb) }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        d / (na * nb)
+    }
 }
 
 fn euclidean(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum::<f32>().sqrt()
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y) * (x - y))
+        .sum::<f32>()
+        .sqrt()
 }
 
 /// Global registry of vector spaces.

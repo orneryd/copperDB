@@ -102,7 +102,10 @@ async fn main() -> Result<()> {
         let bolt_addr = startup.bolt_address.clone();
         Some(tokio::spawn(async move {
             info!(listen_addr = %bolt_addr, "copperdb Bolt server listening");
-            bolt_server.serve().await.context("bolt server exited unexpectedly")
+            bolt_server
+                .serve()
+                .await
+                .context("bolt server exited unexpectedly")
         }))
     } else {
         None
@@ -189,20 +192,24 @@ fn find_default_ui_dist() -> Option<String> {
 
 fn load_config_file(path: &Path) -> Result<Config> {
     match path.extension().and_then(|ext| ext.to_str()) {
-        Some("yaml") | Some("yml") => {
-            load_yaml(path).with_context(|| format!("failed to load config from {}", path.display()))
-        }
-        Some("toml") => {
-            load_toml(path).with_context(|| format!("failed to load config from {}", path.display()))
-        }
+        Some("yaml") | Some("yml") => load_yaml(path)
+            .with_context(|| format!("failed to load config from {}", path.display())),
+        Some("toml") => load_toml(path)
+            .with_context(|| format!("failed to load config from {}", path.display())),
         _ => anyhow::bail!("unsupported config format for {}", path.display()),
     }
 }
 
 fn apply_env_overrides(config: &mut Config) {
-    set_if_present(env::var("COPPERDB_ADDRESS").ok(), |value| config.server.address = value);
-    set_if_present(env::var("COPPERDB_HTTP_ADDRESS").ok(), |value| config.server.http_address = Some(value));
-    set_if_present(env::var("COPPERDB_BOLT_ADDRESS").ok(), |value| config.server.bolt_address = Some(value));
+    set_if_present(env::var("COPPERDB_ADDRESS").ok(), |value| {
+        config.server.address = value
+    });
+    set_if_present(env::var("COPPERDB_HTTP_ADDRESS").ok(), |value| {
+        config.server.http_address = Some(value)
+    });
+    set_if_present(env::var("COPPERDB_BOLT_ADDRESS").ok(), |value| {
+        config.server.bolt_address = Some(value)
+    });
     set_if_present(
         parse_env_u16("COPPERDB_HTTP_PORT")
             .or_else(|| parse_env_u16("NEO4J_dbms_connector_http_listen__address_port")),
@@ -213,11 +220,21 @@ fn apply_env_overrides(config: &mut Config) {
             .or_else(|| parse_env_u16("NEO4J_dbms_connector_bolt_listen__address_port")),
         |value| config.server.bolt_port = value,
     );
-    set_if_present(parse_env_bool("COPPERDB_HTTP_ENABLED"), |value| config.server.http_enabled = value);
-    set_if_present(parse_env_bool("COPPERDB_BOLT_ENABLED"), |value| config.server.bolt_enabled = value);
-    set_if_present(parse_env_bool("COPPERDB_HEADLESS"), |value| config.server.headless = value);
-    set_if_present(env::var("COPPERDB_BASE_PATH").ok(), |value| config.server.base_path = value);
-    set_if_present(env::var("COPPERDB_STATIC_DIR").ok(), |value| config.server.static_dir = Some(value));
+    set_if_present(parse_env_bool("COPPERDB_HTTP_ENABLED"), |value| {
+        config.server.http_enabled = value
+    });
+    set_if_present(parse_env_bool("COPPERDB_BOLT_ENABLED"), |value| {
+        config.server.bolt_enabled = value
+    });
+    set_if_present(parse_env_bool("COPPERDB_HEADLESS"), |value| {
+        config.server.headless = value
+    });
+    set_if_present(env::var("COPPERDB_BASE_PATH").ok(), |value| {
+        config.server.base_path = value
+    });
+    set_if_present(env::var("COPPERDB_STATIC_DIR").ok(), |value| {
+        config.server.static_dir = Some(value)
+    });
 }
 
 fn apply_cli_overrides(config: &mut Config, cli: &Cli) {

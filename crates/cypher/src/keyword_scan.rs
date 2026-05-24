@@ -465,9 +465,15 @@ mod tests {
     fn test_keyword_index_from_offset() {
         let q = "MATCH (n) MATCH (m) RETURN n, m";
         // From offset 0 we get first MATCH
-        assert_eq!(keyword_index_from(q, "MATCH", 0, KeywordScanOpts::default()), Some(0));
+        assert_eq!(
+            keyword_index_from(q, "MATCH", 0, KeywordScanOpts::default()),
+            Some(0)
+        );
         // From offset 1 we skip the first, get second
-        assert_eq!(keyword_index_from(q, "MATCH", 1, KeywordScanOpts::default()), Some(10));
+        assert_eq!(
+            keyword_index_from(q, "MATCH", 1, KeywordScanOpts::default()),
+            Some(10)
+        );
     }
 
     #[test]

@@ -42,7 +42,11 @@ pub struct McpRequest {
 }
 
 impl McpRequest {
-    pub fn new(id: impl Into<serde_json::Value>, method: impl Into<String>, params: Option<serde_json::Value>) -> Self {
+    pub fn new(
+        id: impl Into<serde_json::Value>,
+        method: impl Into<String>,
+        params: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             jsonrpc: "2.0".into(),
             id: id.into(),
@@ -65,7 +69,12 @@ pub struct McpResponse {
 
 impl McpResponse {
     pub fn ok(id: serde_json::Value, result: serde_json::Value) -> Self {
-        Self { jsonrpc: "2.0".into(), id, result: Some(result), error: None }
+        Self {
+            jsonrpc: "2.0".into(),
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
 
     pub fn error(id: serde_json::Value, code: i32, message: impl Into<String>) -> Self {
@@ -73,7 +82,10 @@ impl McpResponse {
             jsonrpc: "2.0".into(),
             id,
             result: None,
-            error: Some(McpResponseError { code, message: message.into() }),
+            error: Some(McpResponseError {
+                code,
+                message: message.into(),
+            }),
         }
     }
 }
@@ -105,7 +117,9 @@ impl Default for ToolRegistry {
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        let mut registry = Self { tools: HashMap::new() };
+        let mut registry = Self {
+            tools: HashMap::new(),
+        };
         for tool in copperdb_tools() {
             registry.register(tool);
         }
@@ -139,15 +153,14 @@ impl ToolRegistry {
         match request.method.as_str() {
             "tools/list" => {
                 let tools: Vec<&Tool> = self.list();
-                McpResponse::ok(
-                    request.id.clone(),
-                    serde_json::json!({ "tools": tools }),
-                )
+                McpResponse::ok(request.id.clone(), serde_json::json!({ "tools": tools }))
             }
             "tools/call" => {
                 let params = match &request.params {
                     Some(p) => p,
-                    None => return McpResponse::error(request.id.clone(), -32602, "missing params"),
+                    None => {
+                        return McpResponse::error(request.id.clone(), -32602, "missing params")
+                    }
                 };
                 let call: ToolCallParams = match serde_json::from_value(params.clone()) {
                     Ok(c) => c,
@@ -257,7 +270,9 @@ mod tests {
         let req = McpRequest::new(
             serde_json::json!(3),
             "tools/call",
-            Some(serde_json::json!({ "name": "run_cypher", "arguments": { "query": "MATCH (n) RETURN n" } })),
+            Some(
+                serde_json::json!({ "name": "run_cypher", "arguments": { "query": "MATCH (n) RETURN n" } }),
+            ),
         );
         let resp = registry.dispatch(&req);
         assert!(resp.error.is_none());
@@ -286,10 +301,7 @@ mod tests {
 
     #[test]
     fn test_mcp_response_serialization() {
-        let resp = McpResponse::ok(
-            serde_json::json!(1),
-            serde_json::json!({"status": "ok"}),
-        );
+        let resp = McpResponse::ok(serde_json::json!(1), serde_json::json!({"status": "ok"}));
         let json = serde_json::to_string(&resp).unwrap();
         let decoded: McpResponse = serde_json::from_str(&json).unwrap();
         assert!(decoded.result.is_some());
