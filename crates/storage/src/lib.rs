@@ -445,12 +445,9 @@ impl SchemaManager {
                             let value_key = value.to_string();
                             let key = (label.to_string(), property.clone(), value_key.clone());
                             let mut unique = self.unique_values.write();
-                            unique.retain(|(existing_label, existing_property, existing_value), existing_node| {
-                                !(existing_label == label
-                                    && existing_property == property
-                                    && existing_value != &value_key
-                                    && existing_node == node_id)
-                            });
+                            cleanup_stale_unique_values_for_node(
+                                &mut unique, label, property, &value_key, node_id,
+                            );
                             if let Some(existing) = unique.get(&key) {
                                 if existing != node_id {
                                     return Err(StorageError::UniqueConstraintViolation {
@@ -470,6 +467,23 @@ impl SchemaManager {
         }
         Ok(())
     }
+}
+
+fn cleanup_stale_unique_values_for_node(
+    unique: &mut BTreeMap<(String, String, String), String>,
+    label: &str,
+    property: &str,
+    new_value: &str,
+    node_id: &str,
+) {
+    unique.retain(
+        |(existing_label, existing_property, existing_value), existing_node| {
+            !(existing_label == label
+                && existing_property == property
+                && existing_value != new_value
+                && existing_node == node_id)
+        },
+    );
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -964,7 +978,7 @@ mod tests {
     #[test]
     fn rejects_non_v0_layout_manifest() {
         let test_dir =
-            std::env::temp_dir().join(format!("copperdb-storage-version-test-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("copperdb-storage-layout-version-rejection-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&test_dir).unwrap();
         let db = sled::open(&test_dir).unwrap();
         let meta = db.open_tree("meta").unwrap();

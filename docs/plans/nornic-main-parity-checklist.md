@@ -74,9 +74,9 @@
 - [ ] Composite engine/routing parity
 - [ ] Remote engine adapter parity
 
-### Migration policy in copper
-- [x] Explicitly target **storage layout version 0 only** in copper
-- [x] Do not add legacy migration arms or upgrade paths in copper storage v0 baseline
+### Migration policy in Copper
+- [x] Explicitly target **storage layout version 0 only** in Copper
+- [x] Do not add legacy migration arms or upgrade paths in Copper storage v0 baseline
 
 ## Distributed search mesh + hyperscaler baseline requirements
 - [ ] Cluster search peer registry in storage metadata
