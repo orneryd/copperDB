@@ -69,7 +69,7 @@ impl Telemetry {
             Some(MetricValue::Counter(existing)) => Ok(MetricValue::Counter(existing + 1.0)),
             Some(other) => Err(TelemetryError::MetricTypeMismatch {
                 metric: name.into(),
-                existing: metric_value_kind(other),
+                existing: metric_value_kind(&other),
                 requested: "counter",
             }),
         })
@@ -86,7 +86,7 @@ impl Telemetry {
             None | Some(MetricValue::Gauge(_)) => Ok(MetricValue::Gauge(value)),
             Some(other) => Err(TelemetryError::MetricTypeMismatch {
                 metric: name.into(),
-                existing: metric_value_kind(other),
+                existing: metric_value_kind(&other),
                 requested: "gauge",
             }),
         })
@@ -107,7 +107,7 @@ impl Telemetry {
             }
             Some(other) => Err(TelemetryError::MetricTypeMismatch {
                 metric: name.into(),
-                existing: metric_value_kind(other),
+                existing: metric_value_kind(&other),
                 requested: "histogram",
             }),
         })
@@ -134,13 +134,16 @@ impl Telemetry {
 
     pub fn mock_unimplemented_catalog_metrics(&self) {
         for spec in METRIC_CATALOG {
-            let empty = [NONE_LABELS];
-            let shape = spec.label_shapes.first().copied().unwrap_or(&empty[0]);
-            let labels = shape
-                .iter()
-                .map(|name| (*name, "mock"))
-                .collect::<Vec<_>>();
-            let _ = self.set_gauge(spec.name, &labels, 0.0);
+            let shape = spec.label_shapes.first().copied().unwrap_or(&[]);
+            if shape.is_empty() {
+                let _ = self.set_gauge(spec.name, &[], 0.0);
+            } else {
+                let labels = shape
+                    .iter()
+                    .map(|name| (*name, "mock"))
+                    .collect::<Vec<_>>();
+                let _ = self.set_gauge(spec.name, &labels, 0.0);
+            }
         }
     }
 
@@ -157,8 +160,6 @@ impl Telemetry {
         Ok(())
     }
 }
-
-const NONE_LABELS: (&str, &str) = ("", "");
 
 fn validate_labels(name: &str, labels: &[(&str, &str)]) -> Result<SampleKey, TelemetryError> {
     let metric = Telemetry::metric_spec(name)
@@ -209,12 +210,16 @@ pub fn classify_cypher_op_type(query: &str) -> &'static str {
     let normalized = query.trim().to_ascii_uppercase();
     if normalized.is_empty() {
         "parse_error"
+    } else if normalized.starts_with("CREATE INDEX")
+        || normalized.starts_with("DROP INDEX")
+        || normalized.starts_with("CREATE CONSTRAINT")
+        || normalized.starts_with("DROP CONSTRAINT")
+    {
+        "schema"
     } else if normalized.starts_with("MATCH") || normalized.starts_with("RETURN") {
         "read"
     } else if normalized.starts_with("CREATE") || normalized.starts_with("MERGE") || normalized.starts_with("DELETE") || normalized.starts_with("SET") {
         "write"
-    } else if normalized.starts_with("CREATE INDEX") || normalized.starts_with("DROP INDEX") || normalized.starts_with("CREATE CONSTRAINT") || normalized.starts_with("DROP CONSTRAINT") {
-        "schema"
     } else if normalized.starts_with("SHOW DATABASE") || normalized.starts_with("CREATE DATABASE") || normalized.starts_with("DROP DATABASE") {
         "admin"
     } else if normalized.starts_with("USE ") {
