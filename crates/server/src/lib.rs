@@ -856,7 +856,7 @@ async fn cypher_handler(
         Err(error) => {
             let _ = state.telemetry.record_counter(
                 "nornicdb_cypher_queries_total",
-                &[("op_type", "parse_error"), ("database", &state.db_name)],
+                &[("op_type", op_type), ("database", &state.db_name)],
             );
             (StatusCode::OK, Json(CypherResponse::error(error)))
         }

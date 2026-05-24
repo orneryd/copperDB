@@ -3,6 +3,7 @@
 use crate::BoltError;
 use copperdb_otel::Telemetry;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, warn};
@@ -12,6 +13,7 @@ use tracing::{debug, warn};
 pub struct BoltServer {
     pub listen_addr: String,
     telemetry: Arc<Telemetry>,
+    active_connections: Arc<AtomicU64>,
 }
 
 impl BoltServer {
@@ -19,6 +21,7 @@ impl BoltServer {
         Self {
             listen_addr: listen_addr.into(),
             telemetry,
+            active_connections: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -32,12 +35,14 @@ impl BoltServer {
                 "nornicdb_bolt_connections_total",
                 &[("result", "success"), ("transport", "tcp")],
             );
+            let active = self.active_connections.fetch_add(1, Ordering::SeqCst) + 1;
             let _ = self.telemetry.set_gauge(
                 "nornicdb_bolt_connections_active",
                 &[("transport", "tcp")],
-                1.0,
+                active as f64,
             );
             let telemetry = Arc::clone(&self.telemetry);
+            let active_connections = Arc::clone(&self.active_connections);
             debug!(%peer_addr, "accepted bolt connection");
             tokio::spawn(async move {
                 if let Err(error) = handle_connection(stream, &telemetry).await {
@@ -47,10 +52,11 @@ impl BoltServer {
                     );
                     warn!(%peer_addr, %error, "bolt connection failed");
                 }
+                let active = active_connections.fetch_sub(1, Ordering::SeqCst) - 1;
                 let _ = telemetry.set_gauge(
                     "nornicdb_bolt_connections_active",
                     &[("transport", "tcp")],
-                    0.0,
+                    active as f64,
                 );
             });
         }
