@@ -2,9 +2,12 @@
 //!
 //! Executes Cypher ASTs from `copperdb-cypher` against the storage engine.
 
-use copperdb_cypher::{Clause, Expression, Query, ReturnItem};
+use copperdb_cypher::{Clause, ConstraintKind, Expression, Query, ReturnItem};
 use copperdb_filter::{eval_predicate, eval_expression};
-use copperdb_storage::StorageEngine;
+use copperdb_storage::{
+    Constraint, ConstraintEntityType, ConstraintType, IndexDefinition, IndexEntityType,
+    StorageEngine,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -181,6 +184,145 @@ impl EvalEngine {
 
         for clause in &query.clauses {
             match clause {
+                Clause::CreateConstraint(create) => {
+                    let existing = self.storage.load_constraints()?;
+                    let already_exists = existing.iter().any(|c| c.name == create.name);
+                    if already_exists {
+                        if create.if_not_exists {
+                            continue;
+                        }
+                        return Err(EvalError::ExecutionError(format!(
+                            "constraint \"{}\" already exists",
+                            create.name
+                        )));
+                    }
+                    let constraint_type = match create.kind {
+                        ConstraintKind::Unique => ConstraintType::Unique,
+                        ConstraintKind::Exists => ConstraintType::Exists,
+                    };
+                    self.storage.persist_constraint(&Constraint {
+                        name: create.name.clone(),
+                        constraint_type,
+                        entity_type: ConstraintEntityType::Node,
+                        label: create.label.clone(),
+                        properties: vec![create.property.clone()],
+                    })?;
+                }
+
+                Clause::DropConstraint(drop) => {
+                    let deleted = self.storage.delete_constraint(&drop.name)?;
+                    if !deleted && !drop.if_exists {
+                        return Err(EvalError::ExecutionError(format!(
+                            "constraint \"{}\" not found",
+                            drop.name
+                        )));
+                    }
+                }
+
+                Clause::ShowConstraints(_) => {
+                    let constraints = self.storage.load_constraints()?;
+                    columns = vec![
+                        "name".to_string(),
+                        "type".to_string(),
+                        "entityType".to_string(),
+                        "label".to_string(),
+                        "properties".to_string(),
+                    ];
+                    result_rows = constraints
+                        .into_iter()
+                        .map(|c| {
+                            let mut row = Row::new();
+                            row.insert("name".to_string(), Value::String(c.name));
+                            row.insert(
+                                "type".to_string(),
+                                Value::String(match c.constraint_type {
+                                    ConstraintType::Unique => "UNIQUE",
+                                    ConstraintType::Exists => "EXISTS",
+                                    ConstraintType::NodeKey => "NODE_KEY",
+                                    ConstraintType::Type => "TYPE",
+                                    ConstraintType::Relationship => "RELATIONSHIP",
+                                }
+                                .to_string()),
+                            );
+                            row.insert(
+                                "entityType".to_string(),
+                                Value::String(match c.entity_type {
+                                    ConstraintEntityType::Node => "NODE",
+                                    ConstraintEntityType::Relationship => "RELATIONSHIP",
+                                }
+                                .to_string()),
+                            );
+                            row.insert("label".to_string(), Value::String(c.label));
+                            row.insert(
+                                "properties".to_string(),
+                                Value::Array(c.properties.into_iter().map(Value::String).collect()),
+                            );
+                            row
+                        })
+                        .collect();
+                }
+
+                Clause::CreateIndex(create) => {
+                    let existing = self.storage.load_index_definitions()?;
+                    let already_exists = existing.iter().any(|i| i.name == create.name);
+                    if already_exists {
+                        if create.if_not_exists {
+                            continue;
+                        }
+                        return Err(EvalError::ExecutionError(format!(
+                            "index \"{}\" already exists",
+                            create.name
+                        )));
+                    }
+                    self.storage.persist_index_definition(&IndexDefinition {
+                        name: create.name.clone(),
+                        entity_type: IndexEntityType::Node,
+                        label: create.label.clone(),
+                        properties: create.properties.clone(),
+                    })?;
+                }
+
+                Clause::DropIndex(drop) => {
+                    let deleted = self.storage.delete_index_definition(&drop.name)?;
+                    if !deleted && !drop.if_exists {
+                        return Err(EvalError::ExecutionError(format!(
+                            "index \"{}\" not found",
+                            drop.name
+                        )));
+                    }
+                }
+
+                Clause::ShowIndexes(_) => {
+                    let indexes = self.storage.load_index_definitions()?;
+                    columns = vec![
+                        "name".to_string(),
+                        "entityType".to_string(),
+                        "label".to_string(),
+                        "properties".to_string(),
+                    ];
+                    result_rows = indexes
+                        .into_iter()
+                        .map(|idx| {
+                            let mut row = Row::new();
+                            row.insert("name".to_string(), Value::String(idx.name));
+                            row.insert(
+                                "entityType".to_string(),
+                                Value::String(match idx.entity_type {
+                                    IndexEntityType::Node => "NODE",
+                                    IndexEntityType::Relationship => "RELATIONSHIP",
+                                }
+                                .to_string()),
+                            );
+                            row.insert("label".to_string(), Value::String(idx.label));
+                            row.insert(
+                                "properties".to_string(),
+                                Value::Array(idx.properties.into_iter().map(Value::String).collect()),
+                            );
+                            row
+                        })
+                        .collect();
+                }
+
                 Clause::Create(create) => {
                     // Any write invalidates the MERGE node-lookup cache (v1.0.42 parity).
                     self.invalidate_node_lookup_cache();
@@ -1045,5 +1187,86 @@ mod tests {
         let result = engine.execute(&count_q, &HashMap::new()).unwrap();
         assert_eq!(result.rows.len(), 1);
     }
-}
 
+    #[test]
+    fn test_constraint_ddl_roundtrip() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let create = parser
+            .parse("CREATE CONSTRAINT person_email_unique FOR (n:Person) REQUIRE n.email IS UNIQUE")
+            .unwrap();
+        engine.execute(&create, &HashMap::new()).unwrap();
+
+        let show = parser.parse("SHOW CONSTRAINTS").unwrap();
+        let shown = engine.execute(&show, &HashMap::new()).unwrap();
+        assert_eq!(shown.rows.len(), 1);
+        assert_eq!(
+            shown.rows[0].get("name"),
+            Some(&Value::String("person_email_unique".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_constraint_drop_if_exists_and_error_path() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let err = engine
+            .execute(
+                &parser.parse("DROP CONSTRAINT missing_constraint").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("constraint \"missing_constraint\" not found"));
+
+        engine
+            .execute(
+                &parser
+                    .parse("DROP CONSTRAINT missing_constraint IF EXISTS")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn test_index_ddl_roundtrip() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let create = parser
+            .parse("CREATE INDEX person_idx FOR (n:Person) ON (n.email)")
+            .unwrap();
+        engine.execute(&create, &HashMap::new()).unwrap();
+
+        let show = parser.parse("SHOW INDEXES").unwrap();
+        let shown = engine.execute(&show, &HashMap::new()).unwrap();
+        assert_eq!(shown.rows.len(), 1);
+        assert_eq!(
+            shown.rows[0].get("name"),
+            Some(&Value::String("person_idx".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_index_drop_if_exists_and_error_path() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let err = engine
+            .execute(
+                &parser.parse("DROP INDEX missing_idx").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("index \"missing_idx\" not found"));
+
+        engine
+            .execute(
+                &parser.parse("DROP INDEX missing_idx IF EXISTS").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+    }
+}

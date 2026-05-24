@@ -49,6 +49,7 @@ pub enum QueryType {
     Set,
     Return,
     With,
+    Ddl,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +73,12 @@ pub enum Clause {
     With(WithClause),
     Unwind(UnwindClause),
     Create(CreateClause),
+    CreateConstraint(CreateConstraintClause),
+    DropConstraint(DropConstraintClause),
+    ShowConstraints(ShowConstraintsClause),
+    CreateIndex(CreateIndexClause),
+    DropIndex(DropIndexClause),
+    ShowIndexes(ShowIndexesClause),
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +133,47 @@ pub struct UnwindClause {
     pub expression: Expression,
     pub variable: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConstraintKind {
+    Unique,
+    Exists,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateConstraintClause {
+    pub name: String,
+    pub if_not_exists: bool,
+    pub label: String,
+    pub property: String,
+    pub kind: ConstraintKind,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropConstraintClause {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShowConstraintsClause;
+
+#[derive(Debug, Clone)]
+pub struct CreateIndexClause {
+    pub name: String,
+    pub if_not_exists: bool,
+    pub label: String,
+    pub properties: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropIndexClause {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShowIndexesClause;
 
 // ─── Patterns ─────────────────────────────────────────────────────────────────
 
@@ -400,8 +448,20 @@ impl ParseContext {
                 }
                 "CREATE" => {
                     self.advance();
-                    let clause = self.parse_create()?;
-                    clauses.push(Clause::Create(clause));
+                    match self.peek_upper().as_deref() {
+                        Some("CONSTRAINT") => {
+                            self.advance();
+                            clauses.push(Clause::CreateConstraint(self.parse_create_constraint()?));
+                        }
+                        Some("INDEX") => {
+                            self.advance();
+                            clauses.push(Clause::CreateIndex(self.parse_create_index()?));
+                        }
+                        _ => {
+                            let clause = self.parse_create()?;
+                            clauses.push(Clause::Create(clause));
+                        }
+                    }
                 }
                 "MERGE" => {
                     self.advance();
@@ -443,6 +503,54 @@ impl ParseContext {
                     self.advance();
                     let clause = self.parse_unwind()?;
                     clauses.push(Clause::Unwind(clause));
+                }
+                "DROP" => {
+                    self.advance();
+                    match self.peek_upper().as_deref() {
+                        Some("CONSTRAINT") => {
+                            self.advance();
+                            clauses.push(Clause::DropConstraint(self.parse_drop_constraint()?));
+                        }
+                        Some("INDEX") => {
+                            self.advance();
+                            clauses.push(Clause::DropIndex(self.parse_drop_index()?));
+                        }
+                        Some(other) => {
+                            return Err(CypherError::ParseError(format!(
+                                "unsupported DROP target '{}'",
+                                other
+                            )));
+                        }
+                        None => {
+                            return Err(CypherError::ParseError(
+                                "expected DROP target, got end of input".into(),
+                            ));
+                        }
+                    }
+                }
+                "SHOW" => {
+                    self.advance();
+                    match self.peek_upper().as_deref() {
+                        Some("CONSTRAINTS") => {
+                            self.advance();
+                            clauses.push(Clause::ShowConstraints(self.parse_show_constraints()?));
+                        }
+                        Some("INDEXES") => {
+                            self.advance();
+                            clauses.push(Clause::ShowIndexes(self.parse_show_indexes()?));
+                        }
+                        Some(other) => {
+                            return Err(CypherError::ParseError(format!(
+                                "unsupported SHOW target '{}'",
+                                other
+                            )));
+                        }
+                        None => {
+                            return Err(CypherError::ParseError(
+                                "expected SHOW target, got end of input".into(),
+                            ));
+                        }
+                    }
                 }
                 _ => {
                     return Err(CypherError::ParseError(format!(
@@ -635,6 +743,158 @@ impl ParseContext {
         self.expect("AS")?;
         let variable = self.advance_identifier()?;
         Ok(UnwindClause { expression, variable })
+    }
+
+    fn parse_create_constraint(&mut self) -> Result<CreateConstraintClause, CypherError> {
+        let name = self.advance_identifier()?;
+        let if_not_exists = self.consume_if_not_exists()?;
+        self.expect("FOR")?;
+        self.expect("(")?;
+        let variable = self.advance_identifier()?;
+        self.expect(":")?;
+        let label = self.advance_identifier()?;
+        self.expect(")")?;
+        self.expect("REQUIRE")?;
+        let (prop_variable, property) = self.parse_qualified_property()?;
+        if prop_variable != variable {
+            return Err(CypherError::ParseError(format!(
+                "constraint variable mismatch: expected '{}', got '{}'",
+                variable, prop_variable
+            )));
+        }
+        self.expect("IS")?;
+
+        let kind = match self.peek_upper().as_deref() {
+            Some("UNIQUE") => {
+                self.advance();
+                ConstraintKind::Unique
+            }
+            Some("NOT") => {
+                self.advance();
+                self.expect("NULL")?;
+                ConstraintKind::Exists
+            }
+            Some(other) => {
+                return Err(CypherError::ParseError(format!(
+                    "unsupported constraint predicate '{}'",
+                    other
+                )));
+            }
+            None => {
+                return Err(CypherError::ParseError(
+                    "expected constraint predicate, got end of input".into(),
+                ));
+            }
+        };
+
+        Ok(CreateConstraintClause {
+            name,
+            if_not_exists,
+            label,
+            property,
+            kind,
+        })
+    }
+
+    fn parse_drop_constraint(&mut self) -> Result<DropConstraintClause, CypherError> {
+        let name = self.advance_identifier()?;
+        let if_exists = self.consume_if_exists()?;
+        Ok(DropConstraintClause { name, if_exists })
+    }
+
+    fn parse_show_constraints(&mut self) -> Result<ShowConstraintsClause, CypherError> {
+        if self.peek().is_some() {
+            return Err(CypherError::ParseError(format!(
+                "unexpected token '{}' after SHOW CONSTRAINTS",
+                self.peek().unwrap_or_default()
+            )));
+        }
+        Ok(ShowConstraintsClause)
+    }
+
+    fn parse_create_index(&mut self) -> Result<CreateIndexClause, CypherError> {
+        let name = self.advance_identifier()?;
+        let if_not_exists = self.consume_if_not_exists()?;
+        self.expect("FOR")?;
+        self.expect("(")?;
+        let variable = self.advance_identifier()?;
+        self.expect(":")?;
+        let label = self.advance_identifier()?;
+        self.expect(")")?;
+        self.expect("ON")?;
+        self.expect("(")?;
+        let mut properties = Vec::new();
+        loop {
+            let (prop_variable, property) = self.parse_qualified_property()?;
+            if prop_variable != variable {
+                return Err(CypherError::ParseError(format!(
+                    "index variable mismatch: expected '{}', got '{}'",
+                    variable, prop_variable
+                )));
+            }
+            properties.push(property);
+            if self.peek() == Some(",") {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+        self.expect(")")?;
+        if properties.is_empty() {
+            return Err(CypherError::ParseError(
+                "index definition must include at least one property".into(),
+            ));
+        }
+        Ok(CreateIndexClause {
+            name,
+            if_not_exists,
+            label,
+            properties,
+        })
+    }
+
+    fn parse_drop_index(&mut self) -> Result<DropIndexClause, CypherError> {
+        let name = self.advance_identifier()?;
+        let if_exists = self.consume_if_exists()?;
+        Ok(DropIndexClause { name, if_exists })
+    }
+
+    fn parse_show_indexes(&mut self) -> Result<ShowIndexesClause, CypherError> {
+        if self.peek().is_some() {
+            return Err(CypherError::ParseError(format!(
+                "unexpected token '{}' after SHOW INDEXES",
+                self.peek().unwrap_or_default()
+            )));
+        }
+        Ok(ShowIndexesClause)
+    }
+
+    fn consume_if_not_exists(&mut self) -> Result<bool, CypherError> {
+        if self.peek_upper().as_deref() == Some("IF") {
+            self.advance();
+            self.expect("NOT")?;
+            self.expect("EXISTS")?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn consume_if_exists(&mut self) -> Result<bool, CypherError> {
+        if self.peek_upper().as_deref() == Some("IF") {
+            self.advance();
+            self.expect("EXISTS")?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn parse_qualified_property(&mut self) -> Result<(String, String), CypherError> {
+        let variable = self.advance_identifier()?;
+        self.expect(".")?;
+        let property = self.advance_identifier()?;
+        Ok((variable, property))
     }
 
     // ── Pattern ──────────────────────────────────────────────────────────────
@@ -1114,7 +1374,9 @@ fn is_keyword(s: &str) -> bool {
             | "WITH" | "MERGE" | "UNWIND" | "ORDER" | "BY" | "LIMIT" | "SKIP" | "AS"
             | "AND" | "OR" | "NOT" | "NULL" | "TRUE" | "FALSE" | "IS" | "IN"
             | "DISTINCT" | "ASC" | "DESC" | "ASCENDING" | "DESCENDING"
-            | "CONTAINS" | "STARTS" | "ENDS"
+            | "CONTAINS" | "STARTS" | "ENDS" | "DROP" | "SHOW" | "CONSTRAINT"
+            | "CONSTRAINTS" | "INDEX" | "INDEXES" | "FOR" | "REQUIRE" | "UNIQUE"
+            | "EXISTS" | "ON"
     )
 }
 
@@ -1124,6 +1386,12 @@ fn is_keyword(s: &str) -> bool {
 fn dominant_query_type(clauses: &[Clause]) -> QueryType {
     fn priority(c: &Clause) -> u8 {
         match c {
+            Clause::CreateConstraint(_)
+            | Clause::DropConstraint(_)
+            | Clause::ShowConstraints(_)
+            | Clause::CreateIndex(_)
+            | Clause::DropIndex(_)
+            | Clause::ShowIndexes(_) => 7,
             Clause::Delete(_) => 6,
             Clause::Set(_) => 5,
             Clause::Merge(_) => 4,
@@ -1136,6 +1404,12 @@ fn dominant_query_type(clauses: &[Clause]) -> QueryType {
 
     let best = clauses.iter().max_by_key(|c| priority(c));
     match best {
+        Some(Clause::CreateConstraint(_))
+        | Some(Clause::DropConstraint(_))
+        | Some(Clause::ShowConstraints(_))
+        | Some(Clause::CreateIndex(_))
+        | Some(Clause::DropIndex(_))
+        | Some(Clause::ShowIndexes(_)) => QueryType::Ddl,
         Some(Clause::Delete(_)) => QueryType::Delete,
         Some(Clause::Set(_)) => QueryType::Set,
         Some(Clause::Merge(_)) => QueryType::Merge,
@@ -1560,5 +1834,116 @@ mod tests {
         // Missing `]` — should produce a parse error, not silently desync
         let result = p.parse("MATCH (a)-[r:KNOWS-(b) RETURN a");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_create_unique_constraint() {
+        let p = Parser::new();
+        let q = p
+            .parse(
+                "CREATE CONSTRAINT person_email_unique IF NOT EXISTS FOR (n:Person) REQUIRE n.email IS UNIQUE",
+            )
+            .unwrap();
+        assert!(matches!(q.query_type, QueryType::Ddl));
+        if let Clause::CreateConstraint(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.name, "person_email_unique");
+            assert!(c.if_not_exists);
+            assert_eq!(c.label, "Person");
+            assert_eq!(c.property, "email");
+            assert!(matches!(c.kind, ConstraintKind::Unique));
+        } else {
+            panic!("expected CreateConstraint clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_exists_constraint() {
+        let p = Parser::new();
+        let q = p
+            .parse("CREATE CONSTRAINT person_email_exists FOR (n:Person) REQUIRE n.email IS NOT NULL")
+            .unwrap();
+        if let Clause::CreateConstraint(c) = q.clauses.first().expect("clause missing") {
+            assert!(matches!(c.kind, ConstraintKind::Exists));
+        } else {
+            panic!("expected CreateConstraint clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_constraint_variable_mismatch_errors() {
+        let p = Parser::new();
+        let err = p
+            .parse("CREATE CONSTRAINT c FOR (n:Person) REQUIRE m.email IS UNIQUE")
+            .unwrap_err();
+        assert!(err.to_string().contains("constraint variable mismatch"));
+    }
+
+    #[test]
+    fn test_parse_drop_constraint_if_exists() {
+        let p = Parser::new();
+        let q = p.parse("DROP CONSTRAINT person_email_unique IF EXISTS").unwrap();
+        if let Clause::DropConstraint(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.name, "person_email_unique");
+            assert!(c.if_exists);
+        } else {
+            panic!("expected DropConstraint clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_show_constraints() {
+        let p = Parser::new();
+        let q = p.parse("SHOW CONSTRAINTS").unwrap();
+        assert!(matches!(
+            q.clauses.first().expect("clause missing"),
+            Clause::ShowConstraints(_)
+        ));
+    }
+
+    #[test]
+    fn test_parse_create_index() {
+        let p = Parser::new();
+        let q = p
+            .parse("CREATE INDEX person_idx IF NOT EXISTS FOR (n:Person) ON (n.email, n.name)")
+            .unwrap();
+        if let Clause::CreateIndex(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.name, "person_idx");
+            assert!(c.if_not_exists);
+            assert_eq!(c.label, "Person");
+            assert_eq!(c.properties, vec!["email", "name"]);
+        } else {
+            panic!("expected CreateIndex clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_index_missing_on_errors() {
+        let p = Parser::new();
+        let err = p
+            .parse("CREATE INDEX person_idx FOR (n:Person)")
+            .unwrap_err();
+        assert!(err.to_string().contains("expected 'ON'"));
+    }
+
+    #[test]
+    fn test_parse_drop_index_if_exists() {
+        let p = Parser::new();
+        let q = p.parse("DROP INDEX person_idx IF EXISTS").unwrap();
+        if let Clause::DropIndex(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.name, "person_idx");
+            assert!(c.if_exists);
+        } else {
+            panic!("expected DropIndex clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_show_indexes() {
+        let p = Parser::new();
+        let q = p.parse("SHOW INDEXES").unwrap();
+        assert!(matches!(
+            q.clauses.first().expect("clause missing"),
+            Clause::ShowIndexes(_)
+        ));
     }
 }

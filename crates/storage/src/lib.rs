@@ -19,6 +19,7 @@ const META_LAYOUT_MANIFEST_KEY: &[u8] = b"layout_manifest";
 const META_SEARCH_PEER_PREFIX: &[u8] = b"search_peer/";
 const META_HYPERSCALER_PROFILE_PREFIX: &[u8] = b"hyperscaler_profile/";
 const META_SCHEMA_CONSTRAINT_PREFIX: &[u8] = b"schema_constraint/";
+const META_SCHEMA_INDEX_PREFIX: &[u8] = b"schema_index/";
 const IDX_LABEL_PREFIX: &str = "label_nodes";
 const IDX_EDGE_TYPE_PREFIX: &str = "edge_type";
 
@@ -374,6 +375,12 @@ pub enum ConstraintType {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IndexEntityType {
+    Node,
+    Relationship,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ConstraintEntityType {
     Node,
     Relationship,
@@ -384,6 +391,14 @@ pub struct Constraint {
     pub name: String,
     pub constraint_type: ConstraintType,
     pub entity_type: ConstraintEntityType,
+    pub label: String,
+    pub properties: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexDefinition {
+    pub name: String,
+    pub entity_type: IndexEntityType,
     pub label: String,
     pub properties: Vec<String>,
 }
@@ -838,6 +853,32 @@ impl StorageEngine {
         }
         constraints.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(constraints)
+    }
+
+    pub fn delete_constraint(&self, name: &str) -> Result<bool, StorageError> {
+        let key = [META_SCHEMA_CONSTRAINT_PREFIX, name.as_bytes()].concat();
+        Ok(self.meta.remove(key)?.is_some())
+    }
+
+    pub fn persist_index_definition(&self, index: &IndexDefinition) -> Result<(), StorageError> {
+        let key = [META_SCHEMA_INDEX_PREFIX, index.name.as_bytes()].concat();
+        self.meta.insert(key, rmp_serde::to_vec(index)?)?;
+        Ok(())
+    }
+
+    pub fn load_index_definitions(&self) -> Result<Vec<IndexDefinition>, StorageError> {
+        let mut indexes: Vec<IndexDefinition> = Vec::new();
+        for entry in self.meta.scan_prefix(META_SCHEMA_INDEX_PREFIX) {
+            let (_, value) = entry?;
+            indexes.push(rmp_serde::from_slice(value.as_ref())?);
+        }
+        indexes.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(indexes)
+    }
+
+    pub fn delete_index_definition(&self, name: &str) -> Result<bool, StorageError> {
+        let key = [META_SCHEMA_INDEX_PREFIX, name.as_bytes()].concat();
+        Ok(self.meta.remove(key)?.is_some())
     }
 
     // --- Generic index operations ---
@@ -1318,5 +1359,26 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].name, "person_email_exists");
         assert_eq!(loaded[1].name, "person_email_unique");
+    }
+
+    #[test]
+    fn schema_index_definitions_roundtrip() {
+        let engine = StorageEngine::open_temporary().unwrap();
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "person_email_idx".to_string(),
+                entity_type: IndexEntityType::Node,
+                label: "Person".to_string(),
+                properties: vec!["email".to_string()],
+            })
+            .unwrap();
+
+        let indexes = engine.load_index_definitions().unwrap();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(indexes[0].name, "person_email_idx");
+
+        let deleted = engine.delete_index_definition("person_email_idx").unwrap();
+        assert!(deleted);
+        assert!(engine.load_index_definitions().unwrap().is_empty());
     }
 }
