@@ -185,6 +185,12 @@ struct MemorySnapshot {
     cypher: Vec<(String, String, Value)>,
 }
 
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct MemorySnapshotWire {
+    kv: Vec<(Vec<u8>, Vec<u8>)>,
+    cypher: Vec<(String, String, Value)>,
+}
+
 #[derive(Debug, Default)]
 pub struct MemoryStorage {
     state: RwLock<MemorySnapshot>,
@@ -231,13 +237,20 @@ impl ReplicationStorage for MemoryStorage {
 
     fn write_snapshot(&self) -> Result<Vec<u8>, ReplicationError> {
         let snapshot = self.state.read().unwrap().clone();
-        serde_json::to_vec(&snapshot).map_err(|error| ReplicationError::Storage(error.to_string()))
+        let wire = MemorySnapshotWire {
+            kv: snapshot.kv.into_iter().collect(),
+            cypher: snapshot.cypher,
+        };
+        serde_json::to_vec(&wire).map_err(|error| ReplicationError::Storage(error.to_string()))
     }
 
     fn restore_snapshot(&self, snapshot: &[u8]) -> Result<(), ReplicationError> {
-        let restored: MemorySnapshot = serde_json::from_slice(snapshot)
+        let restored: MemorySnapshotWire = serde_json::from_slice(snapshot)
             .map_err(|error| ReplicationError::Storage(error.to_string()))?;
-        *self.state.write().unwrap() = restored;
+        *self.state.write().unwrap() = MemorySnapshot {
+            kv: restored.kv.into_iter().collect(),
+            cypher: restored.cypher,
+        };
         Ok(())
     }
 }
