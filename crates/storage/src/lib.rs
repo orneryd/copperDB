@@ -20,6 +20,9 @@ const META_SEARCH_PEER_PREFIX: &[u8] = b"search_peer/";
 const META_HYPERSCALER_PROFILE_PREFIX: &[u8] = b"hyperscaler_profile/";
 const META_SCHEMA_CONSTRAINT_PREFIX: &[u8] = b"schema_constraint/";
 const META_SCHEMA_INDEX_PREFIX: &[u8] = b"schema_index/";
+const META_KP_DECAY_PROFILE_PREFIX: &[u8] = b"kp_decay_profile/";
+const META_KP_PROMOTION_PROFILE_PREFIX: &[u8] = b"kp_promotion_profile/";
+const META_KP_PROMOTION_POLICY_PREFIX: &[u8] = b"kp_promotion_policy/";
 const IDX_LABEL_PREFIX: &str = "label_nodes";
 const IDX_EDGE_TYPE_PREFIX: &str = "edge_type";
 
@@ -66,6 +69,14 @@ pub enum StorageError {
         property: String,
         value: String,
     },
+    #[error("knowledge policy already exists: {0}")]
+    KnowledgePolicyAlreadyExists(String),
+    #[error("knowledge policy not found: {0}")]
+    KnowledgePolicyNotFound(String),
+    #[error("knowledge policy invalid: {0}")]
+    KnowledgePolicyInvalid(String),
+    #[error("knowledge policy in use: {0}")]
+    KnowledgePolicyInUse(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -410,6 +421,45 @@ pub struct IndexDefinition {
     pub entity_type: IndexEntityType,
     pub label: String,
     pub properties: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DecayProfileSchema {
+    pub name: String,
+    pub half_life_seconds: i64,
+    pub visibility_threshold: f64,
+    pub score_floor: f64,
+    pub function: String,
+    pub scope: String,
+    pub decay_enabled: bool,
+    pub score_from: String,
+    pub score_from_property: Option<String>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PromotionProfileSchema {
+    pub name: String,
+    pub scope: String,
+    pub multiplier: f64,
+    pub score_floor: f64,
+    pub score_cap: f64,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromotionWhenClauseSchema {
+    pub profile_ref: String,
+    pub predicate: String,
+    pub order: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromotionPolicySchema {
+    pub name: String,
+    pub target_labels: Vec<String>,
+    pub enabled: bool,
+    pub when_clauses: Vec<PromotionWhenClauseSchema>,
 }
 
 #[derive(Debug, Default)]
@@ -900,6 +950,263 @@ impl StorageEngine {
         Ok(self.meta.remove(key)?.is_some())
     }
 
+    pub fn persist_decay_profile_schema(
+        &self,
+        profile: &DecayProfileSchema,
+    ) -> Result<(), StorageError> {
+        validate_decay_profile(profile)?;
+        let key = [META_KP_DECAY_PROFILE_PREFIX, profile.name.as_bytes()].concat();
+        if self.meta.get(&key)?.is_some() {
+            return Err(StorageError::KnowledgePolicyAlreadyExists(format!(
+                "decay profile {}",
+                profile.name
+            )));
+        }
+        self.meta.insert(key, rmp_serde::to_vec(profile)?)?;
+        Ok(())
+    }
+
+    pub fn load_decay_profile_schemas(&self) -> Result<Vec<DecayProfileSchema>, StorageError> {
+        let mut profiles: Vec<DecayProfileSchema> = Vec::new();
+        for entry in self.meta.scan_prefix(META_KP_DECAY_PROFILE_PREFIX) {
+            let (_, value) = entry?;
+            profiles.push(rmp_serde::from_slice(value.as_ref())?);
+        }
+        profiles.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(profiles)
+    }
+
+    pub fn alter_decay_profile_schema(
+        &self,
+        name: &str,
+        updates: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<(), StorageError> {
+        let key = [META_KP_DECAY_PROFILE_PREFIX, name.as_bytes()].concat();
+        let raw = self
+            .meta
+            .get(&key)?
+            .ok_or_else(|| StorageError::KnowledgePolicyNotFound(format!("decay profile {}", name)))?;
+        let mut profile: DecayProfileSchema = rmp_serde::from_slice(raw.as_ref())?;
+        for (k, v) in updates {
+            match k.as_str() {
+                "halfLifeSeconds" => {
+                    profile.half_life_seconds = value_as_i64(v, "halfLifeSeconds")?;
+                }
+                "visibilityThreshold" => {
+                    profile.visibility_threshold = value_as_f64(v, "visibilityThreshold")?;
+                }
+                "scoreFloor" => {
+                    profile.score_floor = value_as_f64(v, "scoreFloor")?;
+                }
+                "function" => {
+                    profile.function = value_as_string(v, "function")?;
+                }
+                "scope" => {
+                    profile.scope = value_as_string(v, "scope")?;
+                }
+                "decayEnabled" => {
+                    profile.decay_enabled = value_as_bool(v, "decayEnabled")?;
+                }
+                "scoreFrom" => {
+                    profile.score_from = value_as_string(v, "scoreFrom")?;
+                }
+                "scoreFromProperty" => {
+                    profile.score_from_property = Some(value_as_string(v, "scoreFromProperty")?);
+                }
+                "enabled" => {
+                    profile.enabled = value_as_bool(v, "enabled")?;
+                }
+                other => {
+                    return Err(StorageError::KnowledgePolicyInvalid(format!(
+                        "unknown option '{}'",
+                        other
+                    )));
+                }
+            }
+        }
+        validate_decay_profile(&profile)?;
+        self.meta.insert(key, rmp_serde::to_vec(&profile)?)?;
+        Ok(())
+    }
+
+    pub fn delete_decay_profile_schema(
+        &self,
+        name: &str,
+        if_exists: bool,
+    ) -> Result<(), StorageError> {
+        for policy in self.load_promotion_policy_schemas()? {
+            for clause in policy.when_clauses {
+                if clause.profile_ref == name {
+                    return Err(StorageError::KnowledgePolicyInUse(format!(
+                        "decay profile {} referenced by promotion policy {}",
+                        name, policy.name
+                    )));
+                }
+            }
+        }
+        let key = [META_KP_DECAY_PROFILE_PREFIX, name.as_bytes()].concat();
+        let deleted = self.meta.remove(key)?.is_some();
+        if !deleted && !if_exists {
+            return Err(StorageError::KnowledgePolicyNotFound(format!(
+                "decay profile {}",
+                name
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn persist_promotion_profile_schema(
+        &self,
+        profile: &PromotionProfileSchema,
+    ) -> Result<(), StorageError> {
+        validate_promotion_profile(profile)?;
+        let key = [META_KP_PROMOTION_PROFILE_PREFIX, profile.name.as_bytes()].concat();
+        if self.meta.get(&key)?.is_some() {
+            return Err(StorageError::KnowledgePolicyAlreadyExists(format!(
+                "promotion profile {}",
+                profile.name
+            )));
+        }
+        self.meta.insert(key, rmp_serde::to_vec(profile)?)?;
+        Ok(())
+    }
+
+    pub fn load_promotion_profile_schemas(
+        &self,
+    ) -> Result<Vec<PromotionProfileSchema>, StorageError> {
+        let mut profiles: Vec<PromotionProfileSchema> = Vec::new();
+        for entry in self.meta.scan_prefix(META_KP_PROMOTION_PROFILE_PREFIX) {
+            let (_, value) = entry?;
+            profiles.push(rmp_serde::from_slice(value.as_ref())?);
+        }
+        profiles.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(profiles)
+    }
+
+    pub fn alter_promotion_profile_schema(
+        &self,
+        name: &str,
+        updates: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<(), StorageError> {
+        let key = [META_KP_PROMOTION_PROFILE_PREFIX, name.as_bytes()].concat();
+        let raw = self.meta.get(&key)?.ok_or_else(|| {
+            StorageError::KnowledgePolicyNotFound(format!("promotion profile {}", name))
+        })?;
+        let mut profile: PromotionProfileSchema = rmp_serde::from_slice(raw.as_ref())?;
+        for (k, v) in updates {
+            match k.as_str() {
+                "multiplier" => profile.multiplier = value_as_f64(v, "multiplier")?,
+                "scoreFloor" => profile.score_floor = value_as_f64(v, "scoreFloor")?,
+                "scoreCap" => profile.score_cap = value_as_f64(v, "scoreCap")?,
+                "scope" => profile.scope = value_as_string(v, "scope")?,
+                "enabled" => profile.enabled = value_as_bool(v, "enabled")?,
+                other => {
+                    return Err(StorageError::KnowledgePolicyInvalid(format!(
+                        "unknown option '{}'",
+                        other
+                    )));
+                }
+            }
+        }
+        validate_promotion_profile(&profile)?;
+        self.meta.insert(key, rmp_serde::to_vec(&profile)?)?;
+        Ok(())
+    }
+
+    pub fn delete_promotion_profile_schema(
+        &self,
+        name: &str,
+        if_exists: bool,
+    ) -> Result<(), StorageError> {
+        for policy in self.load_promotion_policy_schemas()? {
+            for clause in policy.when_clauses {
+                if clause.profile_ref == name {
+                    return Err(StorageError::KnowledgePolicyInUse(format!(
+                        "promotion profile {} referenced by promotion policy {}",
+                        name, policy.name
+                    )));
+                }
+            }
+        }
+        let key = [META_KP_PROMOTION_PROFILE_PREFIX, name.as_bytes()].concat();
+        let deleted = self.meta.remove(key)?.is_some();
+        if !deleted && !if_exists {
+            return Err(StorageError::KnowledgePolicyNotFound(format!(
+                "promotion profile {}",
+                name
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn persist_promotion_policy_schema(
+        &self,
+        policy: &PromotionPolicySchema,
+    ) -> Result<(), StorageError> {
+        validate_promotion_policy(policy, &self.load_promotion_profile_schemas()?)?;
+        let key = [META_KP_PROMOTION_POLICY_PREFIX, policy.name.as_bytes()].concat();
+        if self.meta.get(&key)?.is_some() {
+            return Err(StorageError::KnowledgePolicyAlreadyExists(format!(
+                "promotion policy {}",
+                policy.name
+            )));
+        }
+        self.meta.insert(key, rmp_serde::to_vec(policy)?)?;
+        Ok(())
+    }
+
+    pub fn load_promotion_policy_schemas(&self) -> Result<Vec<PromotionPolicySchema>, StorageError> {
+        let mut policies: Vec<PromotionPolicySchema> = Vec::new();
+        for entry in self.meta.scan_prefix(META_KP_PROMOTION_POLICY_PREFIX) {
+            let (_, value) = entry?;
+            policies.push(rmp_serde::from_slice(value.as_ref())?);
+        }
+        policies.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(policies)
+    }
+
+    pub fn alter_promotion_policy_schema(
+        &self,
+        name: &str,
+        updates: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<(), StorageError> {
+        let key = [META_KP_PROMOTION_POLICY_PREFIX, name.as_bytes()].concat();
+        let raw = self.meta.get(&key)?.ok_or_else(|| {
+            StorageError::KnowledgePolicyNotFound(format!("promotion policy {}", name))
+        })?;
+        let mut policy: PromotionPolicySchema = rmp_serde::from_slice(raw.as_ref())?;
+        for (k, v) in updates {
+            match k.as_str() {
+                "enabled" => policy.enabled = value_as_bool(v, "enabled")?,
+                other => {
+                    return Err(StorageError::KnowledgePolicyInvalid(format!(
+                        "unknown option '{}'",
+                        other
+                    )));
+                }
+            }
+        }
+        validate_promotion_policy(&policy, &self.load_promotion_profile_schemas()?)?;
+        self.meta.insert(key, rmp_serde::to_vec(&policy)?)?;
+        Ok(())
+    }
+
+    pub fn delete_promotion_policy_schema(
+        &self,
+        name: &str,
+        if_exists: bool,
+    ) -> Result<(), StorageError> {
+        let key = [META_KP_PROMOTION_POLICY_PREFIX, name.as_bytes()].concat();
+        let deleted = self.meta.remove(key)?.is_some();
+        if !deleted && !if_exists {
+            return Err(StorageError::KnowledgePolicyNotFound(format!(
+                "promotion policy {}",
+                name
+            )));
+        }
+        Ok(())
+    }
+
     // --- Generic index operations ---
 
     /// Store an index entry.
@@ -983,6 +1290,158 @@ fn edge_type_index_prefix(edge_type: &str) -> String {
 
 fn edge_type_index_key(edge_type: &str, edge_id: &str) -> String {
     format!("{}{}", edge_type_index_prefix(edge_type), edge_id)
+}
+
+fn value_as_f64(value: &serde_json::Value, field: &str) -> Result<f64, StorageError> {
+    value
+        .as_f64()
+        .ok_or_else(|| StorageError::KnowledgePolicyInvalid(format!("{} must be a number", field)))
+}
+
+fn value_as_i64(value: &serde_json::Value, field: &str) -> Result<i64, StorageError> {
+    value
+        .as_i64()
+        .ok_or_else(|| StorageError::KnowledgePolicyInvalid(format!("{} must be an integer", field)))
+}
+
+fn value_as_bool(value: &serde_json::Value, field: &str) -> Result<bool, StorageError> {
+    value
+        .as_bool()
+        .ok_or_else(|| StorageError::KnowledgePolicyInvalid(format!("{} must be a boolean", field)))
+}
+
+fn value_as_string(value: &serde_json::Value, field: &str) -> Result<String, StorageError> {
+    value
+        .as_str()
+        .map(|v| v.to_string())
+        .ok_or_else(|| StorageError::KnowledgePolicyInvalid(format!("{} must be a string", field)))
+}
+
+fn validate_scope(scope: &str) -> bool {
+    matches!(scope.to_ascii_uppercase().as_str(), "NODE" | "EDGE")
+}
+
+fn validate_decay_function(function: &str) -> bool {
+    matches!(
+        function.to_ascii_lowercase().as_str(),
+        "exponential" | "linear" | "step" | "none"
+    )
+}
+
+fn validate_score_from(mode: &str) -> bool {
+    matches!(
+        mode.to_ascii_uppercase().as_str(),
+        "CREATED" | "LAST_ACCESSED" | "VERSION" | "CUSTOM"
+    )
+}
+
+fn validate_decay_profile(profile: &DecayProfileSchema) -> Result<(), StorageError> {
+    if profile.name.trim().is_empty() {
+        return Err(StorageError::KnowledgePolicyInvalid(
+            "decay profile name is required".into(),
+        ));
+    }
+    if !validate_decay_function(&profile.function) {
+        return Err(StorageError::KnowledgePolicyInvalid(format!(
+            "invalid decay function '{}'",
+            profile.function
+        )));
+    }
+    if !validate_scope(&profile.scope) {
+        return Err(StorageError::KnowledgePolicyInvalid(format!(
+            "invalid scope '{}'",
+            profile.scope
+        )));
+    }
+    if !validate_score_from(&profile.score_from) {
+        return Err(StorageError::KnowledgePolicyInvalid(format!(
+            "invalid scoreFrom '{}'",
+            profile.score_from
+        )));
+    }
+    if profile.visibility_threshold < 0.0 || profile.visibility_threshold > 1.0 {
+        return Err(StorageError::KnowledgePolicyInvalid(
+            "visibilityThreshold must be between 0 and 1".into(),
+        ));
+    }
+    if profile.score_floor < 0.0 || profile.score_floor > 1.0 {
+        return Err(StorageError::KnowledgePolicyInvalid(
+            "scoreFloor must be between 0 and 1".into(),
+        ));
+    }
+    if profile.score_from.eq_ignore_ascii_case("CUSTOM")
+        && profile
+            .score_from_property
+            .as_ref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+    {
+        return Err(StorageError::KnowledgePolicyInvalid(
+            "scoreFromProperty is required when scoreFrom is CUSTOM".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_promotion_profile(profile: &PromotionProfileSchema) -> Result<(), StorageError> {
+    if profile.name.trim().is_empty() {
+        return Err(StorageError::KnowledgePolicyInvalid(
+            "promotion profile name is required".into(),
+        ));
+    }
+    if !validate_scope(&profile.scope) {
+        return Err(StorageError::KnowledgePolicyInvalid(format!(
+            "invalid scope '{}'",
+            profile.scope
+        )));
+    }
+    if profile.multiplier < 0.0 {
+        return Err(StorageError::KnowledgePolicyInvalid(
+            "multiplier must be non-negative".into(),
+        ));
+    }
+    if profile.score_floor < 0.0 || profile.score_floor > 1.0 {
+        return Err(StorageError::KnowledgePolicyInvalid(
+            "scoreFloor must be between 0 and 1".into(),
+        ));
+    }
+    if profile.score_cap < 0.0 || profile.score_cap > 1.0 {
+        return Err(StorageError::KnowledgePolicyInvalid(
+            "scoreCap must be between 0 and 1".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_promotion_policy(
+    policy: &PromotionPolicySchema,
+    profiles: &[PromotionProfileSchema],
+) -> Result<(), StorageError> {
+    if policy.name.trim().is_empty() {
+        return Err(StorageError::KnowledgePolicyInvalid(
+            "promotion policy name is required".into(),
+        ));
+    }
+    if policy.target_labels.is_empty() {
+        return Err(StorageError::KnowledgePolicyInvalid(
+            "promotion policy target labels are required".into(),
+        ));
+    }
+    let profile_names: BTreeSet<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
+    for clause in &policy.when_clauses {
+        if clause.profile_ref.trim().is_empty() {
+            return Err(StorageError::KnowledgePolicyInvalid(
+                "promotion WHEN clause requires profileRef".into(),
+            ));
+        }
+        if !profile_names.contains(clause.profile_ref.as_str()) {
+            return Err(StorageError::KnowledgePolicyInvalid(format!(
+                "promotion profile '{}' not found",
+                clause.profile_ref
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn namespace_from_id(id: &[u8]) -> Option<String> {
@@ -1427,5 +1886,87 @@ mod tests {
         let deleted = engine.delete_index_definition("person_email_idx").unwrap();
         assert!(deleted);
         assert!(engine.load_index_definitions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn knowledge_policy_decay_profile_roundtrip_and_update() {
+        let engine = StorageEngine::open_temporary().unwrap();
+        let profile = DecayProfileSchema {
+            name: "slow_decay".to_string(),
+            half_life_seconds: 604_800,
+            visibility_threshold: 0.1,
+            score_floor: 0.0,
+            function: "exponential".to_string(),
+            scope: "NODE".to_string(),
+            decay_enabled: true,
+            score_from: "CREATED".to_string(),
+            score_from_property: None,
+            enabled: true,
+        };
+        engine.persist_decay_profile_schema(&profile).unwrap();
+
+        let mut updates = BTreeMap::new();
+        updates.insert("visibilityThreshold".to_string(), json!(0.2));
+        updates.insert("scoreFloor".to_string(), json!(0.05));
+        engine
+            .alter_decay_profile_schema("slow_decay", &updates)
+            .unwrap();
+
+        let loaded = engine.load_decay_profile_schemas().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "slow_decay");
+        assert_eq!(loaded[0].visibility_threshold, 0.2);
+        assert_eq!(loaded[0].score_floor, 0.05);
+    }
+
+    #[test]
+    fn knowledge_policy_promotion_schema_roundtrip_and_reference_guards() {
+        let engine = StorageEngine::open_temporary().unwrap();
+        engine
+            .persist_promotion_profile_schema(&PromotionProfileSchema {
+                name: "boost_profile".to_string(),
+                scope: "NODE".to_string(),
+                multiplier: 1.5,
+                score_floor: 0.0,
+                score_cap: 1.0,
+                enabled: true,
+            })
+            .unwrap();
+
+        engine
+            .persist_promotion_policy_schema(&PromotionPolicySchema {
+                name: "fact_policy".to_string(),
+                target_labels: vec!["KnowledgeFact".to_string()],
+                enabled: true,
+                when_clauses: vec![PromotionWhenClauseSchema {
+                    profile_ref: "boost_profile".to_string(),
+                    predicate: "n.evidence >= 3".to_string(),
+                    order: 1,
+                }],
+            })
+            .unwrap();
+
+        let err = engine
+            .delete_promotion_profile_schema("boost_profile", false)
+            .unwrap_err();
+        assert!(matches!(err, StorageError::KnowledgePolicyInUse(_)));
+
+        let mut updates = BTreeMap::new();
+        updates.insert("enabled".to_string(), json!(false));
+        engine
+            .alter_promotion_policy_schema("fact_policy", &updates)
+            .unwrap();
+        let policies = engine.load_promotion_policy_schemas().unwrap();
+        assert_eq!(policies.len(), 1);
+        assert!(!policies[0].enabled);
+
+        engine
+            .delete_promotion_policy_schema("fact_policy", false)
+            .unwrap();
+        engine
+            .delete_promotion_profile_schema("boost_profile", false)
+            .unwrap();
+        assert!(engine.load_promotion_policy_schemas().unwrap().is_empty());
+        assert!(engine.load_promotion_profile_schemas().unwrap().is_empty());
     }
 }

@@ -79,6 +79,18 @@ pub enum Clause {
     CreateIndex(CreateIndexClause),
     DropIndex(DropIndexClause),
     ShowIndexes(ShowIndexesClause),
+    CreateDecayProfile(CreateDecayProfileClause),
+    AlterDecayProfile(AlterDecayProfileClause),
+    DropDecayProfile(DropDecayProfileClause),
+    ShowDecayProfiles(ShowDecayProfilesClause),
+    CreatePromotionProfile(CreatePromotionProfileClause),
+    AlterPromotionProfile(AlterPromotionProfileClause),
+    DropPromotionProfile(DropPromotionProfileClause),
+    ShowPromotionProfiles(ShowPromotionProfilesClause),
+    CreatePromotionPolicy(CreatePromotionPolicyClause),
+    AlterPromotionPolicy(AlterPromotionPolicyClause),
+    DropPromotionPolicy(DropPromotionPolicyClause),
+    ShowPromotionPolicies(ShowPromotionPoliciesClause),
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +186,78 @@ pub struct DropIndexClause {
 
 #[derive(Debug, Clone)]
 pub struct ShowIndexesClause;
+
+#[derive(Debug, Clone)]
+pub struct CreateDecayProfileClause {
+    pub name: String,
+    pub options: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AlterDecayProfileClause {
+    pub name: String,
+    pub options: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropDecayProfileClause {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShowDecayProfilesClause;
+
+#[derive(Debug, Clone)]
+pub struct CreatePromotionProfileClause {
+    pub name: String,
+    pub options: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AlterPromotionProfileClause {
+    pub name: String,
+    pub options: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropPromotionProfileClause {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShowPromotionProfilesClause;
+
+#[derive(Debug, Clone)]
+pub struct PromotionWhenClause {
+    pub profile_ref: String,
+    pub predicate: String,
+    pub order: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreatePromotionPolicyClause {
+    pub name: String,
+    pub target_labels: Vec<String>,
+    pub enabled: bool,
+    pub when_clauses: Vec<PromotionWhenClause>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AlterPromotionPolicyClause {
+    pub name: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropPromotionPolicyClause {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShowPromotionPoliciesClause;
 
 // ─── Patterns ─────────────────────────────────────────────────────────────────
 
@@ -470,6 +554,41 @@ impl ParseContext {
                             self.advance();
                             clauses.push(Clause::CreateIndex(self.parse_create_index()?));
                         }
+                        Some("DECAY") => {
+                            self.advance();
+                            clauses.push(Clause::CreateDecayProfile(
+                                self.parse_create_decay_profile()?,
+                            ));
+                        }
+                        Some("PROMOTION") => {
+                            self.advance();
+                            match self.peek_upper().as_deref() {
+                                Some("PROFILE") => {
+                                    self.advance();
+                                    clauses.push(Clause::CreatePromotionProfile(
+                                        self.parse_create_promotion_profile()?,
+                                    ));
+                                }
+                                Some("POLICY") => {
+                                    self.advance();
+                                    clauses.push(Clause::CreatePromotionPolicy(
+                                        self.parse_create_promotion_policy()?,
+                                    ));
+                                }
+                                Some(other) => {
+                                    return Err(CypherError::ParseError(format!(
+                                        "unsupported CREATE PROMOTION target '{}'",
+                                        other
+                                    )));
+                                }
+                                None => {
+                                    return Err(CypherError::ParseError(
+                                        "expected CREATE PROMOTION target, got end of input"
+                                            .into(),
+                                    ));
+                                }
+                            }
+                        }
                         _ => {
                             let clause = self.parse_create()?;
                             clauses.push(Clause::Create(clause));
@@ -528,6 +647,38 @@ impl ParseContext {
                             self.advance();
                             clauses.push(Clause::DropIndex(self.parse_drop_index()?));
                         }
+                        Some("DECAY") => {
+                            self.advance();
+                            clauses.push(Clause::DropDecayProfile(self.parse_drop_decay_profile()?));
+                        }
+                        Some("PROMOTION") => {
+                            self.advance();
+                            match self.peek_upper().as_deref() {
+                                Some("PROFILE") => {
+                                    self.advance();
+                                    clauses.push(Clause::DropPromotionProfile(
+                                        self.parse_drop_promotion_profile()?,
+                                    ));
+                                }
+                                Some("POLICY") => {
+                                    self.advance();
+                                    clauses.push(Clause::DropPromotionPolicy(
+                                        self.parse_drop_promotion_policy()?,
+                                    ));
+                                }
+                                Some(other) => {
+                                    return Err(CypherError::ParseError(format!(
+                                        "unsupported DROP PROMOTION target '{}'",
+                                        other
+                                    )));
+                                }
+                                None => {
+                                    return Err(CypherError::ParseError(
+                                        "expected DROP PROMOTION target, got end of input".into(),
+                                    ));
+                                }
+                            }
+                        }
                         Some(other) => {
                             return Err(CypherError::ParseError(format!(
                                 "unsupported DROP target '{}'",
@@ -552,6 +703,38 @@ impl ParseContext {
                             self.advance();
                             clauses.push(Clause::ShowIndexes(self.parse_show_indexes()?));
                         }
+                        Some("DECAY") => {
+                            self.advance();
+                            clauses.push(Clause::ShowDecayProfiles(self.parse_show_decay_profiles()?));
+                        }
+                        Some("PROMOTION") => {
+                            self.advance();
+                            match self.peek_upper().as_deref() {
+                                Some("PROFILES") => {
+                                    self.advance();
+                                    clauses.push(Clause::ShowPromotionProfiles(
+                                        self.parse_show_promotion_profiles()?,
+                                    ));
+                                }
+                                Some("POLICIES") => {
+                                    self.advance();
+                                    clauses.push(Clause::ShowPromotionPolicies(
+                                        self.parse_show_promotion_policies()?,
+                                    ));
+                                }
+                                Some(other) => {
+                                    return Err(CypherError::ParseError(format!(
+                                        "unsupported SHOW PROMOTION target '{}'",
+                                        other
+                                    )));
+                                }
+                                None => {
+                                    return Err(CypherError::ParseError(
+                                        "expected SHOW PROMOTION target, got end of input".into(),
+                                    ));
+                                }
+                            }
+                        }
                         Some(other) => {
                             return Err(CypherError::ParseError(format!(
                                 "unsupported SHOW target '{}'",
@@ -561,6 +744,54 @@ impl ParseContext {
                         None => {
                             return Err(CypherError::ParseError(
                                 "expected SHOW target, got end of input".into(),
+                            ));
+                        }
+                    }
+                }
+                "ALTER" => {
+                    self.advance();
+                    match self.peek_upper().as_deref() {
+                        Some("DECAY") => {
+                            self.advance();
+                            clauses.push(Clause::AlterDecayProfile(self.parse_alter_decay_profile()?));
+                        }
+                        Some("PROMOTION") => {
+                            self.advance();
+                            match self.peek_upper().as_deref() {
+                                Some("PROFILE") => {
+                                    self.advance();
+                                    clauses.push(Clause::AlterPromotionProfile(
+                                        self.parse_alter_promotion_profile()?,
+                                    ));
+                                }
+                                Some("POLICY") => {
+                                    self.advance();
+                                    clauses.push(Clause::AlterPromotionPolicy(
+                                        self.parse_alter_promotion_policy()?,
+                                    ));
+                                }
+                                Some(other) => {
+                                    return Err(CypherError::ParseError(format!(
+                                        "unsupported ALTER PROMOTION target '{}'",
+                                        other
+                                    )));
+                                }
+                                None => {
+                                    return Err(CypherError::ParseError(
+                                        "expected ALTER PROMOTION target, got end of input".into(),
+                                    ));
+                                }
+                            }
+                        }
+                        Some(other) => {
+                            return Err(CypherError::ParseError(format!(
+                                "unsupported ALTER target '{}'",
+                                other
+                            )));
+                        }
+                        None => {
+                            return Err(CypherError::ParseError(
+                                "expected ALTER target, got end of input".into(),
                             ));
                         }
                     }
@@ -907,6 +1138,204 @@ impl ParseContext {
             )));
         }
         Ok(ShowIndexesClause)
+    }
+
+    fn parse_create_decay_profile(&mut self) -> Result<CreateDecayProfileClause, CypherError> {
+        self.expect("PROFILE")?;
+        let name = self.advance_identifier()?;
+        self.expect("OPTIONS")?;
+        let options = self.parse_options_map()?;
+        Ok(CreateDecayProfileClause { name, options })
+    }
+
+    fn parse_alter_decay_profile(&mut self) -> Result<AlterDecayProfileClause, CypherError> {
+        self.expect("PROFILE")?;
+        let name = self.advance_identifier()?;
+        self.expect("SET")?;
+        self.expect("OPTIONS")?;
+        let options = self.parse_options_map()?;
+        Ok(AlterDecayProfileClause { name, options })
+    }
+
+    fn parse_drop_decay_profile(&mut self) -> Result<DropDecayProfileClause, CypherError> {
+        self.expect("PROFILE")?;
+        let name = self.advance_identifier()?;
+        let if_exists = self.consume_if_exists()?;
+        Ok(DropDecayProfileClause { name, if_exists })
+    }
+
+    fn parse_show_decay_profiles(&mut self) -> Result<ShowDecayProfilesClause, CypherError> {
+        self.expect("PROFILES")?;
+        if self.peek().is_some() {
+            return Err(CypherError::ParseError(format!(
+                "unexpected token '{}' after SHOW DECAY PROFILES",
+                self.peek().unwrap_or_default()
+            )));
+        }
+        Ok(ShowDecayProfilesClause)
+    }
+
+    fn parse_create_promotion_profile(
+        &mut self,
+    ) -> Result<CreatePromotionProfileClause, CypherError> {
+        let name = self.advance_identifier()?;
+        self.expect("OPTIONS")?;
+        let options = self.parse_options_map()?;
+        Ok(CreatePromotionProfileClause { name, options })
+    }
+
+    fn parse_alter_promotion_profile(&mut self) -> Result<AlterPromotionProfileClause, CypherError> {
+        let name = self.advance_identifier()?;
+        self.expect("SET")?;
+        self.expect("OPTIONS")?;
+        let options = self.parse_options_map()?;
+        Ok(AlterPromotionProfileClause { name, options })
+    }
+
+    fn parse_drop_promotion_profile(&mut self) -> Result<DropPromotionProfileClause, CypherError> {
+        let name = self.advance_identifier()?;
+        let if_exists = self.consume_if_exists()?;
+        Ok(DropPromotionProfileClause { name, if_exists })
+    }
+
+    fn parse_show_promotion_profiles(
+        &mut self,
+    ) -> Result<ShowPromotionProfilesClause, CypherError> {
+        self.expect("PROFILES")?;
+        if self.peek().is_some() {
+            return Err(CypherError::ParseError(format!(
+                "unexpected token '{}' after SHOW PROMOTION PROFILES",
+                self.peek().unwrap_or_default()
+            )));
+        }
+        Ok(ShowPromotionProfilesClause)
+    }
+
+    fn parse_create_promotion_policy(&mut self) -> Result<CreatePromotionPolicyClause, CypherError> {
+        let name = self.advance_identifier()?;
+        self.expect("FOR")?;
+        self.expect("(")?;
+        self.advance_identifier()?;
+        let mut target_labels = Vec::new();
+        while self.peek() == Some(":") {
+            self.advance();
+            target_labels.push(self.advance_identifier()?);
+        }
+        self.expect(")")?;
+        if target_labels.is_empty() {
+            return Err(CypherError::ParseError(
+                "promotion policy target labels are required".into(),
+            ));
+        }
+        self.expect("APPLY")?;
+        self.expect("PROFILE")?;
+        let profile_ref = self.advance_identifier()?;
+        let mut predicate = "true".to_string();
+        if self.peek_upper().as_deref() == Some("WHEN") {
+            self.advance();
+            let token = self
+                .advance()
+                .ok_or_else(|| CypherError::ParseError("expected predicate after WHEN".into()))?;
+            predicate = trim_quotes(token).to_string();
+        }
+        let when_clauses = vec![PromotionWhenClause {
+            profile_ref,
+            predicate,
+            order: 1,
+        }];
+        Ok(CreatePromotionPolicyClause {
+            name,
+            target_labels,
+            enabled: true,
+            when_clauses,
+        })
+    }
+
+    fn parse_alter_promotion_policy(&mut self) -> Result<AlterPromotionPolicyClause, CypherError> {
+        let name = self.advance_identifier()?;
+        self.expect("SET")?;
+        self.expect("ENABLED")?;
+        let token = self.advance().ok_or_else(|| {
+            CypherError::ParseError("expected boolean value after SET ENABLED".into())
+        })?;
+        let enabled = parse_bool_token(token).ok_or_else(|| {
+            CypherError::ParseError(format!("invalid boolean value '{}'", token))
+        })?;
+        Ok(AlterPromotionPolicyClause { name, enabled })
+    }
+
+    fn parse_drop_promotion_policy(&mut self) -> Result<DropPromotionPolicyClause, CypherError> {
+        let name = self.advance_identifier()?;
+        let if_exists = self.consume_if_exists()?;
+        Ok(DropPromotionPolicyClause { name, if_exists })
+    }
+
+    fn parse_show_promotion_policies(
+        &mut self,
+    ) -> Result<ShowPromotionPoliciesClause, CypherError> {
+        self.expect("POLICIES")?;
+        if self.peek().is_some() {
+            return Err(CypherError::ParseError(format!(
+                "unexpected token '{}' after SHOW PROMOTION POLICIES",
+                self.peek().unwrap_or_default()
+            )));
+        }
+        Ok(ShowPromotionPoliciesClause)
+    }
+
+    fn parse_options_map(&mut self) -> Result<HashMap<String, Value>, CypherError> {
+        self.expect("{")?;
+        let mut options = HashMap::new();
+        while self.peek() != Some("}") {
+            let key = self.advance_identifier()?;
+            self.expect(":")?;
+            let value = self.parse_option_value()?;
+            options.insert(key, value);
+            if self.peek() == Some(",") {
+                self.advance();
+                continue;
+            }
+            if self.peek() != Some("}") {
+                return Err(CypherError::ParseError(format!(
+                    "expected ',' or '}}' in options map, got '{}'",
+                    self.peek().unwrap_or_default()
+                )));
+            }
+        }
+        self.expect("}")?;
+        Ok(options)
+    }
+
+    fn parse_option_value(&mut self) -> Result<Value, CypherError> {
+        let token = self
+            .advance()
+            .ok_or_else(|| CypherError::ParseError("expected option value".into()))?;
+        if token == "[" {
+            let mut values = Vec::new();
+            while self.peek() != Some("]") {
+                values.push(self.parse_option_value()?);
+                if self.peek() == Some(",") {
+                    self.advance();
+                } else if self.peek() != Some("]") {
+                    return Err(CypherError::ParseError(format!(
+                        "expected ',' or ']' in array value, got '{}'",
+                        self.peek().unwrap_or_default()
+                    )));
+                }
+            }
+            self.expect("]")?;
+            return Ok(Value::Array(values));
+        }
+        if let Some(bool_value) = parse_bool_token(token) {
+            return Ok(Value::Bool(bool_value));
+        }
+        if let Ok(i) = token.parse::<i64>() {
+            return Ok(Value::from(i));
+        }
+        if let Ok(f) = token.parse::<f64>() {
+            return Ok(Value::from(f));
+        }
+        Ok(Value::String(trim_quotes(token).to_string()))
     }
 
     fn consume_if_not_exists(&mut self) -> Result<bool, CypherError> {
@@ -1424,6 +1853,23 @@ impl ParseContext {
 }
 
 /// Returns `true` if `s` is an openCypher keyword that cannot be a bare variable name.
+fn trim_quotes(token: &str) -> &str {
+    if (token.starts_with('\'') && token.ends_with('\'')) || (token.starts_with('"') && token.ends_with('"')) {
+        &token[1..token.len().saturating_sub(1)]
+    } else {
+        token
+    }
+}
+
+fn parse_bool_token(token: &str) -> Option<bool> {
+    match token.to_ascii_uppercase().as_str() {
+        "TRUE" => Some(true),
+        "FALSE" => Some(false),
+        _ => None,
+    }
+}
+
+/// Returns `true` if `s` is an openCypher keyword that cannot be a bare variable name.
 fn is_keyword(s: &str) -> bool {
     matches!(
         s.to_uppercase().as_str(),
@@ -1465,11 +1911,22 @@ fn is_keyword(s: &str) -> bool {
             | "CONSTRAINTS"
             | "INDEX"
             | "INDEXES"
+            | "ALTER"
+            | "DECAY"
+            | "PROFILE"
+            | "PROFILES"
+            | "PROMOTION"
+            | "POLICY"
+            | "POLICIES"
             | "FOR"
+            | "APPLY"
             | "REQUIRE"
             | "UNIQUE"
             | "EXISTS"
             | "ON"
+            | "OPTIONS"
+            | "ENABLED"
+            | "WHEN"
     )
 }
 
@@ -1484,7 +1941,19 @@ fn dominant_query_type(clauses: &[Clause]) -> QueryType {
             | Clause::ShowConstraints(_)
             | Clause::CreateIndex(_)
             | Clause::DropIndex(_)
-            | Clause::ShowIndexes(_) => 7,
+            | Clause::ShowIndexes(_)
+            | Clause::CreateDecayProfile(_)
+            | Clause::AlterDecayProfile(_)
+            | Clause::DropDecayProfile(_)
+            | Clause::ShowDecayProfiles(_)
+            | Clause::CreatePromotionProfile(_)
+            | Clause::AlterPromotionProfile(_)
+            | Clause::DropPromotionProfile(_)
+            | Clause::ShowPromotionProfiles(_)
+            | Clause::CreatePromotionPolicy(_)
+            | Clause::AlterPromotionPolicy(_)
+            | Clause::DropPromotionPolicy(_)
+            | Clause::ShowPromotionPolicies(_) => 7,
             Clause::Delete(_) => 6,
             Clause::Set(_) => 5,
             Clause::Merge(_) => 4,
@@ -1502,7 +1971,19 @@ fn dominant_query_type(clauses: &[Clause]) -> QueryType {
         | Some(Clause::ShowConstraints(_))
         | Some(Clause::CreateIndex(_))
         | Some(Clause::DropIndex(_))
-        | Some(Clause::ShowIndexes(_)) => QueryType::Ddl,
+        | Some(Clause::ShowIndexes(_))
+        | Some(Clause::CreateDecayProfile(_))
+        | Some(Clause::AlterDecayProfile(_))
+        | Some(Clause::DropDecayProfile(_))
+        | Some(Clause::ShowDecayProfiles(_))
+        | Some(Clause::CreatePromotionProfile(_))
+        | Some(Clause::AlterPromotionProfile(_))
+        | Some(Clause::DropPromotionProfile(_))
+        | Some(Clause::ShowPromotionProfiles(_))
+        | Some(Clause::CreatePromotionPolicy(_))
+        | Some(Clause::AlterPromotionPolicy(_))
+        | Some(Clause::DropPromotionPolicy(_))
+        | Some(Clause::ShowPromotionPolicies(_)) => QueryType::Ddl,
         Some(Clause::Delete(_)) => QueryType::Delete,
         Some(Clause::Set(_)) => QueryType::Set,
         Some(Clause::Merge(_)) => QueryType::Merge,
@@ -2065,6 +2546,83 @@ mod tests {
         assert!(matches!(
             q.clauses.first().expect("clause missing"),
             Clause::ShowIndexes(_)
+        ));
+    }
+
+    #[test]
+    fn test_parse_create_decay_profile() {
+        let p = Parser::new();
+        let q = p
+            .parse(
+                "CREATE DECAY PROFILE slow_decay OPTIONS { halfLifeSeconds: 604800, visibilityThreshold: 0.1, function: 'exponential', scope: 'NODE', scoreFrom: 'CREATED' }",
+            )
+            .unwrap();
+        assert!(matches!(q.query_type, QueryType::Ddl));
+        if let Clause::CreateDecayProfile(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.name, "slow_decay");
+            assert_eq!(c.options.get("halfLifeSeconds"), Some(&Value::from(604800)));
+            assert_eq!(c.options.get("scope"), Some(&Value::String("NODE".to_string())));
+        } else {
+            panic!("expected CreateDecayProfile clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_promotion_profile_and_policy_ddl() {
+        let p = Parser::new();
+        let create_profile = p
+            .parse(
+                "CREATE PROMOTION PROFILE boost_profile OPTIONS { scope: 'NODE', multiplier: 1.5, scoreFloor: 0.0, scoreCap: 1.0, enabled: true }",
+            )
+            .unwrap();
+        assert!(matches!(
+            create_profile.clauses.first().expect("clause missing"),
+            Clause::CreatePromotionProfile(_)
+        ));
+
+        let create_policy = p
+            .parse("CREATE PROMOTION POLICY fact_policy FOR (n:KnowledgeFact) APPLY PROFILE boost_profile WHEN 'n.evidence >= 3'")
+            .unwrap();
+        if let Clause::CreatePromotionPolicy(c) =
+            create_policy.clauses.first().expect("clause missing")
+        {
+            assert_eq!(c.name, "fact_policy");
+            assert_eq!(c.target_labels, vec!["KnowledgeFact"]);
+            assert_eq!(c.when_clauses.len(), 1);
+            assert_eq!(c.when_clauses[0].profile_ref, "boost_profile");
+        } else {
+            panic!("expected CreatePromotionPolicy clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_alter_and_show_knowledge_policy_statements() {
+        let p = Parser::new();
+        let alter_decay = p
+            .parse("ALTER DECAY PROFILE slow_decay SET OPTIONS { visibilityThreshold: 0.2 }")
+            .unwrap();
+        assert!(matches!(
+            alter_decay.clauses.first().expect("clause missing"),
+            Clause::AlterDecayProfile(_)
+        ));
+
+        let alter_policy = p
+            .parse("ALTER PROMOTION POLICY fact_policy SET ENABLED false")
+            .unwrap();
+        assert!(matches!(
+            alter_policy.clauses.first().expect("clause missing"),
+            Clause::AlterPromotionPolicy(_)
+        ));
+
+        let show_decay = p.parse("SHOW DECAY PROFILES").unwrap();
+        assert!(matches!(
+            show_decay.clauses.first().expect("clause missing"),
+            Clause::ShowDecayProfiles(_)
+        ));
+        let show_promo = p.parse("SHOW PROMOTION POLICIES").unwrap();
+        assert!(matches!(
+            show_promo.clauses.first().expect("clause missing"),
+            Clause::ShowPromotionPolicies(_)
         ));
     }
 }

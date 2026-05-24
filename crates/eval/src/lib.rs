@@ -6,10 +6,11 @@ use copperdb_cypher::{Clause, ConstraintKind, Expression, Query, ReturnItem};
 use copperdb_filter::{eval_expression, eval_predicate};
 use copperdb_storage::{
     Constraint, ConstraintEntityType, ConstraintType, IndexDefinition, IndexEntityType,
+    DecayProfileSchema, PromotionPolicySchema, PromotionProfileSchema, PromotionWhenClauseSchema,
     StorageEngine,
 };
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use uuid::Uuid;
@@ -322,6 +323,201 @@ impl EvalEngine {
                                 "properties".to_string(),
                                 Value::Array(
                                     idx.properties.into_iter().map(Value::String).collect(),
+                                ),
+                            );
+                            row
+                        })
+                        .collect();
+                }
+
+                Clause::CreateDecayProfile(create) => {
+                    let profile = DecayProfileSchema {
+                        name: create.name.clone(),
+                        half_life_seconds: option_i64(&create.options, "halfLifeSeconds", 0)?,
+                        visibility_threshold: option_f64(
+                            &create.options,
+                            "visibilityThreshold",
+                            0.0,
+                        )?,
+                        score_floor: option_f64(&create.options, "scoreFloor", 0.0)?,
+                        function: option_string(&create.options, "function", "none")?,
+                        scope: option_string(&create.options, "scope", "NODE")?,
+                        decay_enabled: option_bool(&create.options, "decayEnabled", true)?,
+                        score_from: option_string(&create.options, "scoreFrom", "CREATED")?,
+                        score_from_property: create
+                            .options
+                            .get("scoreFromProperty")
+                            .and_then(|v| v.as_str().map(|s| s.to_string())),
+                        enabled: option_bool(&create.options, "enabled", true)?,
+                    };
+                    self.storage.persist_decay_profile_schema(&profile)?;
+                }
+
+                Clause::AlterDecayProfile(alter) => {
+                    let updates = options_to_btreemap(&alter.options);
+                    self.storage
+                        .alter_decay_profile_schema(&alter.name, &updates)?;
+                }
+
+                Clause::DropDecayProfile(drop) => {
+                    self.storage
+                        .delete_decay_profile_schema(&drop.name, drop.if_exists)?;
+                }
+
+                Clause::ShowDecayProfiles(_) => {
+                    let profiles = self.storage.load_decay_profile_schemas()?;
+                    columns = vec![
+                        "name".to_string(),
+                        "halfLifeSeconds".to_string(),
+                        "visibilityThreshold".to_string(),
+                        "scoreFloor".to_string(),
+                        "function".to_string(),
+                        "scope".to_string(),
+                        "decayEnabled".to_string(),
+                        "scoreFrom".to_string(),
+                        "scoreFromProperty".to_string(),
+                        "enabled".to_string(),
+                    ];
+                    result_rows = profiles
+                        .into_iter()
+                        .map(|p| {
+                            let mut row = Row::new();
+                            row.insert("name".to_string(), Value::String(p.name));
+                            row.insert("halfLifeSeconds".to_string(), Value::from(p.half_life_seconds));
+                            row.insert(
+                                "visibilityThreshold".to_string(),
+                                Value::from(p.visibility_threshold),
+                            );
+                            row.insert("scoreFloor".to_string(), Value::from(p.score_floor));
+                            row.insert("function".to_string(), Value::String(p.function));
+                            row.insert("scope".to_string(), Value::String(p.scope));
+                            row.insert("decayEnabled".to_string(), Value::Bool(p.decay_enabled));
+                            row.insert("scoreFrom".to_string(), Value::String(p.score_from));
+                            row.insert(
+                                "scoreFromProperty".to_string(),
+                                p.score_from_property
+                                    .map(Value::String)
+                                    .unwrap_or(Value::Null),
+                            );
+                            row.insert("enabled".to_string(), Value::Bool(p.enabled));
+                            row
+                        })
+                        .collect();
+                }
+
+                Clause::CreatePromotionProfile(create) => {
+                    let profile = PromotionProfileSchema {
+                        name: create.name.clone(),
+                        scope: option_string(&create.options, "scope", "NODE")?,
+                        multiplier: option_f64(&create.options, "multiplier", 1.0)?,
+                        score_floor: option_f64(&create.options, "scoreFloor", 0.0)?,
+                        score_cap: option_f64(&create.options, "scoreCap", 1.0)?,
+                        enabled: option_bool(&create.options, "enabled", true)?,
+                    };
+                    self.storage.persist_promotion_profile_schema(&profile)?;
+                }
+
+                Clause::AlterPromotionProfile(alter) => {
+                    let updates = options_to_btreemap(&alter.options);
+                    self.storage
+                        .alter_promotion_profile_schema(&alter.name, &updates)?;
+                }
+
+                Clause::DropPromotionProfile(drop) => {
+                    self.storage
+                        .delete_promotion_profile_schema(&drop.name, drop.if_exists)?;
+                }
+
+                Clause::ShowPromotionProfiles(_) => {
+                    let profiles = self.storage.load_promotion_profile_schemas()?;
+                    columns = vec![
+                        "name".to_string(),
+                        "scope".to_string(),
+                        "multiplier".to_string(),
+                        "scoreFloor".to_string(),
+                        "scoreCap".to_string(),
+                        "enabled".to_string(),
+                    ];
+                    result_rows = profiles
+                        .into_iter()
+                        .map(|p| {
+                            let mut row = Row::new();
+                            row.insert("name".to_string(), Value::String(p.name));
+                            row.insert("scope".to_string(), Value::String(p.scope));
+                            row.insert("multiplier".to_string(), Value::from(p.multiplier));
+                            row.insert("scoreFloor".to_string(), Value::from(p.score_floor));
+                            row.insert("scoreCap".to_string(), Value::from(p.score_cap));
+                            row.insert("enabled".to_string(), Value::Bool(p.enabled));
+                            row
+                        })
+                        .collect();
+                }
+
+                Clause::CreatePromotionPolicy(create) => {
+                    let policy = PromotionPolicySchema {
+                        name: create.name.clone(),
+                        target_labels: create.target_labels.clone(),
+                        enabled: create.enabled,
+                        when_clauses: create
+                            .when_clauses
+                            .iter()
+                            .map(|clause| PromotionWhenClauseSchema {
+                                profile_ref: clause.profile_ref.clone(),
+                                predicate: clause.predicate.clone(),
+                                order: clause.order,
+                            })
+                            .collect(),
+                    };
+                    self.storage.persist_promotion_policy_schema(&policy)?;
+                }
+
+                Clause::AlterPromotionPolicy(alter) => {
+                    let updates = BTreeMap::from([("enabled".to_string(), Value::Bool(alter.enabled))]);
+                    self.storage
+                        .alter_promotion_policy_schema(&alter.name, &updates)?;
+                }
+
+                Clause::DropPromotionPolicy(drop) => {
+                    self.storage
+                        .delete_promotion_policy_schema(&drop.name, drop.if_exists)?;
+                }
+
+                Clause::ShowPromotionPolicies(_) => {
+                    let policies = self.storage.load_promotion_policy_schemas()?;
+                    columns = vec![
+                        "name".to_string(),
+                        "targetLabels".to_string(),
+                        "enabled".to_string(),
+                        "whenClauses".to_string(),
+                    ];
+                    result_rows = policies
+                        .into_iter()
+                        .map(|p| {
+                            let mut row = Row::new();
+                            row.insert("name".to_string(), Value::String(p.name));
+                            row.insert(
+                                "targetLabels".to_string(),
+                                Value::Array(
+                                    p.target_labels
+                                        .into_iter()
+                                        .map(Value::String)
+                                        .collect::<Vec<_>>(),
+                                ),
+                            );
+                            row.insert("enabled".to_string(), Value::Bool(p.enabled));
+                            row.insert(
+                                "whenClauses".to_string(),
+                                Value::Array(
+                                    p.when_clauses
+                                        .into_iter()
+                                        .map(|w| {
+                                            serde_json::json!({
+                                                "profileRef": w.profile_ref,
+                                                "predicate": w.predicate,
+                                                "order": w.order,
+                                            })
+                                        })
+                                        .collect(),
                                 ),
                             );
                             row
@@ -847,6 +1043,50 @@ fn node_has_all_labels(props: &HashMap<String, Value>, required: &[String]) -> b
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
     required.iter().all(|l| stored.contains(&l.as_str()))
+}
+
+fn options_to_btreemap(options: &HashMap<String, Value>) -> BTreeMap<String, Value> {
+    options
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect::<BTreeMap<_, _>>()
+}
+
+fn option_string(options: &HashMap<String, Value>, key: &str, default: &str) -> Result<String, EvalError> {
+    match options.get(key) {
+        Some(v) => v
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| EvalError::ExecutionError(format!("{} must be a string", key))),
+        None => Ok(default.to_string()),
+    }
+}
+
+fn option_bool(options: &HashMap<String, Value>, key: &str, default: bool) -> Result<bool, EvalError> {
+    match options.get(key) {
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| EvalError::ExecutionError(format!("{} must be a boolean", key))),
+        None => Ok(default),
+    }
+}
+
+fn option_f64(options: &HashMap<String, Value>, key: &str, default: f64) -> Result<f64, EvalError> {
+    match options.get(key) {
+        Some(v) => v
+            .as_f64()
+            .ok_or_else(|| EvalError::ExecutionError(format!("{} must be a number", key))),
+        None => Ok(default),
+    }
+}
+
+fn option_i64(options: &HashMap<String, Value>, key: &str, default: i64) -> Result<i64, EvalError> {
+    match options.get(key) {
+        Some(v) => v
+            .as_i64()
+            .ok_or_else(|| EvalError::ExecutionError(format!("{} must be an integer", key))),
+        None => Ok(default),
+    }
 }
 
 fn column_name(item: &ReturnItem) -> String {
@@ -1438,5 +1678,67 @@ mod tests {
                 &HashMap::new(),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn test_knowledge_policy_decay_profile_ddl_roundtrip() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let create = parser
+            .parse(
+                "CREATE DECAY PROFILE slow_decay OPTIONS { halfLifeSeconds: 604800, visibilityThreshold: 0.1, scoreFloor: 0.0, function: 'exponential', scope: 'NODE', scoreFrom: 'CREATED', enabled: true }",
+            )
+            .unwrap();
+        engine.execute(&create, &HashMap::new()).unwrap();
+
+        let show = parser.parse("SHOW DECAY PROFILES").unwrap();
+        let shown = engine.execute(&show, &HashMap::new()).unwrap();
+        assert_eq!(shown.rows.len(), 1);
+        assert_eq!(
+            shown.rows[0].get("name"),
+            Some(&Value::String("slow_decay".to_string()))
+        );
+
+        let alter = parser
+            .parse("ALTER DECAY PROFILE slow_decay SET OPTIONS { visibilityThreshold: 0.2 }")
+            .unwrap();
+        engine.execute(&alter, &HashMap::new()).unwrap();
+        let shown = engine.execute(&show, &HashMap::new()).unwrap();
+        assert_eq!(shown.rows[0].get("visibilityThreshold"), Some(&Value::from(0.2)));
+    }
+
+    #[test]
+    fn test_knowledge_policy_promotion_profile_and_policy_roundtrip() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let create_profile = parser
+            .parse(
+                "CREATE PROMOTION PROFILE boost_profile OPTIONS { scope: 'NODE', multiplier: 1.5, scoreFloor: 0.0, scoreCap: 1.0, enabled: true }",
+            )
+            .unwrap();
+        engine.execute(&create_profile, &HashMap::new()).unwrap();
+
+        let create_policy = parser
+            .parse("CREATE PROMOTION POLICY fact_policy FOR (n:KnowledgeFact) APPLY PROFILE boost_profile WHEN 'n.evidence >= 3'")
+            .unwrap();
+        engine.execute(&create_policy, &HashMap::new()).unwrap();
+
+        let show_policies = parser.parse("SHOW PROMOTION POLICIES").unwrap();
+        let shown = engine.execute(&show_policies, &HashMap::new()).unwrap();
+        assert_eq!(shown.rows.len(), 1);
+        assert_eq!(
+            shown.rows[0].get("name"),
+            Some(&Value::String("fact_policy".to_string()))
+        );
+        assert_eq!(shown.rows[0].get("enabled"), Some(&Value::Bool(true)));
+
+        let alter_policy = parser
+            .parse("ALTER PROMOTION POLICY fact_policy SET ENABLED false")
+            .unwrap();
+        engine.execute(&alter_policy, &HashMap::new()).unwrap();
+        let shown = engine.execute(&show_policies, &HashMap::new()).unwrap();
+        assert_eq!(shown.rows[0].get("enabled"), Some(&Value::Bool(false)));
     }
 }
