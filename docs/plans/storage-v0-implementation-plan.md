@@ -1,7 +1,7 @@
 # Storage V0 Implementation Plan (Copper)
 
 ## Objective
-Implement a Rust-native storage architecture baseline aligned to current NornicDB storage concepts while locking copper storage to layout version **0** and excluding migration baggage.
+Implement a Rust-native storage architecture baseline aligned to current NornicDB storage concepts while locking Copper storage to layout version **0** and excluding migration baggage.
 
 ## Phase 1 (initial baseline in this change)
 - [x] Add layout manifest with fixed version `0`

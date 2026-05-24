@@ -8,7 +8,6 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sled::{Db, Tree};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -72,7 +71,7 @@ pub struct SearchPeerRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HyperScalerProfile {
+pub struct HyperscalerProfile {
     pub profile_id: String,
     pub provider: String,
     pub region: String,
@@ -88,6 +87,7 @@ pub struct StorageEngine {
     nodes: Tree,
     edges: Tree,
     indexes: Tree,
+    temp_dir: Option<tempfile::TempDir>,
 }
 
 impl StorageEngine {
@@ -99,10 +99,22 @@ impl StorageEngine {
 
     /// Open an in-memory (temporary) storage engine for testing.
     pub fn open_temporary() -> Result<Self, StorageError> {
-        let path = std::env::temp_dir().join(format!("copperdb-storage-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&path)?;
-        let db = sled::open(path)?;
-        Self::open_with_db(db)
+        let temp_dir = tempfile::tempdir()?;
+        let db = sled::open(temp_dir.path())?;
+        let meta = db.open_tree("meta")?;
+        let nodes = db.open_tree("nodes")?;
+        let edges = db.open_tree("edges")?;
+        let indexes = db.open_tree("indexes")?;
+        let engine = Self {
+            db,
+            meta,
+            nodes,
+            edges,
+            indexes,
+            temp_dir: Some(temp_dir),
+        };
+        engine.ensure_layout_manifest()?;
+        Ok(engine)
     }
 
     fn open_with_db(db: Db) -> Result<Self, StorageError> {
@@ -116,6 +128,7 @@ impl StorageEngine {
             nodes,
             edges,
             indexes,
+            temp_dir: None,
         };
         engine.ensure_layout_manifest()?;
         Ok(engine)
@@ -152,6 +165,10 @@ impl StorageEngine {
 
     pub fn storage_layout_version(&self) -> Result<u8, StorageError> {
         Ok(self.layout_manifest()?.version)
+    }
+
+    pub fn is_temporary(&self) -> bool {
+        self.temp_dir.is_some()
     }
 
     // --- Compatibility node operations (raw bytes) ---
@@ -210,7 +227,7 @@ impl StorageEngine {
             self.unindex_node_labels(&old)?;
         }
         self.nodes
-            .insert(node.id.as_bytes(), rmp_serde::to_vec_named(node)?)?;
+            .insert(node.id.as_bytes(), rmp_serde::to_vec(node)?)?;
         self.index_node_labels(node)?;
         Ok(())
     }
@@ -257,7 +274,7 @@ impl StorageEngine {
             self.unindex_edge_type(&old)?;
         }
         self.edges
-            .insert(edge.id.as_bytes(), rmp_serde::to_vec_named(edge)?)?;
+            .insert(edge.id.as_bytes(), rmp_serde::to_vec(edge)?)?;
         self.index_edge_type(edge)?;
         Ok(())
     }
@@ -323,7 +340,7 @@ impl StorageEngine {
 
     pub fn register_search_peer(&self, peer: &SearchPeerRecord) -> Result<(), StorageError> {
         let key = [META_SEARCH_PEER_PREFIX, peer.peer_id.as_bytes()].concat();
-        self.meta.insert(key, rmp_serde::to_vec_named(peer)?)?;
+        self.meta.insert(key, rmp_serde::to_vec(peer)?)?;
         Ok(())
     }
 
@@ -339,15 +356,15 @@ impl StorageEngine {
 
     pub fn register_hyperscaler_profile(
         &self,
-        profile: &HyperScalerProfile,
+        profile: &HyperscalerProfile,
     ) -> Result<(), StorageError> {
         let key = [META_HYPERSCALER_PROFILE_PREFIX, profile.profile_id.as_bytes()].concat();
-        self.meta.insert(key, rmp_serde::to_vec_named(profile)?)?;
+        self.meta.insert(key, rmp_serde::to_vec(profile)?)?;
         Ok(())
     }
 
-    pub fn list_hyperscaler_profiles(&self) -> Result<Vec<HyperScalerProfile>, StorageError> {
-        let mut profiles: Vec<HyperScalerProfile> = Vec::new();
+    pub fn list_hyperscaler_profiles(&self) -> Result<Vec<HyperscalerProfile>, StorageError> {
+        let mut profiles: Vec<HyperscalerProfile> = Vec::new();
         for entry in self.meta.scan_prefix(META_HYPERSCALER_PROFILE_PREFIX) {
             let (_, v) = entry?;
             profiles.push(rmp_serde::from_slice(v.as_ref())?);
@@ -484,6 +501,7 @@ mod tests {
     #[test]
     fn creates_and_reads_layout_manifest_v0() {
         let engine = StorageEngine::open_temporary().unwrap();
+        assert!(engine.is_temporary());
         let manifest = engine.layout_manifest().unwrap();
         assert_eq!(manifest.version, STORAGE_LAYOUT_VERSION);
         assert!(manifest.created_at_unix_ms > 0);
@@ -649,7 +667,7 @@ mod tests {
         assert_eq!(peers[1].peer_id, "peer-b");
 
         engine
-            .register_hyperscaler_profile(&HyperScalerProfile {
+            .register_hyperscaler_profile(&HyperscalerProfile {
                 profile_id: "aws-primary".to_string(),
                 provider: "aws".to_string(),
                 region: "us-east-1".to_string(),
@@ -658,7 +676,7 @@ mod tests {
             })
             .unwrap();
         engine
-            .register_hyperscaler_profile(&HyperScalerProfile {
+            .register_hyperscaler_profile(&HyperscalerProfile {
                 profile_id: "gcp-burst".to_string(),
                 provider: "gcp".to_string(),
                 region: "us-central1".to_string(),
