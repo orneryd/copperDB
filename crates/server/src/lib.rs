@@ -357,7 +357,7 @@ async fn copper_logo_handler(State(state): State<Arc<AppState>>) -> impl IntoRes
 /// GET /health — liveness probe.
 async fn health_handler() -> Json<HealthResponse> {
     Json(HealthResponse {
-        status: "healthy".into(),
+        status: "ok".into(),
         version: env!("CARGO_PKG_VERSION").into(),
     })
 }
