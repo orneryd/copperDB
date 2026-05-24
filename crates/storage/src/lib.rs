@@ -8,6 +8,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sled::{Db, Tree};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -21,8 +22,8 @@ const IDX_EDGE_TYPE_PREFIX: &str = "edge_type";
 
 #[derive(Debug, Error)]
 pub enum StorageError {
-    #[error("sled error: {0}")]
-    Sled(#[from] sled::Error),
+    #[error("io/sled error: {0}")]
+    Sled(#[from] std::io::Error),
     #[error("serialization error: {0}")]
     Serialization(#[from] rmp_serde::encode::Error),
     #[error("deserialization error: {0}")]
@@ -80,6 +81,7 @@ pub struct HyperScalerProfile {
 }
 
 /// A single opened copperdb storage instance.
+#[derive(Debug)]
 pub struct StorageEngine {
     db: Db,
     meta: Tree,
@@ -97,7 +99,9 @@ impl StorageEngine {
 
     /// Open an in-memory (temporary) storage engine for testing.
     pub fn open_temporary() -> Result<Self, StorageError> {
-        let db = sled::Config::new().temporary(true).open()?;
+        let path = std::env::temp_dir().join(format!("copperdb-storage-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&path)?;
+        let db = sled::open(path)?;
         Self::open_with_db(db)
     }
 
@@ -233,10 +237,10 @@ impl StorageEngine {
         for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
             let (key, _) = entry?;
             let key_str = std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
-            if let Some(node_id) = key_str.rsplit('/').next()
-                && let Some(node) = self.get_node_record(node_id)?
-            {
-                out.push(node);
+            if let Some(node_id) = key_str.rsplit('/').next() {
+                if let Some(node) = self.get_node_record(node_id)? {
+                    out.push(node);
+                }
             }
         }
 
@@ -280,10 +284,10 @@ impl StorageEngine {
         for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
             let (key, _) = entry?;
             let key_str = std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
-            if let Some(edge_id) = key_str.rsplit('/').next()
-                && let Some(edge) = self.get_edge_record(edge_id)?
-            {
-                out.push(edge);
+            if let Some(edge_id) = key_str.rsplit('/').next() {
+                if let Some(edge) = self.get_edge_record(edge_id)? {
+                    out.push(edge);
+                }
             }
         }
 
@@ -324,7 +328,7 @@ impl StorageEngine {
     }
 
     pub fn list_search_peers(&self) -> Result<Vec<SearchPeerRecord>, StorageError> {
-        let mut peers = Vec::new();
+        let mut peers: Vec<SearchPeerRecord> = Vec::new();
         for entry in self.meta.scan_prefix(META_SEARCH_PEER_PREFIX) {
             let (_, v) = entry?;
             peers.push(rmp_serde::from_slice(v.as_ref())?);
@@ -343,7 +347,7 @@ impl StorageEngine {
     }
 
     pub fn list_hyperscaler_profiles(&self) -> Result<Vec<HyperScalerProfile>, StorageError> {
-        let mut profiles = Vec::new();
+        let mut profiles: Vec<HyperScalerProfile> = Vec::new();
         for entry in self.meta.scan_prefix(META_HYPERSCALER_PROFILE_PREFIX) {
             let (_, v) = entry?;
             profiles.push(rmp_serde::from_slice(v.as_ref())?);
@@ -450,7 +454,7 @@ fn now_unix_ms() -> i64 {
 mod tests {
     use super::*;
     use serde_json::json;
-    use tempfile::tempdir;
+    use std::fs;
 
     fn sample_node(id: &str, labels: &[&str]) -> NodeRecord {
         NodeRecord {
@@ -488,8 +492,10 @@ mod tests {
 
     #[test]
     fn rejects_non_v0_layout_manifest() {
-        let tmp = tempdir().unwrap();
-        let db = sled::open(tmp.path()).unwrap();
+        let test_dir =
+            std::env::temp_dir().join(format!("copperdb-storage-version-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&test_dir).unwrap();
+        let db = sled::open(&test_dir).unwrap();
         let meta = db.open_tree("meta").unwrap();
 
         let bad_manifest = StorageLayoutManifest {
@@ -505,7 +511,7 @@ mod tests {
         drop(meta);
         drop(db);
 
-        let err = StorageEngine::open(tmp.path()).unwrap_err();
+        let err = StorageEngine::open(&test_dir).err().unwrap();
         match err {
             StorageError::UnsupportedLayoutVersion { expected, actual } => {
                 assert_eq!(expected, 0);
@@ -513,6 +519,7 @@ mod tests {
             }
             _ => panic!("expected UnsupportedLayoutVersion"),
         }
+        let _ = fs::remove_dir_all(&test_dir);
     }
 
     #[test]
