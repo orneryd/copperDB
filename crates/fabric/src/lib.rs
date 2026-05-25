@@ -49,15 +49,16 @@ impl Router {
 
     /// Find the primary node for a given database.
     pub fn primary_for(&self, database: &str) -> Option<&ClusterNode> {
-        self.nodes.iter().find(|n| {
-            n.role == NodeRole::Primary && n.databases.contains(&database.to_string())
-        })
+        self.nodes
+            .iter()
+            .find(|n| n.role == NodeRole::Primary && n.databases.contains(&database.to_string()))
     }
 
     /// Find any readable node for a given database (prefer local region).
     pub fn readable_for(&self, database: &str, preferred_region: &str) -> Option<&ClusterNode> {
         // Prefer local region
-        self.nodes.iter()
+        self.nodes
+            .iter()
             .filter(|n| n.databases.contains(&database.to_string()))
             .min_by_key(|n| if n.region == preferred_region { 0 } else { 1 })
     }

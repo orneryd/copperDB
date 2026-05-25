@@ -4,8 +4,8 @@
 //! Records authenticated operations with user, database, query, and outcome.
 
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 use std::time::{SystemTime, UNIX_EPOCH};
+use thiserror::Error;
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -82,7 +82,9 @@ pub struct MemoryAuditSink {
 
 impl MemoryAuditSink {
     pub fn new() -> Self {
-        Self { events: std::sync::Mutex::new(vec![]) }
+        Self {
+            events: std::sync::Mutex::new(vec![]),
+        }
     }
 
     pub fn events(&self) -> Vec<AuditEvent> {

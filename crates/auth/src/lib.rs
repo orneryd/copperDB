@@ -82,11 +82,18 @@ pub struct TokenManager {
 
 impl TokenManager {
     pub fn new(secret: impl Into<String>) -> Self {
-        Self { secret: secret.into() }
+        Self {
+            secret: secret.into(),
+        }
     }
 
     /// Issue a signed JWT token for a user.
-    pub fn issue(&self, username: &str, roles: Vec<String>, expiry_secs: u64) -> Result<String, AuthError> {
+    pub fn issue(
+        &self,
+        username: &str,
+        roles: Vec<String>,
+        expiry_secs: u64,
+    ) -> Result<String, AuthError> {
         use jsonwebtoken::{encode, EncodingKey, Header};
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

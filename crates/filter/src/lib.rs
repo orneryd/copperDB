@@ -80,9 +80,7 @@ pub fn eval_expression(
             Ok(Value::Bool(eval_predicate(b, row, params)?))
         }
 
-        Expression::Not(inner) => {
-            Ok(Value::Bool(!eval_predicate(inner, row, params)?))
-        }
+        Expression::Not(inner) => Ok(Value::Bool(!eval_predicate(inner, row, params)?)),
 
         Expression::IsNull(inner) => {
             let v = eval_expression(inner, row, params)?;
@@ -94,9 +92,11 @@ pub fn eval_expression(
             Ok(Value::Bool(v != Value::Null))
         }
 
-        Expression::FunctionCall { name, args, distinct: _ } => {
-            eval_function(name, args, row, params)
-        }
+        Expression::FunctionCall {
+            name,
+            args,
+            distinct: _,
+        } => eval_function(name, args, row, params),
     }
 }
 
@@ -159,7 +159,13 @@ fn numeric_cmp(a: &Value, b: &Value) -> Result<i32, FilterError> {
         (Value::Number(n1), Value::Number(n2)) => {
             let f1 = n1.as_f64().unwrap_or(f64::NAN);
             let f2 = n2.as_f64().unwrap_or(f64::NAN);
-            if f1 < f2 { Ok(-1) } else if f1 > f2 { Ok(1) } else { Ok(0) }
+            if f1 < f2 {
+                Ok(-1)
+            } else if f1 > f2 {
+                Ok(1)
+            } else {
+                Ok(0)
+            }
         }
         (Value::String(s1), Value::String(s2)) => match s1.cmp(s2) {
             std::cmp::Ordering::Less => Ok(-1),
@@ -179,7 +185,9 @@ fn coerce_string(v: &Value) -> Result<String, FilterError> {
         Value::Number(n) => Ok(n.to_string()),
         Value::Bool(b) => Ok(b.to_string()),
         Value::Null => Ok("null".to_string()),
-        _ => Err(FilterError::TypeError(format!("cannot coerce {v:?} to string"))),
+        _ => Err(FilterError::TypeError(format!(
+            "cannot coerce {v:?} to string"
+        ))),
     }
 }
 
@@ -223,7 +231,9 @@ fn eval_function(
                 Value::Array(a) => Ok(Value::Number(a.len().into())),
                 Value::String(s) => Ok(Value::Number(s.len().into())),
                 Value::Null => Ok(Value::Null),
-                _ => Err(FilterError::TypeError(format!("size() not applicable to {v:?}"))),
+                _ => Err(FilterError::TypeError(format!(
+                    "size() not applicable to {v:?}"
+                ))),
             }
         }
         "type" => {
@@ -258,9 +268,9 @@ fn eval_function(
         "tointeger" | "int" | "integer" => {
             let v = eval_arg(0)?;
             match &v {
-                Value::Number(n) => Ok(Value::Number(
-                    serde_json::Number::from(n.as_i64().unwrap_or(0)),
-                )),
+                Value::Number(n) => Ok(Value::Number(serde_json::Number::from(
+                    n.as_i64().unwrap_or(0),
+                ))),
                 Value::String(s) => {
                     let i: i64 = s.parse().unwrap_or(0);
                     Ok(Value::Number(i.into()))
@@ -278,8 +288,7 @@ fn eval_function(
                 Value::String(s) => {
                     let f: f64 = s.parse().unwrap_or(0.0);
                     Ok(Value::Number(
-                        serde_json::Number::from_f64(f)
-                            .unwrap_or(serde_json::Number::from(0)),
+                        serde_json::Number::from_f64(f).unwrap_or(serde_json::Number::from(0)),
                     ))
                 }
                 _ => Ok(Value::Null),
@@ -308,7 +317,8 @@ fn eval_function(
         "split" => {
             let s = coerce_string(&eval_arg(0)?)?;
             let delim = coerce_string(&eval_arg(1)?)?;
-            let parts: Vec<Value> = s.split(delim.as_str())
+            let parts: Vec<Value> = s
+                .split(delim.as_str())
                 .map(|p| Value::String(p.to_string()))
                 .collect();
             Ok(Value::Array(parts))
@@ -321,10 +331,7 @@ fn eval_function(
         }
         "substring" => {
             let s = coerce_string(&eval_arg(0)?)?;
-            let start = eval_arg(1)?
-                .as_i64()
-                .unwrap_or(0)
-                .max(0) as usize;
+            let start = eval_arg(1)?.as_i64().unwrap_or(0).max(0) as usize;
             if args.len() > 2 {
                 let len = eval_arg(2)?.as_i64().unwrap_or(0).max(0) as usize;
                 let end = (start + len).min(s.len());
@@ -382,7 +389,8 @@ fn eval_function(
         "keys" => {
             let v = eval_arg(0)?;
             if let Value::Object(map) = &v {
-                let keys: Vec<Value> = map.keys()
+                let keys: Vec<Value> = map
+                    .keys()
                     .filter(|k| !k.starts_with('_'))
                     .map(|k| Value::String(k.clone()))
                     .collect();
@@ -435,12 +443,13 @@ fn eval_function(
                         _ => f.round(),
                     };
                     return Ok(Value::Number(
-                        serde_json::Number::from_f64(result)
-                            .unwrap_or(serde_json::Number::from(0)),
+                        serde_json::Number::from_f64(result).unwrap_or(serde_json::Number::from(0)),
                     ));
                 }
             }
-            Err(FilterError::TypeError(format!("{name}() requires a number")))
+            Err(FilterError::TypeError(format!(
+                "{name}() requires a number"
+            )))
         }
         _ => Err(FilterError::UnknownFunction(name.to_string())),
     }
@@ -454,10 +463,7 @@ pub trait Predicate: Send + Sync {
 }
 
 /// Filter a list of rows using a predicate.
-pub fn filter_rows<P: Predicate>(
-    rows: Vec<Row>,
-    predicate: &P,
-) -> Result<Vec<Row>, FilterError> {
+pub fn filter_rows<P: Predicate>(rows: Vec<Row>, predicate: &P) -> Result<Vec<Row>, FilterError> {
     rows.into_iter()
         .filter_map(|row| match predicate.evaluate(&row) {
             Ok(true) => Some(Ok(row)),
@@ -475,7 +481,10 @@ pub struct EqPredicate {
 
 impl Predicate for EqPredicate {
     fn evaluate(&self, row: &Row) -> Result<bool, FilterError> {
-        Ok(row.get(&self.key).map(|v| values_equal(v, &self.value)).unwrap_or(false))
+        Ok(row
+            .get(&self.key)
+            .map(|v| values_equal(v, &self.value))
+            .unwrap_or(false))
     }
 }
 
@@ -528,7 +537,10 @@ mod tests {
         let mut row = HashMap::new();
         row.insert("n".to_string(), json!({"name": "Alice", "age": 30}));
         let params = HashMap::new();
-        assert_eq!(eval_expression(&expr, &row, &params).unwrap(), json!("Alice"));
+        assert_eq!(
+            eval_expression(&expr, &row, &params).unwrap(),
+            json!("Alice")
+        );
     }
 
     #[test]
@@ -681,7 +693,10 @@ mod tests {
         let row = HashMap::new();
         let mut params = HashMap::new();
         params.insert("name".to_string(), json!("Alice"));
-        assert_eq!(eval_expression(&expr, &row, &params).unwrap(), json!("Alice"));
+        assert_eq!(
+            eval_expression(&expr, &row, &params).unwrap(),
+            json!("Alice")
+        );
     }
 
     #[test]

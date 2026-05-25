@@ -13,18 +13,20 @@ use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum TxError {
-    #[error("transaction already committed")]
-    AlreadyCommitted,
-    #[error("transaction already rolled back")]
-    AlreadyRolledBack,
-    #[error("transaction conflict")]
-    Conflict,
-    #[error("transaction not found: {0}")]
-    NotFound(String),
+    #[error("no active transaction")]
+    NoActiveTransaction,
+    #[error("transaction already active")]
+    TransactionActive,
+    #[error("transaction already closed")]
+    TransactionClosed,
+    #[error("transaction rolled back")]
+    TransactionRolledBack,
+    #[error("transaction is read-only")]
+    TransactionReadOnly,
     #[error("transaction timed out")]
     TimedOut,
-    #[error("transaction not active")]
-    NotActive,
+    #[error("transaction conflict")]
+    Conflict,
 }
 
 // ─── Enums ───────────────────────────────────────────────────────────────────
@@ -63,8 +65,15 @@ pub enum IsolationLevel {
 /// A single pending storage operation buffered by a transaction.
 #[derive(Debug, Clone)]
 pub enum TxOperation {
-    Put { tree: String, key: Vec<u8>, value: Vec<u8> },
-    Delete { tree: String, key: Vec<u8> },
+    Put {
+        tree: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    },
+    Delete {
+        tree: String,
+        key: Vec<u8>,
+    },
 }
 
 // ─── Transaction ─────────────────────────────────────────────────────────────
@@ -134,9 +143,10 @@ impl Transaction {
                 self.state = TransactionState::Committed;
                 Ok(())
             }
-            TransactionState::Committed => Err(TxError::AlreadyCommitted),
-            TransactionState::RolledBack => Err(TxError::AlreadyRolledBack),
-            TransactionState::Failed => Err(TxError::NotActive),
+            TransactionState::Committed | TransactionState::Failed => {
+                Err(TxError::TransactionClosed)
+            }
+            TransactionState::RolledBack => Err(TxError::TransactionRolledBack),
         }
     }
 
@@ -147,20 +157,31 @@ impl Transaction {
                 self.pending.clear();
                 Ok(())
             }
-            TransactionState::Committed => Err(TxError::AlreadyCommitted),
-            TransactionState::RolledBack => Err(TxError::AlreadyRolledBack),
+            TransactionState::RolledBack => Err(TxError::TransactionRolledBack),
+            TransactionState::Committed => Err(TxError::TransactionClosed),
         }
     }
 
     pub fn add_operation(&mut self, op: TxOperation) -> Result<(), TxError> {
-        if !self.is_active() {
-            return Err(TxError::NotActive);
-        }
+        self.ensure_writable()?;
         if self.mode == TransactionMode::Read {
-            return Err(TxError::NotActive); // write on read tx
+            return Err(TxError::TransactionReadOnly);
         }
         self.pending.push(op);
         Ok(())
+    }
+
+    fn ensure_writable(&self) -> Result<(), TxError> {
+        if self.is_expired() {
+            return Err(TxError::TimedOut);
+        }
+        match self.state {
+            TransactionState::Active => Ok(()),
+            TransactionState::Committed | TransactionState::Failed => {
+                Err(TxError::TransactionClosed)
+            }
+            TransactionState::RolledBack => Err(TxError::TransactionRolledBack),
+        }
     }
 
     pub fn take_pending(&mut self) -> Vec<TxOperation> {
@@ -225,9 +246,10 @@ impl TransactionManager {
     /// Re-inserts only when the error is transient (i.e. the transaction
     /// remains Active so the caller can retry).
     pub fn commit(&self, id: Uuid) -> Result<(), TxError> {
-        let (_, mut tx) = self.active
+        let (_, mut tx) = self
+            .active
             .remove(&id)
-            .ok_or_else(|| TxError::NotFound(id.to_string()))?;
+            .ok_or(TxError::NoActiveTransaction)?;
         match tx.commit() {
             Ok(()) => Ok(()),
             Err(err) => {
@@ -246,9 +268,10 @@ impl TransactionManager {
     /// Rollback the transaction with the given ID.
     /// Removes the transaction from `active` on success or terminal failure.
     pub fn rollback(&self, id: Uuid) -> Result<(), TxError> {
-        let (_, mut tx) = self.active
+        let (_, mut tx) = self
+            .active
             .remove(&id)
-            .ok_or_else(|| TxError::NotFound(id.to_string()))?;
+            .ok_or(TxError::NoActiveTransaction)?;
         match tx.rollback() {
             Ok(()) => Ok(()),
             Err(err) => {
@@ -263,14 +286,18 @@ impl TransactionManager {
 
     /// Check if a transaction is active.
     pub fn is_active(&self, id: &Uuid) -> bool {
-        self.active.get(id).map(|tx| tx.is_active()).unwrap_or(false)
+        self.active
+            .get(id)
+            .map(|tx| tx.is_active())
+            .unwrap_or(false)
     }
 
     /// Add an operation to a transaction's pending list.
     pub fn add_operation(&self, id: &Uuid, op: TxOperation) -> Result<(), TxError> {
-        let mut entry = self.active
+        let mut entry = self
+            .active
             .get_mut(id)
-            .ok_or_else(|| TxError::NotFound(id.to_string()))?;
+            .ok_or(TxError::NoActiveTransaction)?;
         entry.add_operation(op)
     }
 
@@ -280,7 +307,10 @@ impl TransactionManager {
     }
 
     /// Get mutable access to a transaction.
-    pub fn get_mut(&self, id: &Uuid) -> Option<dashmap::mapref::one::RefMut<'_, Uuid, Transaction>> {
+    pub fn get_mut(
+        &self,
+        id: &Uuid,
+    ) -> Option<dashmap::mapref::one::RefMut<'_, Uuid, Transaction>> {
         self.active.get_mut(id)
     }
 
@@ -311,7 +341,7 @@ mod tests {
         assert!(tx.is_active());
         tx.commit().unwrap();
         assert!(!tx.is_active());
-        assert!(tx.commit().is_err());
+        assert!(matches!(tx.commit(), Err(TxError::TransactionClosed)));
     }
 
     #[test]
@@ -319,7 +349,7 @@ mod tests {
         let mut tx = Transaction::begin("testdb", IsolationLevel::Serializable);
         tx.rollback().unwrap();
         assert!(!tx.is_active());
-        assert!(tx.rollback().is_err());
+        assert!(matches!(tx.rollback(), Err(TxError::TransactionRolledBack)));
     }
 
     #[test]
@@ -345,7 +375,7 @@ mod tests {
     fn test_transaction_manager_not_found() {
         let mgr = TransactionManager::new();
         let id = Uuid::new_v4();
-        assert!(matches!(mgr.commit(id), Err(TxError::NotFound(_))));
+        assert!(matches!(mgr.commit(id), Err(TxError::NoActiveTransaction)));
     }
 
     #[test]
@@ -353,11 +383,15 @@ mod tests {
         let mgr = TransactionManager::new();
         let config = SessionConfig::default();
         let id = mgr.begin(&config).unwrap();
-        mgr.add_operation(&id, TxOperation::Put {
-            tree: "nodes".to_string(),
-            key: b"k".to_vec(),
-            value: b"v".to_vec(),
-        }).unwrap();
+        mgr.add_operation(
+            &id,
+            TxOperation::Put {
+                tree: "nodes".to_string(),
+                key: b"k".to_vec(),
+                value: b"v".to_vec(),
+            },
+        )
+        .unwrap();
         let tx = mgr.get(&id).unwrap();
         assert_eq!(tx.pending.len(), 1);
     }
@@ -380,5 +414,72 @@ mod tests {
         assert_eq!(config.fetch_size, 1000);
         assert_eq!(config.bookmark_mode, BookmarkMode::None);
     }
-}
 
+    #[test]
+    fn test_error_messages_match_nornicdb_transaction_contract() {
+        assert_eq!(
+            TxError::NoActiveTransaction.to_string(),
+            "no active transaction"
+        );
+        assert_eq!(
+            TxError::TransactionActive.to_string(),
+            "transaction already active"
+        );
+        assert_eq!(
+            TxError::TransactionClosed.to_string(),
+            "transaction already closed"
+        );
+        assert_eq!(
+            TxError::TransactionRolledBack.to_string(),
+            "transaction rolled back"
+        );
+        assert_eq!(
+            TxError::TransactionReadOnly.to_string(),
+            "transaction is read-only"
+        );
+    }
+
+    #[test]
+    fn test_write_after_rollback_returns_transaction_rolled_back() {
+        let mut tx = Transaction::begin("testdb", IsolationLevel::ReadCommitted);
+        tx.rollback().unwrap();
+        let err = tx
+            .add_operation(TxOperation::Delete {
+                tree: "nodes".to_string(),
+                key: b"k".to_vec(),
+            })
+            .unwrap_err();
+        assert!(matches!(err, TxError::TransactionRolledBack));
+    }
+
+    #[test]
+    fn test_write_after_commit_returns_transaction_closed() {
+        let mut tx = Transaction::begin("testdb", IsolationLevel::ReadCommitted);
+        tx.commit().unwrap();
+        let err = tx
+            .add_operation(TxOperation::Put {
+                tree: "nodes".to_string(),
+                key: b"k".to_vec(),
+                value: b"v".to_vec(),
+            })
+            .unwrap_err();
+        assert!(matches!(err, TxError::TransactionClosed));
+    }
+
+    #[test]
+    fn test_write_on_read_transaction_returns_read_only_error() {
+        let config = SessionConfig {
+            mode: TransactionMode::Read,
+            ..SessionConfig::default()
+        };
+        let mut tx = Transaction::new(&config);
+        let err = tx
+            .add_operation(TxOperation::Put {
+                tree: "nodes".to_string(),
+                key: b"k".to_vec(),
+                value: b"v".to_vec(),
+            })
+            .unwrap_err();
+        assert!(matches!(err, TxError::TransactionReadOnly));
+    }
+}

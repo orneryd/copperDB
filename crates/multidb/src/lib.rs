@@ -44,23 +44,33 @@ impl DatabaseManager {
     pub fn new() -> Self {
         let manager = Self::default();
         // Create the system database (always exists)
-        manager.databases.insert("system".into(), Database {
-            name: "system".into(),
-            storage_path: "./data/system".into(),
-            status: DatabaseStatus::Online,
-            created_at: 0,
-        });
+        manager.databases.insert(
+            "system".into(),
+            Database {
+                name: "system".into(),
+                storage_path: "./data/system".into(),
+                status: DatabaseStatus::Online,
+                created_at: 0,
+            },
+        );
         // Create the default database
-        manager.databases.insert("default".into(), Database {
-            name: "default".into(),
-            storage_path: "./data/default".into(),
-            status: DatabaseStatus::Online,
-            created_at: 0,
-        });
+        manager.databases.insert(
+            "default".into(),
+            Database {
+                name: "default".into(),
+                storage_path: "./data/default".into(),
+                status: DatabaseStatus::Online,
+                created_at: 0,
+            },
+        );
         manager
     }
 
-    pub fn create(&self, name: impl Into<String>, storage_path: impl Into<String>) -> Result<(), MultiDbError> {
+    pub fn create(
+        &self,
+        name: impl Into<String>,
+        storage_path: impl Into<String>,
+    ) -> Result<(), MultiDbError> {
         let name = name.into();
         if self.databases.contains_key(&name) {
             return Err(MultiDbError::AlreadyExists(name));
@@ -69,12 +79,15 @@ impl DatabaseManager {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        self.databases.insert(name.clone(), Database {
-            name,
-            storage_path: storage_path.into(),
-            status: DatabaseStatus::Online,
-            created_at: now,
-        });
+        self.databases.insert(
+            name.clone(),
+            Database {
+                name,
+                storage_path: storage_path.into(),
+                status: DatabaseStatus::Online,
+                created_at: now,
+            },
+        );
         Ok(())
     }
 
@@ -86,7 +99,9 @@ impl DatabaseManager {
         if name == "system" {
             return Err(MultiDbError::CannotDropSystem);
         }
-        self.databases.remove(name).ok_or_else(|| MultiDbError::NotFound(name.to_owned()))?;
+        self.databases
+            .remove(name)
+            .ok_or_else(|| MultiDbError::NotFound(name.to_owned()))?;
         Ok(())
     }
 
@@ -110,6 +125,9 @@ mod tests {
     #[test]
     fn test_cannot_drop_system() {
         let manager = DatabaseManager::new();
-        assert!(matches!(manager.drop("system"), Err(MultiDbError::CannotDropSystem)));
+        assert!(matches!(
+            manager.drop("system"),
+            Err(MultiDbError::CannotDropSystem)
+        ));
     }
 }

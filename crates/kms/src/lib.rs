@@ -48,9 +48,10 @@ impl LocalKms {
     /// Create a local KMS with a 32-byte master key.
     pub fn new(master_key: Vec<u8>) -> Result<Self, KmsError> {
         if master_key.len() != 32 {
-            return Err(KmsError::ProviderError(
-                format!("master key must be 32 bytes, got {}", master_key.len()),
-            ));
+            return Err(KmsError::ProviderError(format!(
+                "master key must be 32 bytes, got {}",
+                master_key.len()
+            )));
         }
         Ok(Self { master_key })
     }
@@ -59,7 +60,10 @@ impl LocalKms {
 #[async_trait::async_trait]
 impl KmsProvider for LocalKms {
     async fn wrap_key(&self, _key_id: &str, plaintext_dek: &[u8]) -> Result<Vec<u8>, KmsError> {
-        use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Key, Nonce};
+        use aes_gcm::{
+            aead::{Aead, KeyInit},
+            Aes256Gcm, Key, Nonce,
+        };
         use getrandom::fill as fill_random;
 
         let key = Key::<Aes256Gcm>::try_from(self.master_key.as_slice())
@@ -69,7 +73,8 @@ impl KmsProvider for LocalKms {
         fill_random(&mut nonce_bytes)
             .map_err(|_| KmsError::ProviderError("nonce generation failed".into()))?;
         let nonce = Nonce::from(nonce_bytes);
-        let ciphertext = cipher.encrypt(&nonce, plaintext_dek)
+        let ciphertext = cipher
+            .encrypt(&nonce, plaintext_dek)
             .map_err(|_| KmsError::ProviderError("AES-GCM wrap failed".into()))?;
         let mut result = nonce.to_vec();
         result.extend(ciphertext);
@@ -77,7 +82,10 @@ impl KmsProvider for LocalKms {
     }
 
     async fn unwrap_key(&self, _key_id: &str, encrypted_dek: &[u8]) -> Result<Vec<u8>, KmsError> {
-        use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Key, Nonce};
+        use aes_gcm::{
+            aead::{Aead, KeyInit},
+            Aes256Gcm, Key, Nonce,
+        };
         if encrypted_dek.len() < 12 {
             return Err(KmsError::DecryptFailed);
         }
@@ -86,7 +94,9 @@ impl KmsProvider for LocalKms {
             .map_err(|_| KmsError::ProviderError("invalid master key length".into()))?;
         let cipher = Aes256Gcm::new(&key);
         let nonce = Nonce::try_from(nonce_bytes).map_err(|_| KmsError::DecryptFailed)?;
-        cipher.decrypt(&nonce, ciphertext).map_err(|_| KmsError::DecryptFailed)
+        cipher
+            .decrypt(&nonce, ciphertext)
+            .map_err(|_| KmsError::DecryptFailed)
     }
 }
 

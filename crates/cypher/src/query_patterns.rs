@@ -379,7 +379,11 @@ fn parse_pattern_chain(s: &str) -> Option<PatternChain> {
             break;
         }
         let (var, rest) = parse_node_variable(cursor)?;
-        edges.push(ChainEdge { rel_var, rel_type, direction });
+        edges.push(ChainEdge {
+            rel_var,
+            rel_type,
+            direction,
+        });
         nodes.push(var);
         cursor = rest.trim();
     }
@@ -582,18 +586,15 @@ mod tests {
     #[test]
     fn test_with_clause_bypasses_optimization() {
         // WITH makes the query ineligible for optimization
-        let info = detect_query_pattern(
-            "MATCH (n) WITH n MATCH (m) RETURN n, m",
-        );
+        let info = detect_query_pattern("MATCH (n) WITH n MATCH (m) RETURN n, m");
         assert_eq!(info.pattern, QueryPattern::Generic);
     }
 
     #[test]
     fn test_starts_with_operator_does_not_bypass_optimization() {
         // STARTS WITH is a string operator, not a clause boundary; optimization should proceed.
-        let info = detect_query_pattern(
-            "MATCH (n) WHERE n.name STARTS WITH 'A' RETURN n LIMIT 200",
-        );
+        let info =
+            detect_query_pattern("MATCH (n) WHERE n.name STARTS WITH 'A' RETURN n LIMIT 200");
         // Should be optimizable (LargeResultSet) because STARTS WITH is an operator, not a WITH clause.
         assert_eq!(info.pattern, QueryPattern::LargeResultSet);
     }
@@ -645,6 +646,9 @@ mod tests {
     fn test_query_pattern_display() {
         assert_eq!(QueryPattern::Generic.as_str(), "Generic");
         assert_eq!(QueryPattern::LargeResultSet.as_str(), "LargeResultSet");
-        assert_eq!(QueryPattern::MutualRelationship.as_str(), "MutualRelationship");
+        assert_eq!(
+            QueryPattern::MutualRelationship.as_str(),
+            "MutualRelationship"
+        );
     }
 }

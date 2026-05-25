@@ -65,33 +65,39 @@ impl MockEmbedder {
 impl Embedder for MockEmbedder {
     async fn embed(&self, texts: &[String]) -> Result<Vec<Embedding>, EmbedError> {
         use std::hash::{Hash, Hasher};
-        texts.iter().map(|text| {
-            // Deterministic pseudo-random vector from text hash
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            text.hash(&mut hasher);
-            let seed = hasher.finish();
-            let vector: Vec<f32> = (0..self.dims)
-                .map(|i| {
-                    let v = ((seed.wrapping_add(i as u64).wrapping_mul(6364136223846793005)
-                        .wrapping_add(1442695040888963407)) >> 33) as f32
-                        / u32::MAX as f32
-                        * 2.0
-                        - 1.0;
-                    v
+        texts
+            .iter()
+            .map(|text| {
+                // Deterministic pseudo-random vector from text hash
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                text.hash(&mut hasher);
+                let seed = hasher.finish();
+                let vector: Vec<f32> = (0..self.dims)
+                    .map(|i| {
+                        let v = ((seed
+                            .wrapping_add(i as u64)
+                            .wrapping_mul(6364136223846793005)
+                            .wrapping_add(1442695040888963407))
+                            >> 33) as f32
+                            / u32::MAX as f32
+                            * 2.0
+                            - 1.0;
+                        v
+                    })
+                    .collect();
+                let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let vector = if norm > 0.0 {
+                    vector.iter().map(|x| x / norm).collect()
+                } else {
+                    vector
+                };
+                Ok(Embedding {
+                    text: text.clone(),
+                    vector,
+                    model: "mock".into(),
                 })
-                .collect();
-            let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
-            let vector = if norm > 0.0 {
-                vector.iter().map(|x| x / norm).collect()
-            } else {
-                vector
-            };
-            Ok(Embedding {
-                text: text.clone(),
-                vector,
-                model: "mock".into(),
             })
-        }).collect()
+            .collect()
     }
 
     fn dimensions(&self) -> usize {

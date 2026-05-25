@@ -55,10 +55,7 @@ pub const BUILD_INFO: BuildInfo = BuildInfo {
 pub fn summary() -> String {
     format!(
         "copperdb v{} ({}) built {} for {}",
-        BUILD_INFO.version,
-        BUILD_INFO.git_commit,
-        BUILD_INFO.build_date,
-        BUILD_INFO.target,
+        BUILD_INFO.version, BUILD_INFO.git_commit, BUILD_INFO.build_date, BUILD_INFO.target,
     )
 }
 

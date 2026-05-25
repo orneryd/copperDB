@@ -42,14 +42,16 @@ pub struct TlsConfig {
 impl TlsConfig {
     pub fn validate(&self) -> Result<(), SecurityError> {
         if !std::path::Path::new(&self.cert_path).exists() {
-            return Err(SecurityError::CertError(
-                format!("certificate file not found: {}", self.cert_path)
-            ));
+            return Err(SecurityError::CertError(format!(
+                "certificate file not found: {}",
+                self.cert_path
+            )));
         }
         if !std::path::Path::new(&self.key_path).exists() {
-            return Err(SecurityError::CertError(
-                format!("key file not found: {}", self.key_path)
-            ));
+            return Err(SecurityError::CertError(format!(
+                "key file not found: {}",
+                self.key_path
+            )));
         }
         Ok(())
     }
@@ -62,18 +64,21 @@ const INJECTION_CHARS: &[char] = &['`', '"', '\'', ';', '\n', '\r', '\0', '\\'];
 /// Rejects any input containing injection characters or control characters.
 pub fn sanitize_identifier(input: &str) -> Result<String, SecurityError> {
     if input.is_empty() {
-        return Err(SecurityError::InvalidIdentifier("identifier must not be empty".into()));
+        return Err(SecurityError::InvalidIdentifier(
+            "identifier must not be empty".into(),
+        ));
     }
     for ch in INJECTION_CHARS {
         if input.contains(*ch) {
-            return Err(SecurityError::InvalidIdentifier(
-                format!("identifier contains forbidden character: {:?}", ch)
-            ));
+            return Err(SecurityError::InvalidIdentifier(format!(
+                "identifier contains forbidden character: {:?}",
+                ch
+            )));
         }
     }
     if input.chars().any(|c| c.is_control()) {
         return Err(SecurityError::InvalidIdentifier(
-            "identifier contains control characters".into()
+            "identifier contains control characters".into(),
         ));
     }
     Ok(input.to_string())
@@ -87,12 +92,15 @@ pub fn sanitize_string_value(input: &str) -> String {
 /// Validate a node label: must be alphanumeric + underscore, non-empty.
 pub fn validate_label(label: &str) -> Result<(), SecurityError> {
     if label.is_empty() {
-        return Err(SecurityError::InvalidLabel("label must not be empty".into()));
+        return Err(SecurityError::InvalidLabel(
+            "label must not be empty".into(),
+        ));
     }
     if !label.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return Err(SecurityError::InvalidLabel(
-            format!("label '{}' contains invalid characters (only alphanumeric and _ allowed)", label)
-        ));
+        return Err(SecurityError::InvalidLabel(format!(
+            "label '{}' contains invalid characters (only alphanumeric and _ allowed)",
+            label
+        )));
     }
     Ok(())
 }
@@ -100,12 +108,15 @@ pub fn validate_label(label: &str) -> Result<(), SecurityError> {
 /// Validate a property key: must be alphanumeric + underscore, non-empty.
 pub fn validate_property_key(key: &str) -> Result<(), SecurityError> {
     if key.is_empty() {
-        return Err(SecurityError::InvalidPropertyKey("property key must not be empty".into()));
+        return Err(SecurityError::InvalidPropertyKey(
+            "property key must not be empty".into(),
+        ));
     }
     if !key.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return Err(SecurityError::InvalidPropertyKey(
-            format!("property key '{}' contains invalid characters", key)
-        ));
+        return Err(SecurityError::InvalidPropertyKey(format!(
+            "property key '{}' contains invalid characters",
+            key
+        )));
     }
     Ok(())
 }
@@ -125,12 +136,17 @@ pub fn hash_password(password: &str) -> Result<String, SecurityError> {
 /// Verify a password against an Argon2id PHC hash produced by [`hash_password`].
 /// Uses constant-time comparison internally.
 pub fn verify_password(password: &str, hash: &str) -> bool {
-    use argon2::{password_hash::{phc::PasswordHash, PasswordVerifier}, Argon2};
+    use argon2::{
+        password_hash::{phc::PasswordHash, PasswordVerifier},
+        Argon2,
+    };
     let parsed = match PasswordHash::new(hash) {
         Ok(h) => h,
         Err(_) => return false,
     };
-    Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok()
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok()
 }
 
 /// Generate a random 32-byte hex token.
@@ -205,7 +221,10 @@ mod tests {
     fn test_hash_password_is_argon2_phc() {
         let hash = hash_password("test").unwrap();
         // Argon2id PHC strings start with "$argon2id$"
-        assert!(hash.starts_with("$argon2id$"), "expected Argon2id PHC string, got: {hash}");
+        assert!(
+            hash.starts_with("$argon2id$"),
+            "expected Argon2id PHC string, got: {hash}"
+        );
     }
 
     #[test]
@@ -213,7 +232,10 @@ mod tests {
         // Each call produces a different hash (random salt)
         let h1 = hash_password("same").unwrap();
         let h2 = hash_password("same").unwrap();
-        assert_ne!(h1, h2, "two hashes of the same password must differ (different salts)");
+        assert_ne!(
+            h1, h2,
+            "two hashes of the same password must differ (different salts)"
+        );
     }
 
     #[test]

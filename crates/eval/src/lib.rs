@@ -2,11 +2,15 @@
 //!
 //! Executes Cypher ASTs from `copperdb-cypher` against the storage engine.
 
-use copperdb_cypher::{Clause, Expression, Query, ReturnItem};
-use copperdb_filter::{eval_predicate, eval_expression};
-use copperdb_storage::StorageEngine;
+use copperdb_cypher::{Clause, ConstraintKind, Expression, Query, ReturnItem};
+use copperdb_filter::{eval_expression, eval_predicate};
+use copperdb_storage::{
+    Constraint, ConstraintEntityType, ConstraintType, DecayProfileSchema, IndexDefinition,
+    IndexEntityType, PromotionPolicySchema, PromotionProfileSchema, PromotionWhenClauseSchema,
+    StorageEngine,
+};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use uuid::Uuid;
@@ -115,17 +119,15 @@ impl EvalEngine {
         }
         let cached = {
             let cache = self.node_lookup_cache.lock().ok()?;
-            props.iter().find_map(|(prop, val)| {
-                cache.get(&merge_cache_key(labels, prop, val)).cloned()
-            })?
+            props
+                .iter()
+                .find_map(|(prop, val)| cache.get(&merge_cache_key(labels, prop, val)).cloned())?
         };
 
         // Verify the cached node is still alive in storage and still matches all props.
         if let Some(Value::String(id)) = cached.as_object().and_then(|o| o.get("_id")) {
             if let Ok(Some(bytes)) = self.storage.get_node(id) {
-                if let Ok(live_props) =
-                    rmp_serde::from_slice::<HashMap<String, Value>>(&bytes)
-                {
+                if let Ok(live_props) = rmp_serde::from_slice::<HashMap<String, Value>>(&bytes) {
                     let all_props_match = props
                         .iter()
                         .all(|(k, v)| live_props.get(k).map(|pv| pv == v).unwrap_or(false));
@@ -181,11 +183,361 @@ impl EvalEngine {
 
         for clause in &query.clauses {
             match clause {
+                Clause::CreateConstraint(create) => {
+                    let existing = self.storage.load_constraints()?;
+                    let already_exists = existing.iter().any(|c| c.name == create.name);
+                    if already_exists {
+                        if create.if_not_exists {
+                            continue;
+                        }
+                        return Err(EvalError::ExecutionError(format!(
+                            "constraint \"{}\" already exists",
+                            create.name
+                        )));
+                    }
+                    let constraint_type = match create.kind {
+                        ConstraintKind::Unique => ConstraintType::Unique,
+                        ConstraintKind::Exists => ConstraintType::Exists,
+                    };
+                    self.storage.persist_constraint(&Constraint {
+                        name: create.name.clone(),
+                        constraint_type,
+                        entity_type: ConstraintEntityType::Node,
+                        label: create.label.clone(),
+                        properties: vec![create.property.clone()],
+                    })?;
+                }
+
+                Clause::DropConstraint(drop) => {
+                    let deleted = self.storage.delete_constraint(&drop.name)?;
+                    if !deleted && !drop.if_exists {
+                        return Err(EvalError::ExecutionError(format!(
+                            "constraint \"{}\" not found",
+                            drop.name
+                        )));
+                    }
+                }
+
+                Clause::ShowConstraints(_) => {
+                    let constraints = self.storage.load_constraints()?;
+                    columns = vec![
+                        "name".to_string(),
+                        "type".to_string(),
+                        "entityType".to_string(),
+                        "label".to_string(),
+                        "properties".to_string(),
+                    ];
+                    result_rows = constraints
+                        .into_iter()
+                        .map(|c| {
+                            let mut row = Row::new();
+                            row.insert("name".to_string(), Value::String(c.name));
+                            row.insert(
+                                "type".to_string(),
+                                Value::String(
+                                    match c.constraint_type {
+                                        ConstraintType::Unique => "UNIQUE",
+                                        ConstraintType::Exists => "EXISTS",
+                                        ConstraintType::NodeKey => "NODE_KEY",
+                                        ConstraintType::Type => "TYPE",
+                                        ConstraintType::Relationship => "RELATIONSHIP",
+                                    }
+                                    .to_string(),
+                                ),
+                            );
+                            row.insert(
+                                "entityType".to_string(),
+                                Value::String(
+                                    match c.entity_type {
+                                        ConstraintEntityType::Node => "NODE",
+                                        ConstraintEntityType::Relationship => "RELATIONSHIP",
+                                    }
+                                    .to_string(),
+                                ),
+                            );
+                            row.insert("label".to_string(), Value::String(c.label));
+                            row.insert(
+                                "properties".to_string(),
+                                Value::Array(c.properties.into_iter().map(Value::String).collect()),
+                            );
+                            row
+                        })
+                        .collect();
+                }
+
+                Clause::CreateIndex(create) => {
+                    let existing = self.storage.load_index_definitions()?;
+                    let already_exists = existing.iter().any(|i| i.name == create.name);
+                    if already_exists {
+                        if create.if_not_exists {
+                            continue;
+                        }
+                        return Err(EvalError::ExecutionError(format!(
+                            "index \"{}\" already exists",
+                            create.name
+                        )));
+                    }
+                    self.storage.persist_index_definition(&IndexDefinition {
+                        name: create.name.clone(),
+                        entity_type: IndexEntityType::Node,
+                        label: create.label.clone(),
+                        properties: create.properties.clone(),
+                    })?;
+                }
+
+                Clause::DropIndex(drop) => {
+                    let deleted = self.storage.delete_index_definition(&drop.name)?;
+                    if !deleted && !drop.if_exists {
+                        return Err(EvalError::ExecutionError(format!(
+                            "index \"{}\" not found",
+                            drop.name
+                        )));
+                    }
+                }
+
+                Clause::ShowIndexes(_) => {
+                    let indexes = self.storage.load_index_definitions()?;
+                    columns = vec![
+                        "name".to_string(),
+                        "entityType".to_string(),
+                        "label".to_string(),
+                        "properties".to_string(),
+                    ];
+                    result_rows = indexes
+                        .into_iter()
+                        .map(|idx| {
+                            let mut row = Row::new();
+                            row.insert("name".to_string(), Value::String(idx.name));
+                            row.insert(
+                                "entityType".to_string(),
+                                Value::String(
+                                    match idx.entity_type {
+                                        IndexEntityType::Node => "NODE",
+                                        IndexEntityType::Relationship => "RELATIONSHIP",
+                                    }
+                                    .to_string(),
+                                ),
+                            );
+                            row.insert("label".to_string(), Value::String(idx.label));
+                            row.insert(
+                                "properties".to_string(),
+                                Value::Array(
+                                    idx.properties.into_iter().map(Value::String).collect(),
+                                ),
+                            );
+                            row
+                        })
+                        .collect();
+                }
+
+                Clause::CreateDecayProfile(create) => {
+                    let profile = DecayProfileSchema {
+                        name: create.name.clone(),
+                        half_life_seconds: option_i64(&create.options, "halfLifeSeconds", 0)?,
+                        visibility_threshold: option_f64(
+                            &create.options,
+                            "visibilityThreshold",
+                            0.0,
+                        )?,
+                        score_floor: option_f64(&create.options, "scoreFloor", 0.0)?,
+                        function: option_string(&create.options, "function", "none")?,
+                        scope: option_string(&create.options, "scope", "NODE")?,
+                        decay_enabled: option_bool(&create.options, "decayEnabled", true)?,
+                        score_from: option_string(&create.options, "scoreFrom", "CREATED")?,
+                        score_from_property: create
+                            .options
+                            .get("scoreFromProperty")
+                            .and_then(|v| v.as_str().map(|s| s.to_string())),
+                        enabled: option_bool(&create.options, "enabled", true)?,
+                    };
+                    self.storage.persist_decay_profile_schema(&profile)?;
+                }
+
+                Clause::AlterDecayProfile(alter) => {
+                    let updates = options_to_btreemap(&alter.options);
+                    self.storage
+                        .alter_decay_profile_schema(&alter.name, &updates)?;
+                }
+
+                Clause::DropDecayProfile(drop) => {
+                    self.storage
+                        .delete_decay_profile_schema(&drop.name, drop.if_exists)?;
+                }
+
+                Clause::ShowDecayProfiles(_) => {
+                    let profiles = self.storage.load_decay_profile_schemas()?;
+                    columns = vec![
+                        "name".to_string(),
+                        "halfLifeSeconds".to_string(),
+                        "visibilityThreshold".to_string(),
+                        "scoreFloor".to_string(),
+                        "function".to_string(),
+                        "scope".to_string(),
+                        "decayEnabled".to_string(),
+                        "scoreFrom".to_string(),
+                        "scoreFromProperty".to_string(),
+                        "enabled".to_string(),
+                    ];
+                    result_rows = profiles
+                        .into_iter()
+                        .map(|p| {
+                            let mut row = Row::new();
+                            row.insert("name".to_string(), Value::String(p.name));
+                            row.insert(
+                                "halfLifeSeconds".to_string(),
+                                Value::from(p.half_life_seconds),
+                            );
+                            row.insert(
+                                "visibilityThreshold".to_string(),
+                                Value::from(p.visibility_threshold),
+                            );
+                            row.insert("scoreFloor".to_string(), Value::from(p.score_floor));
+                            row.insert("function".to_string(), Value::String(p.function));
+                            row.insert("scope".to_string(), Value::String(p.scope));
+                            row.insert("decayEnabled".to_string(), Value::Bool(p.decay_enabled));
+                            row.insert("scoreFrom".to_string(), Value::String(p.score_from));
+                            row.insert(
+                                "scoreFromProperty".to_string(),
+                                p.score_from_property
+                                    .map(Value::String)
+                                    .unwrap_or(Value::Null),
+                            );
+                            row.insert("enabled".to_string(), Value::Bool(p.enabled));
+                            row
+                        })
+                        .collect();
+                }
+
+                Clause::CreatePromotionProfile(create) => {
+                    let profile = PromotionProfileSchema {
+                        name: create.name.clone(),
+                        scope: option_string(&create.options, "scope", "NODE")?,
+                        multiplier: option_f64(&create.options, "multiplier", 1.0)?,
+                        score_floor: option_f64(&create.options, "scoreFloor", 0.0)?,
+                        score_cap: option_f64(&create.options, "scoreCap", 1.0)?,
+                        enabled: option_bool(&create.options, "enabled", true)?,
+                    };
+                    self.storage.persist_promotion_profile_schema(&profile)?;
+                }
+
+                Clause::AlterPromotionProfile(alter) => {
+                    let updates = options_to_btreemap(&alter.options);
+                    self.storage
+                        .alter_promotion_profile_schema(&alter.name, &updates)?;
+                }
+
+                Clause::DropPromotionProfile(drop) => {
+                    self.storage
+                        .delete_promotion_profile_schema(&drop.name, drop.if_exists)?;
+                }
+
+                Clause::ShowPromotionProfiles(_) => {
+                    let profiles = self.storage.load_promotion_profile_schemas()?;
+                    columns = vec![
+                        "name".to_string(),
+                        "scope".to_string(),
+                        "multiplier".to_string(),
+                        "scoreFloor".to_string(),
+                        "scoreCap".to_string(),
+                        "enabled".to_string(),
+                    ];
+                    result_rows = profiles
+                        .into_iter()
+                        .map(|p| {
+                            let mut row = Row::new();
+                            row.insert("name".to_string(), Value::String(p.name));
+                            row.insert("scope".to_string(), Value::String(p.scope));
+                            row.insert("multiplier".to_string(), Value::from(p.multiplier));
+                            row.insert("scoreFloor".to_string(), Value::from(p.score_floor));
+                            row.insert("scoreCap".to_string(), Value::from(p.score_cap));
+                            row.insert("enabled".to_string(), Value::Bool(p.enabled));
+                            row
+                        })
+                        .collect();
+                }
+
+                Clause::CreatePromotionPolicy(create) => {
+                    let policy = PromotionPolicySchema {
+                        name: create.name.clone(),
+                        target_labels: create.target_labels.clone(),
+                        enabled: create.enabled,
+                        when_clauses: create
+                            .when_clauses
+                            .iter()
+                            .map(|clause| PromotionWhenClauseSchema {
+                                profile_ref: clause.profile_ref.clone(),
+                                predicate: clause.predicate.clone(),
+                                order: clause.order,
+                            })
+                            .collect(),
+                    };
+                    self.storage.persist_promotion_policy_schema(&policy)?;
+                }
+
+                Clause::AlterPromotionPolicy(alter) => {
+                    let updates =
+                        BTreeMap::from([("enabled".to_string(), Value::Bool(alter.enabled))]);
+                    self.storage
+                        .alter_promotion_policy_schema(&alter.name, &updates)?;
+                }
+
+                Clause::DropPromotionPolicy(drop) => {
+                    self.storage
+                        .delete_promotion_policy_schema(&drop.name, drop.if_exists)?;
+                }
+
+                Clause::ShowPromotionPolicies(_) => {
+                    let policies = self.storage.load_promotion_policy_schemas()?;
+                    columns = vec![
+                        "name".to_string(),
+                        "targetLabels".to_string(),
+                        "enabled".to_string(),
+                        "whenClauses".to_string(),
+                    ];
+                    result_rows = policies
+                        .into_iter()
+                        .map(|p| {
+                            let mut row = Row::new();
+                            row.insert("name".to_string(), Value::String(p.name));
+                            row.insert(
+                                "targetLabels".to_string(),
+                                Value::Array(
+                                    p.target_labels
+                                        .into_iter()
+                                        .map(Value::String)
+                                        .collect::<Vec<_>>(),
+                                ),
+                            );
+                            row.insert("enabled".to_string(), Value::Bool(p.enabled));
+                            row.insert(
+                                "whenClauses".to_string(),
+                                Value::Array(
+                                    p.when_clauses
+                                        .into_iter()
+                                        .map(|w| {
+                                            serde_json::json!({
+                                                "profileRef": w.profile_ref,
+                                                "predicate": w.predicate,
+                                                "order": w.order,
+                                            })
+                                        })
+                                        .collect(),
+                                ),
+                            );
+                            row
+                        })
+                        .collect();
+                }
+
                 Clause::Create(create) => {
                     // Any write invalidates the MERGE node-lookup cache (v1.0.42 parity).
                     self.invalidate_node_lookup_cache();
                     for node_pat in &create.pattern.nodes {
-                        let label = node_pat.labels.first().cloned().unwrap_or_else(|| "Node".to_string());
+                        let label = node_pat
+                            .labels
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| "Node".to_string());
                         let id = Uuid::new_v4().to_string();
                         let key = format!("{label}:{id}");
 
@@ -195,7 +547,11 @@ impl EvalEngine {
                         props.insert(
                             "_labels".to_string(),
                             Value::Array(
-                                node_pat.labels.iter().map(|l| Value::String(l.clone())).collect(),
+                                node_pat
+                                    .labels
+                                    .iter()
+                                    .map(|l| Value::String(l.clone()))
+                                    .collect(),
                             ),
                         );
 
@@ -217,7 +573,10 @@ impl EvalEngine {
                     // Handle edges in CREATE
                     for edge_pat in &create.pattern.edges {
                         if let Some(var) = &edge_pat.variable {
-                            let rel_type = edge_pat.rel_type.clone().unwrap_or_else(|| "REL".to_string());
+                            let rel_type = edge_pat
+                                .rel_type
+                                .clone()
+                                .unwrap_or_else(|| "REL".to_string());
                             let id = Uuid::new_v4().to_string();
                             let key = format!("{rel_type}:{id}");
                             let mut props: HashMap<String, Value> = edge_pat.properties.clone();
@@ -234,7 +593,10 @@ impl EvalEngine {
                             }
                         } else {
                             // Anonymous edge still created
-                            let rel_type = edge_pat.rel_type.clone().unwrap_or_else(|| "REL".to_string());
+                            let rel_type = edge_pat
+                                .rel_type
+                                .clone()
+                                .unwrap_or_else(|| "REL".to_string());
                             let id = Uuid::new_v4().to_string();
                             let key = format!("{rel_type}:{id}");
                             let mut props: HashMap<String, Value> = edge_pat.properties.clone();
@@ -268,14 +630,16 @@ impl EvalEngine {
 
                         let mut new_rows: Vec<Row> = vec![];
                         for item in self.storage.scan_nodes_with_prefix(&prefix) {
-                            let (_key, val) = item.map_err(|e| EvalError::StorageError(e.to_string()))?;
+                            let (_key, val) =
+                                item.map_err(|e| EvalError::StorageError(e.to_string()))?;
                             let props: HashMap<String, Value> = rmp_serde::from_slice(&val)
                                 .map_err(|e| EvalError::SerializationError(e.to_string()))?;
 
                             // Check inline property constraints
-                            let matches = node_pat.properties.iter().all(|(k, v)| {
-                                props.get(k).map(|pv| pv == v).unwrap_or(false)
-                            });
+                            let matches = node_pat
+                                .properties
+                                .iter()
+                                .all(|(k, v)| props.get(k).map(|pv| pv == v).unwrap_or(false));
                             if !matches {
                                 continue;
                             }
@@ -310,7 +674,8 @@ impl EvalEngine {
                     // Edge patterns cannot be evaluated without an adjacency index.
                     if !match_clause.pattern.edges.is_empty() {
                         return Err(EvalError::ExecutionError(
-                            "relationship patterns in OPTIONAL MATCH are not yet supported".to_string(),
+                            "relationship patterns in OPTIONAL MATCH are not yet supported"
+                                .to_string(),
                         ));
                     }
 
@@ -326,13 +691,17 @@ impl EvalEngine {
                         let mut new_rows: Vec<Row> = vec![];
                         let mut found_any = false;
                         for item in self.storage.scan_nodes_with_prefix(&prefix) {
-                            let (_key, val) = item.map_err(|e| EvalError::StorageError(e.to_string()))?;
+                            let (_key, val) =
+                                item.map_err(|e| EvalError::StorageError(e.to_string()))?;
                             let props: HashMap<String, Value> = rmp_serde::from_slice(&val)
                                 .map_err(|e| EvalError::SerializationError(e.to_string()))?;
-                            let matches = node_pat.properties.iter().all(|(k, v)| {
-                                props.get(k).map(|pv| pv == v).unwrap_or(false)
-                            });
-                            if !matches { continue; }
+                            let matches = node_pat
+                                .properties
+                                .iter()
+                                .all(|(k, v)| props.get(k).map(|pv| pv == v).unwrap_or(false));
+                            if !matches {
+                                continue;
+                            }
                             // Multi-label support (v1.0.42)
                             if node_pat.labels.len() > 1
                                 && !node_has_all_labels(&props, &node_pat.labels)
@@ -469,15 +838,19 @@ impl EvalEngine {
                         for item in &set.items {
                             let new_val = eval_expression(&item.value, row, params)?;
                             // Update in-memory row
-                            if let Some(Value::Object(ref mut props)) = row.get_mut(&item.variable) {
+                            if let Some(Value::Object(ref mut props)) = row.get_mut(&item.variable)
+                            {
                                 props.insert(item.property.clone(), new_val.clone());
                                 stats.properties_set += 1;
                                 // Persist to storage
                                 if let Some(Value::String(id)) = props.get("_id") {
                                     let id = id.clone();
-                                    let new_props: HashMap<String, Value> = props.clone().into_iter().collect();
-                                    let bytes = rmp_serde::to_vec_named(&new_props)
-                                        .map_err(|e| EvalError::SerializationError(e.to_string()))?;
+                                    let new_props: HashMap<String, Value> =
+                                        props.clone().into_iter().collect();
+                                    let bytes =
+                                        rmp_serde::to_vec_named(&new_props).map_err(|e| {
+                                            EvalError::SerializationError(e.to_string())
+                                        })?;
                                     self.storage.put_node(&id, &bytes)?;
                                 }
                             }
@@ -534,7 +907,10 @@ impl EvalEngine {
                     //    subsequent MERGEs in the same pipeline hit the cache.
                     for node_pat in &merge.pattern.nodes {
                         let labels = &node_pat.labels;
-                        let label = labels.first().cloned().unwrap_or_else(|| "Node".to_string());
+                        let label = labels
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| "Node".to_string());
                         let prefix = format!("{label}:");
 
                         // --- Cache fast path ---
@@ -552,12 +928,14 @@ impl EvalEngine {
                         // --- Storage scan ---
                         let mut found_node: Option<Value> = None;
                         for item in self.storage.scan_nodes_with_prefix(&prefix) {
-                            let (_key, val) = item.map_err(|e| EvalError::StorageError(e.to_string()))?;
+                            let (_key, val) =
+                                item.map_err(|e| EvalError::StorageError(e.to_string()))?;
                             let props: HashMap<String, Value> = rmp_serde::from_slice(&val)
                                 .map_err(|e| EvalError::SerializationError(e.to_string()))?;
-                            let prop_matches = node_pat.properties.iter().all(|(k, v)| {
-                                props.get(k).map(|pv| pv == v).unwrap_or(false)
-                            });
+                            let prop_matches = node_pat
+                                .properties
+                                .iter()
+                                .all(|(k, v)| props.get(k).map(|pv| pv == v).unwrap_or(false));
                             if !prop_matches {
                                 continue;
                             }
@@ -671,6 +1049,58 @@ fn node_has_all_labels(props: &HashMap<String, Value>, required: &[String]) -> b
     required.iter().all(|l| stored.contains(&l.as_str()))
 }
 
+fn options_to_btreemap(options: &HashMap<String, Value>) -> BTreeMap<String, Value> {
+    options
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect::<BTreeMap<_, _>>()
+}
+
+fn option_string(
+    options: &HashMap<String, Value>,
+    key: &str,
+    default: &str,
+) -> Result<String, EvalError> {
+    match options.get(key) {
+        Some(v) => v
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| EvalError::ExecutionError(format!("{} must be a string", key))),
+        None => Ok(default.to_string()),
+    }
+}
+
+fn option_bool(
+    options: &HashMap<String, Value>,
+    key: &str,
+    default: bool,
+) -> Result<bool, EvalError> {
+    match options.get(key) {
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| EvalError::ExecutionError(format!("{} must be a boolean", key))),
+        None => Ok(default),
+    }
+}
+
+fn option_f64(options: &HashMap<String, Value>, key: &str, default: f64) -> Result<f64, EvalError> {
+    match options.get(key) {
+        Some(v) => v
+            .as_f64()
+            .ok_or_else(|| EvalError::ExecutionError(format!("{} must be a number", key))),
+        None => Ok(default),
+    }
+}
+
+fn option_i64(options: &HashMap<String, Value>, key: &str, default: i64) -> Result<i64, EvalError> {
+    match options.get(key) {
+        Some(v) => v
+            .as_i64()
+            .ok_or_else(|| EvalError::ExecutionError(format!("{} must be an integer", key))),
+        None => Ok(default),
+    }
+}
+
 fn column_name(item: &ReturnItem) -> String {
     if let Some(alias) = &item.alias {
         return alias.clone();
@@ -698,7 +1128,11 @@ fn expression_name(expr: &Expression) -> String {
     }
 }
 
-fn project_row(row: &Row, items: &[ReturnItem], params: &HashMap<String, Value>) -> Result<Row, EvalError> {
+fn project_row(
+    row: &Row,
+    items: &[ReturnItem],
+    params: &HashMap<String, Value>,
+) -> Result<Row, EvalError> {
     let mut result = HashMap::new();
     for item in items {
         let col = column_name(item);
@@ -724,7 +1158,10 @@ fn compare_json(a: &Value, b: &Value) -> std::cmp::Ordering {
 fn row_key(row: &Row) -> String {
     let mut keys: Vec<_> = row.keys().collect();
     keys.sort();
-    keys.iter().map(|k| format!("{}={}", k, row[*k])).collect::<Vec<_>>().join(",")
+    keys.iter()
+        .map(|k| format!("{}={}", k, row[*k]))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 #[cfg(test)]
@@ -742,7 +1179,9 @@ mod tests {
     fn test_create_node() {
         let engine = make_engine();
         let parser = Parser::new();
-        let query = parser.parse("CREATE (n:Person {name: 'Alice', age: 30})").unwrap();
+        let query = parser
+            .parse("CREATE (n:Person {name: 'Alice', age: 30})")
+            .unwrap();
         let result = engine.execute(&query, &HashMap::new()).unwrap();
         assert_eq!(result.stats.nodes_created, 1);
         assert_eq!(result.stats.properties_set, 2);
@@ -769,10 +1208,26 @@ mod tests {
     fn test_match_where_filter() {
         let engine = make_engine();
         let parser = Parser::new();
-        engine.execute(&parser.parse("CREATE (n:Person {name: 'Alice', age: 30})").unwrap(), &HashMap::new()).unwrap();
-        engine.execute(&parser.parse("CREATE (n:Person {name: 'Bob', age: 25})").unwrap(), &HashMap::new()).unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (n:Person {name: 'Alice', age: 30})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (n:Person {name: 'Bob', age: 25})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
 
-        let q = parser.parse("MATCH (n:Person) WHERE n.name = 'Alice' RETURN n").unwrap();
+        let q = parser
+            .parse("MATCH (n:Person) WHERE n.name = 'Alice' RETURN n")
+            .unwrap();
         let result = engine.execute(&q, &HashMap::new()).unwrap();
         assert_eq!(result.rows.len(), 1);
         if let Some(Value::Object(props)) = result.rows[0].get("n") {
@@ -787,7 +1242,10 @@ mod tests {
         let engine = make_engine();
         let parser = Parser::new();
         engine
-            .execute(&parser.parse("CREATE (n:Person {name: 'Alice'})").unwrap(), &HashMap::new())
+            .execute(
+                &parser.parse("CREATE (n:Person {name: 'Alice'})").unwrap(),
+                &HashMap::new(),
+            )
             .unwrap();
         let q = parser.parse("MATCH (n:Person) DELETE n").unwrap();
         let result = engine.execute(&q, &HashMap::new()).unwrap();
@@ -802,10 +1260,26 @@ mod tests {
     fn test_match_with_inline_properties() {
         let engine = make_engine();
         let parser = Parser::new();
-        engine.execute(&parser.parse("CREATE (n:Car {make: 'Toyota', year: 2020})").unwrap(), &HashMap::new()).unwrap();
-        engine.execute(&parser.parse("CREATE (n:Car {make: 'Honda', year: 2019})").unwrap(), &HashMap::new()).unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (n:Car {make: 'Toyota', year: 2020})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (n:Car {make: 'Honda', year: 2019})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
 
-        let q = parser.parse("MATCH (n:Car {make: 'Toyota'}) RETURN n").unwrap();
+        let q = parser
+            .parse("MATCH (n:Car {make: 'Toyota'}) RETURN n")
+            .unwrap();
         let result = engine.execute(&q, &HashMap::new()).unwrap();
         assert_eq!(result.rows.len(), 1);
     }
@@ -814,11 +1288,19 @@ mod tests {
     fn test_return_property() {
         let engine = make_engine();
         let parser = Parser::new();
-        engine.execute(&parser.parse("CREATE (n:City {name: 'London'})").unwrap(), &HashMap::new()).unwrap();
+        engine
+            .execute(
+                &parser.parse("CREATE (n:City {name: 'London'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
         let q = parser.parse("MATCH (n:City) RETURN n.name").unwrap();
         let result = engine.execute(&q, &HashMap::new()).unwrap();
         assert_eq!(result.rows.len(), 1);
-        assert_eq!(result.rows[0].get("n.name"), Some(&Value::String("London".into())));
+        assert_eq!(
+            result.rows[0].get("n.name"),
+            Some(&Value::String("London".into()))
+        );
     }
 
     #[test]
@@ -839,10 +1321,14 @@ mod tests {
         let engine = make_engine();
         let parser = Parser::new();
         for i in 0..5 {
-            engine.execute(
-                &parser.parse(&format!("CREATE (n:Num {{val: {i}}})")).unwrap(),
-                &HashMap::new(),
-            ).unwrap();
+            engine
+                .execute(
+                    &parser
+                        .parse(&format!("CREATE (n:Num {{val: {i}}})"))
+                        .unwrap(),
+                    &HashMap::new(),
+                )
+                .unwrap();
         }
         let q = parser.parse("MATCH (n:Num) RETURN n LIMIT 3").unwrap();
         let result = engine.execute(&q, &HashMap::new()).unwrap();
@@ -855,11 +1341,36 @@ mod tests {
         // and each row must carry bindings for BOTH `a` and `b`.
         let engine = make_engine();
         let parser = Parser::new();
-        engine.execute(&parser.parse("CREATE (n:A {v: 1})").unwrap(), &HashMap::new()).unwrap();
-        engine.execute(&parser.parse("CREATE (n:A {v: 2})").unwrap(), &HashMap::new()).unwrap();
-        engine.execute(&parser.parse("CREATE (n:B {v: 10})").unwrap(), &HashMap::new()).unwrap();
-        engine.execute(&parser.parse("CREATE (n:B {v: 20})").unwrap(), &HashMap::new()).unwrap();
-        engine.execute(&parser.parse("CREATE (n:B {v: 30})").unwrap(), &HashMap::new()).unwrap();
+        engine
+            .execute(
+                &parser.parse("CREATE (n:A {v: 1})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser.parse("CREATE (n:A {v: 2})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser.parse("CREATE (n:B {v: 10})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser.parse("CREATE (n:B {v: 20})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser.parse("CREATE (n:B {v: 30})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
 
         let q = parser.parse("MATCH (a:A), (b:B) RETURN a, b").unwrap();
         let result = engine.execute(&q, &HashMap::new()).unwrap();
@@ -880,7 +1391,10 @@ mod tests {
         // Relationship patterns in MATCH are not yet supported.
         let q = parser.parse("MATCH (a)-[r:KNOWS]->(b) RETURN a").unwrap();
         let result = engine.execute(&q, &HashMap::new());
-        assert!(result.is_err(), "expected error for relationship pattern in MATCH");
+        assert!(
+            result.is_err(),
+            "expected error for relationship pattern in MATCH"
+        );
     }
 
     // ── NornicDB v1.0.42 regression tests ────────────────────────────────────
@@ -892,19 +1406,27 @@ mod tests {
         let engine = make_engine();
         let parser = Parser::new();
 
-        engine.execute(
-            &parser.parse("CREATE (n:Person {name: 'Alice'})").unwrap(),
-            &HashMap::new(),
-        ).unwrap();
+        engine
+            .execute(
+                &parser.parse("CREATE (n:Person {name: 'Alice'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
 
         // MERGE twice — should match the existing node, not create two more.
         let q = parser.parse("MERGE (n:Person {name: 'Alice'})").unwrap();
         engine.execute(&q, &HashMap::new()).unwrap();
         engine.execute(&q, &HashMap::new()).unwrap();
 
-        let count_q = parser.parse("MATCH (n:Person {name: 'Alice'}) RETURN n").unwrap();
+        let count_q = parser
+            .parse("MATCH (n:Person {name: 'Alice'}) RETURN n")
+            .unwrap();
         let result = engine.execute(&count_q, &HashMap::new()).unwrap();
-        assert_eq!(result.rows.len(), 1, "MERGE must not duplicate an existing node");
+        assert_eq!(
+            result.rows.len(),
+            1,
+            "MERGE must not duplicate an existing node"
+        );
     }
 
     /// MERGE node-lookup cache must evict stale entries after a DELETE.
@@ -918,27 +1440,39 @@ mod tests {
         let parser = Parser::new();
 
         // First MERGE – creates the node and caches it.
-        engine.execute(
-            &parser.parse("MERGE (n:Tag {name: 'rust'})").unwrap(),
-            &HashMap::new(),
-        ).unwrap();
+        engine
+            .execute(
+                &parser.parse("MERGE (n:Tag {name: 'rust'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
 
         // Delete the node – this must invalidate the cache.
-        engine.execute(
-            &parser.parse("MATCH (n:Tag {name: 'rust'}) DELETE n").unwrap(),
-            &HashMap::new(),
-        ).unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Tag {name: 'rust'}) DELETE n")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
 
         // Second MERGE – the cache was cleared so MERGE must re-scan storage,
         // find nothing, and create a new node.
-        let merge_result = engine.execute(
-            &parser.parse("MERGE (n:Tag {name: 'rust'})").unwrap(),
-            &HashMap::new(),
-        ).unwrap();
-        assert_eq!(merge_result.stats.nodes_created, 1,
-            "MERGE should recreate the node after the stale cache entry was evicted");
+        let merge_result = engine
+            .execute(
+                &parser.parse("MERGE (n:Tag {name: 'rust'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            merge_result.stats.nodes_created, 1,
+            "MERGE should recreate the node after the stale cache entry was evicted"
+        );
 
-        let count_q = parser.parse("MATCH (n:Tag {name: 'rust'}) RETURN n").unwrap();
+        let count_q = parser
+            .parse("MATCH (n:Tag {name: 'rust'}) RETURN n")
+            .unwrap();
         let result = engine.execute(&count_q, &HashMap::new()).unwrap();
         assert_eq!(result.rows.len(), 1);
     }
@@ -955,7 +1489,10 @@ mod tests {
         // Directly insert a node with two labels [:Person, :Employee].
         {
             let mut props: HashMap<String, Value> = HashMap::new();
-            props.insert("_id".to_string(), Value::String("Person:alice-id".to_string()));
+            props.insert(
+                "_id".to_string(),
+                Value::String("Person:alice-id".to_string()),
+            );
             props.insert("name".to_string(), Value::String("Alice".to_string()));
             props.insert(
                 "_labels".to_string(),
@@ -971,7 +1508,10 @@ mod tests {
         // Directly insert a node with only [:Person].
         {
             let mut props: HashMap<String, Value> = HashMap::new();
-            props.insert("_id".to_string(), Value::String("Person:bob-id".to_string()));
+            props.insert(
+                "_id".to_string(),
+                Value::String("Person:bob-id".to_string()),
+            );
             props.insert("name".to_string(), Value::String("Bob".to_string()));
             props.insert(
                 "_labels".to_string(),
@@ -986,12 +1526,20 @@ mod tests {
         // MATCH (n:Person) should return BOTH Alice and Bob (prefix = "Person:").
         let q_person = parser.parse("MATCH (n:Person) RETURN n").unwrap();
         let result = engine.execute(&q_person, &HashMap::new()).unwrap();
-        assert_eq!(result.rows.len(), 2, "MATCH :Person should return both nodes");
+        assert_eq!(
+            result.rows.len(),
+            2,
+            "MATCH :Person should return both nodes"
+        );
 
         // MATCH (n:Person:Employee) should return ONLY Alice.
         let q_both = parser.parse("MATCH (n:Person:Employee) RETURN n").unwrap();
         let result_both = engine.execute(&q_both, &HashMap::new()).unwrap();
-        assert_eq!(result_both.rows.len(), 1, "MATCH :Person:Employee should return only Alice");
+        assert_eq!(
+            result_both.rows.len(),
+            1,
+            "MATCH :Person:Employee should return only Alice"
+        );
         if let Some(Value::Object(p)) = result_both.rows[0].get("n") {
             assert_eq!(p.get("name"), Some(&Value::String("Alice".into())));
         } else {
@@ -1013,9 +1561,15 @@ mod tests {
             engine.execute(&q, &HashMap::new()).unwrap();
         }
 
-        let count_q = parser.parse("MATCH (n:Counter {key: 'hits'}) RETURN n").unwrap();
+        let count_q = parser
+            .parse("MATCH (n:Counter {key: 'hits'}) RETURN n")
+            .unwrap();
         let result = engine.execute(&count_q, &HashMap::new()).unwrap();
-        assert_eq!(result.rows.len(), 1, "five MERGEs must produce exactly one node");
+        assert_eq!(
+            result.rows.len(),
+            1,
+            "five MERGEs must produce exactly one node"
+        );
     }
 
     /// UNWIND + MERGE should execute a MERGE for each unwound item, but must
@@ -1028,22 +1582,178 @@ mod tests {
         let parser = Parser::new();
 
         // Create the node first.
-        engine.execute(
-            &parser.parse("CREATE (n:Service {name: 'api'})").unwrap(),
-            &HashMap::new(),
-        ).unwrap();
+        engine
+            .execute(
+                &parser.parse("CREATE (n:Service {name: 'api'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
 
         // MERGE must match the created node, not create a second one.
-        let merge_result = engine.execute(
-            &parser.parse("MERGE (n:Service {name: 'api'})").unwrap(),
-            &HashMap::new(),
-        ).unwrap();
-        assert_eq!(merge_result.stats.nodes_created, 0,
-            "MERGE should find the existing node, not create a new one");
+        let merge_result = engine
+            .execute(
+                &parser.parse("MERGE (n:Service {name: 'api'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            merge_result.stats.nodes_created, 0,
+            "MERGE should find the existing node, not create a new one"
+        );
 
         let count_q = parser.parse("MATCH (n:Service) RETURN n").unwrap();
         let result = engine.execute(&count_q, &HashMap::new()).unwrap();
         assert_eq!(result.rows.len(), 1);
     }
-}
 
+    #[test]
+    fn test_constraint_ddl_roundtrip() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let create = parser
+            .parse("CREATE CONSTRAINT person_email_unique FOR (n:Person) REQUIRE n.email IS UNIQUE")
+            .unwrap();
+        engine.execute(&create, &HashMap::new()).unwrap();
+
+        let show = parser.parse("SHOW CONSTRAINTS").unwrap();
+        let shown = engine.execute(&show, &HashMap::new()).unwrap();
+        assert_eq!(shown.rows.len(), 1);
+        assert_eq!(
+            shown.rows[0].get("name"),
+            Some(&Value::String("person_email_unique".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_constraint_drop_if_exists_and_error_path() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let err = match engine.execute(
+            &parser.parse("DROP CONSTRAINT missing_constraint").unwrap(),
+            &HashMap::new(),
+        ) {
+            Ok(_) => panic!("expected drop constraint to fail"),
+            Err(err) => err,
+        };
+        assert!(err
+            .to_string()
+            .contains("constraint \"missing_constraint\" not found"));
+
+        engine
+            .execute(
+                &parser
+                    .parse("DROP CONSTRAINT missing_constraint IF EXISTS")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn test_index_ddl_roundtrip() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let create = parser
+            .parse("CREATE INDEX person_idx FOR (n:Person) ON (n.email)")
+            .unwrap();
+        engine.execute(&create, &HashMap::new()).unwrap();
+
+        let show = parser.parse("SHOW INDEXES").unwrap();
+        let shown = engine.execute(&show, &HashMap::new()).unwrap();
+        assert_eq!(shown.rows.len(), 1);
+        assert_eq!(
+            shown.rows[0].get("name"),
+            Some(&Value::String("person_idx".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_index_drop_if_exists_and_error_path() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let err = match engine.execute(
+            &parser.parse("DROP INDEX missing_idx").unwrap(),
+            &HashMap::new(),
+        ) {
+            Ok(_) => panic!("expected drop index to fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("index \"missing_idx\" not found"));
+
+        engine
+            .execute(
+                &parser.parse("DROP INDEX missing_idx IF EXISTS").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn test_knowledge_policy_decay_profile_ddl_roundtrip() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let create = parser
+            .parse(
+                "CREATE DECAY PROFILE slow_decay OPTIONS { halfLifeSeconds: 604800, visibilityThreshold: 0.1, scoreFloor: 0.0, function: 'exponential', scope: 'NODE', scoreFrom: 'CREATED', enabled: true }",
+            )
+            .unwrap();
+        engine.execute(&create, &HashMap::new()).unwrap();
+
+        let show = parser.parse("SHOW DECAY PROFILES").unwrap();
+        let shown = engine.execute(&show, &HashMap::new()).unwrap();
+        assert_eq!(shown.rows.len(), 1);
+        assert_eq!(
+            shown.rows[0].get("name"),
+            Some(&Value::String("slow_decay".to_string()))
+        );
+
+        let alter = parser
+            .parse("ALTER DECAY PROFILE slow_decay SET OPTIONS { visibilityThreshold: 0.2 }")
+            .unwrap();
+        engine.execute(&alter, &HashMap::new()).unwrap();
+        let shown = engine.execute(&show, &HashMap::new()).unwrap();
+        assert_eq!(
+            shown.rows[0].get("visibilityThreshold"),
+            Some(&Value::from(0.2))
+        );
+    }
+
+    #[test]
+    fn test_knowledge_policy_promotion_profile_and_policy_roundtrip() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let create_profile = parser
+            .parse(
+                "CREATE PROMOTION PROFILE boost_profile OPTIONS { scope: 'NODE', multiplier: 1.5, scoreFloor: 0.0, scoreCap: 1.0, enabled: true }",
+            )
+            .unwrap();
+        engine.execute(&create_profile, &HashMap::new()).unwrap();
+
+        let create_policy = parser
+            .parse("CREATE PROMOTION POLICY fact_policy FOR (n:KnowledgeFact) APPLY PROFILE boost_profile WHEN 'n.evidence >= 3'")
+            .unwrap();
+        engine.execute(&create_policy, &HashMap::new()).unwrap();
+
+        let show_policies = parser.parse("SHOW PROMOTION POLICIES").unwrap();
+        let shown = engine.execute(&show_policies, &HashMap::new()).unwrap();
+        assert_eq!(shown.rows.len(), 1);
+        assert_eq!(
+            shown.rows[0].get("name"),
+            Some(&Value::String("fact_policy".to_string()))
+        );
+        assert_eq!(shown.rows[0].get("enabled"), Some(&Value::Bool(true)));
+
+        let alter_policy = parser
+            .parse("ALTER PROMOTION POLICY fact_policy SET ENABLED false")
+            .unwrap();
+        engine.execute(&alter_policy, &HashMap::new()).unwrap();
+        let shown = engine.execute(&show_policies, &HashMap::new()).unwrap();
+        assert_eq!(shown.rows[0].get("enabled"), Some(&Value::Bool(false)));
+    }
+}

@@ -19,9 +19,15 @@ pub enum ComplianceError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Policy {
     /// Mask a property value for users without the given role.
-    MaskProperty { property: String, allowed_roles: Vec<String> },
+    MaskProperty {
+        property: String,
+        allowed_roles: Vec<String>,
+    },
     /// Restrict access to a node label for users without the given role.
-    RestrictLabel { label: String, allowed_roles: Vec<String> },
+    RestrictLabel {
+        label: String,
+        allowed_roles: Vec<String>,
+    },
     /// Require audit logging for all operations on a given label.
     RequireAudit { label: String },
     /// Data retention: auto-delete nodes older than the given duration.
@@ -50,7 +56,11 @@ impl PolicySet {
         roles: &[String],
     ) -> Result<(), ComplianceError> {
         for policy in &self.policies {
-            if let Policy::MaskProperty { property: p, allowed_roles } = policy {
+            if let Policy::MaskProperty {
+                property: p,
+                allowed_roles,
+            } = policy
+            {
                 if p == property {
                     let allowed = roles.iter().any(|r| allowed_roles.contains(r));
                     if !allowed {
@@ -95,7 +105,9 @@ mod tests {
     #[test]
     fn test_no_policy_allows_all() {
         let policies = PolicySet::new();
-        assert!(policies.check_property_access("name", &["reader".to_string()]).is_ok());
+        assert!(policies
+            .check_property_access("name", &["reader".to_string()])
+            .is_ok());
     }
 
     #[test]
@@ -115,7 +127,9 @@ mod tests {
     #[test]
     fn test_policy_serialization() {
         let mut ps = PolicySet::new();
-        ps.add(Policy::RequireAudit { label: "Finance".into() });
+        ps.add(Policy::RequireAudit {
+            label: "Finance".into(),
+        });
         let json = serde_json::to_string(&ps).unwrap();
         let decoded: PolicySet = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.policies.len(), 1);
@@ -124,7 +138,10 @@ mod tests {
     #[test]
     fn test_retention_policy_in_policy_set() {
         let mut ps = PolicySet::new();
-        ps.add(Policy::RetentionPolicy { label: "Log".into(), max_age_days: 30 });
+        ps.add(Policy::RetentionPolicy {
+            label: "Log".into(),
+            max_age_days: 30,
+        });
         assert_eq!(ps.policies.len(), 1);
     }
 }

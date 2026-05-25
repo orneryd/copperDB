@@ -98,6 +98,9 @@ mod tests {
             model_path: "/nonexistent/model.gguf".into(),
             ..Default::default()
         };
-        assert!(matches!(LocalModel::load(config), Err(LocalLlmError::ModelNotFound(_))));
+        assert!(matches!(
+            LocalModel::load(config),
+            Err(LocalLlmError::ModelNotFound(_))
+        ));
     }
 }

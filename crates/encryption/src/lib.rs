@@ -101,8 +101,7 @@ pub fn decrypt(envelope: &Envelope, kek: &[u8]) -> Result<Vec<u8>, EncryptionErr
     let kek_key = Key::<Aes256Gcm>::try_from(kek)
         .map_err(|_| EncryptionError::InvalidKeyLength(kek.len()))?;
     let kek_cipher = Aes256Gcm::new(&kek_key);
-    let kek_nonce = Nonce::try_from(kek_nonce_bytes)
-        .map_err(|_| EncryptionError::InvalidNonce)?;
+    let kek_nonce = Nonce::try_from(kek_nonce_bytes).map_err(|_| EncryptionError::InvalidNonce)?;
     let dek = Zeroizing::new(
         kek_cipher
             .decrypt(&kek_nonce, dek_ciphertext)
@@ -116,15 +115,19 @@ pub fn decrypt(envelope: &Envelope, kek: &[u8]) -> Result<Vec<u8>, EncryptionErr
     if envelope.nonce.len() != 12 {
         return Err(EncryptionError::InvalidNonce);
     }
-    let nonce = Nonce::try_from(envelope.nonce.as_slice())
-        .map_err(|_| EncryptionError::InvalidNonce)?;
+    let nonce =
+        Nonce::try_from(envelope.nonce.as_slice()).map_err(|_| EncryptionError::InvalidNonce)?;
     cipher
         .decrypt(&nonce, envelope.ciphertext.as_ref())
         .map_err(|_| EncryptionError::DecryptFailed)
 }
 
 /// Rotate the KEK by re-wrapping all DEKs with a new KEK.
-pub fn rotate_kek(envelope: &Envelope, old_kek: &[u8], new_kek: &[u8]) -> Result<Envelope, EncryptionError> {
+pub fn rotate_kek(
+    envelope: &Envelope,
+    old_kek: &[u8],
+    new_kek: &[u8],
+) -> Result<Envelope, EncryptionError> {
     // Decrypt the envelope to get the plaintext, then re-encrypt with new KEK.
     let plaintext = decrypt(envelope, old_kek)?;
     encrypt(&plaintext, new_kek)

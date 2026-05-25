@@ -30,11 +30,23 @@ pub struct SearchResult {
 #[derive(Debug, Clone)]
 pub enum SearchQuery {
     /// BM25 full-text search.
-    FullText { query: String, fields: Vec<String>, limit: usize },
+    FullText {
+        query: String,
+        fields: Vec<String>,
+        limit: usize,
+    },
     /// Vector similarity search.
-    Semantic { vector: Vec<f32>, k: usize, min_score: f32 },
+    Semantic {
+        vector: Vec<f32>,
+        k: usize,
+        min_score: f32,
+    },
     /// Hybrid: BM25 + semantic with RRF fusion.
-    Hybrid { text: String, vector: Vec<f32>, k: usize },
+    Hybrid {
+        text: String,
+        vector: Vec<f32>,
+        k: usize,
+    },
 }
 
 /// In-memory full-text search index using an inverted index.

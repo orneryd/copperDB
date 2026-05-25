@@ -56,10 +56,7 @@ pub fn flatten_map(
 }
 
 /// Merge two JSON objects, with the second overriding the first on conflict.
-pub fn merge_json(
-    base: serde_json::Value,
-    overlay: serde_json::Value,
-) -> serde_json::Value {
+pub fn merge_json(base: serde_json::Value, overlay: serde_json::Value) -> serde_json::Value {
     match (base, overlay) {
         (serde_json::Value::Object(mut a), serde_json::Value::Object(b)) => {
             for (k, v) in b {

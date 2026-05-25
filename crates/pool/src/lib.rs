@@ -40,7 +40,9 @@ impl<T> Drop for PooledConnection<T> {
     fn drop(&mut self) {
         if let (Some(conn), Some(pool)) = (self.inner.take(), self.pool.upgrade()) {
             let mut guard = pool.connections.lock();
-            if !pool.closed.load(std::sync::atomic::Ordering::Relaxed) && guard.len() < pool.max_size {
+            if !pool.closed.load(std::sync::atomic::Ordering::Relaxed)
+                && guard.len() < pool.max_size
+            {
                 guard.push_back(conn);
             }
         }
@@ -83,7 +85,8 @@ impl<T: Send> ConnectionPool<T> {
         conn.map(|inner| PooledConnection {
             inner: Some(inner),
             pool: std::sync::Arc::downgrade(self),
-        }).ok_or_else(|| PoolError::Exhausted(self.max_size))
+        })
+        .ok_or_else(|| PoolError::Exhausted(self.max_size))
     }
 
     pub fn available(&self) -> usize {
@@ -91,7 +94,8 @@ impl<T: Send> ConnectionPool<T> {
     }
 
     pub fn close(&self) {
-        self.closed.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.closed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.connections.lock().clear();
     }
 }
@@ -135,7 +139,8 @@ impl<C: Send + 'static> Pool<C> {
 
     /// Track how many connections have been created externally.
     pub fn record_created(&self) {
-        self.created.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.created
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Number of connections currently in use (created but not in pool).

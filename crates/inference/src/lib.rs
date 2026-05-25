@@ -80,7 +80,9 @@ impl InferencePipeline {
     /// Real implementations would load the model and run forward pass.
     pub fn predict(&self, input: &[f32]) -> Result<Vec<f32>, InferenceError> {
         if input.is_empty() {
-            return Err(InferenceError::InvalidInput("input must not be empty".into()));
+            return Err(InferenceError::InvalidInput(
+                "input must not be empty".into(),
+            ));
         }
         match &self.config.model_type {
             ModelType::OpenAI => Err(InferenceError::UnsupportedModelType),
@@ -98,7 +100,9 @@ impl InferencePipeline {
     /// Run text-to-text inference — returns a stub response.
     pub fn predict_text(&self, text: &str) -> Result<String, InferenceError> {
         if text.is_empty() {
-            return Err(InferenceError::InvalidInput("text must not be empty".into()));
+            return Err(InferenceError::InvalidInput(
+                "text must not be empty".into(),
+            ));
         }
         match &self.config.model_type {
             ModelType::OpenAI => Err(InferenceError::UnsupportedModelType),
@@ -121,9 +125,8 @@ mod tests {
 
     #[test]
     fn test_predict_normalizes() {
-        let pipeline = InferencePipeline::new(
-            InferenceConfig::new(ModelType::Gguf, "/models/llm.gguf")
-        );
+        let pipeline =
+            InferencePipeline::new(InferenceConfig::new(ModelType::Gguf, "/models/llm.gguf"));
         let result = pipeline.predict(&[3.0, 4.0]).unwrap();
         assert_eq!(result.len(), 2);
         let magnitude: f32 = result.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -138,9 +141,8 @@ mod tests {
 
     #[test]
     fn test_predict_text() {
-        let pipeline = InferencePipeline::new(
-            InferenceConfig::new(ModelType::Gguf, "/models/llm.gguf")
-        );
+        let pipeline =
+            InferencePipeline::new(InferenceConfig::new(ModelType::Gguf, "/models/llm.gguf"));
         let result = pipeline.predict_text("hello world").unwrap();
         assert!(result.contains("hello world"));
     }
@@ -160,9 +162,10 @@ mod tests {
 
     #[test]
     fn test_custom_model_type() {
-        let pipeline = InferencePipeline::new(
-            InferenceConfig::new(ModelType::Custom("my-model".into()), "path")
-        );
+        let pipeline = InferencePipeline::new(InferenceConfig::new(
+            ModelType::Custom("my-model".into()),
+            "path",
+        ));
         let result = pipeline.predict_text("hi").unwrap();
         assert!(result.contains("my-model"));
     }

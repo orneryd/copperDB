@@ -15,7 +15,10 @@ use axum::{
 use copperdb_auth::{AuthError, TokenManager};
 use copperdb_copperdb::{copperdb as GraphEngine, DatabaseConfig as EngineConfig};
 use copperdb_multidb::{DatabaseManager, DatabaseStatus, MultiDbError};
-use copperdb_retention::{Manager as RetentionManager, Policy, ErasureRequest, LegalHold, RetentionError};
+use copperdb_otel::{classify_cypher_op_type, Telemetry};
+use copperdb_retention::{
+    ErasureRequest, LegalHold, Manager as RetentionManager, Policy, RetentionError,
+};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -44,7 +47,8 @@ pub struct AuthState {
 impl Default for AuthState {
     fn default() -> Self {
         let username = std::env::var("COPPERDB_AUTH_USERNAME").unwrap_or_else(|_| "admin".into());
-        let password = std::env::var("COPPERDB_AUTH_PASSWORD").unwrap_or_else(|_| "password".into());
+        let password =
+            std::env::var("COPPERDB_AUTH_PASSWORD").unwrap_or_else(|_| "password".into());
         let secret = std::env::var("COPPERDB_AUTH_JWT_SECRET")
             .unwrap_or_else(|_| "copperdb-development-secret-change-me".into());
         Self {
@@ -74,6 +78,8 @@ pub struct AppState {
     pub db_manager: Arc<DatabaseManager>,
     /// Browser and API authentication settings.
     pub auth: AuthState,
+    /// Shared metrics surface (ported from NornicDB observability catalog).
+    pub telemetry: Arc<Telemetry>,
 }
 
 impl Default for AppState {
@@ -88,6 +94,7 @@ impl Default for AppState {
             headless: false,
             db_manager,
             auth: AuthState::default(),
+            telemetry: Arc::new(Telemetry::new()),
         }
     }
 }
@@ -157,8 +164,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/db/{database}/tx/commit", post(neo4j_tx_commit_handler))
         .route("/db/data/cypher", post(cypher_handler))
         // ── Retention policies ──────────────────────────────────────────────
-        .route("/admin/retention/policies", get(list_policies).post(create_policy))
-        .route("/admin/retention/policies/defaults", post(load_default_policies))
+        .route(
+            "/admin/retention/policies",
+            get(list_policies).post(create_policy),
+        )
+        .route(
+            "/admin/retention/policies/defaults",
+            post(load_default_policies),
+        )
         .route(
             "/admin/retention/policies/{id}",
             get(get_policy).put(update_policy).delete(delete_policy),
@@ -167,8 +180,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/admin/retention/holds", get(list_holds).post(place_hold))
         .route("/admin/retention/holds/{id}", delete(release_hold))
         // ── Erasure requests ─────────────────────────────────────────────────
-        .route("/admin/retention/erasures", get(list_erasures).post(create_erasure))
-        .route("/admin/retention/erasures/{id}/process", post(process_erasure))
+        .route(
+            "/admin/retention/erasures",
+            get(list_erasures).post(create_erasure),
+        )
+        .route(
+            "/admin/retention/erasures/{id}/process",
+            post(process_erasure),
+        )
         // ── Sweep / status ───────────────────────────────────────────────────
         .route("/admin/retention/sweep", post(retention_sweep))
         .route("/admin/retention/status", get(retention_status));
@@ -282,10 +301,7 @@ fn serve_ui_index(state: &AppState) -> Response {
     StatusCode::SERVICE_UNAVAILABLE.into_response()
 }
 
-async fn root_handler(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn root_handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     if is_ui_request(&headers) && !state.headless {
         return serve_ui_index(&state);
     }
@@ -327,7 +343,9 @@ async fn favicon_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
 }
 
 async fn nornic_logo_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match read_static_file(&state, "nornicdb.svg").or_else(|| read_static_file(&state, "copperdb.svg")) {
+    match read_static_file(&state, "nornicdb.svg")
+        .or_else(|| read_static_file(&state, "copperdb.svg"))
+    {
         Some(bytes) => binary_response(StatusCode::OK, "image/svg+xml", bytes),
         None => StatusCode::NOT_FOUND.into_response(),
     }
@@ -341,14 +359,25 @@ async fn copper_logo_handler(State(state): State<Arc<AppState>>) -> impl IntoRes
 }
 
 /// GET /health — liveness probe.
-async fn health_handler() -> Json<HealthResponse> {
+async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
+    let _ = state.telemetry.record_counter(
+        "nornicdb_http_requests_total",
+        &[
+            ("method", "GET"),
+            ("path_template", "/health"),
+            ("status_class", "2xx"),
+        ],
+    );
     Json(HealthResponse {
-        status: "healthy".into(),
+        status: "ok".into(),
         version: env!("CARGO_PKG_VERSION").into(),
     })
 }
 
-async fn status_handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+async fn status_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     if state.auth.security_enabled && authenticated_user(&state, &headers).is_none() {
         return StatusCode::UNAUTHORIZED.into_response();
     }
@@ -409,8 +438,13 @@ async fn auth_token_handler(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AuthTokenRequest>,
 ) -> impl IntoResponse {
+    let started = std::time::Instant::now();
     if let Some(grant_type) = &request.grant_type {
         if grant_type != "password" {
+            let _ = state.telemetry.record_counter(
+                "nornicdb_auth_attempts_total",
+                &[("result", "denied"), ("protocol", "http")],
+            );
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"message": "unsupported grant_type"})),
@@ -420,6 +454,10 @@ async fn auth_token_handler(
     }
 
     if request.username != state.auth.username || request.password != state.auth.password {
+        let _ = state.telemetry.record_counter(
+            "nornicdb_auth_attempts_total",
+            &[("result", "failure"), ("protocol", "http")],
+        );
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"message": AuthError::InvalidCredentials.to_string()})),
@@ -427,9 +465,17 @@ async fn auth_token_handler(
             .into_response();
     }
 
-    let token = match state.auth.token_manager.issue(&request.username, vec!["admin".into()], 7 * 24 * 60 * 60) {
+    let token = match state.auth.token_manager.issue(
+        &request.username,
+        vec!["admin".into()],
+        7 * 24 * 60 * 60,
+    ) {
         Ok(token) => token,
         Err(error) => {
+            let _ = state.telemetry.record_counter(
+                "nornicdb_auth_attempts_total",
+                &[("result", "failure"), ("protocol", "http")],
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"message": error.to_string()})),
@@ -437,6 +483,19 @@ async fn auth_token_handler(
                 .into_response();
         }
     };
+    let _ = state.telemetry.record_counter(
+        "nornicdb_auth_attempts_total",
+        &[("result", "success"), ("protocol", "http")],
+    );
+    let _ = state.telemetry.observe_histogram(
+        "nornicdb_http_request_duration_seconds",
+        &[
+            ("method", "POST"),
+            ("path_template", "/auth/token"),
+            ("status_class", "2xx"),
+        ],
+        started.elapsed().as_secs_f64(),
+    );
 
     let cookie = format!(
         "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
@@ -460,13 +519,19 @@ async fn auth_token_handler(
 async fn auth_logout_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     (
         StatusCode::OK,
-        [(header::SET_COOKIE, format!("{}=; Path=/; HttpOnly; Max-Age=0", state.auth.cookie_name))],
+        [(
+            header::SET_COOKIE,
+            format!("{}=; Path=/; HttpOnly; Max-Age=0", state.auth.cookie_name),
+        )],
         Json(serde_json::json!({"status": "logged out"})),
     )
         .into_response()
 }
 
-async fn auth_me_handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+async fn auth_me_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     match authenticated_user(&state, &headers) {
         Some(claims) => Json(serde_json::json!({
             "id": claims.sub,
@@ -570,7 +635,12 @@ async fn neo4j_tx_commit_handler(
     let mut errors = Vec::new();
 
     for statement in request.statements {
-        match execute_statement(&state, &database, &statement.statement, statement.parameters.unwrap_or_default()) {
+        match execute_statement(
+            &state,
+            &database,
+            &statement.statement,
+            statement.parameters.unwrap_or_default(),
+        ) {
             Ok(result) => results.push(result),
             Err(error) => errors.push(Neo4jError {
                 code: "Neo.ClientError.Statement.ExecutionFailed".into(),
@@ -613,7 +683,9 @@ fn execute_statement(
     }
 
     let engine = open_engine(state, database)?;
-    let result = engine.execute(normalized, parameters).map_err(|error| error.to_string())?;
+    let result = engine
+        .execute(normalized, parameters)
+        .map_err(|error| error.to_string())?;
     Ok(convert_engine_result(result))
 }
 
@@ -649,7 +721,14 @@ fn show_databases_result(state: &AppState) -> Neo4jResult {
         .map(|db| Neo4jRow {
             row: vec![
                 serde_json::Value::String(db.name.clone()),
-                serde_json::Value::String(if db.name == "system" { "system" } else { "standard" }.into()),
+                serde_json::Value::String(
+                    if db.name == "system" {
+                        "system"
+                    } else {
+                        "standard"
+                    }
+                    .into(),
+                ),
                 serde_json::Value::String("read-write".into()),
                 serde_json::Value::String("primary".into()),
                 serde_json::Value::String(database_status_name(db.status).into()),
@@ -674,7 +753,12 @@ fn parse_database_name(statement: &str, prefix: &str) -> Result<String, String> 
         .strip_prefix(prefix)
         .ok_or_else(|| format!("invalid database statement: {}", statement))?
         .trim();
-    let token = suffix.split_whitespace().next().unwrap_or_default().trim_matches('`').trim_matches(';');
+    let token = suffix
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_matches('`')
+        .trim_matches(';');
     if token.is_empty() {
         Err("database name is required".into())
     } else {
@@ -719,16 +803,33 @@ async fn cypher_handler(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CypherRequest>,
 ) -> impl IntoResponse {
+    let started = std::time::Instant::now();
+    let op_type = classify_cypher_op_type(&body.query);
     if body.query.trim().is_empty() {
+        let _ = state.telemetry.record_counter(
+            "nornicdb_cypher_queries_total",
+            &[("op_type", "parse_error"), ("database", &state.db_name)],
+        );
         return (
             StatusCode::BAD_REQUEST,
             Json(CypherResponse::error("query must not be empty")),
         );
     }
-    match open_engine(&state, &state.db_name)
-        .and_then(|engine| engine.execute(&body.query, HashMap::new()).map_err(|error| error.to_string()))
-    {
+    match open_engine(&state, &state.db_name).and_then(|engine| {
+        engine
+            .execute(&body.query, HashMap::new())
+            .map_err(|error| error.to_string())
+    }) {
         Ok(result) => {
+            let _ = state.telemetry.record_counter(
+                "nornicdb_cypher_queries_total",
+                &[("op_type", op_type), ("database", &state.db_name)],
+            );
+            let _ = state.telemetry.observe_histogram(
+                "nornicdb_cypher_query_duration_seconds",
+                &[("op_type", op_type), ("database", &state.db_name)],
+                started.elapsed().as_secs_f64(),
+            );
             let rows = result
                 .rows
                 .into_iter()
@@ -752,10 +853,13 @@ async fn cypher_handler(
                 }),
             )
         }
-        Err(error) => (
-            StatusCode::OK,
-            Json(CypherResponse::error(error)),
-        ),
+        Err(error) => {
+            let _ = state.telemetry.record_counter(
+                "nornicdb_cypher_queries_total",
+                &[("op_type", op_type), ("database", &state.db_name)],
+            );
+            (StatusCode::OK, Json(CypherResponse::error(error)))
+        }
     }
 }
 
@@ -773,7 +877,10 @@ async fn create_policy(
 ) -> impl IntoResponse {
     let mut mgr = state.retention.write();
     match mgr.add_policy(body) {
-        Ok(()) => (StatusCode::CREATED, Json(serde_json::json!({"status": "created"}))),
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"status": "created"})),
+        ),
         Err(RetentionError::AlreadyExists(id)) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": format!("policy already exists: {id}")})),
@@ -819,7 +926,10 @@ async fn update_policy(
     body.id = id;
     let mut mgr = state.retention.write();
     match mgr.update_policy(body) {
-        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "updated"}))),
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "updated"})),
+        ),
         Err(RetentionError::PolicyNotFound(id)) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": format!("policy not found: {id}")})),
@@ -901,7 +1011,9 @@ async fn create_erasure(
         Ok(req) => (StatusCode::CREATED, Json(serde_json::json!(req))),
         Err(RetentionError::ActiveLegalHold(sid)) => (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": format!("active legal hold prevents erasure for subject: {sid}")})),
+            Json(
+                serde_json::json!({"error": format!("active legal hold prevents erasure for subject: {sid}")}),
+            ),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

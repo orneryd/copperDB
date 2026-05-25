@@ -99,12 +99,18 @@ impl GpuAccelerator {
     }
 
     pub fn available_backends() -> Vec<BackendInfo> {
-        [Backend::Metal, Backend::OpenCl, Backend::Cuda, Backend::Vulkan, Backend::Wgpu]
-            .into_iter()
-            .filter_map(|backend| {
-                Self::detect_backend_runtime(backend).map(|runtime| BackendInfo { backend, runtime })
-            })
-            .collect()
+        [
+            Backend::Metal,
+            Backend::OpenCl,
+            Backend::Cuda,
+            Backend::Vulkan,
+            Backend::Wgpu,
+        ]
+        .into_iter()
+        .filter_map(|backend| {
+            Self::detect_backend_runtime(backend).map(|runtime| BackendInfo { backend, runtime })
+        })
+        .collect()
     }
 
     pub fn preferred_backend() -> Option<Backend> {
@@ -115,7 +121,12 @@ impl GpuAccelerator {
             }
         }
 
-        for backend in [Backend::OpenCl, Backend::Cuda, Backend::Vulkan, Backend::Wgpu] {
+        for backend in [
+            Backend::OpenCl,
+            Backend::Cuda,
+            Backend::Vulkan,
+            Backend::Wgpu,
+        ] {
             if Self::detect_backend_runtime(backend).is_some() {
                 return Some(backend);
             }
@@ -129,13 +140,19 @@ impl GpuAccelerator {
             Backend::Auto => return None,
             Backend::Wgpu => {
                 if cfg!(target_os = "macos") {
-                    return Self::detect_backend_runtime(Backend::Metal).map(|_| "wgpu/metal".into());
+                    return Self::detect_backend_runtime(Backend::Metal)
+                        .map(|_| "wgpu/metal".into());
                 }
                 return Self::detect_backend_runtime(Backend::Vulkan).map(|_| "wgpu/vulkan".into());
             }
             Backend::Cuda => &["libcuda.dylib", "libcuda.so", "libcuda.so.1", "nvcuda.dll"][..],
             Backend::Metal => &["/System/Library/Frameworks/Metal.framework/Metal"][..],
-            Backend::Vulkan => &["libvulkan.1.dylib", "libvulkan.so", "libvulkan.so.1", "vulkan-1.dll"][..],
+            Backend::Vulkan => &[
+                "libvulkan.1.dylib",
+                "libvulkan.so",
+                "libvulkan.so.1",
+                "vulkan-1.dll",
+            ][..],
             Backend::OpenCl => &[
                 "/System/Library/Frameworks/OpenCL.framework/OpenCL",
                 "libOpenCL.so",
@@ -174,7 +191,10 @@ impl GpuAccelerator {
         match self.backend {
             Backend::Auto => Err(GpuError::UnsupportedBackend("auto".into())),
             Backend::Wgpu | Backend::Cuda | Backend::Metal | Backend::Vulkan | Backend::OpenCl => {
-                Ok(candidates.iter().map(|candidate| cosine_similarity(query, candidate)).collect())
+                Ok(candidates
+                    .iter()
+                    .map(|candidate| cosine_similarity(query, candidate))
+                    .collect())
             }
         }
     }
@@ -193,7 +213,9 @@ impl GpuAccelerator {
         }
         let dims = vectors[0].len();
         if vectors.iter().any(|vector| vector.len() != dims) {
-            return Err(GpuError::ComputeFailed("inconsistent vector dimensions".into()));
+            return Err(GpuError::ComputeFailed(
+                "inconsistent vector dimensions".into(),
+            ));
         }
 
         let cluster_count = k.min(vectors.len());
@@ -248,7 +270,9 @@ impl GpuAccelerator {
 
         match self.backend {
             Backend::Auto => Err(GpuError::UnsupportedBackend("auto".into())),
-            Backend::Wgpu | Backend::Cuda | Backend::Metal | Backend::Vulkan | Backend::OpenCl => Ok(assignments),
+            Backend::Wgpu | Backend::Cuda | Backend::Metal | Backend::Vulkan | Backend::OpenCl => {
+                Ok(assignments)
+            }
         }
     }
 }
@@ -275,10 +299,7 @@ mod tests {
             runtime: "test".into(),
         };
         let query = vec![1.0f32, 0.0, 0.0];
-        let candidates = vec![
-            vec![1.0f32, 0.0, 0.0],
-            vec![0.0f32, 1.0, 0.0],
-        ];
+        let candidates = vec![vec![1.0f32, 0.0, 0.0], vec![0.0f32, 1.0, 0.0]];
         let scores = acc.batch_cosine_similarity(&query, &candidates).unwrap();
         assert!((scores[0] - 1.0).abs() < 1e-5);
         assert!((scores[1] - 0.0).abs() < 1e-5);

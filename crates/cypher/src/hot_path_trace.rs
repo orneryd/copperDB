@@ -82,17 +82,28 @@ impl HotPathTraceState {
     /// Reset all flags to `false` (call at the start of each query).
     pub fn reset(&self) {
         self.outer_index_top_k.store(false, Ordering::Relaxed);
-        self.outer_scan_fallback_used.store(false, Ordering::Relaxed);
-        self.fabric_batched_apply_rows.store(false, Ordering::Relaxed);
-        self.simple_match_limit_fast_path.store(false, Ordering::Relaxed);
-        self.compound_query_fast_path.store(false, Ordering::Relaxed);
-        self.traversal_start_seed_top_k.store(false, Ordering::Relaxed);
-        self.traversal_end_seed_top_k.store(false, Ordering::Relaxed);
-        self.unwind_simple_merge_batch.store(false, Ordering::Relaxed);
-        self.unwind_fixed_chain_link_batch.store(false, Ordering::Relaxed);
-        self.call_tail_traversal_fast_path.store(false, Ordering::Relaxed);
-        self.merge_schema_lookup_used.store(false, Ordering::Relaxed);
-        self.merge_scan_fallback_used.store(false, Ordering::Relaxed);
+        self.outer_scan_fallback_used
+            .store(false, Ordering::Relaxed);
+        self.fabric_batched_apply_rows
+            .store(false, Ordering::Relaxed);
+        self.simple_match_limit_fast_path
+            .store(false, Ordering::Relaxed);
+        self.compound_query_fast_path
+            .store(false, Ordering::Relaxed);
+        self.traversal_start_seed_top_k
+            .store(false, Ordering::Relaxed);
+        self.traversal_end_seed_top_k
+            .store(false, Ordering::Relaxed);
+        self.unwind_simple_merge_batch
+            .store(false, Ordering::Relaxed);
+        self.unwind_fixed_chain_link_batch
+            .store(false, Ordering::Relaxed);
+        self.call_tail_traversal_fast_path
+            .store(false, Ordering::Relaxed);
+        self.merge_schema_lookup_used
+            .store(false, Ordering::Relaxed);
+        self.merge_scan_fallback_used
+            .store(false, Ordering::Relaxed);
     }
 
     /// Snapshot the current flags into a `HotPathTrace`.
@@ -106,8 +117,12 @@ impl HotPathTraceState {
             traversal_start_seed_top_k: self.traversal_start_seed_top_k.load(Ordering::Relaxed),
             traversal_end_seed_top_k: self.traversal_end_seed_top_k.load(Ordering::Relaxed),
             unwind_simple_merge_batch: self.unwind_simple_merge_batch.load(Ordering::Relaxed),
-            unwind_fixed_chain_link_batch: self.unwind_fixed_chain_link_batch.load(Ordering::Relaxed),
-            call_tail_traversal_fast_path: self.call_tail_traversal_fast_path.load(Ordering::Relaxed),
+            unwind_fixed_chain_link_batch: self
+                .unwind_fixed_chain_link_batch
+                .load(Ordering::Relaxed),
+            call_tail_traversal_fast_path: self
+                .call_tail_traversal_fast_path
+                .load(Ordering::Relaxed),
             merge_schema_lookup_used: self.merge_schema_lookup_used.load(Ordering::Relaxed),
             merge_scan_fallback_used: self.merge_scan_fallback_used.load(Ordering::Relaxed),
         }
@@ -124,11 +139,13 @@ impl HotPathTraceState {
     }
 
     pub fn mark_fabric_batched_apply_rows(&self) {
-        self.fabric_batched_apply_rows.store(true, Ordering::Relaxed);
+        self.fabric_batched_apply_rows
+            .store(true, Ordering::Relaxed);
     }
 
     pub fn mark_simple_match_limit_fast_path(&self) {
-        self.simple_match_limit_fast_path.store(true, Ordering::Relaxed);
+        self.simple_match_limit_fast_path
+            .store(true, Ordering::Relaxed);
     }
 
     pub fn mark_compound_query_fast_path(&self) {
@@ -136,7 +153,8 @@ impl HotPathTraceState {
     }
 
     pub fn mark_traversal_start_seed_top_k(&self) {
-        self.traversal_start_seed_top_k.store(true, Ordering::Relaxed);
+        self.traversal_start_seed_top_k
+            .store(true, Ordering::Relaxed);
     }
 
     pub fn mark_traversal_end_seed_top_k(&self) {
@@ -144,15 +162,18 @@ impl HotPathTraceState {
     }
 
     pub fn mark_unwind_simple_merge_batch(&self) {
-        self.unwind_simple_merge_batch.store(true, Ordering::Relaxed);
+        self.unwind_simple_merge_batch
+            .store(true, Ordering::Relaxed);
     }
 
     pub fn mark_unwind_fixed_chain_link_batch(&self) {
-        self.unwind_fixed_chain_link_batch.store(true, Ordering::Relaxed);
+        self.unwind_fixed_chain_link_batch
+            .store(true, Ordering::Relaxed);
     }
 
     pub fn mark_call_tail_traversal_fast_path(&self) {
-        self.call_tail_traversal_fast_path.store(true, Ordering::Relaxed);
+        self.call_tail_traversal_fast_path
+            .store(true, Ordering::Relaxed);
     }
 
     pub fn mark_merge_schema_lookup(&self) {

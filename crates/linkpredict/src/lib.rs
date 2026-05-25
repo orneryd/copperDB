@@ -7,8 +7,8 @@
 //! - Adamic-Adar Index
 //! - Preferential Attachment
 
-use thiserror::Error;
 use std::collections::HashSet;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum LinkPredictError {
@@ -24,7 +24,9 @@ pub fn common_neighbors(a: &HashSet<String>, b: &HashSet<String>) -> usize {
 /// Compute Jaccard Coefficient.
 pub fn jaccard(a: &HashSet<String>, b: &HashSet<String>) -> f64 {
     let union = a.union(b).count();
-    if union == 0 { return 0.0; }
+    if union == 0 {
+        return 0.0;
+    }
     a.intersection(b).count() as f64 / union as f64
 }
 
