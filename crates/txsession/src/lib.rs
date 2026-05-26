@@ -3,8 +3,10 @@
 //! Provides ACID transaction handling with begin, commit, rollback, and
 //! pending-write buffering.
 
+use copperdb_topology::{DistributedTransactionClock, LogicalTransactionId};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use uuid::Uuid;
@@ -88,6 +90,8 @@ pub struct Transaction {
     pub timeout: Duration,
     pub bookmarks: Vec<String>,
     pub database: Option<String>,
+    pub begin_timestamp: LogicalTransactionId,
+    pub commit_timestamp: Option<LogicalTransactionId>,
     pub(crate) pending: Vec<TxOperation>,
     // Legacy fields
     pub isolation: IsolationLevel,
@@ -95,6 +99,13 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn new(config: &SessionConfig) -> Self {
+        Self::new_with_timestamp(config, LogicalTransactionId::ZERO)
+    }
+
+    pub fn new_with_timestamp(
+        config: &SessionConfig,
+        begin_timestamp: LogicalTransactionId,
+    ) -> Self {
         Self {
             id: Uuid::new_v4(),
             state: TransactionState::Active,
@@ -103,6 +114,8 @@ impl Transaction {
             timeout: config.timeout,
             bookmarks: config.bookmarks.clone(),
             database: config.database.clone(),
+            begin_timestamp,
+            commit_timestamp: None,
             pending: Vec::new(),
             isolation: IsolationLevel::ReadCommitted,
         }
@@ -119,6 +132,8 @@ impl Transaction {
             timeout: Duration::from_secs(30),
             bookmarks: Vec::new(),
             database: Some(db_str),
+            begin_timestamp: LogicalTransactionId::ZERO,
+            commit_timestamp: None,
             pending: Vec::new(),
             isolation,
         }
@@ -133,6 +148,10 @@ impl Transaction {
     }
 
     pub fn commit(&mut self) -> Result<(), TxError> {
+        self.commit_at(LogicalTransactionId::ZERO)
+    }
+
+    pub fn commit_at(&mut self, commit_timestamp: LogicalTransactionId) -> Result<(), TxError> {
         if self.is_expired() {
             self.state = TransactionState::Failed;
             self.pending.clear();
@@ -141,6 +160,7 @@ impl Transaction {
         match self.state {
             TransactionState::Active => {
                 self.state = TransactionState::Committed;
+                self.commit_timestamp = Some(commit_timestamp);
                 Ok(())
             }
             TransactionState::Committed | TransactionState::Failed => {
@@ -224,18 +244,28 @@ impl Default for SessionConfig {
 /// Manages all active transactions.
 pub struct TransactionManager {
     active: DashMap<Uuid, Transaction>,
+    clock: Arc<DistributedTransactionClock>,
 }
 
 impl TransactionManager {
     pub fn new() -> Self {
+        Self::with_clock(Arc::new(DistributedTransactionClock::new(0)))
+    }
+
+    pub fn with_clock(clock: Arc<DistributedTransactionClock>) -> Self {
         Self {
             active: DashMap::new(),
+            clock,
         }
+    }
+
+    pub fn clock(&self) -> &Arc<DistributedTransactionClock> {
+        &self.clock
     }
 
     /// Begin a new transaction, returning its ID.
     pub fn begin(&self, config: &SessionConfig) -> Result<Uuid, TxError> {
-        let tx = Transaction::new(config);
+        let tx = Transaction::new_with_timestamp(config, self.clock.issue());
         let id = tx.id;
         self.active.insert(id, tx);
         Ok(id)
@@ -250,7 +280,8 @@ impl TransactionManager {
             .active
             .remove(&id)
             .ok_or(TxError::NoActiveTransaction)?;
-        match tx.commit() {
+        let commit_timestamp = self.clock.issue();
+        match tx.commit_at(commit_timestamp) {
             Ok(()) => Ok(()),
             Err(err) => {
                 // Only re-insert if the transaction is still Active (Conflict or
@@ -360,6 +391,22 @@ mod tests {
         assert!(mgr.is_active(&id));
         mgr.commit(id).unwrap();
         assert!(!mgr.is_active(&id));
+    }
+
+    #[test]
+    fn transaction_manager_assigns_logical_begin_and_commit_timestamps() {
+        let clock = Arc::new(DistributedTransactionClock::with_epoch(11, 5));
+        let mgr = TransactionManager::with_clock(Arc::clone(&clock));
+        let config = SessionConfig::default();
+        let id = mgr.begin(&config).unwrap();
+
+        let begin_timestamp = mgr.get(&id).unwrap().begin_timestamp;
+        assert_eq!(begin_timestamp.epoch, 5);
+        assert_eq!(begin_timestamp.node_ordinal, 11);
+
+        mgr.commit(id).unwrap();
+        let next = clock.issue();
+        assert_eq!(next.counter, begin_timestamp.counter + 2);
     }
 
     #[test]

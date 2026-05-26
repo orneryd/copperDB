@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -22,6 +23,111 @@ pub enum TopologyError {
 }
 
 pub const DEFAULT_SEARCH_HEDGE_AFTER_MICROS: u32 = 5_000;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LogicalTransactionId {
+    pub epoch: u64,
+    pub counter: u64,
+    pub node_ordinal: u32,
+}
+
+impl LogicalTransactionId {
+    pub const ZERO: Self = Self {
+        epoch: 0,
+        counter: 0,
+        node_ordinal: 0,
+    };
+
+    pub fn new(epoch: u64, counter: u64, node_ordinal: u32) -> Self {
+        Self {
+            epoch,
+            counter,
+            node_ordinal,
+        }
+    }
+
+    pub fn stable_id(&self) -> String {
+        format!(
+            "{:016x}:{:016x}:{:08x}",
+            self.epoch, self.counter, self.node_ordinal
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LogicalTransactionRange {
+    pub first: LogicalTransactionId,
+    pub last: LogicalTransactionId,
+    pub len: u64,
+}
+
+#[derive(Debug)]
+pub struct DistributedTransactionClock {
+    node_ordinal: u32,
+    epoch: AtomicU64,
+    counter: AtomicU64,
+}
+
+impl DistributedTransactionClock {
+    pub fn new(node_ordinal: u32) -> Self {
+        Self::with_epoch(node_ordinal, 1)
+    }
+
+    pub fn with_epoch(node_ordinal: u32, epoch: u64) -> Self {
+        Self {
+            node_ordinal,
+            epoch: AtomicU64::new(epoch.max(1)),
+            counter: AtomicU64::new(0),
+        }
+    }
+
+    pub fn node_ordinal(&self) -> u32 {
+        self.node_ordinal
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    pub fn issue(&self) -> LogicalTransactionId {
+        let counter = self.counter.fetch_add(1, Ordering::AcqRel) + 1;
+        LogicalTransactionId::new(self.epoch(), counter, self.node_ordinal)
+    }
+
+    pub fn reserve(&self, len: u64) -> LogicalTransactionRange {
+        let len = len.max(1);
+        let first_counter = self.counter.fetch_add(len, Ordering::AcqRel) + 1;
+        LogicalTransactionRange {
+            first: LogicalTransactionId::new(self.epoch(), first_counter, self.node_ordinal),
+            last: LogicalTransactionId::new(
+                self.epoch(),
+                first_counter + len - 1,
+                self.node_ordinal,
+            ),
+            len,
+        }
+    }
+
+    pub fn observe(&self, remote: LogicalTransactionId) -> LogicalTransactionId {
+        self.advance_epoch(remote.epoch);
+        advance_atomic_at_least(&self.counter, remote.counter);
+        self.issue()
+    }
+
+    pub fn advance_epoch(&self, epoch: u64) {
+        advance_atomic_at_least(&self.epoch, epoch.max(1));
+    }
+}
+
+fn advance_atomic_at_least(target: &AtomicU64, floor: u64) {
+    let mut current = target.load(Ordering::Acquire);
+    while current < floor {
+        match target.compare_exchange(current, floor, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => break,
+            Err(next) => current = next,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HyperscalerProvider {
@@ -676,5 +782,46 @@ mod tests {
         assert_eq!(plan.fanout[0].node_id, "local-healthy");
         assert_eq!(plan.fanout[1].node_id, "remote-fast");
         assert_eq!(plan.hedge_after_micros, DEFAULT_SEARCH_HEDGE_AFTER_MICROS);
+    }
+
+    #[test]
+    fn distributed_transaction_clock_issues_unique_ordered_ids_without_wall_time() {
+        let clock = DistributedTransactionClock::with_epoch(7, 42);
+        let first = clock.issue();
+        let second = clock.issue();
+
+        assert_eq!(first.epoch, 42);
+        assert_eq!(first.node_ordinal, 7);
+        assert!(first < second);
+        assert_eq!(
+            first.stable_id(),
+            "000000000000002a:0000000000000001:00000007"
+        );
+    }
+
+    #[test]
+    fn distributed_transaction_clock_reserves_ranges_for_batch_writers() {
+        let clock = DistributedTransactionClock::new(3);
+        let range = clock.reserve(4);
+        let next = clock.issue();
+
+        assert_eq!(range.first.counter, 1);
+        assert_eq!(range.last.counter, 4);
+        assert_eq!(range.len, 4);
+        assert_eq!(next.counter, 5);
+    }
+
+    #[test]
+    fn distributed_transaction_clock_merges_peer_observations() {
+        let local = DistributedTransactionClock::with_epoch(1, 2);
+        let remote = LogicalTransactionId::new(9, 100, 8);
+        let after_observe = local.observe(remote);
+        let next = local.issue();
+
+        assert_eq!(after_observe.epoch, 9);
+        assert_eq!(after_observe.counter, 101);
+        assert_eq!(after_observe.node_ordinal, 1);
+        assert_eq!(next.counter, 102);
+        assert!(remote < after_observe);
     }
 }

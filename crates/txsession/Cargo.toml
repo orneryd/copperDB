@@ -16,4 +16,5 @@ uuid.workspace = true
 tracing.workspace = true
 serde.workspace = true
 copperdb-storage = { workspace = true }
+copperdb-topology = { workspace = true }
 copperdb-util = { workspace = true }

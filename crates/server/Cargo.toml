@@ -17,6 +17,7 @@ axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 hyper.workspace = true
+url.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 parking_lot.workspace = true
@@ -29,3 +30,4 @@ copperdb-multidb = { workspace = true }
 copperdb-util = { workspace = true }
 copperdb-retention = { workspace = true }
 copperdb-otel = { workspace = true }
+copperdb-security = { workspace = true }

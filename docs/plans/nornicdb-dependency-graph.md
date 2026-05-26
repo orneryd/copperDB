@@ -17,9 +17,10 @@ These packages define vocabulary, errors, startup/shutdown behavior, and observa
 - [x] `errors` -> Neo4j-compatible transient error codes, retry classification, conflict sentinels.
 - [x] `otel` (`observability` in NornicDB) -> metrics catalog, runtime config, endpoint precedence, readiness checks, resource identity, redaction, mandatory fields, recovery.
 - [x] `lifecycle` -> component supervisor, first-error cancellation, reverse-order shutdown, fresh shutdown budget.
-- [x] `topology` -> hyperscaler placement, latency-aware distributed search fan-out, and high-availability write planning contracts.
+- [x] `topology` -> hyperscaler placement, latency-aware distributed search fan-out, high-availability write planning contracts, and syscall-free distributed transaction ordering.
 
 Current Rust status: all Layer 0 packages have focused implementations and tests. `topology` is the single contract path for enterprise placement, search routing, and HA write planning.
+`topology` also owns the distributed transaction timestamp contract: logical IDs are `(epoch, counter, node_ordinal)`, allocated by atomics without wall-clock syscalls, batch-reservable for multi-core writers, and mergeable from peer observations for distributed transaction ordering.
 
 ## Layer 1: Security, Identity, And Compliance
 
@@ -29,12 +30,12 @@ These packages depend on layer 0 and gate every externally reachable surface.
 - [x] `encryption` -> versioned envelopes, provider-backed `EnvelopeEncryptor`, DEK cache, rewrap rotation surface.
 - [x] `auth` -> JWT/RBAC identity, persistent users, roles, allowlists, privileges, entitlements, token cache.
 - [x] `audit` -> durable security and data-access event trail, append-only storage, hash-chain verification.
-- [ ] `security` -> hardening and auth-adjacent enforcement.
-- [ ] `compliance` -> policy enforcement and regulated-data controls.
+- [x] `security` -> token/header/URL validation, SSRF and injection defenses, server ingress enforcement.
+- [x] `compliance` -> durable governance policies, access controls, retention markers, audit-backed HIPAA/SOC2 evidence.
 
 Required direction: API surfaces call into this layer; this layer must not depend on HTTP/Bolt/GraphQL/MCP implementations.
 
-Current Rust status: `kms`, `encryption`, `auth`, and `audit` are implemented as durable package-owned paths. `auth` persists system users, role records, role-to-database allowlists, per-database privilege matrices, and role entitlement overrides through `copperdb-storage` system nodes; in-memory maps are reloadable caches only. `audit` persists append-only system audit events through `copperdb-storage`, reloads the trail from durable nodes, and verifies sequence continuity plus event hash chaining.
+Current Rust status: all Layer 1 packages are implemented as package-owned paths. `auth` persists system users, role records, role-to-database allowlists, per-database privilege matrices, and role entitlement overrides through `copperdb-storage` system nodes; in-memory maps are reloadable caches only. `audit` persists append-only system audit events through `copperdb-storage`, reloads the trail from durable nodes, and verifies sequence continuity plus event hash chaining. `security` owns no durable state; its completed path is deterministic validation for tokens, headers, graph identifiers, outbound URLs, and protocol-neutral request validation threaded into the HTTP server. `compliance` persists governance policies through `copperdb-storage` and derives HIPAA/SOC2 evidence from the durable audit trail.
 
 ## Layer 2: Storage, Transactions, And Metadata
 
@@ -80,6 +81,7 @@ The hyperscaler, distributed search, and HA write layers are first-class archite
 - `search` receives a `DistributedSearchPlan` from topology. The planner chooses candidates by same-region locality, observed latency, inflight load, capacity weight, health, fan-out cap, and hedge deadline.
 - `fabric` routes by `PlacementKey`, never by protocol-specific IDs.
 - `replication` receives a `DistributedWritePlan` from topology and enforces required acknowledgements for `LeaderLease`, `Quorum`, and `RaftLog` modes.
+- `txsession` receives begin/commit timestamps from topology's distributed logical transaction clock; storage/MVCC and replication must compare logical transaction IDs, not syscall timestamps or NTP-corrected wall time.
 
 Latency strategy:
 
@@ -147,5 +149,6 @@ The following contracts are intentionally first-class even while distributed exe
 - Placements: tenant/database/shard, primary, replicas, search nodes, hyperscaler profile.
 - Distributed search plans: placement plus latency-ranked healthy search fan-out, bounded parallelism, and hedge deadline.
 - Distributed write plans: placement plus mode, leader, replicas, required acknowledgements.
+- Distributed transaction IDs: epoch, logical counter, node ordinal; no wall-clock dependency on the write hot path.
 
-These contracts are implemented in `copperdb-topology`, persisted by `storage`, and consumed by `fabric`, `search`, and `replication`.
+These contracts are implemented in `copperdb-topology`, persisted by `storage` where they are durable topology metadata, and consumed by `fabric`, `search`, `replication`, and `txsession`.

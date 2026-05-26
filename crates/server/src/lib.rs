@@ -7,7 +7,8 @@
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, Request, StatusCode},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
@@ -18,6 +19,9 @@ use copperdb_multidb::{DatabaseManager, DatabaseStatus, MultiDbError};
 use copperdb_otel::{classify_cypher_op_type, Telemetry};
 use copperdb_retention::{
     ErasureRequest, LegalHold, Manager as RetentionManager, Policy, RetentionError,
+};
+use copperdb_security::{
+    RequestTarget, RequestViolation, SecurityConfig, SecurityMiddleware, SecurityRequest,
 };
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -80,6 +84,8 @@ pub struct AppState {
     pub auth: AuthState,
     /// Shared metrics surface (ported from NornicDB observability catalog).
     pub telemetry: Arc<Telemetry>,
+    /// Protocol-neutral ingress validation for headers, tokens, and URL query parameters.
+    pub security: SecurityMiddleware,
 }
 
 impl Default for AppState {
@@ -95,6 +101,17 @@ impl Default for AppState {
             db_manager,
             auth: AuthState::default(),
             telemetry: Arc::new(Telemetry::new()),
+            security: SecurityMiddleware::with_config(SecurityConfig {
+                environment: std::env::var("COPPERDB_ENV").unwrap_or_else(|_| "development".into()),
+                allow_http: std::env::var("COPPERDB_ALLOW_HTTP")
+                    .map(|value| {
+                        matches!(
+                            value.to_ascii_lowercase().as_str(),
+                            "1" | "true" | "yes" | "on"
+                        )
+                    })
+                    .unwrap_or(true),
+            }),
         }
     }
 }
@@ -144,7 +161,7 @@ impl CypherResponse {
 
 /// Build the application router.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let mut router = Router::new()
+    let router = Router::new()
         .route("/", get(root_handler))
         .route("/login", get(ui_handler))
         .route("/security", get(ui_handler))
@@ -193,11 +210,60 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/admin/retention/status", get(retention_status));
 
     let normalized = normalize_base_path(&state.base_path);
+    let router = router.layer(middleware::from_fn_with_state(
+        Arc::clone(&state),
+        security_validation_middleware,
+    ));
+
     if normalized == "/" {
         router.with_state(state)
     } else {
         Router::new().nest(&normalized, router).with_state(state)
     }
+}
+
+async fn security_validation_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let security_request = match security_request_from_http(&request) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+
+    match state.security.validate_request(&security_request) {
+        Ok(()) => next.run(request).await,
+        Err(violation) => security_violation_response(violation),
+    }
+}
+
+fn security_request_from_http(request: &Request<Body>) -> Result<SecurityRequest, Response> {
+    let mut security_request = SecurityRequest::new();
+    for (name, value) in request.headers() {
+        let value = value
+            .to_str()
+            .map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
+        security_request = security_request.with_header(name.as_str(), value);
+    }
+
+    if let Some(query) = request.uri().query() {
+        for (name, value) in url::form_urlencoded::parse(query.as_bytes()) {
+            security_request =
+                security_request.with_query_param(name.into_owned(), value.into_owned());
+        }
+    }
+
+    Ok(security_request)
+}
+
+fn security_violation_response(violation: RequestViolation) -> Response {
+    let status = match violation.target {
+        RequestTarget::Authorization => StatusCode::UNAUTHORIZED,
+        RequestTarget::QueryParam(ref name) if name == "token" => StatusCode::UNAUTHORIZED,
+        RequestTarget::Header(_) | RequestTarget::QueryParam(_) => StatusCode::BAD_REQUEST,
+    };
+    (status, violation.source.to_string()).into_response()
 }
 
 fn normalize_base_path(base_path: &str) -> String {
@@ -218,7 +284,7 @@ fn base_prefix(state: &AppState) -> String {
     }
 }
 
-fn host_for_request(headers: &HeaderMap, state: &AppState) -> String {
+fn host_for_request(headers: &HeaderMap, _state: &AppState) -> String {
     headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())

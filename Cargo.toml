@@ -161,6 +161,7 @@ aws-sdk-kms = "1.105.0"
 # OAuth2 (replaces auth OAuth flows)
 oauth2 = "5.0.0"
 tempfile = "3.27.0"
+url = "2.5.4"
 
 # Inter-crate dependencies within this workspace
 copperdb-util = { path = "crates/util" }

@@ -1,67 +1,294 @@
-//! Security utilities for copperdb.
+//! Security validation for copperDB ingress and outbound URL handling.
 //!
-//! Equivalent to Go's `pkg/security` in NornicDB.
-//! Provides input sanitization, identifier validation, password hashing,
-//! token generation, and TLS certificate management configuration.
+//! This crate owns protocol-neutral validation contracts. HTTP/Bolt/GraphQL/MCP
+//! adapters should call these validators instead of embedding security rules in
+//! protocol code.
 
+use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
+use url::{Host, Url};
 
-#[derive(Debug, Error)]
+pub const MAX_TOKEN_LENGTH: usize = 8192;
+pub const MAX_URL_LENGTH: usize = 2048;
+pub const MAX_HEADER_LENGTH: usize = 4096;
+
+const URL_PARAMETER_NAMES: &[&str] = &["callback", "redirect", "redirect_uri", "url", "webhook"];
+const TOKEN_VALID_CHARS: &str =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~+/=";
+const INJECTION_CHARS: &[char] = &['`', '"', '\'', ';', '\n', '\r', '\0', '\\'];
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SecurityError {
-    #[error("TLS configuration error: {0}")]
-    TlsConfig(String),
-    #[error("certificate error: {0}")]
-    CertError(String),
-    #[error("unauthorized")]
-    Unauthorized,
+    #[error("token contains invalid characters")]
+    TokenInvalidChars,
+    #[error("token exceeds maximum length of {0} characters")]
+    TokenTooLong(usize),
+    #[error("token must be a non-empty string")]
+    TokenEmpty,
+    #[error("only HTTP/HTTPS protocols are allowed")]
+    UrlInvalidProtocol,
+    #[error("private IP addresses are not allowed")]
+    UrlPrivateIp,
+    #[error("localhost is not allowed in production")]
+    UrlLocalhost,
+    #[error("only HTTPS URLs are allowed in production")]
+    UrlHttpNotAllowed,
+    #[error("URL exceeds maximum length of {0} characters")]
+    UrlTooLong(usize),
+    #[error("invalid URL format")]
+    UrlInvalid,
+    #[error("header value exceeds maximum length of {0} characters")]
+    HeaderTooLong(usize),
+    #[error("header value contains invalid control characters")]
+    HeaderInvalidChars,
     #[error("invalid identifier: {0}")]
     InvalidIdentifier(String),
     #[error("invalid label: {0}")]
     InvalidLabel(String),
     #[error("invalid property key: {0}")]
     InvalidPropertyKey(String),
-    #[error("hashing error: {0}")]
-    HashingError(String),
 }
 
-/// TLS configuration options.
-#[derive(Debug, Clone)]
-pub struct TlsConfig {
-    /// Path to PEM-encoded certificate chain.
-    pub cert_path: String,
-    /// Path to PEM-encoded private key.
-    pub key_path: String,
-    /// Path to CA certificate for client verification (mTLS).
-    pub ca_cert_path: Option<String>,
-    /// Require client certificates (mutual TLS).
-    pub require_client_cert: bool,
-    /// Minimum TLS version ("1.2" or "1.3").
-    pub min_version: String,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecurityConfig {
+    pub environment: String,
+    pub allow_http: bool,
 }
 
-impl TlsConfig {
-    pub fn validate(&self) -> Result<(), SecurityError> {
-        if !std::path::Path::new(&self.cert_path).exists() {
-            return Err(SecurityError::CertError(format!(
-                "certificate file not found: {}",
-                self.cert_path
-            )));
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            environment: "development".into(),
+            allow_http: true,
         }
-        if !std::path::Path::new(&self.key_path).exists() {
-            return Err(SecurityError::CertError(format!(
-                "key file not found: {}",
-                self.key_path
-            )));
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecurityMiddleware {
+    is_development: bool,
+    allow_http: bool,
+}
+
+impl SecurityMiddleware {
+    pub fn new() -> Self {
+        Self::with_config(SecurityConfig::default())
+    }
+
+    pub fn with_config(config: SecurityConfig) -> Self {
+        let environment = config.environment.trim().to_ascii_lowercase();
+        Self {
+            is_development: environment.is_empty()
+                || environment == "development"
+                || environment == "dev",
+            allow_http: config.allow_http,
         }
+    }
+
+    pub fn is_development(&self) -> bool {
+        self.is_development
+    }
+
+    pub fn allow_http(&self) -> bool {
+        self.allow_http
+    }
+
+    pub fn validate_request(&self, request: &SecurityRequest) -> Result<(), RequestViolation> {
+        for (name, value) in &request.headers {
+            validate_header_value(value).map_err(|source| RequestViolation {
+                target: RequestTarget::Header(name.clone()),
+                source,
+            })?;
+        }
+
+        if let Some(value) = request.header("authorization") {
+            if let Some(token) = bearer_or_basic_token(value) {
+                validate_token(token).map_err(|source| RequestViolation {
+                    target: RequestTarget::Authorization,
+                    source,
+                })?;
+            }
+        }
+
+        if let Some(token) = request.query_param("token") {
+            validate_token(token).map_err(|source| RequestViolation {
+                target: RequestTarget::QueryParam("token".into()),
+                source,
+            })?;
+        }
+
+        for name in URL_PARAMETER_NAMES {
+            if let Some(value) = request.query_param(name) {
+                validate_url(value, self.is_development, self.allow_http).map_err(|source| {
+                    RequestViolation {
+                        target: RequestTarget::QueryParam((*name).into()),
+                        source,
+                    }
+                })?;
+            }
+        }
+
         Ok(())
     }
 }
 
-/// Characters that are forbidden in Cypher identifiers to prevent injection.
-const INJECTION_CHARS: &[char] = &['`', '"', '\'', ';', '\n', '\r', '\0', '\\'];
+impl Default for SecurityMiddleware {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-/// Sanitize a Cypher identifier (label, relationship type, property key).
-/// Rejects any input containing injection characters or control characters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SecurityRequest {
+    pub headers: Vec<(String, String)>,
+    pub query_params: Vec<(String, String)>,
+}
+
+impl SecurityRequest {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    pub fn with_query_param(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.query_params.push((name.into(), value.into()));
+        self
+    }
+
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    pub fn query_param(&self, name: &str) -> Option<&str> {
+        self.query_params
+            .iter()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestViolation {
+    pub target: RequestTarget,
+    pub source: SecurityError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestTarget {
+    Header(String),
+    Authorization,
+    QueryParam(String),
+}
+
+pub fn validate_token(token: &str) -> Result<(), SecurityError> {
+    if token.trim().is_empty() {
+        return Err(SecurityError::TokenEmpty);
+    }
+    if token.len() > MAX_TOKEN_LENGTH {
+        return Err(SecurityError::TokenTooLong(MAX_TOKEN_LENGTH));
+    }
+    let lowercase = token.to_ascii_lowercase();
+    if lowercase.contains("javascript:")
+        || lowercase.contains("data:")
+        || lowercase.contains("file:")
+        || lowercase.contains("vbscript:")
+    {
+        return Err(SecurityError::TokenInvalidChars);
+    }
+    if token.chars().any(|ch| {
+        matches!(
+            ch,
+            '\r' | '\n'
+                | '<'
+                | '>'
+                | '\''
+                | '"'
+                | '&'
+                | ';'
+                | '('
+                | ')'
+                | '{'
+                | '}'
+                | '['
+                | ']'
+                | '\\'
+                | '\0'
+        )
+    }) {
+        return Err(SecurityError::TokenInvalidChars);
+    }
+    if !token.chars().all(|ch| TOKEN_VALID_CHARS.contains(ch)) {
+        return Err(SecurityError::TokenInvalidChars);
+    }
+    Ok(())
+}
+
+pub fn validate_url(
+    raw_url: &str,
+    is_development: bool,
+    allow_http: bool,
+) -> Result<(), SecurityError> {
+    if raw_url.len() > MAX_URL_LENGTH {
+        return Err(SecurityError::UrlTooLong(MAX_URL_LENGTH));
+    }
+    if raw_url.trim().is_empty() {
+        return Err(SecurityError::UrlInvalid);
+    }
+
+    let parsed = Url::parse(raw_url).map_err(|_| SecurityError::UrlInvalid)?;
+    match parsed.scheme().to_ascii_lowercase().as_str() {
+        "http" => {
+            if !is_development && !allow_http {
+                return Err(SecurityError::UrlHttpNotAllowed);
+            }
+        }
+        "https" => {}
+        _ => return Err(SecurityError::UrlInvalidProtocol),
+    }
+
+    let host = parsed.host().ok_or(SecurityError::UrlInvalid)?;
+    match host {
+        Host::Domain(domain) => {
+            let lowercase = domain.to_ascii_lowercase();
+            if !is_development && (lowercase == "localhost" || lowercase == "host.docker.internal")
+            {
+                return Err(SecurityError::UrlLocalhost);
+            }
+        }
+        Host::Ipv4(ip) => validate_ip(IpAddr::V4(ip), is_development)?,
+        Host::Ipv6(ip) => validate_ip(IpAddr::V6(ip), is_development)?,
+    }
+
+    Ok(())
+}
+
+pub fn validate_header_value(value: &str) -> Result<(), SecurityError> {
+    if value.len() > MAX_HEADER_LENGTH {
+        return Err(SecurityError::HeaderTooLong(MAX_HEADER_LENGTH));
+    }
+    if value.chars().any(|ch| matches!(ch, '\r' | '\n' | '\0')) {
+        return Err(SecurityError::HeaderInvalidChars);
+    }
+    Ok(())
+}
+
+pub fn sanitize_string(input: &str) -> String {
+    input
+        .chars()
+        .filter(|ch| *ch != '\0' && (*ch >= ' ' || *ch == '\t' || *ch == '\n'))
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 pub fn sanitize_identifier(input: &str) -> Result<String, SecurityError> {
     if input.is_empty() {
         return Err(SecurityError::InvalidIdentifier(
@@ -76,7 +303,7 @@ pub fn sanitize_identifier(input: &str) -> Result<String, SecurityError> {
             )));
         }
     }
-    if input.chars().any(|c| c.is_control()) {
+    if input.chars().any(|ch| ch.is_control()) {
         return Err(SecurityError::InvalidIdentifier(
             "identifier contains control characters".into(),
         ));
@@ -84,72 +311,18 @@ pub fn sanitize_identifier(input: &str) -> Result<String, SecurityError> {
     Ok(input.to_string())
 }
 
-/// Escape single quotes in a string value for safe embedding in Cypher.
 pub fn sanitize_string_value(input: &str) -> String {
     input.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
-/// Validate a node label: must be alphanumeric + underscore, non-empty.
 pub fn validate_label(label: &str) -> Result<(), SecurityError> {
-    if label.is_empty() {
-        return Err(SecurityError::InvalidLabel(
-            "label must not be empty".into(),
-        ));
-    }
-    if !label.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return Err(SecurityError::InvalidLabel(format!(
-            "label '{}' contains invalid characters (only alphanumeric and _ allowed)",
-            label
-        )));
-    }
-    Ok(())
+    validate_graph_name(label, "label", SecurityError::InvalidLabel)
 }
 
-/// Validate a property key: must be alphanumeric + underscore, non-empty.
 pub fn validate_property_key(key: &str) -> Result<(), SecurityError> {
-    if key.is_empty() {
-        return Err(SecurityError::InvalidPropertyKey(
-            "property key must not be empty".into(),
-        ));
-    }
-    if !key.chars().all(|c| c.is_alphanumeric() || c == '_') {
-        return Err(SecurityError::InvalidPropertyKey(format!(
-            "property key '{}' contains invalid characters",
-            key
-        )));
-    }
-    Ok(())
+    validate_graph_name(key, "property key", SecurityError::InvalidPropertyKey)
 }
 
-/// Hash a password using Argon2id with a random salt, returning a PHC string.
-/// The returned string encodes the algorithm, parameters, salt, and hash and
-/// can be stored directly. Use [`verify_password`] to check a candidate.
-pub fn hash_password(password: &str) -> Result<String, SecurityError> {
-    use argon2::{password_hash::PasswordHasher, Argon2};
-    let argon2 = Argon2::default();
-    argon2
-        .hash_password(password.as_bytes())
-        .map(|h| h.to_string())
-        .map_err(|e| SecurityError::HashingError(e.to_string()))
-}
-
-/// Verify a password against an Argon2id PHC hash produced by [`hash_password`].
-/// Uses constant-time comparison internally.
-pub fn verify_password(password: &str, hash: &str) -> bool {
-    use argon2::{
-        password_hash::{phc::PasswordHash, PasswordVerifier},
-        Argon2,
-    };
-    let parsed = match PasswordHash::new(hash) {
-        Ok(h) => h,
-        Err(_) => return false,
-    };
-    Argon2::default()
-        .verify_password(password.as_bytes(), &parsed)
-        .is_ok()
-}
-
-/// Generate a random 32-byte hex token.
 pub fn generate_token() -> String {
     use getrandom::fill as fill_random;
     let mut bytes = [0u8; 32];
@@ -157,97 +330,243 @@ pub fn generate_token() -> String {
     hex::encode(bytes)
 }
 
+fn validate_graph_name(
+    value: &str,
+    kind: &str,
+    error: fn(String) -> SecurityError,
+) -> Result<(), SecurityError> {
+    if value.is_empty() {
+        return Err(error(format!("{kind} must not be empty")));
+    }
+    if !value.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
+        return Err(error(format!(
+            "{kind} '{value}' contains invalid characters"
+        )));
+    }
+    Ok(())
+}
+
+fn bearer_or_basic_token(value: &str) -> Option<&str> {
+    let (scheme, token) = value.split_once(' ')?;
+    if scheme.eq_ignore_ascii_case("bearer") || scheme.eq_ignore_ascii_case("basic") {
+        Some(token.trim())
+    } else {
+        None
+    }
+}
+
+fn validate_ip(ip: IpAddr, is_development: bool) -> Result<(), SecurityError> {
+    if is_development && ip.is_loopback() {
+        return Ok(());
+    }
+    if is_private_ip(ip) {
+        return Err(SecurityError::UrlPrivateIp);
+    }
+    Ok(())
+}
+
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_private_ipv4(ip),
+        IpAddr::V6(ip) => is_private_ipv6(ip),
+    }
+}
+
+fn is_private_ipv4(ip: Ipv4Addr) -> bool {
+    ip.is_loopback() || ip.is_private() || ip.is_link_local()
+}
+
+fn is_private_ipv6(ip: Ipv6Addr) -> bool {
+    ip.is_loopback() || ip.is_unique_local() || is_ipv6_link_local(ip)
+}
+
+fn is_ipv6_link_local(ip: Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xffc0) == 0xfe80
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_sanitize_identifier_valid() {
+    fn validate_token_accepts_oauth_and_jwt_shapes() {
+        validate_token(
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSM",
+        )
+        .unwrap();
+        validate_token("ya29.a0AfH6SMBx").unwrap();
+        validate_token("abc123-_~+/=").unwrap();
+        validate_token(&"a".repeat(MAX_TOKEN_LENGTH)).unwrap();
+    }
+
+    #[test]
+    fn validate_token_blocks_injection_patterns() {
+        for token in [
+            "token\r\nX-Evil: header",
+            "<script>alert('xss')</script>",
+            "javascript:alert('xss')",
+            "data:text/html,<script>alert('xss')</script>",
+            "file:///etc/passwd",
+            "token\0evil",
+            "token;rm -rf /",
+        ] {
+            assert_eq!(validate_token(token), Err(SecurityError::TokenInvalidChars));
+        }
+        assert_eq!(validate_token(""), Err(SecurityError::TokenEmpty));
+        assert_eq!(
+            validate_token(&"a".repeat(MAX_TOKEN_LENGTH + 1)),
+            Err(SecurityError::TokenTooLong(MAX_TOKEN_LENGTH))
+        );
+    }
+
+    #[test]
+    fn validate_url_enforces_protocol_and_https_policy() {
+        validate_url("https://oauth.example.com/userinfo", false, false).unwrap();
+        validate_url("https://oauth.example.com:8443/api", false, false).unwrap();
+        validate_url("http://localhost:8888/api", true, true).unwrap();
+        validate_url("https://8.8.8.8/api", false, false).unwrap();
+        assert_eq!(
+            validate_url("ftp://example.com/data", false, false),
+            Err(SecurityError::UrlInvalidProtocol)
+        );
+        assert_eq!(
+            validate_url("http://example.com/api", false, false),
+            Err(SecurityError::UrlHttpNotAllowed)
+        );
+        validate_url("http://example.com/api", false, true).unwrap();
+        validate_url("http://example.com/api", true, false).unwrap();
+    }
+
+    #[test]
+    fn validate_url_blocks_private_and_metadata_addresses() {
+        for raw_url in [
+            "https://10.0.0.1/api",
+            "https://172.16.0.1/api",
+            "https://172.31.255.255/api",
+            "https://192.168.1.1/api",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://127.0.0.1/api",
+            "https://[fc00::1]/api",
+            "https://[fe80::1]/api",
+        ] {
+            assert_eq!(
+                validate_url(raw_url, false, false),
+                Err(SecurityError::UrlPrivateIp)
+            );
+        }
+    }
+
+    #[test]
+    fn validate_url_allows_loopback_only_in_development() {
+        validate_url("http://127.0.0.1:9200/index", true, false).unwrap();
+        validate_url("http://[::1]:8080/api", true, false).unwrap();
+        validate_url("https://localhost:8080/api", true, false).unwrap();
+        assert_eq!(
+            validate_url("https://localhost:8080/api", false, false),
+            Err(SecurityError::UrlLocalhost)
+        );
+    }
+
+    #[test]
+    fn validate_url_rejects_empty_invalid_and_too_long_urls() {
+        assert_eq!(
+            validate_url("", false, false),
+            Err(SecurityError::UrlInvalid)
+        );
+        assert_eq!(
+            validate_url("   ", false, false),
+            Err(SecurityError::UrlInvalid)
+        );
+        assert_eq!(
+            validate_url(
+                &format!("https://example.com/{}", "a".repeat(MAX_URL_LENGTH)),
+                false,
+                false,
+            ),
+            Err(SecurityError::UrlTooLong(MAX_URL_LENGTH))
+        );
+    }
+
+    #[test]
+    fn header_and_string_validation_match_security_contract() {
+        validate_header_value("Mozilla/5.0").unwrap();
+        validate_header_value("application/json; charset=utf-8").unwrap();
+        assert_eq!(
+            validate_header_value("value\r\nX-Injected: evil"),
+            Err(SecurityError::HeaderInvalidChars)
+        );
+        assert_eq!(
+            validate_header_value("value\0injected"),
+            Err(SecurityError::HeaderInvalidChars)
+        );
+        assert_eq!(
+            validate_header_value(&"a".repeat(MAX_HEADER_LENGTH + 1)),
+            Err(SecurityError::HeaderTooLong(MAX_HEADER_LENGTH))
+        );
+        assert_eq!(sanitize_string("hello\0\x01\x02world"), "helloworld");
+        assert_eq!(sanitize_string("  hello world  "), "hello world");
+    }
+
+    #[test]
+    fn middleware_config_and_request_validation_work() {
+        let dev = SecurityMiddleware::with_config(SecurityConfig {
+            environment: "dev".into(),
+            allow_http: true,
+        });
+        assert!(dev.is_development());
+        assert!(dev.allow_http());
+
+        let prod = SecurityMiddleware::with_config(SecurityConfig {
+            environment: "production".into(),
+            allow_http: false,
+        });
+        assert!(!prod.is_development());
+        assert!(!prod.allow_http());
+
+        let request = SecurityRequest::new()
+            .with_header("User-Agent", "Mozilla/5.0")
+            .with_header("Authorization", "Bearer abc123-_~+/=")
+            .with_query_param("callback", "https://example.com/callback");
+        prod.validate_request(&request).unwrap();
+
+        let bad_header = SecurityRequest::new().with_header("X-Custom", "value\0injection");
+        let violation = prod.validate_request(&bad_header).unwrap_err();
+        assert_eq!(violation.target, RequestTarget::Header("X-Custom".into()));
+        assert_eq!(violation.source, SecurityError::HeaderInvalidChars);
+
+        let bad_token = SecurityRequest::new().with_header("Authorization", "Bearer <script>");
+        let violation = prod.validate_request(&bad_token).unwrap_err();
+        assert_eq!(violation.target, RequestTarget::Authorization);
+        assert_eq!(violation.source, SecurityError::TokenInvalidChars);
+
+        let ssrf = SecurityRequest::new().with_query_param("webhook", "https://192.168.1.1/hook");
+        let violation = prod.validate_request(&ssrf).unwrap_err();
+        assert_eq!(
+            violation.target,
+            RequestTarget::QueryParam("webhook".into())
+        );
+        assert_eq!(violation.source, SecurityError::UrlPrivateIp);
+    }
+
+    #[test]
+    fn graph_identifier_helpers_remain_strict() {
         assert!(sanitize_identifier("Person").is_ok());
         assert!(sanitize_identifier("my_label_123").is_ok());
-    }
-
-    #[test]
-    fn test_sanitize_identifier_injection() {
         assert!(sanitize_identifier("Person`").is_err());
         assert!(sanitize_identifier("label; DROP").is_err());
-        assert!(sanitize_identifier("label'").is_err());
-    }
-
-    #[test]
-    fn test_sanitize_identifier_empty() {
-        assert!(sanitize_identifier("").is_err());
-    }
-
-    #[test]
-    fn test_sanitize_string_value() {
-        let safe = sanitize_string_value("it's a test");
-        assert_eq!(safe, "it\\'s a test");
-    }
-
-    #[test]
-    fn test_validate_label_valid() {
-        assert!(validate_label("Person").is_ok());
-        assert!(validate_label("Movie_Title").is_ok());
-    }
-
-    #[test]
-    fn test_validate_label_invalid() {
+        assert_eq!(sanitize_string_value("it's a test"), "it\\'s a test");
+        validate_label("Movie_Title").unwrap();
+        validate_property_key("created_at").unwrap();
         assert!(validate_label("Person-Node").is_err());
-        assert!(validate_label("").is_err());
-        assert!(validate_label("Label With Space").is_err());
-    }
-
-    #[test]
-    fn test_validate_property_key_valid() {
-        assert!(validate_property_key("name").is_ok());
-        assert!(validate_property_key("created_at").is_ok());
-    }
-
-    #[test]
-    fn test_validate_property_key_invalid() {
-        assert!(validate_property_key("").is_err());
         assert!(validate_property_key("my-key").is_err());
     }
 
     #[test]
-    fn test_hash_and_verify_password() {
-        let hash = hash_password("s3cr3t!").unwrap();
-        assert!(verify_password("s3cr3t!", &hash));
-        assert!(!verify_password("wrong", &hash));
-    }
-
-    #[test]
-    fn test_hash_password_is_argon2_phc() {
-        let hash = hash_password("test").unwrap();
-        // Argon2id PHC strings start with "$argon2id$"
-        assert!(
-            hash.starts_with("$argon2id$"),
-            "expected Argon2id PHC string, got: {hash}"
-        );
-    }
-
-    #[test]
-    fn test_hash_password_different_salts() {
-        // Each call produces a different hash (random salt)
-        let h1 = hash_password("same").unwrap();
-        let h2 = hash_password("same").unwrap();
-        assert_ne!(
-            h1, h2,
-            "two hashes of the same password must differ (different salts)"
-        );
-    }
-
-    #[test]
-    fn test_generate_token_length() {
-        let token = generate_token();
-        assert_eq!(token.len(), 64); // 32 bytes = 64 hex chars
-    }
-
-    #[test]
-    fn test_generate_token_unique() {
-        let t1 = generate_token();
-        let t2 = generate_token();
-        assert_ne!(t1, t2);
+    fn generated_tokens_are_random_hex() {
+        let first = generate_token();
+        let second = generate_token();
+        assert_eq!(first.len(), 64);
+        assert_ne!(first, second);
+        validate_token(&first).unwrap();
     }
 }

@@ -26,6 +26,7 @@ const META_KP_PROMOTION_PROFILE_PREFIX: &[u8] = b"kp_promotion_profile/";
 const META_KP_PROMOTION_POLICY_PREFIX: &[u8] = b"kp_promotion_policy/";
 const IDX_LABEL_PREFIX: &str = "label_nodes";
 const IDX_EDGE_TYPE_PREFIX: &str = "edge_type";
+const IDX_NODE_PROPERTY_PREFIX: &str = "node_property";
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -739,10 +740,12 @@ impl StorageEngine {
     pub fn put_node_record(&self, node: &NodeRecord) -> Result<(), StorageError> {
         if let Some(old) = self.get_node_record(&node.id)? {
             self.unindex_node_labels(&old)?;
+            self.unindex_node_properties(&old)?;
         }
         self.nodes
             .insert(node.id.as_bytes(), rmp_serde::to_vec(node)?)?;
         self.index_node_labels(node)?;
+        self.index_node_properties(node)?;
         Ok(())
     }
 
@@ -756,6 +759,7 @@ impl StorageEngine {
     pub fn delete_node_record(&self, id: &str) -> Result<(), StorageError> {
         if let Some(existing) = self.get_node_record(id)? {
             self.unindex_node_labels(&existing)?;
+            self.unindex_node_properties(&existing)?;
             self.nodes.remove(id.as_bytes())?;
         }
         Ok(())
@@ -776,6 +780,32 @@ impl StorageEngine {
             }
         }
 
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
+    }
+
+    pub fn get_nodes_by_property(
+        &self,
+        label: &str,
+        property: &str,
+        value: &serde_json::Value,
+    ) -> Result<Vec<NodeRecord>, StorageError> {
+        if !self.has_node_property_index(label, property)? {
+            return Ok(Vec::new());
+        }
+
+        let prefix = node_property_index_value_prefix(label, property, value);
+        let mut out = Vec::new();
+        for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
+            let (key, _) = entry?;
+            let key_str =
+                std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            if let Some(node_id) = key_str.rsplit('/').next() {
+                if let Some(node) = self.get_node_record(node_id)? {
+                    out.push(node);
+                }
+            }
+        }
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)
     }
@@ -962,6 +992,9 @@ impl StorageEngine {
     pub fn persist_index_definition(&self, index: &IndexDefinition) -> Result<(), StorageError> {
         let key = [META_SCHEMA_INDEX_PREFIX, index.name.as_bytes()].concat();
         self.meta.insert(key, rmp_serde::to_vec(index)?)?;
+        if is_single_property_node_index(index) {
+            self.rebuild_node_property_index(index)?;
+        }
         Ok(())
     }
 
@@ -976,8 +1009,18 @@ impl StorageEngine {
     }
 
     pub fn delete_index_definition(&self, name: &str) -> Result<bool, StorageError> {
+        let existing = self
+            .load_index_definitions()?
+            .into_iter()
+            .find(|index| index.name == name);
         let key = [META_SCHEMA_INDEX_PREFIX, name.as_bytes()].concat();
-        Ok(self.meta.remove(key)?.is_some())
+        let deleted = self.meta.remove(key)?.is_some();
+        if deleted {
+            if let Some(index) = existing.filter(is_single_property_node_index) {
+                self.delete_node_property_index_entries(&index.label, &index.properties[0])?;
+            }
+        }
+        Ok(deleted)
     }
 
     pub fn persist_decay_profile_schema(
@@ -1275,6 +1318,87 @@ impl StorageEngine {
         Ok(())
     }
 
+    fn index_node_properties(&self, node: &NodeRecord) -> Result<(), StorageError> {
+        for index in self.node_property_index_definitions()? {
+            if !node.labels.iter().any(|label| label == &index.label) {
+                continue;
+            }
+            let property = &index.properties[0];
+            if let Some(value) = node.properties.get(property) {
+                self.indexes.insert(
+                    node_property_index_key(&index.label, property, value, &node.id).as_bytes(),
+                    &[],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn unindex_node_properties(&self, node: &NodeRecord) -> Result<(), StorageError> {
+        for index in self.node_property_index_definitions()? {
+            if !node.labels.iter().any(|label| label == &index.label) {
+                continue;
+            }
+            let property = &index.properties[0];
+            if let Some(value) = node.properties.get(property) {
+                self.indexes.remove(
+                    node_property_index_key(&index.label, property, value, &node.id).as_bytes(),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn has_node_property_index(&self, label: &str, property: &str) -> Result<bool, StorageError> {
+        Ok(self
+            .node_property_index_definitions()?
+            .iter()
+            .any(|index| index.label == label && index.properties[0] == property))
+    }
+
+    fn node_property_index_definitions(&self) -> Result<Vec<IndexDefinition>, StorageError> {
+        Ok(self
+            .load_index_definitions()?
+            .into_iter()
+            .filter(is_single_property_node_index)
+            .collect())
+    }
+
+    fn rebuild_node_property_index(&self, index: &IndexDefinition) -> Result<(), StorageError> {
+        self.delete_node_property_index_entries(&index.label, &index.properties[0])?;
+        for node in self.get_nodes_by_label(&index.label)? {
+            if let Some(value) = node.properties.get(&index.properties[0]) {
+                self.indexes.insert(
+                    node_property_index_key(&index.label, &index.properties[0], value, &node.id)
+                        .as_bytes(),
+                    &[],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn delete_node_property_index_entries(
+        &self,
+        label: &str,
+        property: &str,
+    ) -> Result<(), StorageError> {
+        let prefix = node_property_index_property_prefix(label, property);
+        let keys = self
+            .indexes
+            .scan_prefix(prefix.as_bytes())
+            .map(|entry| {
+                entry
+                    .map(|(key, _)| key.to_vec())
+                    .map_err(StorageError::from)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for key in keys {
+            self.indexes.remove(key)?;
+        }
+        Ok(())
+    }
+
     fn unindex_node_labels(&self, node: &NodeRecord) -> Result<(), StorageError> {
         for label in &node.labels {
             self.indexes
@@ -1321,6 +1445,52 @@ fn edge_type_index_prefix(edge_type: &str) -> String {
 
 fn edge_type_index_key(edge_type: &str, edge_id: &str) -> String {
     format!("{}{}", edge_type_index_prefix(edge_type), edge_id)
+}
+
+fn is_single_property_node_index(index: &IndexDefinition) -> bool {
+    index.entity_type == IndexEntityType::Node && index.properties.len() == 1
+}
+
+fn node_property_index_property_prefix(label: &str, property: &str) -> String {
+    format!(
+        "{IDX_NODE_PROPERTY_PREFIX}/{}/{}/",
+        escape_index_component(label),
+        escape_index_component(property)
+    )
+}
+
+fn node_property_index_value_prefix(
+    label: &str,
+    property: &str,
+    value: &serde_json::Value,
+) -> String {
+    format!(
+        "{}{}/",
+        node_property_index_property_prefix(label, property),
+        property_index_value_key(value)
+    )
+}
+
+fn node_property_index_key(
+    label: &str,
+    property: &str,
+    value: &serde_json::Value,
+    node_id: &str,
+) -> String {
+    format!(
+        "{}{}",
+        node_property_index_value_prefix(label, property, value),
+        node_id
+    )
+}
+
+fn property_index_value_key(value: &serde_json::Value) -> String {
+    let bytes = serde_json::to_vec(value).unwrap_or_else(|_| value.to_string().into_bytes());
+    hex::encode(bytes)
+}
+
+fn escape_index_component(value: &str) -> String {
+    hex::encode(value.as_bytes())
 }
 
 fn value_as_f64(value: &serde_json::Value, field: &str) -> Result<f64, StorageError> {
@@ -1920,6 +2090,68 @@ mod tests {
         let deleted = engine.delete_index_definition("person_email_idx").unwrap();
         assert!(deleted);
         assert!(engine.load_index_definitions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn node_property_index_rebuilds_and_tracks_mutations() {
+        let engine = StorageEngine::open_temporary().unwrap();
+        let mut alice = sample_node("db:n1", &["Person"]);
+        alice
+            .properties
+            .insert("email".into(), json!("alice@example.com"));
+        let mut bob = sample_node("db:n2", &["Person"]);
+        bob.properties
+            .insert("email".into(), json!("bob@example.com"));
+        engine.put_node_record(&alice).unwrap();
+        engine.put_node_record(&bob).unwrap();
+
+        assert!(engine
+            .get_nodes_by_property("Person", "email", &json!("alice@example.com"))
+            .unwrap()
+            .is_empty());
+
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "person_email_idx".to_string(),
+                entity_type: IndexEntityType::Node,
+                label: "Person".to_string(),
+                properties: vec!["email".to_string()],
+            })
+            .unwrap();
+
+        let alice_hits = engine
+            .get_nodes_by_property("Person", "email", &json!("alice@example.com"))
+            .unwrap();
+        assert_eq!(alice_hits.len(), 1);
+        assert_eq!(alice_hits[0].id, "db:n1");
+
+        alice
+            .properties
+            .insert("email".into(), json!("alice@new.test"));
+        engine.put_node_record(&alice).unwrap();
+        assert!(engine
+            .get_nodes_by_property("Person", "email", &json!("alice@example.com"))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            engine
+                .get_nodes_by_property("Person", "email", &json!("alice@new.test"))
+                .unwrap()[0]
+                .id,
+            "db:n1"
+        );
+
+        engine.delete_node_record("db:n1").unwrap();
+        assert!(engine
+            .get_nodes_by_property("Person", "email", &json!("alice@new.test"))
+            .unwrap()
+            .is_empty());
+
+        engine.delete_index_definition("person_email_idx").unwrap();
+        assert!(engine
+            .get_nodes_by_property("Person", "email", &json!("bob@example.com"))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
