@@ -4,7 +4,7 @@ Date: 2026-05-26
 
 This graph is the package-porting order for copperDB. It follows NornicDB's package architecture while keeping Rust dependency cycles out of the workspace. Each layer may depend on earlier layers; later layers should not be required by earlier layers.
 
-A checked package means the Rust package has a single-path implementation, is threaded into its immediate consumers, and has focused contract tests. Unchecked packages may exist as scaffolds or partial ports but are not complete enough to call done.
+A checked package means the Rust package has a single-path implementation, full durable persistence for package-owned state, is threaded into its immediate consumers, and has focused contract tests. Unchecked packages may exist as scaffolds or partial ports but are not complete enough to call done.
 
 ## Layer 0: Shared Contracts And Process Foundation
 
@@ -27,12 +27,14 @@ These packages depend on layer 0 and gate every externally reachable surface.
 
 - [x] `kms` -> provider-backed data keys, local KEK wrapping, metadata, audit signing, provider factory.
 - [x] `encryption` -> versioned envelopes, provider-backed `EnvelopeEncryptor`, DEK cache, rewrap rotation surface.
-- [ ] `auth` -> JWT/OAuth/RBAC/session identity.
+- [x] `auth` -> JWT/RBAC identity, persistent users, roles, allowlists, privileges, entitlements, token cache.
 - [ ] `security` -> hardening and auth-adjacent enforcement.
 - [ ] `audit` -> durable security and data-access event trail.
 - [ ] `compliance` -> policy enforcement and regulated-data controls.
 
 Required direction: API surfaces call into this layer; this layer must not depend on HTTP/Bolt/GraphQL/MCP implementations.
+
+Current Rust status: `kms`, `encryption`, and `auth` are implemented as durable package-owned paths. `auth` persists system users, role records, role-to-database allowlists, per-database privilege matrices, and role entitlement overrides through `copperdb-storage` system nodes; in-memory maps are reloadable caches only.
 
 ## Layer 2: Storage, Transactions, And Metadata
 
@@ -128,12 +130,13 @@ Required direction: protocol packages should not implement storage/query semanti
 
 ## Implementation Walk Order
 
-1. Finish layer 0 contracts: `errors`, `lifecycle`, and `otel` runtime, building on the new `topology` crate.
-2. Expand layer 2 storage metadata for topology placements and HA write/search policies.
-3. Keep layer 3 as planning seams first: distributed search fan-out and HA write plans must exist before network execution.
-4. Port layer 4 package behavior one package at a time, starting with `cypher`, `filter`, `indexing`, `eval`, then `knowledgepolicy`.
-5. Thread layer 5 engine through auth, audit, compliance, retention, replication/fabric, search/index, and telemetry.
-6. Complete layer 6 protocol adapters after the central engine pipeline is stable.
+1. Finish layer 0 contracts and keep `topology` as the single distributed contract path.
+2. Complete layer 1 durable security packages before calling protocol surfaces complete: `security`, `audit`, then `compliance`.
+3. Expand layer 2 storage and transaction metadata only when the package being implemented owns durable state there.
+4. Keep layer 3 distributed execution as real planning and persistence contracts first; do not check a package until its state is durable and its immediate consumers compile against it.
+5. Port layer 4 package behavior one package at a time, starting with `cypher`, `filter`, `indexing`, `eval`, then `knowledgepolicy`.
+6. Thread layer 5 engine through auth, audit, compliance, retention, replication/fabric, search/index, and telemetry.
+7. Complete layer 6 protocol adapters after the central engine pipeline is stable.
 
 ## Foundational Distributed Contracts
 

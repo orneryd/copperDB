@@ -21,4 +21,7 @@ hmac.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 parking_lot.workspace = true
+copperdb-storage = { workspace = true }
 copperdb-util = { workspace = true }
+getrandom.workspace = true
+hex.workspace = true
