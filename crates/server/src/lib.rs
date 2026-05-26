@@ -13,8 +13,10 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use copperdb_auth::{AuthError, TokenManager};
+use copperdb_auth::{AuthConfig, AuthError, Authenticator, Claims, DatabaseAccessMode};
+use copperdb_buildinfo::{display_version, server_announcement, version};
 use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig};
+use copperdb_envutil::{get as env_get, get_bool_loose};
 use copperdb_multidb::{DatabaseManager, DatabaseStatus, MultiDbError};
 use copperdb_otel::{classify_cypher_op_type, Telemetry};
 use copperdb_retention::{
@@ -23,11 +25,13 @@ use copperdb_retention::{
 use copperdb_security::{
     RequestTarget, RequestViolation, SecurityConfig, SecurityMiddleware, SecurityRequest,
 };
+use copperdb_storage::StorageEngine;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -45,25 +49,99 @@ pub struct AuthState {
     pub username: String,
     pub password: String,
     pub cookie_name: String,
-    pub token_manager: Arc<TokenManager>,
+    pub jwt_secret: String,
+    pub auth_storage_path: String,
 }
 
 impl Default for AuthState {
     fn default() -> Self {
-        let username = std::env::var("COPPERDB_AUTH_USERNAME").unwrap_or_else(|_| "admin".into());
-        let password =
-            std::env::var("COPPERDB_AUTH_PASSWORD").unwrap_or_else(|_| "password".into());
-        let secret = std::env::var("COPPERDB_AUTH_JWT_SECRET")
-            .unwrap_or_else(|_| "copperdb-development-secret-change-me".into());
-        Self {
-            security_enabled: true,
-            dev_login_enabled: true,
+        let username = env_get("COPPERDB_AUTH_USERNAME", "admin");
+        let password = env_get("COPPERDB_AUTH_PASSWORD", "password");
+        let secret = env_get(
+            "COPPERDB_AUTH_JWT_SECRET",
+            "copperdb-development-secret-change-me",
+        );
+        let security_enabled = get_bool_loose("COPPERDB_SECURITY_ENABLED", true);
+        let dev_login_enabled = get_bool_loose("COPPERDB_DEV_LOGIN_ENABLED", true);
+        let default_storage_path = default_auth_storage_path();
+        let storage_path = env_get("COPPERDB_AUTH_STORAGE_PATH", &default_storage_path);
+        Self::from_storage_path(
+            storage_path,
+            security_enabled,
+            dev_login_enabled,
+            username,
+            password,
+            secret,
+        )
+        .expect("durable authenticator must initialize during server startup")
+    }
+}
+
+impl AuthState {
+    pub fn from_storage_path(
+        auth_storage_path: String,
+        security_enabled: bool,
+        dev_login_enabled: bool,
+        username: String,
+        password: String,
+        jwt_secret: String,
+    ) -> Result<Self, AuthError> {
+        let state = Self {
+            security_enabled,
+            dev_login_enabled,
             username,
             password,
             cookie_name: "nornicdb_token".into(),
-            token_manager: Arc::new(TokenManager::new(secret)),
+            jwt_secret,
+            auth_storage_path,
+        };
+        let authenticator = state.open_authenticator()?;
+        authenticator.seed_builtin_access_if_empty()?;
+        if state.security_enabled
+            && matches!(
+                authenticator.get_user(&state.username),
+                Err(AuthError::UserNotFound(_))
+            )
+        {
+            authenticator.create_user(&state.username, &state.password, vec!["admin".into()])?;
+        }
+        Ok(state)
+    }
+
+    fn auth_config(&self) -> AuthConfig {
+        AuthConfig {
+            jwt_secret: self.jwt_secret.clone().into_bytes(),
+            token_expiry: Some(Duration::from_secs(7 * 24 * 60 * 60)),
+            default_admin_username: self.username.clone(),
+            security_enabled: self.security_enabled,
+            ..Default::default()
         }
     }
+
+    fn open_authenticator(&self) -> Result<Authenticator, AuthError> {
+        let storage = Arc::new(StorageEngine::open(&self.auth_storage_path)?);
+        Authenticator::new(self.auth_config(), storage)
+    }
+}
+
+#[cfg(not(test))]
+fn default_auth_storage_path() -> String {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .parent()
+        .and_then(|crates_dir| crates_dir.parent())
+        .unwrap_or(&manifest_dir)
+        .join("data/copperdb-auth")
+        .to_string_lossy()
+        .into_owned()
+}
+
+#[cfg(test)]
+fn default_auth_storage_path() -> String {
+    std::env::temp_dir()
+        .join(format!("copperdb-auth-{}", uuid::Uuid::new_v4()))
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Application state shared across request handlers.
@@ -102,15 +180,8 @@ impl Default for AppState {
             auth: AuthState::default(),
             telemetry: Arc::new(Telemetry::new()),
             security: SecurityMiddleware::with_config(SecurityConfig {
-                environment: std::env::var("COPPERDB_ENV").unwrap_or_else(|_| "development".into()),
-                allow_http: std::env::var("COPPERDB_ALLOW_HTTP")
-                    .map(|value| {
-                        matches!(
-                            value.to_ascii_lowercase().as_str(),
-                            "1" | "true" | "yes" | "on"
-                        )
-                    })
-                    .unwrap_or(true),
+                environment: env_get("COPPERDB_ENV", "development"),
+                allow_http: get_bool_loose("COPPERDB_ALLOW_HTTP", true),
             }),
         }
     }
@@ -381,6 +452,7 @@ async fn root_handler(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         "transaction": format!("http://{}{}/db/{{databaseName}}/tx", host, base),
         "neo4j_version": "5.0.0",
         "neo4j_edition": "community",
+        "server": server_announcement(),
         "default_database": state.db_name,
     }))
     .into_response()
@@ -436,7 +508,7 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthRespon
     );
     Json(HealthResponse {
         status: "ok".into(),
-        version: env!("CARGO_PKG_VERSION").into(),
+        version: version().into(),
     })
 }
 
@@ -444,8 +516,8 @@ async fn status_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if state.auth.security_enabled && authenticated_user(&state, &headers).is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, false) {
+        return status.into_response();
     }
 
     let databases = state.db_manager.list();
@@ -456,7 +528,8 @@ async fn status_handler(
             "requests": 0,
             "errors": 0,
             "active": 0,
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": display_version(),
+            "announcement": server_announcement(),
         },
         "database": {
             "nodes": 0,
@@ -519,24 +592,8 @@ async fn auth_token_handler(
         }
     }
 
-    if request.username != state.auth.username || request.password != state.auth.password {
-        let _ = state.telemetry.record_counter(
-            "nornicdb_auth_attempts_total",
-            &[("result", "failure"), ("protocol", "http")],
-        );
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"message": AuthError::InvalidCredentials.to_string()})),
-        )
-            .into_response();
-    }
-
-    let token = match state.auth.token_manager.issue(
-        &request.username,
-        vec!["admin".into()],
-        7 * 24 * 60 * 60,
-    ) {
-        Ok(token) => token,
+    let authenticator = match state.auth.open_authenticator() {
+        Ok(authenticator) => authenticator,
         Err(error) => {
             let _ = state.telemetry.record_counter(
                 "nornicdb_auth_attempts_total",
@@ -549,6 +606,29 @@ async fn auth_token_handler(
                 .into_response();
         }
     };
+
+    let (token_response, _user) =
+        match authenticator.authenticate(&request.username, &request.password) {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = state.telemetry.record_counter(
+                    "nornicdb_auth_attempts_total",
+                    &[("result", "failure"), ("protocol", "http")],
+                );
+                let status = match error {
+                    AuthError::InvalidCredentials
+                    | AuthError::AccountLocked
+                    | AuthError::UserDisabled => StatusCode::UNAUTHORIZED,
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                };
+                return (
+                    status,
+                    Json(serde_json::json!({"message": error.to_string()})),
+                )
+                    .into_response();
+            }
+        };
+
     let _ = state.telemetry.record_counter(
         "nornicdb_auth_attempts_total",
         &[("result", "success"), ("protocol", "http")],
@@ -566,17 +646,17 @@ async fn auth_token_handler(
     let cookie = format!(
         "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
         state.auth.cookie_name,
-        token,
-        7 * 24 * 60 * 60
+        token_response.access_token,
+        token_response.expires_in.unwrap_or(7 * 24 * 60 * 60)
     );
 
     (
         StatusCode::OK,
         [(header::SET_COOKIE, cookie)],
         Json(serde_json::json!({
-            "access_token": token,
+            "access_token": token_response.access_token,
             "token_type": "Bearer",
-            "expires_in": 7 * 24 * 60 * 60,
+            "expires_in": token_response.expires_in.unwrap_or(7 * 24 * 60 * 60),
         })),
     )
         .into_response()
@@ -610,13 +690,59 @@ async fn auth_me_handler(
     }
 }
 
-fn authenticated_user(state: &AppState, headers: &HeaderMap) -> Option<copperdb_auth::Claims> {
+fn authenticated_user(state: &AppState, headers: &HeaderMap) -> Option<Claims> {
+    let token = bearer_token(headers).or_else(|| cookie_token(state, headers))?;
+    state
+        .auth
+        .open_authenticator()
+        .ok()?
+        .validate_token(token)
+        .ok()
+}
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .trim()
+        .strip_prefix("Bearer ")
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+}
+
+fn cookie_token<'a>(state: &AppState, headers: &'a HeaderMap) -> Option<&'a str> {
     let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
-    let token = cookie_header
+    cookie_header
         .split(';')
         .map(str::trim)
-        .find_map(|pair| pair.strip_prefix(&format!("{}=", state.auth.cookie_name)))?;
-    state.auth.token_manager.verify(token).ok()
+        .find_map(|pair| pair.strip_prefix(&format!("{}=", state.auth.cookie_name)))
+}
+
+fn authorize_database_access(
+    state: &AppState,
+    headers: &HeaderMap,
+    database: &str,
+    write: bool,
+) -> Result<Option<Claims>, StatusCode> {
+    if !state.auth.security_enabled {
+        return Ok(None);
+    }
+    let claims = authenticated_user(state, headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let roles = claims.roles.clone();
+    let authenticator = state
+        .auth
+        .open_authenticator()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let access_mode = authenticator.allowlist.access_mode_for_roles(roles.clone());
+    if !access_mode.can_access_database(database) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let resolved = authenticator.privileges.resolve(&roles, database);
+    if (write && !resolved.write) || (!write && !resolved.read) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(Some(claims))
 }
 
 #[derive(Deserialize)]
@@ -659,8 +785,8 @@ async fn database_info_handler(
     Path(database): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if state.auth.security_enabled && authenticated_user(&state, &headers).is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if let Err(status) = authorize_database_access(&state, &headers, &database, false) {
+        return status.into_response();
     }
 
     match state.db_manager.get(&database) {
@@ -693,8 +819,12 @@ async fn neo4j_tx_commit_handler(
     headers: HeaderMap,
     Json(request): Json<Neo4jCommitRequest>,
 ) -> impl IntoResponse {
-    if state.auth.security_enabled && authenticated_user(&state, &headers).is_none() {
-        return StatusCode::UNAUTHORIZED.into_response();
+    let write = request
+        .statements
+        .iter()
+        .any(|statement| statement_requires_write(&statement.statement));
+    if let Err(status) = authorize_database_access(&state, &headers, &database, write) {
+        return status.into_response();
     }
 
     let mut results = Vec::new();
@@ -832,6 +962,14 @@ fn parse_database_name(statement: &str, prefix: &str) -> Result<String, String> 
     }
 }
 
+fn statement_requires_write(statement: &str) -> bool {
+    let upper = statement.trim_start().to_ascii_uppercase();
+    !(upper.starts_with("MATCH ")
+        || upper.starts_with("RETURN ")
+        || upper.starts_with("WITH ")
+        || upper.starts_with("SHOW "))
+}
+
 fn create_database(state: &AppState, name: &str) -> Result<(), String> {
     let path = format!("./data/{}", name);
     match state.db_manager.create(name, path) {
@@ -867,6 +1005,7 @@ fn database_status_name(status: DatabaseStatus) -> &'static str {
 /// POST /db/data/cypher — execute a Cypher query (HTTP API).
 async fn cypher_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<CypherRequest>,
 ) -> impl IntoResponse {
     let started = std::time::Instant::now();
@@ -880,6 +1019,14 @@ async fn cypher_handler(
             StatusCode::BAD_REQUEST,
             Json(CypherResponse::error("query must not be empty")),
         );
+    }
+    if let Err(status) = authorize_database_access(
+        &state,
+        &headers,
+        &state.db_name,
+        statement_requires_write(&body.query),
+    ) {
+        return (status, Json(CypherResponse::error(status.to_string())));
     }
     match open_engine(&state, &state.db_name).and_then(|engine| {
         engine
@@ -1192,5 +1339,167 @@ mod tests {
         let state = Arc::new(AppState::default());
         let _app = build_router(state);
         // Just verify the router builds without panicking
+    }
+
+    #[tokio::test]
+    async fn health_uses_buildinfo_version() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let state = Arc::new(AppState::default());
+        let app = build_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let health: HealthResponse = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(health.version, copperdb_buildinfo::version());
+    }
+
+    #[tokio::test]
+    async fn root_advertises_buildinfo_server_announcement() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let state = Arc::new(AppState::default());
+        let app = build_router(state);
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let root: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(root["server"], copperdb_buildinfo::server_announcement());
+    }
+
+    #[tokio::test]
+    async fn auth_token_uses_durable_authenticator_for_cookie_access() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let auth_path = unique_auth_path();
+        let mut state = AppState::default();
+        state.auth = AuthState::from_storage_path(
+            auth_path,
+            true,
+            true,
+            "admin".into(),
+            "password".into(),
+            "test-secret".into(),
+        )
+        .unwrap();
+        let app = build_router(Arc::new(state));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/auth/token")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"username":"admin","password":"password"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn write_query_requires_write_privilege_from_durable_roles() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let auth_path = unique_auth_path();
+        let mut state = AppState::default();
+        state.auth = AuthState::from_storage_path(
+            auth_path,
+            true,
+            true,
+            "admin".into(),
+            "password".into(),
+            "test-secret".into(),
+        )
+        .unwrap();
+        state
+            .auth
+            .open_authenticator()
+            .unwrap()
+            .create_user(
+                "viewer",
+                "password",
+                vec![copperdb_auth::ROLE_VIEWER.into()],
+            )
+            .unwrap();
+        let token = state
+            .auth
+            .open_authenticator()
+            .unwrap()
+            .authenticate("viewer", "password")
+            .unwrap()
+            .0
+            .access_token;
+        let app = build_router(Arc::new(state));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/db/data/cypher")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"query":"CREATE (n:Denied {v: 1})"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    fn unique_auth_path() -> String {
+        std::env::temp_dir()
+            .join(format!("copperdb-auth-{}", uuid::Uuid::new_v4()))
+            .to_string_lossy()
+            .into_owned()
     }
 }

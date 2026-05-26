@@ -11,15 +11,15 @@ A checked package means the Rust package has a single-path implementation, full 
 These packages define vocabulary, errors, startup/shutdown behavior, and observability contracts. They must be implemented first because every other layer consumes them.
 
 - [x] `util` -> shared helpers, deterministic ID hashing, bounded MessagePack decode.
-- [ ] `buildinfo` -> build/version metadata, product version, display version, server announcement.
-- [ ] `envutil` -> environment parsing helpers for strings, numbers, loose/strict booleans, durations.
-- [ ] `config` -> config files, env, CLI/default precedence and listener resolution.
-- [ ] `errors` -> Neo4j-compatible transient error codes, retry classification, conflict sentinels.
+- [x] `buildinfo` -> build/version metadata, product version, display version, server announcement.
+- [x] `envutil` -> environment parsing helpers for strings, numbers, loose/strict booleans, durations.
+- [x] `config` -> config files, env, CLI/default precedence and listener resolution.
+- [x] `errors` -> Neo4j-compatible transient error codes, retry classification, conflict sentinels.
 - [x] `otel` (`observability` in NornicDB) -> metrics catalog, runtime config, endpoint precedence, readiness checks, resource identity, redaction, mandatory fields, recovery.
-- [ ] `lifecycle` -> component supervisor, first-error cancellation, reverse-order shutdown, fresh shutdown budget.
+- [x] `lifecycle` -> component supervisor, first-error cancellation, reverse-order shutdown, fresh shutdown budget.
 - [x] `topology` -> hyperscaler placement, latency-aware distributed search fan-out, high-availability write planning contracts, and syscall-free distributed transaction ordering.
 
-Current Rust status: `util`, `otel`, and `topology` have focused implementations, active consumer wiring, and tests. `buildinfo`, `envutil`, `config`, `errors`, and `lifecycle` have useful package contracts but are unchecked after audit because their immediate consumer wiring is incomplete: server/version surfaces do not consume `buildinfo`, config/server paths bypass `envutil`, loaded config is not consistently threaded into component state, retry classification is not consumed by storage/txsession, and lifecycle supervision is not used for process startup/shutdown.
+Current Rust status: all Layer 0 packages have focused implementations, active consumer wiring, and tests. `buildinfo` is consumed by startup logging and HTTP discovery/health/status surfaces. `envutil` is consumed by config env parsing and server auth/security defaults. `config` is consumed by binary startup for file/env/CLI listener precedence. `errors` is consumed by `txsession` retry classification. `lifecycle` supervises HTTP and Bolt startup, cancellation, and reverse-order shutdown in the binary process path.
 `topology` also owns the distributed transaction timestamp contract: logical IDs are `(epoch, counter, node_ordinal)`, allocated by atomics without wall-clock syscalls, batch-reservable for multi-core writers, and mergeable from peer observations for distributed transaction ordering.
 
 ## Layer 1: Security, Identity, And Compliance
@@ -28,14 +28,14 @@ These packages depend on layer 0 and gate every externally reachable surface.
 
 - [ ] `kms` -> provider-backed data keys, local KEK wrapping, metadata, audit signing, provider factory.
 - [ ] `encryption` -> versioned envelopes, provider-backed `EnvelopeEncryptor`, DEK cache, rewrap rotation surface.
-- [ ] `auth` -> JWT/RBAC identity, persistent users, roles, allowlists, privileges, entitlements, token cache.
-- [ ] `audit` -> durable security and data-access event trail, append-only storage, hash-chain verification.
+- [x] `auth` -> JWT/RBAC identity, persistent users, roles, allowlists, privileges, entitlements, token cache.
+- [x] `audit` -> durable security and data-access event trail, append-only storage, hash-chain verification.
 - [x] `security` -> token/header/URL validation, SSRF and injection defenses, server ingress enforcement.
 - [ ] `compliance` -> durable governance policies, access controls, retention markers, audit-backed HIPAA/SOC2 evidence.
 
 Required direction: API surfaces call into this layer; this layer must not depend on HTTP/Bolt/GraphQL/MCP implementations.
 
-Current Rust status: `security` remains checked because protocol-neutral request validation is threaded into the HTTP server and owns no durable state. `kms`, `encryption`, `auth`, `audit`, and `compliance` have focused package implementations and tests, but they are unchecked after audit because they are not yet wired into the engine/server execution path: KMS/encryption are not bootstrapped as the storage encryption path, `Authenticator` is not instantiated for ingress or engine authorization, `AuditLog` is not recording query/protocol operations, and compliance policy/reporting is not enforced or exposed through consumers.
+Current Rust status: `security` remains checked because protocol-neutral request validation is threaded into the HTTP server and owns no durable state. `auth` is checked because the HTTP server now bootstraps a durable storage-backed `Authenticator`, seeds/reloads the configured admin user, issues tokens through the persisted identity model, accepts bearer or cookie tokens, and enforces role database privileges before protected status/query/database routes. `audit` is checked because `CopperDb` now constructs a storage-backed `AuditLog`, records successful and failed embedded Cypher query operations as durable data-access events, exposes the log for verification, and has focused engine tests proving hash-chain verification and event persistence. `kms`, `encryption`, and `compliance` have focused package implementations and tests, but they remain unchecked because they are not yet wired into the engine/server execution path: KMS/encryption are not bootstrapped as the storage encryption path, and compliance policy/reporting is not enforced or exposed through consumers.
 
 ## Layer 2: Storage, Transactions, And Metadata
 

@@ -3,12 +3,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
+use axum::Router;
 use clap::Parser;
 use copperdb_bolt::server::BoltServer;
+use copperdb_buildinfo::display_version;
 use copperdb_config::{load_with_precedence, ConfigOverrides};
+use copperdb_lifecycle::{BoxError, Component, Supervisor};
 use copperdb_otel::Telemetry;
 use copperdb_server::{build_router, AppState};
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -59,6 +64,65 @@ struct StartupConfig {
     static_dir: Option<String>,
 }
 
+#[derive(Debug)]
+struct HttpComponent {
+    listen_addr: String,
+    app: Router,
+}
+
+#[async_trait]
+impl Component for HttpComponent {
+    fn name(&self) -> &str {
+        "http"
+    }
+
+    async fn start(&self, token: CancellationToken) -> Result<(), BoxError> {
+        let http_addr: SocketAddr = self
+            .listen_addr
+            .parse()
+            .with_context(|| format!("invalid HTTP listen address {}", self.listen_addr))?;
+        let listener = TcpListener::bind(http_addr)
+            .await
+            .with_context(|| format!("failed to bind {}", http_addr))?;
+        info!(listen_addr = %http_addr, "copperdb HTTP server listening");
+        let server = axum::serve(listener, self.app.clone());
+        tokio::select! {
+            result = server => result.context("http server exited unexpectedly")?,
+            _ = token.cancelled() => {}
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), BoxError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct BoltComponent {
+    server: BoltServer,
+}
+
+#[async_trait]
+impl Component for BoltComponent {
+    fn name(&self) -> &str {
+        "bolt"
+    }
+
+    async fn start(&self, token: CancellationToken) -> Result<(), BoxError> {
+        info!(listen_addr = %self.server.listen_addr, "copperdb Bolt server listening");
+        tokio::select! {
+            result = self.server.serve() => result.context("bolt server exited unexpectedly")?,
+            _ = token.cancelled() => {}
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), BoxError> {
+        Ok(())
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -69,6 +133,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let startup = resolve_startup_config(&cli)?;
+    info!(version = %display_version(), "starting copperdb");
     let telemetry = Arc::new(Telemetry::new());
     telemetry.seed_zero_catalog_metrics();
     let state = Arc::new(AppState {
@@ -81,57 +146,33 @@ async fn main() -> Result<()> {
     });
 
     let app = build_router(state);
+    let mut supervisor = Supervisor::new();
 
-    let http_task = if startup.http_enabled {
-        let http_addr: SocketAddr = startup
-            .http_address
-            .parse()
-            .with_context(|| format!("invalid HTTP listen address {}", startup.http_address))?;
-        Some(tokio::spawn(async move {
-            let listener = TcpListener::bind(http_addr)
-                .await
-                .with_context(|| format!("failed to bind {}", http_addr))?;
-            info!(listen_addr = %http_addr, "copperdb HTTP server listening");
-            axum::serve(listener, app)
-                .await
-                .context("http server exited unexpectedly")
-        }))
-    } else {
-        None
-    };
-
-    let bolt_task = if startup.bolt_enabled {
-        let bolt_server = BoltServer::new(startup.bolt_address.clone(), telemetry);
-        let bolt_addr = startup.bolt_address.clone();
-        Some(tokio::spawn(async move {
-            info!(listen_addr = %bolt_addr, "copperdb Bolt server listening");
-            bolt_server
-                .serve()
-                .await
-                .context("bolt server exited unexpectedly")
-        }))
-    } else {
-        None
-    };
-
-    match (http_task, bolt_task) {
-        (Some(http_task), Some(bolt_task)) => {
-            tokio::try_join!(flatten_task(http_task), flatten_task(bolt_task))?;
-        }
-        (Some(http_task), None) => {
-            flatten_task(http_task).await?;
-        }
-        (None, Some(bolt_task)) => {
-            flatten_task(bolt_task).await?;
-        }
-        (None, None) => anyhow::bail!("both HTTP and Bolt listeners are disabled"),
+    if startup.http_enabled {
+        supervisor.register(HttpComponent {
+            listen_addr: startup.http_address.clone(),
+            app,
+        });
     }
 
-    Ok(())
-}
+    if startup.bolt_enabled {
+        supervisor.register(BoltComponent {
+            server: BoltServer::new(startup.bolt_address.clone(), telemetry),
+        });
+    }
 
-async fn flatten_task(handle: tokio::task::JoinHandle<Result<()>>) -> Result<()> {
-    handle.await.context("startup task panicked")?
+    if supervisor.components().is_empty() {
+        anyhow::bail!("both HTTP and Bolt listeners are disabled");
+    }
+
+    supervisor
+        .run_until(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await
+        .map_err(|errors| anyhow::anyhow!("lifecycle supervision failed: {errors:?}"))?;
+
+    Ok(())
 }
 
 fn resolve_startup_config(cli: &Cli) -> Result<StartupConfig> {

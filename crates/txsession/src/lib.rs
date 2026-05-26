@@ -3,6 +3,7 @@
 //! Provides ACID transaction handling with begin, commit, rollback, and
 //! pending-write buffering.
 
+use copperdb_errors::{map_transient_transaction_error, TransientTransactionCode};
 use copperdb_topology::{DistributedTransactionClock, LogicalTransactionId};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,20 @@ pub enum TxError {
     Conflict,
     #[error("terminal transaction error: {0}")]
     Terminal(String),
+}
+
+pub fn classify_retryable_error(
+    err: &(dyn std::error::Error + 'static),
+) -> Option<TransientTransactionCode> {
+    if let Some(tx_error) = err.downcast_ref::<TxError>() {
+        return match tx_error {
+            TxError::Conflict => Some(TransientTransactionCode::Outdated),
+            TxError::TimedOut => Some(TransientTransactionCode::Outdated),
+            _ => None,
+        };
+    }
+
+    map_transient_transaction_error(err)
 }
 
 // ─── Enums ───────────────────────────────────────────────────────────────────
@@ -658,6 +673,26 @@ mod tests {
         assert_eq!(
             TxError::TransactionReadOnly.to_string(),
             "transaction is read-only"
+        );
+    }
+
+    #[test]
+    fn transaction_errors_use_shared_retry_classification() {
+        assert_eq!(
+            classify_retryable_error(&TxError::Conflict),
+            Some(TransientTransactionCode::Outdated)
+        );
+        assert_eq!(
+            classify_retryable_error(&TxError::TimedOut),
+            Some(TransientTransactionCode::Outdated)
+        );
+        assert_eq!(
+            classify_retryable_error(&TxError::TransactionReadOnly),
+            None
+        );
+        assert_eq!(
+            classify_retryable_error(&copperdb_errors::CopperDbError::TransactionDeadlock),
+            Some(TransientTransactionCode::DeadlockDetected)
         );
     }
 

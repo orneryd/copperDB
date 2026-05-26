@@ -471,11 +471,7 @@ fn parse_env_u16(env: &BTreeMap<String, String>, key: &str) -> Option<u16> {
 }
 
 fn parse_env_bool(env: &BTreeMap<String, String>, key: &str) -> Option<bool> {
-    match env.get(key)?.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
+    copperdb_envutil::parse_loose_bool_value(env.get(key)?)
 }
 
 fn set_if_present<T>(value: Option<T>, apply: impl FnOnce(T)) {

@@ -38,8 +38,9 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
+use copperdb_audit::{AuditConfig, AuditLog, Event, EventType};
 use copperdb_cache::QueryCache;
-use copperdb_cypher::Parser;
+use copperdb_cypher::{Parser, QueryType};
 use copperdb_eval::{EvalEngine, QueryStats};
 use copperdb_storage::StorageEngine;
 use copperdb_txsession::TransactionManager;
@@ -61,6 +62,8 @@ pub enum CopperDbError {
     Eval(String),
     #[error("initialization error: {0}")]
     Init(String),
+    #[error("audit error: {0}")]
+    Audit(String),
 }
 
 impl From<copperdb_storage::StorageError> for CopperDbError {
@@ -78,6 +81,12 @@ impl From<copperdb_cypher::CypherError> for CopperDbError {
 impl From<copperdb_eval::EvalError> for CopperDbError {
     fn from(e: copperdb_eval::EvalError) -> Self {
         CopperDbError::Eval(e.to_string())
+    }
+}
+
+impl From<copperdb_audit::AuditError> for CopperDbError {
+    fn from(e: copperdb_audit::AuditError) -> Self {
+        CopperDbError::Audit(e.to_string())
     }
 }
 
@@ -159,13 +168,14 @@ pub struct CopperDb {
     eval: EvalEngine,
     tx_manager: Arc<TransactionManager>,
     query_cache: Arc<QueryCache<copperdb_cypher::Query>>,
+    audit_log: Arc<AuditLog>,
 }
 
 impl CopperDb {
     /// Create a new in-memory (temporary) database instance.
     pub fn open_temporary() -> Result<Self, CopperDbError> {
         let storage = Arc::new(StorageEngine::open_temporary()?);
-        Ok(Self::from_storage(storage, DatabaseConfig::default()))
+        Self::from_storage(storage, DatabaseConfig::default())
     }
 
     /// Create a persistent database at the given path.
@@ -174,12 +184,16 @@ impl CopperDb {
             StorageEngine::open(&config.data_dir)
                 .map_err(|e| CopperDbError::Storage(e.to_string()))?,
         );
-        Ok(Self::from_storage(storage, config))
+        Self::from_storage(storage, config)
     }
 
-    fn from_storage(storage: Arc<StorageEngine>, config: DatabaseConfig) -> Self {
+    fn from_storage(
+        storage: Arc<StorageEngine>,
+        config: DatabaseConfig,
+    ) -> Result<Self, CopperDbError> {
         let eval = EvalEngine::new(Arc::clone(&storage));
-        Self {
+        let audit_log = Arc::new(AuditLog::new(Arc::clone(&storage), AuditConfig::default())?);
+        Ok(Self {
             config,
             storage,
             eval,
@@ -188,7 +202,8 @@ impl CopperDb {
                 1024,
                 Some(std::time::Duration::from_secs(300)),
             )),
-        }
+            audit_log,
+        })
     }
 
     /// Execute a Cypher query string, returning rows and stats.
@@ -217,16 +232,50 @@ impl CopperDb {
             cached
         } else {
             let parser = Parser::new();
-            let q = parser.parse(cypher)?;
+            let q = match parser.parse(cypher) {
+                Ok(q) => q,
+                Err(err) => {
+                    self.record_query_audit(
+                        cypher,
+                        "PARSE",
+                        false,
+                        Some(err.to_string()),
+                        None,
+                        0,
+                    )?;
+                    return Err(err.into());
+                }
+            };
             self.query_cache.put(hash, q.clone());
             q
         };
 
-        let eval_result = self.eval.execute(&parsed, &params)?;
+        let eval_result = match self.eval.execute(&parsed, &params) {
+            Ok(result) => result,
+            Err(err) => {
+                self.record_query_audit(
+                    cypher,
+                    query_action(&parsed.query_type),
+                    false,
+                    Some(err.to_string()),
+                    Some(hash),
+                    start.elapsed().as_millis() as u64,
+                )?;
+                return Err(err.into());
+            }
+        };
 
         let elapsed_ms = start.elapsed().as_millis() as u64;
         let mut stats = ResultStats::from(eval_result.stats);
         stats.execution_time_ms = elapsed_ms;
+        self.record_query_audit(
+            cypher,
+            query_action(&parsed.query_type),
+            true,
+            None,
+            Some(hash),
+            elapsed_ms,
+        )?;
 
         Ok(QueryResult {
             columns: eval_result.columns,
@@ -254,6 +303,64 @@ impl CopperDb {
     /// Access the storage engine directly.
     pub fn storage(&self) -> &Arc<StorageEngine> {
         &self.storage
+    }
+
+    /// Access the durable audit log.
+    pub fn audit_log(&self) -> &Arc<AuditLog> {
+        &self.audit_log
+    }
+
+    fn record_query_audit(
+        &self,
+        cypher: &str,
+        action: &str,
+        success: bool,
+        reason: Option<String>,
+        query_hash: Option<u64>,
+        elapsed_ms: u64,
+    ) -> Result<(), CopperDbError> {
+        let mut event = Event {
+            event_type: audit_event_type(action),
+            user_id: Some("embedded".into()),
+            username: Some("embedded".into()),
+            resource: Some("cypher_query".into()),
+            resource_id: query_hash.map(|hash| format!("{hash:016x}")),
+            action: Some(action.into()),
+            success,
+            reason,
+            data_classification: Some("DATABASE".into()),
+            ..Event::new(EventType::DataRead)
+        };
+        event
+            .metadata
+            .insert("database".into(), self.config.default_database.clone());
+        event
+            .metadata
+            .insert("query_length".into(), cypher.len().to_string());
+        event
+            .metadata
+            .insert("elapsed_ms".into(), elapsed_ms.to_string());
+        self.audit_log.record(event)?;
+        Ok(())
+    }
+}
+
+fn query_action(query_type: &QueryType) -> &'static str {
+    match query_type {
+        QueryType::Match | QueryType::Return | QueryType::With => "READ",
+        QueryType::Create => "CREATE",
+        QueryType::Merge | QueryType::Set | QueryType::Ddl => "UPDATE",
+        QueryType::Delete => "DELETE",
+    }
+}
+
+fn audit_event_type(action: &str) -> EventType {
+    match action {
+        "CREATE" => EventType::DataCreate,
+        "UPDATE" => EventType::DataUpdate,
+        "DELETE" => EventType::DataDelete,
+        "EXPORT" => EventType::DataExport,
+        _ => EventType::DataRead,
     }
 }
 
@@ -368,6 +475,38 @@ mod tests {
             .execute("MATCH (n:Cached) RETURN n", Default::default())
             .unwrap();
         assert_eq!(r1.rows.len(), r2.rows.len());
+    }
+
+    #[test]
+    fn engine_records_durable_query_audit_events() {
+        let db = CopperDb::open_temporary().unwrap();
+        db.execute("CREATE (n:Audit {v: 1})", Default::default())
+            .unwrap();
+        db.execute("MATCH (n:Audit) RETURN n", Default::default())
+            .unwrap();
+
+        let events = db.audit_log().events().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_type, EventType::DataCreate);
+        assert_eq!(events[1].event_type, EventType::DataRead);
+        assert_eq!(events[1].resource.as_deref(), Some("cypher_query"));
+        assert!(db.audit_log().verify_chain().unwrap().valid);
+    }
+
+    #[test]
+    fn engine_records_failed_query_audit_events() {
+        let db = CopperDb::open_temporary().unwrap();
+        let err = db
+            .execute("MATCH (n RETURN n", Default::default())
+            .unwrap_err();
+        assert!(matches!(err, CopperDbError::Parse(_)));
+
+        let events = db.audit_log().events().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, EventType::DataRead);
+        assert_eq!(events[0].action.as_deref(), Some("PARSE"));
+        assert!(!events[0].success);
+        assert!(events[0].reason.is_some());
     }
 
     #[test]
