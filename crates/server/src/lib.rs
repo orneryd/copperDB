@@ -15,17 +15,20 @@ use axum::{
 };
 use copperdb_auth::{AuthConfig, AuthError, Authenticator, Claims, DatabaseAccessMode};
 use copperdb_buildinfo::{display_version, server_announcement, version};
-use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig};
+use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig, QueryResult};
 use copperdb_envutil::{get as env_get, get_bool_loose};
 use copperdb_multidb::{DatabaseManager, DatabaseStatus, MultiDbError};
 use copperdb_otel::{classify_cypher_op_type, Telemetry};
+use copperdb_replication::{InMemoryReplicaTransport, MemoryStorage};
 use copperdb_retention::{
     ErasureRequest, LegalHold, Manager as RetentionManager, Policy, RetentionError,
+    RetentionSweepConfig,
 };
 use copperdb_security::{
     RequestTarget, RequestViolation, SecurityConfig, SecurityMiddleware, SecurityRequest,
 };
 use copperdb_storage::StorageEngine;
+use copperdb_topology::{ConsistencyLevel, PlacementKey};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -164,15 +167,24 @@ pub struct AppState {
     pub telemetry: Arc<Telemetry>,
     /// Protocol-neutral ingress validation for headers, tokens, and URL query parameters.
     pub security: SecurityMiddleware,
+    /// Route supported Cypher requests through the distributed coordinator when enabled.
+    pub distributed_cypher_enabled: bool,
 }
 
 impl Default for AppState {
     fn default() -> Self {
-        let db_manager = Arc::new(DatabaseManager::new());
+        let db_manager = Arc::new(
+            DatabaseManager::open("./data/copperdb-multidb")
+                .unwrap_or_else(|_| DatabaseManager::new()),
+        );
         let _ = db_manager.create("copperdb", "./data/copperdb");
+        let retention = db_manager
+            .get("copperdb")
+            .and_then(|database| RetentionManager::open(database.storage_path).ok())
+            .unwrap_or_else(RetentionManager::new);
         Self {
             db_name: "copperdb".into(),
-            retention: Arc::new(RwLock::new(RetentionManager::new())),
+            retention: Arc::new(RwLock::new(retention)),
             static_dir: None,
             base_path: "/".into(),
             headless: false,
@@ -183,6 +195,7 @@ impl Default for AppState {
                 environment: env_get("COPPERDB_ENV", "development"),
                 allow_http: get_bool_loose("COPPERDB_ALLOW_HTTP", true),
             }),
+            distributed_cypher_enabled: get_bool_loose("COPPERDB_DISTRIBUTED_CYPHER", false),
         }
     }
 }
@@ -745,6 +758,12 @@ fn authorize_database_access(
     Ok(Some(claims))
 }
 
+fn roles_for_claims(claims: Option<&Claims>) -> Vec<String> {
+    claims
+        .map(|claims| claims.roles.clone())
+        .unwrap_or_else(|| vec!["admin".into()])
+}
+
 #[derive(Deserialize)]
 struct Neo4jStatement {
     statement: String,
@@ -823,9 +842,16 @@ async fn neo4j_tx_commit_handler(
         .statements
         .iter()
         .any(|statement| statement_requires_write(&statement.statement));
-    if let Err(status) = authorize_database_access(&state, &headers, &database, write) {
-        return status.into_response();
-    }
+    let claims = match authorize_database_access(&state, &headers, &database, write) {
+        Ok(claims) => claims,
+        Err(status) => return status.into_response(),
+    };
+    let roles = roles_for_claims(claims.as_ref());
+    let distributed = distributed_cypher_requested(&state, &headers);
+    let request_region = headers
+        .get("x-copperdb-region")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
 
     let mut results = Vec::new();
     let mut errors = Vec::new();
@@ -836,6 +862,9 @@ async fn neo4j_tx_commit_handler(
             &database,
             &statement.statement,
             statement.parameters.unwrap_or_default(),
+            &roles,
+            distributed,
+            request_region.clone(),
         ) {
             Ok(result) => results.push(result),
             Err(error) => errors.push(Neo4jError {
@@ -853,6 +882,9 @@ fn execute_statement(
     database: &str,
     statement: &str,
     parameters: HashMap<String, serde_json::Value>,
+    roles: &[String],
+    distributed: bool,
+    request_region: Option<String>,
 ) -> Result<Neo4jResult, String> {
     let normalized = statement.trim();
     let upper = normalized.to_ascii_uppercase();
@@ -879,9 +911,37 @@ fn execute_statement(
     }
 
     let engine = open_engine(state, database)?;
-    let result = engine
-        .execute(normalized, parameters)
-        .map_err(|error| error.to_string())?;
+    let result = if distributed {
+        let placement = PlacementKey::default_for_database(database);
+        let consistency = ConsistencyLevel::Quorum;
+        let request_region = request_region.as_deref();
+        let transport = build_local_replica_transport(
+            &engine,
+            &placement,
+            consistency,
+            request_region,
+            statement_requires_write(normalized),
+        )?;
+        futures::executor::block_on(async {
+            engine
+                .execute_distributed_as(
+                    normalized,
+                    parameters,
+                    roles,
+                    &placement,
+                    consistency,
+                    request_region,
+                    transport,
+                )
+                .await
+                .map(|outcome| outcome.result)
+                .map_err(|error| error.to_string())
+        })?
+    } else {
+        engine
+            .execute_as(normalized, parameters, roles)
+            .map_err(|error| error.to_string())?
+    };
     Ok(convert_engine_result(result))
 }
 
@@ -970,6 +1030,49 @@ fn statement_requires_write(statement: &str) -> bool {
         || upper.starts_with("SHOW "))
 }
 
+fn distributed_cypher_requested(state: &AppState, headers: &HeaderMap) -> bool {
+    state.distributed_cypher_enabled
+        || headers
+            .get("x-copperdb-distributed")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+}
+
+fn cypher_parameters(
+    parameters: Option<serde_json::Value>,
+) -> Result<HashMap<String, serde_json::Value>, String> {
+    match parameters.unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())) {
+        serde_json::Value::Object(map) => Ok(map.into_iter().collect()),
+        _ => Err("parameters must be a JSON object".into()),
+    }
+}
+
+fn build_local_replica_transport(
+    engine: &GraphEngine,
+    placement: &PlacementKey,
+    consistency: ConsistencyLevel,
+    request_region: Option<&str>,
+    write: bool,
+) -> Result<Arc<InMemoryReplicaTransport>, String> {
+    let replicas = if write {
+        engine
+            .plan_distributed_write(placement, consistency, request_region)
+            .map_err(|error| error.to_string())?
+            .replicas
+    } else {
+        engine
+            .plan_distributed_read(placement, consistency, request_region)
+            .map_err(|error| error.to_string())?
+            .replicas
+    };
+    let transport = Arc::new(InMemoryReplicaTransport::new());
+    for replica in replicas {
+        transport.register(&replica.node_id, Arc::new(MemoryStorage::new()));
+    }
+    Ok(transport)
+}
+
 fn create_database(state: &AppState, name: &str) -> Result<(), String> {
     let path = format!("./data/{}", name);
     match state.db_manager.create(name, path) {
@@ -984,8 +1087,13 @@ fn drop_database(state: &AppState, name: &str) -> Result<(), String> {
 }
 
 fn open_engine(state: &AppState, database: &str) -> Result<GraphEngine, String> {
+    let data_dir = state
+        .db_manager
+        .get(database)
+        .map(|database| database.storage_path)
+        .unwrap_or_else(|| format!("data/{}", database));
     let config = EngineConfig {
-        data_dir: format!("data/{}", database),
+        data_dir,
         default_database: database.into(),
         auth_enabled: state.auth.security_enabled,
         log_queries: false,
@@ -1020,19 +1128,22 @@ async fn cypher_handler(
             Json(CypherResponse::error("query must not be empty")),
         );
     }
-    if let Err(status) = authorize_database_access(
+    let claims = match authorize_database_access(
         &state,
         &headers,
         &state.db_name,
         statement_requires_write(&body.query),
     ) {
-        return (status, Json(CypherResponse::error(status.to_string())));
-    }
-    match open_engine(&state, &state.db_name).and_then(|engine| {
-        engine
-            .execute(&body.query, HashMap::new())
-            .map_err(|error| error.to_string())
-    }) {
+        Ok(claims) => claims,
+        Err(status) => return (status, Json(CypherResponse::error(status.to_string()))),
+    };
+    let roles = roles_for_claims(claims.as_ref());
+    let distributed = distributed_cypher_requested(&state, &headers);
+    let request_region = headers
+        .get("x-copperdb-region")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    match execute_http_cypher(&state, &body, &roles, distributed, request_region) {
         Ok(result) => {
             let _ = state.telemetry.record_counter(
                 "nornicdb_cypher_queries_total",
@@ -1074,6 +1185,51 @@ async fn cypher_handler(
             (StatusCode::OK, Json(CypherResponse::error(error)))
         }
     }
+}
+
+fn execute_http_cypher(
+    state: &AppState,
+    body: &CypherRequest,
+    roles: &[String],
+    distributed: bool,
+    request_region: Option<String>,
+) -> Result<QueryResult, String> {
+    let parameters = cypher_parameters(body.parameters.clone())?;
+    let engine = open_engine(state, &state.db_name)?;
+    if !distributed {
+        return engine
+            .execute_as(&body.query, parameters, roles)
+            .map_err(|error| error.to_string());
+    }
+
+    let placement = PlacementKey::default_for_database(&state.db_name);
+    let consistency = ConsistencyLevel::Quorum;
+    let request_region = request_region.as_deref();
+    let transport = build_local_replica_transport(
+        &engine,
+        &placement,
+        consistency,
+        request_region,
+        statement_requires_write(&body.query),
+    )?;
+    let query = body.query.clone();
+    let roles = roles.to_vec();
+    let request_region = request_region.map(str::to_owned);
+    futures::executor::block_on(async move {
+        engine
+            .execute_distributed_as(
+                &query,
+                parameters,
+                &roles,
+                &placement,
+                consistency,
+                request_region.as_deref(),
+                transport,
+            )
+            .await
+            .map(|outcome| outcome.result)
+            .map_err(|error| error.to_string())
+    })
 }
 
 // ─── Retention policy handlers ────────────────────────────────────────────────
@@ -1185,8 +1341,13 @@ async fn place_hold(
     Json(body): Json<PlaceHoldRequest>,
 ) -> impl IntoResponse {
     let mut mgr = state.retention.write();
-    let hold = mgr.place_legal_hold(body.subject_id, body.reason);
-    (StatusCode::CREATED, Json(serde_json::json!(hold)))
+    match mgr.place_legal_hold(body.subject_id, body.reason) {
+        Ok(hold) => (StatusCode::CREATED, Json(serde_json::json!(hold))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
 }
 
 async fn release_hold(
@@ -1249,12 +1410,15 @@ async fn process_erasure(
 
 // ─── Sweep / status handlers ──────────────────────────────────────────────────
 
-async fn retention_sweep(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(serde_json::json!({
-        "status": "ok",
-        "nodes_expired": 0,
-        "dry_run": false,
-    }))
+async fn retention_sweep(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let mgr = state.retention.read();
+    match mgr.sweep(RetentionSweepConfig::default()) {
+        Ok(report) => (StatusCode::OK, Json(serde_json::json!(report))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
 }
 
 async fn retention_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -1494,6 +1658,148 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn http_cypher_can_opt_into_distributed_engine_routing() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementRecord};
+        use tower::ServiceExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_path = temp_dir
+            .path()
+            .join("clinic")
+            .to_string_lossy()
+            .into_owned();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("clinic", storage_path.clone()).unwrap();
+        let mut state = AppState {
+            db_name: "clinic".into(),
+            db_manager,
+            distributed_cypher_enabled: false,
+            ..Default::default()
+        };
+        state.auth.security_enabled = false;
+        let placement = PlacementKey::default_for_database("clinic");
+        {
+            let engine = GraphEngine::open(EngineConfig {
+                data_dir: storage_path,
+                default_database: "clinic".into(),
+                ..Default::default()
+            })
+            .unwrap();
+            for node_id in ["node-1", "node-2", "node-3"] {
+                engine
+                    .storage()
+                    .register_topology_peer(
+                        &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                            .with_capability(NodeCapability::Storage)
+                            .with_capability(NodeCapability::Coordinator),
+                    )
+                    .unwrap();
+            }
+            engine
+                .storage()
+                .register_topology_placement(&PlacementRecord {
+                    key: placement,
+                    primary_node: "node-1".into(),
+                    replica_nodes: vec!["node-2".into(), "node-3".into()],
+                    search_nodes: vec![],
+                    hyperscaler_profile: None,
+                    min_write_replicas: 1,
+                    search_fanout: 1,
+                })
+                .unwrap();
+        }
+
+        let app = build_router(Arc::new(state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/db/data/cypher")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-copperdb-distributed", "true")
+                    .body(Body::from(
+                        serde_json::json!({"query":"CREATE (n:DistributedHttp {v: 1})"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let decoded: CypherResponse = serde_json::from_slice(&body).unwrap();
+        assert!(decoded.errors.is_empty(), "{:?}", decoded.errors);
+        assert!(decoded.stats.is_some());
+    }
+
+    #[test]
+    fn server_statement_execution_passes_roles_to_compliance() {
+        use copperdb_compliance::{ComplianceControl, CompliancePolicy};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_path = temp_dir.path().to_string_lossy().into_owned();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("clinic", storage_path.clone()).unwrap();
+        let state = AppState {
+            db_name: "clinic".into(),
+            db_manager,
+            ..Default::default()
+        };
+
+        {
+            let engine = GraphEngine::open(EngineConfig {
+                data_dir: storage_path,
+                ..Default::default()
+            })
+            .unwrap();
+            engine
+                .compliance_manager()
+                .add_policy(CompliancePolicy::new(
+                    "patient-label",
+                    "Patient Label",
+                    ComplianceControl::RestrictLabel {
+                        label: "Patient".into(),
+                        allowed_roles: vec!["doctor".into()],
+                    },
+                ))
+                .unwrap();
+            engine.flush().unwrap();
+        }
+
+        let reader_roles = vec!["reader".to_string()];
+        let err = match execute_statement(
+            &state,
+            "clinic",
+            "CREATE (n:Patient {name: 'Alice'})",
+            HashMap::new(),
+            &reader_roles,
+            false,
+            None,
+        ) {
+            Ok(_) => panic!("reader role should be denied by compliance policy"),
+            Err(err) => err,
+        };
+        assert!(err.contains("compliance error"));
+
+        let doctor_roles = vec!["doctor".to_string()];
+        execute_statement(
+            &state,
+            "clinic",
+            "CREATE (n:Patient {name: 'Alice'})",
+            HashMap::new(),
+            &doctor_roles,
+            false,
+            None,
+        )
+        .unwrap();
     }
 
     fn unique_auth_path() -> String {

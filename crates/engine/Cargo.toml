@@ -34,8 +34,11 @@ copperdb-graphql = { workspace = true }
 copperdb-pool = { workspace = true }
 copperdb-txsession = { workspace = true }
 copperdb-audit = { workspace = true }
+copperdb-compliance = { workspace = true }
 copperdb-config = { workspace = true }
+copperdb-topology = { workspace = true }
 copperdb-util = { workspace = true }
+copperdb-kms = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

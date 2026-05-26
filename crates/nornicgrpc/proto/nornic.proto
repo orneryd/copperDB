@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package copperdb.nornic.v1;
+
+service NornicReplica {
+  rpc ApplyReplica(RemoteReplicaApplyRequest) returns (RemoteReplicaApplyResponse);
+  rpc ReadReplica(RemoteReplicaReadRequest) returns (RemoteReplicaReadResponse);
+}
+
+message RemoteReplicaApplyRequest {
+  string target_node = 1;
+  string target_addr = 2;
+  bytes command_json = 3;
+}
+
+message RemoteReplicaApplyResponse {}
+
+message RemoteReplicaReadRequest {
+  string target_node = 1;
+  string target_addr = 2;
+  bytes key = 3;
+}
+
+message RemoteReplicaReadResponse {
+  bool found = 1;
+  bytes value = 2;
+}

@@ -176,7 +176,8 @@ impl EvalEngine {
         query: &Query,
         params: &HashMap<String, Value>,
     ) -> Result<EvalResult, EvalError> {
-        let mut current_rows: Vec<Row> = vec![HashMap::new()];
+        let mut current_rows = pooled_binding_rows();
+        current_rows.push(HashMap::new());
         let mut stats = QueryStats::default();
         let mut columns: Vec<String> = vec![];
         let mut result_rows: Vec<Row> = vec![];
@@ -628,7 +629,7 @@ impl EvalEngine {
                             format!("{label}:")
                         };
 
-                        let mut new_rows: Vec<Row> = vec![];
+                        let mut new_rows = pooled_binding_rows();
                         for item in self.storage.scan_nodes_with_prefix(&prefix) {
                             let (_key, val) =
                                 item.map_err(|e| EvalError::StorageError(e.to_string()))?;
@@ -666,7 +667,7 @@ impl EvalEngine {
                                 new_rows.push(row);
                             }
                         }
-                        current_rows = new_rows;
+                        replace_binding_rows(&mut current_rows, new_rows);
                     }
                 }
 
@@ -688,7 +689,7 @@ impl EvalEngine {
                         } else {
                             format!("{label}:")
                         };
-                        let mut new_rows: Vec<Row> = vec![];
+                        let mut new_rows = pooled_binding_rows();
                         let mut found_any = false;
                         for item in self.storage.scan_nodes_with_prefix(&prefix) {
                             let (_key, val) =
@@ -729,20 +730,22 @@ impl EvalEngine {
                                 new_rows.push(row);
                             }
                         }
-                        current_rows = new_rows;
+                        replace_binding_rows(&mut current_rows, new_rows);
                     }
                 }
 
                 Clause::Where(where_clause) => {
                     let expr = &where_clause.expression;
-                    let mut filtered = Vec::with_capacity(current_rows.len());
-                    for row in current_rows {
+                    let mut filtered = pooled_binding_rows();
+                    let mut old_rows = std::mem::take(&mut current_rows);
+                    for row in old_rows.drain(..) {
                         match eval_predicate(expr, &row, params) {
                             Ok(true) => filtered.push(row),
                             Ok(false) => {}
                             Err(e) => return Err(EvalError::FilterError(e.to_string())),
                         }
                     }
+                    recycle_binding_rows(old_rows);
                     current_rows = filtered;
                 }
 
@@ -816,7 +819,7 @@ impl EvalEngine {
                     // Any write invalidates the MERGE node-lookup cache (v1.0.42 parity).
                     self.invalidate_node_lookup_cache();
                     let vars_to_delete: Vec<String> = del.variables.clone();
-                    let mut remaining_rows: Vec<Row> = vec![];
+                    let mut remaining_rows = pooled_binding_rows();
                     for row in &current_rows {
                         for var in &vars_to_delete {
                             if let Some(Value::Object(props)) = row.get(var) {
@@ -828,7 +831,7 @@ impl EvalEngine {
                         }
                         remaining_rows.push(row.clone());
                     }
-                    current_rows = remaining_rows;
+                    replace_binding_rows(&mut current_rows, remaining_rows);
                 }
 
                 Clause::Set(set) => {
@@ -867,7 +870,7 @@ impl EvalEngine {
                         .collect::<Result<Vec<_>, _>>()?;
 
                     if let Some(where_clause) = &with.where_clause {
-                        let mut filtered_rows = Vec::new();
+                        let mut filtered_rows = pooled_binding_rows();
                         for row in projected {
                             if eval_predicate(&where_clause.expression, &row, params)
                                 .map_err(|e| EvalError::FilterError(e.to_string()))?
@@ -882,7 +885,7 @@ impl EvalEngine {
                 }
 
                 Clause::Unwind(unwind) => {
-                    let mut new_rows: Vec<Row> = vec![];
+                    let mut new_rows = pooled_binding_rows();
                     for row in &current_rows {
                         let list_val = eval_expression(&unwind.expression, row, params)?;
                         if let Value::Array(items) = list_val {
@@ -893,7 +896,7 @@ impl EvalEngine {
                             }
                         }
                     }
-                    current_rows = new_rows;
+                    replace_binding_rows(&mut current_rows, new_rows);
                 }
 
                 Clause::Merge(merge) => {
@@ -1022,6 +1025,19 @@ impl Default for Executor {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+fn pooled_binding_rows() -> Vec<Row> {
+    copperdb_pool::get_binding_row_slice()
+}
+
+fn recycle_binding_rows(rows: Vec<Row>) {
+    copperdb_pool::put_binding_row_slice(rows);
+}
+
+fn replace_binding_rows(current_rows: &mut Vec<Row>, new_rows: Vec<Row>) {
+    let old_rows = std::mem::replace(current_rows, new_rows);
+    recycle_binding_rows(old_rows);
+}
 
 /// Build a canonical cache key for a single (labels, prop, val) triple.
 ///

@@ -9,16 +9,20 @@
 use async_trait::async_trait;
 use copperdb_storage::{StorageEngine, StorageError};
 use copperdb_topology::{
-    DistributedWriteMode, DistributedWritePlan, PlacementKey, TopologyError, TopologyRegistry,
+    ConsistencyLevel, DistributedReadPlan, DistributedWriteMode, DistributedWritePlan,
+    LogicalTransactionId, PlacementKey, TopologyError, TopologyRegistry,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tokio::sync::Notify;
+use tokio::sync::{oneshot, Notify};
+
+const REPAIR_QUEUE_PREFIX: &str = "replication:repair:";
 
 #[derive(Debug, Error)]
 pub enum ReplicationError {
@@ -207,6 +211,10 @@ pub struct HealthStatus {
 #[async_trait]
 pub trait ReplicationStorage: Send + Sync {
     fn apply_command(&self, command: &Command) -> Result<(), ReplicationError>;
+    fn read_key(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ReplicationError> {
+        let _ = key;
+        Ok(None)
+    }
     fn write_snapshot(&self) -> Result<Vec<u8>, ReplicationError>;
     fn restore_snapshot(&self, snapshot: &[u8]) -> Result<(), ReplicationError>;
 }
@@ -265,6 +273,10 @@ impl ReplicationStorage for MemoryStorage {
             }
         }
         Ok(())
+    }
+
+    fn read_key(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ReplicationError> {
+        Ok(self.get(key))
     }
 
     fn write_snapshot(&self) -> Result<Vec<u8>, ReplicationError> {
@@ -335,6 +347,11 @@ impl ReplicationStorage for StorageEngineAdapter {
         }
     }
 
+    fn read_key(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ReplicationError> {
+        let engine = self.engine.lock().unwrap();
+        engine.get_node(&Self::data_key(key)).map_err(Into::into)
+    }
+
     fn write_snapshot(&self) -> Result<Vec<u8>, ReplicationError> {
         let engine = self.engine.lock().unwrap();
         let mut snapshot = BTreeMap::new();
@@ -368,6 +385,513 @@ impl ReplicationStorage for StorageEngineAdapter {
         }
 
         Ok(())
+    }
+}
+
+#[async_trait]
+pub trait ReplicaTransport: Send + Sync {
+    async fn apply_replica(&self, target: &str, command: Command) -> Result<(), ReplicationError>;
+    async fn read_replica(
+        &self,
+        target: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, ReplicationError>;
+}
+
+#[derive(Default)]
+pub struct InMemoryReplicaTransport {
+    replicas: RwLock<HashMap<String, Arc<dyn ReplicationStorage>>>,
+}
+
+impl InMemoryReplicaTransport {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(&self, node_id: impl Into<String>, storage: Arc<dyn ReplicationStorage>) {
+        self.replicas
+            .write()
+            .unwrap()
+            .insert(node_id.into(), storage);
+    }
+
+    fn lookup(&self, target: &str) -> Result<Arc<dyn ReplicationStorage>, ReplicationError> {
+        self.replicas
+            .read()
+            .unwrap()
+            .get(target)
+            .cloned()
+            .ok_or_else(|| ReplicationError::Transport(format!("unknown replica {target}")))
+    }
+}
+
+#[async_trait]
+impl ReplicaTransport for InMemoryReplicaTransport {
+    async fn apply_replica(&self, target: &str, command: Command) -> Result<(), ReplicationError> {
+        self.lookup(target)?.apply_command(&command)
+    }
+
+    async fn read_replica(
+        &self,
+        target: &str,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, ReplicationError> {
+        self.lookup(target)?.read_key(key)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DistributedWriteOutcome {
+    pub plan: DistributedWritePlan,
+    pub acknowledged_by: Vec<String>,
+    pub failed_replicas: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DistributedReadOutcome {
+    pub plan: DistributedReadPlan,
+    pub responded_by: Vec<String>,
+    pub failed_replicas: Vec<String>,
+    pub value: Option<Vec<u8>>,
+}
+
+pub struct CassandraCoordinator {
+    topology: TopologyRegistry,
+    transport: Arc<dyn ReplicaTransport>,
+    repair_queue: Option<Arc<DurableRepairQueue>>,
+}
+
+impl CassandraCoordinator {
+    pub fn new(topology: TopologyRegistry, transport: Arc<dyn ReplicaTransport>) -> Self {
+        Self {
+            topology,
+            transport,
+            repair_queue: None,
+        }
+    }
+
+    pub fn with_repair_queue(
+        topology: TopologyRegistry,
+        transport: Arc<dyn ReplicaTransport>,
+        repair_queue: Arc<DurableRepairQueue>,
+    ) -> Self {
+        Self {
+            topology,
+            transport,
+            repair_queue: Some(repair_queue),
+        }
+    }
+
+    pub fn topology(&self) -> &TopologyRegistry {
+        &self.topology
+    }
+
+    pub async fn write(
+        &self,
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        command: Command,
+        request_region: Option<&str>,
+    ) -> Result<DistributedWriteOutcome, ReplicationError> {
+        let plan = self
+            .topology
+            .plan_write_with_consistency(
+                placement,
+                DistributedWriteMode::DynamoQuorum,
+                consistency,
+                request_region,
+            )
+            .map_err(|error| ReplicationError::Storage(error.to_string()))?;
+        let mut acknowledged_by = Vec::new();
+        let mut failed_replicas = Vec::new();
+        for replica in &plan.replicas {
+            if self
+                .transport
+                .apply_replica(&replica.node_id, command.clone())
+                .await
+                .is_ok()
+            {
+                acknowledged_by.push(replica.node_id.clone());
+            } else {
+                failed_replicas.push(replica.node_id.clone());
+            }
+        }
+        if acknowledged_by.len() < plan.required_acks {
+            return Err(ReplicationError::NoQuorum {
+                required: plan.required_acks,
+                received: acknowledged_by.len(),
+            });
+        }
+        self.enqueue_hinted_handoff(&plan, &command, &failed_replicas)?;
+        Ok(DistributedWriteOutcome {
+            plan,
+            acknowledged_by,
+            failed_replicas,
+        })
+    }
+
+    pub async fn read(
+        &self,
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        key: &[u8],
+        request_region: Option<&str>,
+    ) -> Result<DistributedReadOutcome, ReplicationError> {
+        let plan = self
+            .topology
+            .plan_read(placement, consistency, request_region)
+            .map_err(|error| ReplicationError::Storage(error.to_string()))?;
+        let mut responded_by = Vec::new();
+        let mut failed_replicas = Vec::new();
+        let mut value = None;
+        for replica in &plan.replicas {
+            match self.transport.read_replica(&replica.node_id, key).await {
+                Ok(replica_value) => {
+                    if value.is_none() && replica_value.is_some() {
+                        value = replica_value;
+                    }
+                    responded_by.push(replica.node_id.clone());
+                }
+                Err(_) => {
+                    failed_replicas.push(replica.node_id.clone());
+                }
+            }
+            if responded_by.len() >= plan.required_responses && value.is_some() {
+                break;
+            }
+        }
+        if responded_by.len() < plan.required_responses {
+            return Err(ReplicationError::NoQuorum {
+                required: plan.required_responses,
+                received: responded_by.len(),
+            });
+        }
+        self.enqueue_read_repairs(&plan, key, &failed_replicas)?;
+        Ok(DistributedReadOutcome {
+            plan,
+            responded_by,
+            failed_replicas,
+            value,
+        })
+    }
+
+    fn enqueue_hinted_handoff(
+        &self,
+        plan: &DistributedWritePlan,
+        command: &Command,
+        failed_replicas: &[String],
+    ) -> Result<(), ReplicationError> {
+        let Some(queue) = &self.repair_queue else {
+            return Ok(());
+        };
+        for replica in failed_replicas {
+            queue.enqueue(RepairRecord::hinted_handoff(
+                plan.placement.clone(),
+                replica.clone(),
+                command.clone(),
+            ))?;
+        }
+        Ok(())
+    }
+
+    fn enqueue_read_repairs(
+        &self,
+        plan: &DistributedReadPlan,
+        key: &[u8],
+        failed_replicas: &[String],
+    ) -> Result<(), ReplicationError> {
+        let Some(queue) = &self.repair_queue else {
+            return Ok(());
+        };
+        for replica in failed_replicas {
+            queue.enqueue(RepairRecord::read_repair_probe(
+                plan.placement.clone(),
+                replica.clone(),
+                key.to_vec(),
+            ))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum RepairKind {
+    HintedHandoff,
+    ReadRepairProbe,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RepairRecord {
+    pub id: String,
+    pub kind: RepairKind,
+    pub placement: PlacementKey,
+    pub target_node: String,
+    pub command: Option<Command>,
+    pub read_key: Option<Vec<u8>>,
+    pub transaction_id: LogicalTransactionId,
+    pub attempts: u32,
+}
+
+impl RepairRecord {
+    pub fn hinted_handoff(placement: PlacementKey, target_node: String, command: Command) -> Self {
+        Self::new(
+            RepairKind::HintedHandoff,
+            placement,
+            target_node,
+            Some(command),
+            None,
+        )
+    }
+
+    pub fn read_repair_probe(
+        placement: PlacementKey,
+        target_node: String,
+        read_key: Vec<u8>,
+    ) -> Self {
+        Self::new(
+            RepairKind::ReadRepairProbe,
+            placement,
+            target_node,
+            None,
+            Some(read_key),
+        )
+    }
+
+    fn new(
+        kind: RepairKind,
+        placement: PlacementKey,
+        target_node: String,
+        command: Option<Command>,
+        read_key: Option<Vec<u8>>,
+    ) -> Self {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        kind.hash(&mut hasher);
+        placement.hash(&mut hasher);
+        target_node.hash(&mut hasher);
+        if let Some(command) = &command {
+            serde_json::to_string(command)
+                .unwrap_or_default()
+                .hash(&mut hasher);
+        }
+        read_key.hash(&mut hasher);
+        let id = format!(
+            "{}:{}:{:x}",
+            match kind {
+                RepairKind::HintedHandoff => "hint",
+                RepairKind::ReadRepairProbe => "read",
+            },
+            target_node,
+            hasher.finish()
+        );
+        Self {
+            id,
+            kind,
+            placement,
+            target_node,
+            command,
+            read_key,
+            transaction_id: LogicalTransactionId::ZERO,
+            attempts: 0,
+        }
+    }
+
+    fn increment_attempts(&mut self) {
+        self.attempts = self.attempts.saturating_add(1);
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepairReplayReport {
+    pub attempted: usize,
+    pub completed: usize,
+    pub retained: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct DurableRepairQueue {
+    path: PathBuf,
+}
+
+impl DurableRepairQueue {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, ReplicationError> {
+        let path = path.as_ref().to_path_buf();
+        StorageEngine::open(&path)?;
+        Ok(Self { path })
+    }
+
+    pub fn enqueue(&self, record: RepairRecord) -> Result<(), ReplicationError> {
+        let storage = StorageEngine::open(&self.path)?;
+        storage.put_node(
+            &Self::record_key(&record.id),
+            &serde_json::to_vec(&record)
+                .map_err(|error| ReplicationError::Storage(error.to_string()))?,
+        )?;
+        Ok(())
+    }
+
+    pub fn pending(&self) -> Result<Vec<RepairRecord>, ReplicationError> {
+        let storage = StorageEngine::open(&self.path)?;
+        let mut records = Vec::new();
+        for entry in storage.scan_nodes_with_prefix(REPAIR_QUEUE_PREFIX) {
+            let (_, value) = entry?;
+            records.push(
+                serde_json::from_slice::<RepairRecord>(&value)
+                    .map_err(|error| ReplicationError::Storage(error.to_string()))?,
+            );
+        }
+        records.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(records)
+    }
+
+    pub fn delete(&self, record_id: &str) -> Result<(), ReplicationError> {
+        let storage = StorageEngine::open(&self.path)?;
+        storage.delete_node(&Self::record_key(record_id))?;
+        Ok(())
+    }
+
+    pub async fn replay_batch(
+        &self,
+        transport: Arc<dyn ReplicaTransport>,
+        max_records: usize,
+    ) -> Result<RepairReplayReport, ReplicationError> {
+        let mut report = RepairReplayReport::default();
+        for mut record in self.pending()?.into_iter().take(max_records.max(1)) {
+            report.attempted += 1;
+            match Self::replay_record(Arc::clone(&transport), &record).await {
+                Ok(()) => {
+                    self.delete(&record.id)?;
+                    report.completed += 1;
+                }
+                Err(_) => {
+                    record.increment_attempts();
+                    self.enqueue(record)?;
+                    report.retained += 1;
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    async fn replay_record(
+        transport: Arc<dyn ReplicaTransport>,
+        record: &RepairRecord,
+    ) -> Result<(), ReplicationError> {
+        match record.kind {
+            RepairKind::HintedHandoff => {
+                let command = record.command.clone().ok_or_else(|| {
+                    ReplicationError::Storage("hinted handoff record missing command".into())
+                })?;
+                transport.apply_replica(&record.target_node, command).await
+            }
+            RepairKind::ReadRepairProbe => {
+                let key = record.read_key.as_ref().ok_or_else(|| {
+                    ReplicationError::Storage("read repair record missing key".into())
+                })?;
+                transport.read_replica(&record.target_node, key).await?;
+                Ok(())
+            }
+        }
+    }
+
+    fn record_key(record_id: &str) -> String {
+        format!("{REPAIR_QUEUE_PREFIX}{record_id}")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RepairWorkerConfig {
+    pub interval: Duration,
+    pub max_records_per_tick: usize,
+}
+
+impl Default for RepairWorkerConfig {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(5),
+            max_records_per_tick: 100,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ScheduledRepairWorker {
+    queue: Arc<DurableRepairQueue>,
+    transport: Arc<dyn ReplicaTransport>,
+    config: RepairWorkerConfig,
+}
+
+impl ScheduledRepairWorker {
+    pub fn new(
+        queue: Arc<DurableRepairQueue>,
+        transport: Arc<dyn ReplicaTransport>,
+        config: RepairWorkerConfig,
+    ) -> Self {
+        let defaults = RepairWorkerConfig::default();
+        Self {
+            queue,
+            transport,
+            config: RepairWorkerConfig {
+                interval: if config.interval.is_zero() {
+                    defaults.interval
+                } else {
+                    config.interval
+                },
+                max_records_per_tick: config.max_records_per_tick.max(1),
+            },
+        }
+    }
+
+    pub async fn run_once(&self) -> Result<RepairReplayReport, ReplicationError> {
+        self.queue
+            .replay_batch(
+                Arc::clone(&self.transport),
+                self.config.max_records_per_tick,
+            )
+            .await
+    }
+
+    pub fn spawn(self) -> RepairWorkerHandle {
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let join = tokio::spawn(async move { self.run_until_shutdown(shutdown_rx).await });
+        RepairWorkerHandle {
+            shutdown_tx: Some(shutdown_tx),
+            join,
+        }
+    }
+
+    async fn run_until_shutdown(
+        self,
+        mut shutdown_rx: oneshot::Receiver<()>,
+    ) -> Result<RepairReplayReport, ReplicationError> {
+        let mut interval = tokio::time::interval(self.config.interval);
+        let mut total = RepairReplayReport::default();
+        loop {
+            tokio::select! {
+                _ = &mut shutdown_rx => return Ok(total),
+                _ = interval.tick() => {
+                    let report = self.run_once().await?;
+                    total.attempted += report.attempted;
+                    total.completed += report.completed;
+                    total.retained += report.retained;
+                }
+            }
+        }
+    }
+}
+
+pub struct RepairWorkerHandle {
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    join: tokio::task::JoinHandle<Result<RepairReplayReport, ReplicationError>>,
+}
+
+impl RepairWorkerHandle {
+    pub async fn shutdown(mut self) -> Result<RepairReplayReport, ReplicationError> {
+        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+            let _ = shutdown_tx.send(());
+        }
+        self.join.await.map_err(|error| {
+            ReplicationError::Transport(format!("repair worker join error: {error}"))
+        })?
     }
 }
 
@@ -1429,5 +1953,460 @@ mod tests {
         assert_eq!(plan.leader.node_id, "node-1");
         assert_eq!(plan.required_acks, 2);
         assert_eq!(plan.replicas.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cassandra_coordinator_writes_and_reads_at_quorum() {
+        use copperdb_topology::{
+            ConsistencyLevel, MeshPeer, NodeCapability, PlacementKey, PlacementRecord,
+        };
+
+        let placement = PlacementKey::default_for_database("neo4j");
+        let mut topology = TopologyRegistry::new();
+        for node_id in ["node-1", "node-2", "node-3"] {
+            topology
+                .register_peer(
+                    MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        topology
+            .register_placement(PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        let storage1 = Arc::new(MemoryStorage::new());
+        let storage2 = Arc::new(MemoryStorage::new());
+        let storage3 = Arc::new(MemoryStorage::new());
+        transport.register("node-1", storage1.clone());
+        transport.register("node-2", storage2.clone());
+        transport.register("node-3", storage3.clone());
+        let coordinator = CassandraCoordinator::new(topology, transport);
+
+        let write = coordinator
+            .write(
+                &placement,
+                ConsistencyLevel::Quorum,
+                Command::Put {
+                    key: b"distributed".to_vec(),
+                    value: b"write".to_vec(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(write.plan.required_acks, 2);
+        assert_eq!(write.acknowledged_by.len(), 3);
+        assert!(write.failed_replicas.is_empty());
+        assert_eq!(storage1.get(b"distributed"), Some(b"write".to_vec()));
+        assert_eq!(storage2.get(b"distributed"), Some(b"write".to_vec()));
+        assert_eq!(storage3.get(b"distributed"), Some(b"write".to_vec()));
+
+        let read = coordinator
+            .read(&placement, ConsistencyLevel::Quorum, b"distributed", None)
+            .await
+            .unwrap();
+        assert_eq!(read.plan.required_responses, 2);
+        assert!(read.failed_replicas.is_empty());
+        assert_eq!(read.value, Some(b"write".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn cassandra_coordinator_reports_late_repair_candidates_after_quorum() {
+        use copperdb_topology::{
+            ConsistencyLevel, MeshPeer, NodeCapability, PlacementKey, PlacementRecord,
+        };
+
+        let placement = PlacementKey::default_for_database("neo4j");
+        let mut topology = TopologyRegistry::new();
+        for node_id in ["node-1", "node-2", "node-3"] {
+            topology
+                .register_peer(
+                    MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        topology
+            .register_placement(PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        let storage1 = Arc::new(MemoryStorage::new());
+        let storage2 = Arc::new(MemoryStorage::new());
+        transport.register("node-1", storage1.clone());
+        transport.register("node-2", storage2.clone());
+        let coordinator = CassandraCoordinator::new(topology, transport);
+
+        let write = coordinator
+            .write(
+                &placement,
+                ConsistencyLevel::Quorum,
+                Command::Put {
+                    key: b"handoff".to_vec(),
+                    value: b"candidate".to_vec(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(write.acknowledged_by, vec!["node-1", "node-2"]);
+        assert_eq!(write.failed_replicas, vec!["node-3"]);
+    }
+
+    #[tokio::test]
+    async fn cassandra_coordinator_persists_hinted_handoff_after_quorum() {
+        use copperdb_topology::{
+            ConsistencyLevel, MeshPeer, NodeCapability, PlacementKey, PlacementRecord,
+        };
+
+        let placement = PlacementKey::default_for_database("neo4j");
+        let mut topology = TopologyRegistry::new();
+        for node_id in ["node-1", "node-2", "node-3"] {
+            topology
+                .register_peer(
+                    MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        topology
+            .register_placement(PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(MemoryStorage::new()));
+        transport.register("node-2", Arc::new(MemoryStorage::new()));
+        let dir = tempfile::tempdir().unwrap();
+        let repair_path = dir.path().join("repair");
+        let queue = Arc::new(DurableRepairQueue::open(&repair_path).unwrap());
+        let coordinator =
+            CassandraCoordinator::with_repair_queue(topology, transport, queue.clone());
+
+        coordinator
+            .write(
+                &placement,
+                ConsistencyLevel::Quorum,
+                Command::Put {
+                    key: b"handoff".to_vec(),
+                    value: b"durable".to_vec(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let reopened = DurableRepairQueue::open(&repair_path).unwrap();
+        let pending = reopened.pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].kind, RepairKind::HintedHandoff);
+        assert_eq!(pending[0].target_node, "node-3");
+        assert!(matches!(pending[0].command, Some(Command::Put { .. })));
+    }
+
+    #[tokio::test]
+    async fn cassandra_coordinator_persists_read_repair_probe_after_quorum() {
+        use copperdb_topology::{
+            ConsistencyLevel, MeshPeer, NodeCapability, PlacementKey, PlacementRecord,
+        };
+
+        let placement = PlacementKey::default_for_database("neo4j");
+        let mut topology = TopologyRegistry::new();
+        for node_id in ["node-1", "node-2", "node-3"] {
+            topology
+                .register_peer(
+                    MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        topology
+            .register_placement(PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        let storage1 = Arc::new(MemoryStorage::new());
+        let storage3 = Arc::new(MemoryStorage::new());
+        storage1
+            .apply_command(&Command::Put {
+                key: b"repair-read".to_vec(),
+                value: b"value".to_vec(),
+            })
+            .unwrap();
+        storage3
+            .apply_command(&Command::Put {
+                key: b"repair-read".to_vec(),
+                value: b"value".to_vec(),
+            })
+            .unwrap();
+        transport.register("node-1", storage1);
+        transport.register("node-3", storage3);
+        let dir = tempfile::tempdir().unwrap();
+        let repair_path = dir.path().join("repair");
+        let queue = Arc::new(DurableRepairQueue::open(&repair_path).unwrap());
+        let coordinator =
+            CassandraCoordinator::with_repair_queue(topology, transport, queue.clone());
+
+        let read = coordinator
+            .read(&placement, ConsistencyLevel::Quorum, b"repair-read", None)
+            .await
+            .unwrap();
+        assert_eq!(read.failed_replicas, vec!["node-2"]);
+        assert_eq!(read.value, Some(b"value".to_vec()));
+
+        let pending = queue.pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].kind, RepairKind::ReadRepairProbe);
+        assert_eq!(pending[0].target_node, "node-2");
+        assert_eq!(pending[0].read_key, Some(b"repair-read".to_vec()));
+    }
+
+    #[test]
+    fn durable_repair_queue_persists_and_deletes_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let repair_path = dir.path().join("repair");
+        let queue = DurableRepairQueue::open(&repair_path).unwrap();
+        let record = RepairRecord::read_repair_probe(
+            PlacementKey::default_for_database("neo4j"),
+            "node-2".into(),
+            b"key".to_vec(),
+        );
+        let record_id = record.id.clone();
+        queue.enqueue(record).unwrap();
+
+        let reopened = DurableRepairQueue::open(&repair_path).unwrap();
+        let pending = reopened.pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].kind, RepairKind::ReadRepairProbe);
+        assert_eq!(pending[0].read_key, Some(b"key".to_vec()));
+
+        reopened.delete(&record_id).unwrap();
+        assert!(reopened.pending().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn durable_repair_queue_replays_hinted_handoff_and_deletes_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let repair_path = dir.path().join("repair");
+        let queue = DurableRepairQueue::open(&repair_path).unwrap();
+        queue
+            .enqueue(RepairRecord::hinted_handoff(
+                PlacementKey::default_for_database("neo4j"),
+                "node-2".into(),
+                Command::Put {
+                    key: b"replay".to_vec(),
+                    value: b"handoff".to_vec(),
+                },
+            ))
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        let storage = Arc::new(MemoryStorage::new());
+        transport.register("node-2", storage.clone());
+
+        let report = queue.replay_batch(transport, 10).await.unwrap();
+        assert_eq!(
+            report,
+            RepairReplayReport {
+                attempted: 1,
+                completed: 1,
+                retained: 0,
+            }
+        );
+        assert_eq!(storage.get(b"replay"), Some(b"handoff".to_vec()));
+        assert!(queue.pending().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn durable_repair_queue_retains_failed_replay_with_attempt_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let repair_path = dir.path().join("repair");
+        let queue = DurableRepairQueue::open(&repair_path).unwrap();
+        queue
+            .enqueue(RepairRecord::hinted_handoff(
+                PlacementKey::default_for_database("neo4j"),
+                "missing-node".into(),
+                Command::Put {
+                    key: b"retry".to_vec(),
+                    value: b"later".to_vec(),
+                },
+            ))
+            .unwrap();
+
+        let report = queue
+            .replay_batch(Arc::new(InMemoryReplicaTransport::new()), 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            report,
+            RepairReplayReport {
+                attempted: 1,
+                completed: 0,
+                retained: 1,
+            }
+        );
+        let pending = queue.pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn scheduled_repair_worker_replays_pending_repairs_in_background() {
+        let dir = tempfile::tempdir().unwrap();
+        let repair_path = dir.path().join("repair");
+        let queue = Arc::new(DurableRepairQueue::open(&repair_path).unwrap());
+        queue
+            .enqueue(RepairRecord::hinted_handoff(
+                PlacementKey::default_for_database("neo4j"),
+                "node-2".into(),
+                Command::Put {
+                    key: b"scheduled-repair".to_vec(),
+                    value: b"done".to_vec(),
+                },
+            ))
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        let storage = Arc::new(MemoryStorage::new());
+        transport.register("node-2", storage.clone());
+        let worker = ScheduledRepairWorker::new(
+            queue.clone(),
+            transport,
+            RepairWorkerConfig {
+                interval: Duration::from_millis(10),
+                max_records_per_tick: 10,
+            },
+        );
+        let handle = worker.spawn();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if queue.pending().unwrap().is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let report = handle.shutdown().await.unwrap();
+
+        assert!(report.attempted >= 1);
+        assert!(report.completed >= 1);
+        assert_eq!(storage.get(b"scheduled-repair"), Some(b"done".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn storage_engine_adapter_persists_replica_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage_path = dir.path().join("replica");
+        {
+            let storage = StorageEngine::open(&storage_path).unwrap();
+            let adapter = StorageEngineAdapter::new(storage);
+            adapter
+                .apply_command(&Command::Put {
+                    key: b"durable".to_vec(),
+                    value: b"replica".to_vec(),
+                })
+                .unwrap();
+            assert_eq!(
+                adapter.read_key(b"durable").unwrap(),
+                Some(b"replica".to_vec())
+            );
+        }
+
+        let reopened = StorageEngine::open(&storage_path).unwrap();
+        let adapter = StorageEngineAdapter::new(reopened);
+        assert_eq!(
+            adapter.read_key(b"durable").unwrap(),
+            Some(b"replica".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn cassandra_coordinator_fails_when_quorum_is_unavailable() {
+        use copperdb_topology::{
+            ConsistencyLevel, MeshPeer, NodeCapability, PlacementKey, PlacementRecord,
+        };
+
+        let placement = PlacementKey::default_for_database("neo4j");
+        let mut topology = TopologyRegistry::new();
+        for node_id in ["node-1", "node-2", "node-3"] {
+            topology
+                .register_peer(
+                    MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        topology
+            .register_placement(PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(MemoryStorage::new()));
+        let coordinator = CassandraCoordinator::new(topology, transport);
+        let error = coordinator
+            .write(
+                &placement,
+                ConsistencyLevel::Quorum,
+                Command::Put {
+                    key: b"k".to_vec(),
+                    value: b"v".to_vec(),
+                },
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ReplicationError::NoQuorum { .. }));
     }
 }

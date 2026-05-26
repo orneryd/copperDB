@@ -20,4 +20,5 @@ copperdb-cypher = { workspace = true }
 copperdb-storage = { workspace = true }
 copperdb-cache = { workspace = true }
 copperdb-filter = { workspace = true }
+copperdb-pool = { workspace = true }
 copperdb-util = { workspace = true }

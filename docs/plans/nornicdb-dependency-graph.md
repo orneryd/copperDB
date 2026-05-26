@@ -26,27 +26,27 @@ Current Rust status: all Layer 0 packages have focused implementations, active c
 
 These packages depend on layer 0 and gate every externally reachable surface.
 
-- [ ] `kms` -> provider-backed data keys, local KEK wrapping, metadata, audit signing, provider factory.
-- [ ] `encryption` -> versioned envelopes, provider-backed `EnvelopeEncryptor`, DEK cache, rewrap rotation surface.
+- [x] `kms` -> provider-backed data keys, local KEK wrapping, metadata, audit signing, provider factory.
+- [x] `encryption` -> versioned envelopes, provider-backed `EnvelopeEncryptor`, DEK cache, rewrap rotation surface.
 - [x] `auth` -> JWT/RBAC identity, persistent users, roles, allowlists, privileges, entitlements, token cache.
 - [x] `audit` -> durable security and data-access event trail, append-only storage, hash-chain verification.
 - [x] `security` -> token/header/URL validation, SSRF and injection defenses, server ingress enforcement.
-- [ ] `compliance` -> durable governance policies, access controls, retention markers, audit-backed HIPAA/SOC2 evidence.
+- [x] `compliance` -> durable governance policies, access controls, retention markers, audit-backed HIPAA/SOC2 evidence.
 
 Required direction: API surfaces call into this layer; this layer must not depend on HTTP/Bolt/GraphQL/MCP implementations.
 
-Current Rust status: `security` remains checked because protocol-neutral request validation is threaded into the HTTP server and owns no durable state. `auth` is checked because the HTTP server now bootstraps a durable storage-backed `Authenticator`, seeds/reloads the configured admin user, issues tokens through the persisted identity model, accepts bearer or cookie tokens, and enforces role database privileges before protected status/query/database routes. `audit` is checked because `CopperDb` now constructs a storage-backed `AuditLog`, records successful and failed embedded Cypher query operations as durable data-access events, exposes the log for verification, and has focused engine tests proving hash-chain verification and event persistence. `kms`, `encryption`, and `compliance` have focused package implementations and tests, but they remain unchecked because they are not yet wired into the engine/server execution path: KMS/encryption are not bootstrapped as the storage encryption path, and compliance policy/reporting is not enforced or exposed through consumers.
+Current Rust status: all Layer 1 packages are checked. `security` remains checked because protocol-neutral request validation is threaded into the HTTP server and owns no durable state. `kms` and `encryption` are checked because `StorageEngine::open_encrypted` now uses a provider-backed `EnvelopeEncryptor` to encrypt/decrypt node and edge record bytes, persists encryption metadata, rejects plaintext opens for encrypted stores, enforces key URI metadata, and is reachable from `CopperDb::open` through encrypted storage configuration. `auth` is checked because the HTTP server now bootstraps a durable storage-backed `Authenticator`, seeds/reloads the configured admin user, issues tokens through the persisted identity model, accepts bearer or cookie tokens, and enforces role database privileges before protected status/query/database routes. `audit` is checked because `CopperDb` now constructs a storage-backed `AuditLog`, records successful and failed embedded Cypher query operations as durable data-access events, exposes the log for verification, and has focused engine tests proving hash-chain verification and event persistence. `compliance` is checked because `CopperDb` now constructs a storage-backed `ComplianceManager`, enforces durable label/property policies against parsed queries using caller roles, exports HIPAA/SOC2 evidence from the durable audit trail, and the HTTP server passes authenticated roles into engine execution.
 
 ## Layer 2: Storage, Transactions, And Metadata
 
 These packages own durable graph state and storage-adjacent state.
 
-- [ ] `storage` -> graph records, metadata catalogs, MVCC, WAL, schema, indexes, namespace primitives.
+- [x] `storage` -> graph records, metadata catalogs, MVCC, WAL, schema, indexes, namespace primitives.
 - [x] `cache` -> query/result/write-through caches.
-- [ ] `pool` -> reusable query-execution resource pooling.
+- [x] `pool` -> reusable query-execution resource pooling.
 - [x] `txsession` -> transaction/session lifecycle and conflict semantics.
-- [ ] `retention` -> retention policies, legal holds, erasure request model and sweeper hooks.
-- [ ] `multidb` -> logical database catalog and namespace routing.
+- [x] `retention` -> retention policies, legal holds, erasure request model and sweeper hooks.
+- [x] `multidb` -> logical database catalog and namespace routing.
 
 Distributed foundation hooks in this layer:
 
@@ -54,25 +54,29 @@ Distributed foundation hooks in this layer:
 - storage rebuilds a validated `TopologyRegistry` from durable metadata.
 - transaction errors should route through `errors`.
 
-Current Rust status: `cache` is complete for its Layer 2 contract. It owns no source-of-truth durable state; its package-owned state is bounded, reloadable acceleration state. The crate provides query-plan LRU caching, parameter-sensitive query-result caching with non-deterministic query rejection, write-through cache wrappers that update memory only after backing writes succeed, enable/disable controls, TTL expiration, explicit invalidation, eviction stats, and focused concurrency/contract tests. `pool` has the reusable execution scratch object implementation and tests for row slices, pooled nodes, byte buffers, string builders, maps, string slices, value slices, bounded retention, oversized-object rejection, disabled-mode behavior, clearing-on-return, and concurrency, but remains unchecked until eval/cypher consumers actually use it. `txsession` is complete for package-owned transaction/session state: logical begin/commit timestamps from `topology`, pending write buffers, read-only enforcement, terminal state errors, explicit owner-bound sessions, TTL refresh/cleanup, terminal-error replay, and commit/rollback deletion. Its active sessions are runtime coordination state, not durable graph source-of-truth.
+Current Rust status: all Layer 2 packages are checked. `storage` is complete for its Layer 2 contract. It owns durable graph records, metadata catalogs, schema constraints and index definitions, label/property/edge indexes, namespace discovery, topology-native distributed metadata, encrypted record storage with manifest enforcement, MVCC snapshot/head helpers, and a persistent WAL with replay, checksum validation, partial-write/error contracts, segment stats, and reopen sequence continuity. It is consumed by engine/eval plus audit/auth/compliance policy surfaces. `cache` is complete for its Layer 2 contract. It owns no source-of-truth durable state; its package-owned state is bounded, reloadable acceleration state. The crate provides query-plan LRU caching, parameter-sensitive query-result caching with non-deterministic query rejection, write-through cache wrappers that update memory only after backing writes succeed, enable/disable controls, TTL expiration, explicit invalidation, eviction stats, and focused concurrency/contract tests. `pool` is complete for its Layer 2 contract. It owns no durable source-of-truth state; it provides reusable execution scratch pools for result row slices, evaluator binding rows, pooled nodes, byte buffers, string builders, maps, string slices, value slices, bounded retention, oversized-object rejection, disabled-mode behavior, clearing-on-return, and concurrency, and `eval` now consumes pooled binding-row vectors in MATCH/OPTIONAL MATCH/WHERE/DELETE/UNWIND row-processing paths. `txsession` is complete for package-owned transaction/session state: logical begin/commit timestamps from `topology`, pending write buffers, read-only enforcement, terminal state errors, explicit owner-bound sessions, TTL refresh/cleanup, terminal-error replay, and commit/rollback deletion. Its active sessions are runtime coordination state, not durable graph source-of-truth. `retention` is complete for its Layer 2 contract: policies, legal holds, and erasure requests persist through storage-backed records; active legal holds block erasure creation and retention deletion; the sweep path supports dry-run, batch limits, expiry checks, deletion, held-node reporting, and is wired into the server retention sweep endpoint. `multidb` is complete for its Layer 2 contract: the logical database catalog persists through storage-backed records, seeds system/default entries durably, create/open/drop paths consume the catalog, server startup opens the durable catalog, and engine opening uses registered database storage paths for namespace routing.
 
 ## Layer 3: Distributed Execution Foundation
 
 These packages turn topology into cluster behavior. In this phase, seams must exist before full execution is enabled.
 
-- [ ] `replication` -> HA write planning, log replication, leader election, snapshots, write quorum.
-- [ ] `fabric` -> cluster routing, topology propagation, placement-aware execution.
-- [ ] `search` -> distributed search mesh planning, shard fan-out, peer selection.
-- [ ] `qdrantgrpc` -> external vector-store client and remote vector index offload.
-- [ ] `nornicgrpc` -> gRPC transport for internal/remote execution.
+- [x] `replication` -> Cassandra-like coordinator writes/reads, replica fan-out transport, consistency-level quorum enforcement, repair seams.
+- [x] `fabric` -> cluster routing, topology propagation, placement-aware execution.
+- [x] `search` -> distributed search mesh planning, shard fan-out, peer selection.
+- [x] `qdrantgrpc` -> external vector-store client and remote vector index offload.
+- [x] `nornicgrpc` -> gRPC transport for internal/remote execution.
 
 Current Rust status:
 
-- `replication` consumes `topology` through `HighAvailabilityWritePlanner`.
-- `fabric` consumes `topology` through `FabricTopology`.
-- `search` consumes `topology` through `DistributedSearchRouter`.
+- `replication` consumes `topology` through `HighAvailabilityWritePlanner` and the coordinator-based `DynamoQuorum` contract documented in [docs/plans/distributed-execution-architecture.md](distributed-execution-architecture.md). It now has Cassandra-style coordinator write/read execution, in-memory replica transport, storage-backed replica adapter coverage, quorum failure behavior, failed-replica outputs, durable hinted handoff/read-repair queue records for post-quorum repair follow-up, and a scheduled repair worker for background replay.
+- `fabric` consumes `topology` through `FabricTopology` and exposes search, consistency-aware write, and consistency-aware read plans.
+- `search` consumes `topology` through `DistributedSearchRouter` and now has a distributed executor seam for fan-out, failed-node tracking, and deterministic merge ordering.
+- `qdrantgrpc` consumes `DistributedSearchPlan` to build vector-search request targets for external vector-store offload and now has a production Qdrant HTTP search client plus a distributed executor that fans out through the remote client seam, tracks failed targets, and merges hits deterministically.
+- `nornicgrpc` consumes `DistributedWritePlan`, `DistributedReadPlan`, and `DistributedSearchPlan` to build internal remote execution envelopes without inventing alternate routing rules, and now exposes generated tonic/prost replica service bindings, a generated-client adapter, a generated-server adapter, and a `ReplicaTransport` adapter that maps coordinator write/read calls to target-addressed remote client requests.
+- `engine` now loads durable topology from storage, exposes distributed read/write plan helpers, builds Cassandra coordinators from caller-provided replica transports, roots durable repair queues beside the database path or an explicit repair-queue path, replays repair batches through replica transports, builds scheduled repair workers, and exposes explicit distributed Cypher execution that routes mutations through `DynamoQuorum` before local evaluation.
+- `server` now lets HTTP Cypher and Neo4j transaction commit requests opt into distributed Cypher execution with `COPPERDB_DISTRIBUTED_CYPHER` or `x-copperdb-distributed`, using topology-derived placement and quorum consistency while keeping protocol handlers thin.
 - `storage` persists and reloads the same topology contracts.
-- Network execution, remote fan-out transport, and HA write enforcement remain open work before these packages can be checked.
+- Layer 3 is checked: package-owned durable state is persisted, runtime-only transport/executor state is explicit, immediate consumers compile, and focused distributed contract tests cover topology planning, coordinator quorum behavior, repair replay, protocol opt-in, nornic remote transport, and Qdrant vector-search offload.
 
 ## Enterprise Scaling Design
 
@@ -82,7 +86,7 @@ The hyperscaler, distributed search, and HA write layers are first-class archite
 - `storage` persists topology-native records only and reconstructs a validated registry for boot and control-plane updates.
 - `search` receives a `DistributedSearchPlan` from topology. The planner chooses candidates by same-region locality, observed latency, inflight load, capacity weight, health, fan-out cap, and hedge deadline.
 - `fabric` routes by `PlacementKey`, never by protocol-specific IDs.
-- `replication` receives a `DistributedWritePlan` from topology and enforces required acknowledgements for `LeaderLease`, `Quorum`, and `RaftLog` modes.
+- `replication` receives `DistributedWritePlan` and `DistributedReadPlan` values from topology and enforces Cassandra-like coordinator semantics for `DynamoQuorum` writes and consistency-level reads.
 - `txsession` receives begin/commit timestamps from topology's distributed logical transaction clock; storage/MVCC and replication must compare logical transaction IDs, not syscall timestamps or NTP-corrected wall time.
 
 Latency strategy:
@@ -150,7 +154,8 @@ The following contracts are intentionally first-class even while distributed exe
 - Mesh peers: node id, address, region/zone, capabilities, health, heartbeat, observed RTT, inflight load, capacity weight.
 - Placements: tenant/database/shard, primary, replicas, search nodes, hyperscaler profile.
 - Distributed search plans: placement plus latency-ranked healthy search fan-out, bounded parallelism, and hedge deadline.
-- Distributed write plans: placement plus mode, leader, replicas, required acknowledgements.
+- Distributed write plans: placement plus mode, consistency level, coordinator, replicas, and required acknowledgements.
+- Distributed read plans: placement plus consistency level, coordinator, replicas, and required responses.
 - Distributed transaction IDs: epoch, logical counter, node ordinal; no wall-clock dependency on the write hot path.
 
 These contracts are implemented in `copperdb-topology`, persisted by `storage` where they are durable topology metadata, and consumed by `fabric`, `search`, `replication`, and `txsession`.

@@ -4,7 +4,9 @@
 //! Combines in-memory inverted-index full-text search with optional
 //! vector similarity search via copperdb-vectorspace.
 
+use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 use thiserror::Error;
 
 use copperdb_topology::{
@@ -19,15 +21,44 @@ pub enum SearchError {
     IndexNotReady,
     #[error("document not found: {0}")]
     NotFound(String),
+    #[error("topology error: {0}")]
+    Topology(String),
+    #[error("transport error: {0}")]
+    Transport(String),
 }
 
 /// A search result with relevance score.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SearchResult {
     pub id: String,
     pub score: f32,
     pub label: String,
     pub snippet: Option<String>,
+}
+
+pub fn merge_distributed_results(
+    shard_results: Vec<Vec<SearchResult>>,
+    limit: usize,
+) -> Vec<SearchResult> {
+    let mut best_by_id: HashMap<String, SearchResult> = HashMap::new();
+    for result in shard_results.into_iter().flatten() {
+        let replace = best_by_id
+            .get(&result.id)
+            .map(|existing| result.score > existing.score)
+            .unwrap_or(true);
+        if replace {
+            best_by_id.insert(result.id.clone(), result);
+        }
+    }
+    let mut merged = best_by_id.into_values().collect::<Vec<_>>();
+    merged.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then(left.id.cmp(&right.id))
+    });
+    merged.truncate(limit);
+    merged
 }
 
 /// Search query types.
@@ -74,6 +105,132 @@ pub struct SearchIndex {
 #[derive(Debug, Clone, Default)]
 pub struct DistributedSearchRouter {
     topology: TopologyRegistry,
+}
+
+#[async_trait]
+pub trait SearchTransport: Send + Sync {
+    async fn search_node(
+        &self,
+        node_id: &str,
+        query: &SearchQuery,
+    ) -> Result<Vec<SearchResult>, SearchError>;
+}
+
+#[derive(Default)]
+pub struct InMemorySearchTransport {
+    node_results: RwLock<HashMap<String, Vec<SearchResult>>>,
+}
+
+impl InMemorySearchTransport {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register_results(&self, node_id: impl Into<String>, results: Vec<SearchResult>) {
+        self.node_results
+            .write()
+            .unwrap()
+            .insert(node_id.into(), results);
+    }
+}
+
+#[async_trait]
+impl SearchTransport for InMemorySearchTransport {
+    async fn search_node(
+        &self,
+        node_id: &str,
+        _query: &SearchQuery,
+    ) -> Result<Vec<SearchResult>, SearchError> {
+        self.node_results
+            .read()
+            .unwrap()
+            .get(node_id)
+            .cloned()
+            .ok_or_else(|| SearchError::Transport(format!("unknown search node {node_id}")))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DistributedSearchOutcome {
+    pub plan: DistributedSearchPlan,
+    pub responded_by: Vec<String>,
+    pub failed_nodes: Vec<String>,
+    pub results: Vec<SearchResult>,
+}
+
+pub struct DistributedSearchExecutor {
+    router: DistributedSearchRouter,
+    transport: Arc<dyn SearchTransport>,
+}
+
+impl DistributedSearchExecutor {
+    pub fn new(router: DistributedSearchRouter, transport: Arc<dyn SearchTransport>) -> Self {
+        Self { router, transport }
+    }
+
+    pub fn router(&self) -> &DistributedSearchRouter {
+        &self.router
+    }
+
+    pub async fn search(
+        &self,
+        placement: &PlacementKey,
+        query: SearchQuery,
+        limit: usize,
+    ) -> Result<DistributedSearchOutcome, SearchError> {
+        let plan = self
+            .router
+            .plan(placement)
+            .map_err(|error| SearchError::Topology(error.to_string()))?;
+        self.execute_plan(plan, query, limit).await
+    }
+
+    pub async fn search_low_latency(
+        &self,
+        placement: &PlacementKey,
+        query: SearchQuery,
+        request_region: impl Into<String>,
+        max_fanout: usize,
+        limit: usize,
+    ) -> Result<DistributedSearchOutcome, SearchError> {
+        let plan = self
+            .router
+            .plan_low_latency(placement, request_region, max_fanout)
+            .map_err(|error| SearchError::Topology(error.to_string()))?;
+        self.execute_plan(plan, query, limit).await
+    }
+
+    async fn execute_plan(
+        &self,
+        plan: DistributedSearchPlan,
+        query: SearchQuery,
+        limit: usize,
+    ) -> Result<DistributedSearchOutcome, SearchError> {
+        let mut responded_by = Vec::new();
+        let mut failed_nodes = Vec::new();
+        let mut shard_results = Vec::new();
+        for peer in &plan.fanout {
+            match self.transport.search_node(&peer.node_id, &query).await {
+                Ok(results) => {
+                    responded_by.push(peer.node_id.clone());
+                    shard_results.push(results);
+                }
+                Err(_) => failed_nodes.push(peer.node_id.clone()),
+            }
+        }
+        if responded_by.is_empty() {
+            return Err(SearchError::Transport(
+                "distributed search returned no shard responses".into(),
+            ));
+        }
+        let results = merge_distributed_results(shard_results, limit);
+        Ok(DistributedSearchOutcome {
+            plan,
+            responded_by,
+            failed_nodes,
+            results,
+        })
+    }
 }
 
 impl DistributedSearchRouter {
@@ -395,5 +552,114 @@ mod tests {
             .unwrap();
         assert_eq!(plan.parallelism, 2);
         assert_eq!(plan.fanout[0].node_id, "search-local");
+    }
+
+    #[test]
+    fn distributed_result_merge_is_score_ordered_and_stable() {
+        let merged = merge_distributed_results(
+            vec![
+                vec![
+                    SearchResult {
+                        id: "b".into(),
+                        score: 0.9,
+                        label: "Node".into(),
+                        snippet: None,
+                    },
+                    SearchResult {
+                        id: "a".into(),
+                        score: 0.7,
+                        label: "Node".into(),
+                        snippet: None,
+                    },
+                ],
+                vec![
+                    SearchResult {
+                        id: "a".into(),
+                        score: 0.95,
+                        label: "Node".into(),
+                        snippet: Some("fresh".into()),
+                    },
+                    SearchResult {
+                        id: "c".into(),
+                        score: 0.9,
+                        label: "Node".into(),
+                        snippet: None,
+                    },
+                ],
+            ],
+            3,
+        );
+
+        assert_eq!(merged[0].id, "a");
+        assert_eq!(merged[0].snippet, Some("fresh".into()));
+        assert_eq!(merged[1].id, "b");
+        assert_eq!(merged[2].id, "c");
+    }
+
+    #[tokio::test]
+    async fn distributed_executor_fans_out_and_merges_results() {
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let placement = PlacementKey::default_for_database("neo4j");
+        let mut topology = TopologyRegistry::new();
+        for node_id in ["search-a", "search-b", "search-c"] {
+            topology
+                .register_peer(
+                    MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Search),
+                )
+                .unwrap();
+        }
+        topology
+            .register_placement(PlacementRecord {
+                key: placement.clone(),
+                primary_node: "search-a".into(),
+                replica_nodes: vec![],
+                search_nodes: vec!["search-a".into(), "search-b".into(), "search-c".into()],
+                hyperscaler_profile: None,
+                min_write_replicas: 0,
+                search_fanout: 3,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemorySearchTransport::new());
+        transport.register_results(
+            "search-a",
+            vec![SearchResult {
+                id: "node-1".into(),
+                score: 0.82,
+                label: "Node".into(),
+                snippet: None,
+            }],
+        );
+        transport.register_results(
+            "search-b",
+            vec![SearchResult {
+                id: "node-2".into(),
+                score: 0.91,
+                label: "Node".into(),
+                snippet: None,
+            }],
+        );
+
+        let executor =
+            DistributedSearchExecutor::new(DistributedSearchRouter::new(topology), transport);
+        let outcome = executor
+            .search(
+                &placement,
+                SearchQuery::FullText {
+                    query: "graph".into(),
+                    fields: vec!["body".into()],
+                    limit: 10,
+                },
+                10,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.responded_by, vec!["search-a", "search-b"]);
+        assert_eq!(outcome.failed_nodes, vec!["search-c"]);
+        assert_eq!(outcome.results[0].id, "node-2");
+        assert_eq!(outcome.results[1].id, "node-1");
     }
 }

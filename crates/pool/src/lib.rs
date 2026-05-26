@@ -6,7 +6,7 @@
 
 use parking_lot::Mutex;
 use serde_json::Value;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::OnceLock;
 
 pub const DEFAULT_MAX_SIZE: usize = 1000;
@@ -84,6 +84,7 @@ impl PooledStringBuilder {
 struct PoolState {
     config: PoolConfig,
     row_slices: BoundedPool<Vec<Vec<Value>>>,
+    binding_row_slices: BoundedPool<Vec<HashMap<String, Value>>>,
     node_slices: BoundedPool<Vec<PooledNode>>,
     byte_buffers: BoundedPool<Vec<u8>>,
     string_builders: BoundedPool<PooledStringBuilder>,
@@ -134,6 +135,7 @@ pub fn configure(config: PoolConfig) {
         max_size: config.max_size.max(1),
     };
     state.row_slices.clear();
+    state.binding_row_slices.clear();
     state.node_slices.clear();
     state.byte_buffers.clear();
     state.string_builders.clear();
@@ -171,6 +173,29 @@ pub fn put_row_slice(mut rows: Vec<Vec<Value>>) {
     rows.clear();
     let max_size = state.config.max_size;
     state.row_slices.put(rows, max_size);
+}
+
+pub fn get_binding_row_slice() -> Vec<HashMap<String, Value>> {
+    let mut state = state().lock();
+    if !state.config.enabled {
+        return Vec::with_capacity(DEFAULT_ROW_CAPACITY);
+    }
+    state
+        .binding_row_slices
+        .get_or_else(|| Vec::with_capacity(DEFAULT_ROW_CAPACITY))
+}
+
+pub fn put_binding_row_slice(mut rows: Vec<HashMap<String, Value>>) {
+    let mut state = state().lock();
+    if !state.config.enabled || rows.capacity() > state.config.max_size {
+        return;
+    }
+    for row in &mut rows {
+        row.clear();
+    }
+    rows.clear();
+    let max_size = state.config.max_size;
+    state.binding_row_slices.put(rows, max_size);
 }
 
 pub fn get_node_slice() -> Vec<PooledNode> {
@@ -339,6 +364,21 @@ mod tests {
         assert!(rows.is_empty());
         assert!(rows.capacity() >= DEFAULT_ROW_CAPACITY);
         put_row_slice(rows);
+    }
+
+    #[test]
+    fn binding_row_slice_round_trips_empty_and_cleared() {
+        let _guard = test_guard();
+        reset_pool();
+        let mut rows = get_binding_row_slice();
+        assert!(rows.is_empty());
+        rows.push(HashMap::from([("n".into(), Value::String("node".into()))]));
+        put_binding_row_slice(rows);
+
+        let rows = get_binding_row_slice();
+        assert!(rows.is_empty());
+        assert!(rows.capacity() >= DEFAULT_ROW_CAPACITY);
+        put_binding_row_slice(rows);
     }
 
     #[test]

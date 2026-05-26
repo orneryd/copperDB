@@ -16,3 +16,6 @@ tracing.workspace = true
 uuid.workspace = true
 copperdb-storage = { workspace = true }
 copperdb-util = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true

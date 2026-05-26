@@ -40,12 +40,24 @@
 
 use copperdb_audit::{AuditConfig, AuditLog, Event, EventType};
 use copperdb_cache::QueryCache;
-use copperdb_cypher::{Parser, QueryType};
+use copperdb_compliance::{ComplianceManager, ComplianceReporter};
+use copperdb_cypher::{Clause, Expression, Parser, Pattern, QueryType};
 use copperdb_eval::{EvalEngine, QueryStats};
+use copperdb_kms::{new_provider, ProviderFactoryConfig};
+use copperdb_replication::{
+    CassandraCoordinator, Command, DistributedReadOutcome, DistributedWriteOutcome,
+    DurableRepairQueue, RepairReplayReport, RepairWorkerConfig, ReplicaTransport, ReplicationError,
+    ScheduledRepairWorker,
+};
 use copperdb_storage::StorageEngine;
+use copperdb_topology::{
+    ConsistencyLevel, DistributedReadPlan, DistributedWriteMode, DistributedWritePlan,
+    PlacementKey, TopologyRegistry,
+};
 use copperdb_txsession::TransactionManager;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
@@ -64,6 +76,10 @@ pub enum CopperDbError {
     Init(String),
     #[error("audit error: {0}")]
     Audit(String),
+    #[error("compliance error: {0}")]
+    Compliance(String),
+    #[error("replication error: {0}")]
+    Replication(String),
 }
 
 impl From<copperdb_storage::StorageError> for CopperDbError {
@@ -90,6 +106,18 @@ impl From<copperdb_audit::AuditError> for CopperDbError {
     }
 }
 
+impl From<copperdb_compliance::ComplianceError> for CopperDbError {
+    fn from(e: copperdb_compliance::ComplianceError) -> Self {
+        CopperDbError::Compliance(e.to_string())
+    }
+}
+
+impl From<ReplicationError> for CopperDbError {
+    fn from(e: ReplicationError) -> Self {
+        CopperDbError::Replication(e.to_string())
+    }
+}
+
 // ─── Legacy error (kept for existing tests) ──────────────────────────────────
 
 #[derive(Debug, Error)]
@@ -113,6 +141,9 @@ pub struct DatabaseConfig {
     pub default_database: String,
     pub auth_enabled: bool,
     pub log_queries: bool,
+    pub storage_encryption_master_key: Option<Vec<u8>>,
+    pub storage_encryption_key_uri: String,
+    pub distributed_repair_queue_dir: Option<String>,
 }
 
 impl Default for DatabaseConfig {
@@ -123,6 +154,9 @@ impl Default for DatabaseConfig {
             default_database: "copperdb".to_string(),
             auth_enabled: false,
             log_queries: false,
+            storage_encryption_master_key: None,
+            storage_encryption_key_uri: "kms://local/storage".into(),
+            distributed_repair_queue_dir: None,
         }
     }
 }
@@ -134,6 +168,13 @@ pub struct QueryResult {
     pub columns: Vec<String>,
     pub rows: Vec<HashMap<String, Value>>,
     pub stats: ResultStats,
+}
+
+#[derive(Debug)]
+pub struct DistributedQueryResult {
+    pub result: QueryResult,
+    pub write_outcome: Option<DistributedWriteOutcome>,
+    pub read_outcome: Option<DistributedReadOutcome>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -169,6 +210,7 @@ pub struct CopperDb {
     tx_manager: Arc<TransactionManager>,
     query_cache: Arc<QueryCache<copperdb_cypher::Query>>,
     audit_log: Arc<AuditLog>,
+    compliance: Arc<ComplianceManager>,
 }
 
 impl CopperDb {
@@ -180,10 +222,7 @@ impl CopperDb {
 
     /// Create a persistent database at the given path.
     pub fn open(config: DatabaseConfig) -> Result<Self, CopperDbError> {
-        let storage = Arc::new(
-            StorageEngine::open(&config.data_dir)
-                .map_err(|e| CopperDbError::Storage(e.to_string()))?,
-        );
+        let storage = Arc::new(open_storage(&config)?);
         Self::from_storage(storage, config)
     }
 
@@ -193,6 +232,7 @@ impl CopperDb {
     ) -> Result<Self, CopperDbError> {
         let eval = EvalEngine::new(Arc::clone(&storage));
         let audit_log = Arc::new(AuditLog::new(Arc::clone(&storage), AuditConfig::default())?);
+        let compliance = Arc::new(ComplianceManager::new(Arc::clone(&storage)));
         Ok(Self {
             config,
             storage,
@@ -203,14 +243,25 @@ impl CopperDb {
                 Some(std::time::Duration::from_secs(300)),
             )),
             audit_log,
+            compliance,
         })
     }
 
-    /// Execute a Cypher query string, returning rows and stats.
+    /// Execute a Cypher query string as an embedded admin caller.
     pub fn execute(
         &self,
         cypher: &str,
         params: HashMap<String, Value>,
+    ) -> Result<QueryResult, CopperDbError> {
+        self.execute_as(cypher, params, &["admin".to_string()])
+    }
+
+    /// Execute a Cypher query as a caller with the provided normalized role names.
+    pub fn execute_as(
+        &self,
+        cypher: &str,
+        params: HashMap<String, Value>,
+        roles: &[String],
     ) -> Result<QueryResult, CopperDbError> {
         let start = Instant::now();
 
@@ -218,15 +269,8 @@ impl CopperDb {
             tracing::info!(query = cypher, "executing query");
         }
 
-        // Hold an async-flush guard for the duration of this implicit transaction.
-        //
-        // Mirrors NornicDB v1.0.42's `asyncEngine.HoldFlush()` pattern (commit
-        // `82ec5b5`): preventing background flushes from advancing MVCC heads
-        // while the query is executing.  For our sled backend the guard is a
-        // no-op, but the pattern is correct and ready for future extension.
         let _flush_guard = self.storage.hold_flush();
 
-        // Check cache — use the same FNV-1a hasher as QueryCache internally
         let hash = QueryCache::<copperdb_cypher::Query>::key(cypher, &[]);
         let parsed = if let Some(cached) = self.query_cache.get(hash) {
             cached
@@ -249,6 +293,18 @@ impl CopperDb {
             self.query_cache.put(hash, q.clone());
             q
         };
+
+        if let Err(err) = self.enforce_compliance(&parsed, roles) {
+            self.record_query_audit(
+                cypher,
+                query_action(&parsed.query_type),
+                false,
+                Some(err.to_string()),
+                Some(hash),
+                start.elapsed().as_millis() as u64,
+            )?;
+            return Err(err.into());
+        }
 
         let eval_result = match self.eval.execute(&parsed, &params) {
             Ok(result) => result,
@@ -284,6 +340,54 @@ impl CopperDb {
         })
     }
 
+    pub async fn execute_distributed_as(
+        &self,
+        cypher: &str,
+        params: HashMap<String, Value>,
+        roles: &[String],
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+        transport: Arc<dyn ReplicaTransport>,
+    ) -> Result<DistributedQueryResult, CopperDbError> {
+        let parsed = Parser::new().parse(cypher)?;
+        self.enforce_compliance(&parsed, roles)?;
+
+        let coordinator = self.build_cassandra_coordinator(transport)?;
+        let mut write_outcome = None;
+        let mut read_outcome = None;
+        if is_mutating_query(&parsed.query_type) {
+            write_outcome = Some(
+                coordinator
+                    .write(
+                        placement,
+                        consistency,
+                        Command::CypherMutation {
+                            database: self.config.default_database.clone(),
+                            query: cypher.to_string(),
+                            params: Value::Object(params.clone().into_iter().collect()),
+                        },
+                        request_region,
+                    )
+                    .await?,
+            );
+        } else {
+            let plan = self.plan_distributed_read(placement, consistency, request_region)?;
+            read_outcome = Some(DistributedReadOutcome {
+                plan,
+                responded_by: Vec::new(),
+                failed_replicas: Vec::new(),
+                value: None,
+            });
+        }
+
+        Ok(DistributedQueryResult {
+            result: self.execute_as(cypher, params, roles)?,
+            write_outcome,
+            read_outcome,
+        })
+    }
+
     /// Flush all pending writes to disk.
     pub fn flush(&self) -> Result<(), CopperDbError> {
         self.storage.flush()?;
@@ -308,6 +412,117 @@ impl CopperDb {
     /// Access the durable audit log.
     pub fn audit_log(&self) -> &Arc<AuditLog> {
         &self.audit_log
+    }
+
+    /// Access the durable compliance policy manager.
+    pub fn compliance_manager(&self) -> &Arc<ComplianceManager> {
+        &self.compliance
+    }
+
+    pub fn load_distributed_topology(&self) -> Result<TopologyRegistry, CopperDbError> {
+        self.storage.load_topology_registry().map_err(Into::into)
+    }
+
+    pub fn plan_distributed_write(
+        &self,
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+    ) -> Result<DistributedWritePlan, CopperDbError> {
+        self.load_distributed_topology()?
+            .plan_write_with_consistency(
+                placement,
+                DistributedWriteMode::DynamoQuorum,
+                consistency,
+                request_region,
+            )
+            .map_err(|error| CopperDbError::Replication(error.to_string()))
+    }
+
+    pub fn plan_distributed_read(
+        &self,
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+    ) -> Result<DistributedReadPlan, CopperDbError> {
+        self.load_distributed_topology()?
+            .plan_read(placement, consistency, request_region)
+            .map_err(|error| CopperDbError::Replication(error.to_string()))
+    }
+
+    pub fn open_repair_queue(&self) -> Result<Arc<DurableRepairQueue>, CopperDbError> {
+        Ok(Arc::new(DurableRepairQueue::open(
+            self.repair_queue_path(),
+        )?))
+    }
+
+    pub fn build_cassandra_coordinator(
+        &self,
+        transport: Arc<dyn ReplicaTransport>,
+    ) -> Result<CassandraCoordinator, CopperDbError> {
+        Ok(CassandraCoordinator::with_repair_queue(
+            self.load_distributed_topology()?,
+            transport,
+            self.open_repair_queue()?,
+        ))
+    }
+
+    pub async fn replay_repairs(
+        &self,
+        transport: Arc<dyn ReplicaTransport>,
+        max_records: usize,
+    ) -> Result<RepairReplayReport, CopperDbError> {
+        self.open_repair_queue()?
+            .replay_batch(transport, max_records)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub fn build_repair_worker(
+        &self,
+        transport: Arc<dyn ReplicaTransport>,
+        config: RepairWorkerConfig,
+    ) -> Result<ScheduledRepairWorker, CopperDbError> {
+        Ok(ScheduledRepairWorker::new(
+            self.open_repair_queue()?,
+            transport,
+            config,
+        ))
+    }
+
+    /// Build a compliance reporter over the durable audit trail.
+    pub fn compliance_reporter(&self) -> ComplianceReporter {
+        ComplianceReporter::new(Arc::clone(&self.audit_log))
+    }
+
+    fn repair_queue_path(&self) -> PathBuf {
+        self.config
+            .distributed_repair_queue_dir
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(&self.config.data_dir).join("replication-repair"))
+    }
+
+    fn enforce_compliance(
+        &self,
+        query: &copperdb_cypher::Query,
+        roles: &[String],
+    ) -> Result<(), copperdb_compliance::ComplianceError> {
+        let mut labels = Vec::new();
+        let mut properties = Vec::new();
+        collect_compliance_terms(query, &mut labels, &mut properties);
+        labels.sort();
+        labels.dedup();
+        properties.sort();
+        properties.dedup();
+
+        for label in labels {
+            self.compliance.check_label_access(&label, roles)?;
+        }
+        for property in properties {
+            self.compliance.check_property_access(&property, roles)?;
+        }
+        Ok(())
     }
 
     fn record_query_audit(
@@ -345,6 +560,29 @@ impl CopperDb {
     }
 }
 
+fn open_storage(config: &DatabaseConfig) -> Result<StorageEngine, CopperDbError> {
+    match &config.storage_encryption_master_key {
+        Some(master_key) => {
+            let provider = new_provider(ProviderFactoryConfig {
+                provider: "local".into(),
+                key_uri: config.storage_encryption_key_uri.clone(),
+                master_key: master_key.clone(),
+                audit_signing_key: None,
+            })
+            .map_err(|err| CopperDbError::Init(err.to_string()))?;
+            StorageEngine::open_encrypted(
+                &config.data_dir,
+                provider,
+                config.storage_encryption_key_uri.clone(),
+            )
+            .map_err(|e| CopperDbError::Storage(e.to_string()))
+        }
+        None => {
+            StorageEngine::open(&config.data_dir).map_err(|e| CopperDbError::Storage(e.to_string()))
+        }
+    }
+}
+
 fn query_action(query_type: &QueryType) -> &'static str {
     match query_type {
         QueryType::Match | QueryType::Return | QueryType::With => "READ",
@@ -352,6 +590,13 @@ fn query_action(query_type: &QueryType) -> &'static str {
         QueryType::Merge | QueryType::Set | QueryType::Ddl => "UPDATE",
         QueryType::Delete => "DELETE",
     }
+}
+
+fn is_mutating_query(query_type: &QueryType) -> bool {
+    matches!(
+        query_type,
+        QueryType::Create | QueryType::Merge | QueryType::Set | QueryType::Delete | QueryType::Ddl
+    )
 }
 
 fn audit_event_type(action: &str) -> EventType {
@@ -382,6 +627,81 @@ impl CopperDbServer {
     pub async fn shutdown(&self) -> Result<(), CopperDbServerError> {
         tracing::info!("Shutting down copperdb");
         Ok(())
+    }
+}
+
+fn collect_compliance_terms(
+    query: &copperdb_cypher::Query,
+    labels: &mut Vec<String>,
+    properties: &mut Vec<String>,
+) {
+    for clause in &query.clauses {
+        match clause {
+            Clause::Match(clause) | Clause::OptionalMatch(clause) => {
+                collect_pattern_terms(&clause.pattern, labels, properties)
+            }
+            Clause::Create(clause) => collect_pattern_terms(&clause.pattern, labels, properties),
+            Clause::Merge(clause) => collect_pattern_terms(&clause.pattern, labels, properties),
+            Clause::Where(clause) => collect_expression_properties(&clause.expression, properties),
+            Clause::Set(clause) => {
+                for item in &clause.items {
+                    properties.push(item.property.clone());
+                    collect_expression_properties(&item.value, properties);
+                }
+            }
+            Clause::Return(clause) => {
+                for item in &clause.items {
+                    collect_expression_properties(&item.expression, properties);
+                }
+                for item in &clause.order_by {
+                    collect_expression_properties(&item.expression, properties);
+                }
+            }
+            Clause::With(clause) => {
+                for item in &clause.items {
+                    collect_expression_properties(&item.expression, properties);
+                }
+                if let Some(where_clause) = &clause.where_clause {
+                    collect_expression_properties(&where_clause.expression, properties);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_pattern_terms(
+    pattern: &Pattern,
+    labels: &mut Vec<String>,
+    properties: &mut Vec<String>,
+) {
+    for node in &pattern.nodes {
+        labels.extend(node.labels.iter().cloned());
+        properties.extend(node.properties.keys().cloned());
+    }
+    for edge in &pattern.edges {
+        properties.extend(edge.properties.keys().cloned());
+    }
+}
+
+fn collect_expression_properties(expression: &Expression, properties: &mut Vec<String>) {
+    match expression {
+        Expression::PropertyAccess { property, .. } => properties.push(property.clone()),
+        Expression::Comparison { left, right, .. }
+        | Expression::And(left, right)
+        | Expression::Or(left, right) => {
+            collect_expression_properties(left, properties);
+            collect_expression_properties(right, properties);
+        }
+        Expression::FunctionCall { args, .. } => {
+            for arg in args {
+                collect_expression_properties(arg, properties);
+            }
+        }
+        Expression::Not(inner) | Expression::IsNull(inner) | Expression::IsNotNull(inner) => {
+            collect_expression_properties(inner, properties);
+        }
+        Expression::Literal(_) | Expression::Parameter(_) | Expression::Variable(_) => {}
     }
 }
 
@@ -510,10 +830,476 @@ mod tests {
     }
 
     #[test]
+    fn engine_enforces_durable_compliance_label_and_property_policies() {
+        use copperdb_compliance::{ComplianceControl, CompliancePolicy};
+
+        let db = CopperDb::open_temporary().unwrap();
+        db.compliance_manager()
+            .add_policy(CompliancePolicy::new(
+                "patient-label",
+                "Patient Label",
+                ComplianceControl::RestrictLabel {
+                    label: "Patient".into(),
+                    allowed_roles: vec!["doctor".into()],
+                },
+            ))
+            .unwrap();
+        db.compliance_manager()
+            .add_policy(CompliancePolicy::new(
+                "mask-ssn",
+                "Mask SSN",
+                ComplianceControl::MaskProperty {
+                    property: "ssn".into(),
+                    allowed_roles: vec!["doctor".into()],
+                },
+            ))
+            .unwrap();
+
+        let reader_roles = vec!["reader".to_string()];
+        let err = db
+            .execute_as(
+                "CREATE (n:Patient {name: 'Alice'})",
+                Default::default(),
+                &reader_roles,
+            )
+            .unwrap_err();
+        assert!(matches!(err, CopperDbError::Compliance(_)));
+
+        let doctor_roles = vec!["doctor".to_string()];
+        db.execute_as(
+            "CREATE (n:Patient {name: 'Alice', ssn: '111'})",
+            Default::default(),
+            &doctor_roles,
+        )
+        .unwrap();
+        let err = db
+            .execute_as(
+                "MATCH (n:Patient) WHERE n.ssn = '111' RETURN n",
+                Default::default(),
+                &reader_roles,
+            )
+            .unwrap_err();
+        assert!(matches!(err, CopperDbError::Compliance(_)));
+    }
+
+    #[test]
+    fn engine_exports_compliance_evidence_from_audit_log() {
+        let db = CopperDb::open_temporary().unwrap();
+        db.execute("CREATE (n:Evidence {v: 1})", Default::default())
+            .unwrap();
+        let report = db
+            .compliance_reporter()
+            .export_soc2_evidence(copperdb_compliance::ReportWindow::all_time())
+            .unwrap();
+        assert_eq!(report.summary.total, 1);
+        assert_eq!(report.summary.by_event_type.get("DATA_CREATE"), Some(&1));
+    }
+
+    #[test]
     fn test_default_config() {
         let config = DatabaseConfig::default();
         assert!(!config.auth_enabled);
         assert_eq!(config.max_connections, 100);
+        assert!(config.storage_encryption_master_key.is_none());
+    }
+
+    #[test]
+    fn persistent_engine_can_open_with_encrypted_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = DatabaseConfig {
+            data_dir: dir.path().to_string_lossy().into_owned(),
+            storage_encryption_master_key: Some(vec![0x42; 32]),
+            storage_encryption_key_uri: "kms://local/storage-test".into(),
+            ..Default::default()
+        };
+
+        {
+            let db = CopperDb::open(config.clone()).unwrap();
+            assert!(db.storage().is_encrypted());
+            db.execute("CREATE (n:Encrypted {v: 1})", Default::default())
+                .unwrap();
+            db.flush().unwrap();
+        }
+
+        let reopened = CopperDb::open(config).unwrap();
+        let result = reopened
+            .execute("MATCH (n:Encrypted) RETURN n", Default::default())
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn engine_plans_distributed_reads_and_writes_from_storage_topology() {
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let write_plan = db
+            .plan_distributed_write(&placement, ConsistencyLevel::Quorum, None)
+            .unwrap();
+        assert_eq!(write_plan.required_acks, 2);
+        assert_eq!(write_plan.replicas.len(), 3);
+
+        let read_plan = db
+            .plan_distributed_read(&placement, ConsistencyLevel::Quorum, None)
+            .unwrap();
+        assert_eq!(read_plan.required_responses, 2);
+        assert_eq!(read_plan.replicas.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn engine_builds_cassandra_coordinator_with_durable_repair_queue() {
+        use copperdb_replication::{Command, InMemoryReplicaTransport, MemoryStorage, RepairKind};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            distributed_repair_queue_dir: Some(
+                dir.path().join("repair").to_string_lossy().into_owned(),
+            ),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(MemoryStorage::new()));
+        transport.register("node-2", Arc::new(MemoryStorage::new()));
+        let coordinator = db.build_cassandra_coordinator(transport).unwrap();
+
+        let outcome = coordinator
+            .write(
+                &placement,
+                ConsistencyLevel::Quorum,
+                Command::Put {
+                    key: b"engine".to_vec(),
+                    value: b"handoff".to_vec(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.failed_replicas, vec!["node-3"]);
+
+        let pending = db.open_repair_queue().unwrap().pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].kind, RepairKind::HintedHandoff);
+        assert_eq!(pending[0].target_node, "node-3");
+    }
+
+    #[tokio::test]
+    async fn engine_replays_durable_repairs_through_replica_transport() {
+        use copperdb_replication::{Command, InMemoryReplicaTransport, MemoryStorage};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            distributed_repair_queue_dir: Some(
+                dir.path().join("repair").to_string_lossy().into_owned(),
+            ),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let first_transport = Arc::new(InMemoryReplicaTransport::new());
+        first_transport.register("node-1", Arc::new(MemoryStorage::new()));
+        first_transport.register("node-2", Arc::new(MemoryStorage::new()));
+        db.build_cassandra_coordinator(first_transport)
+            .unwrap()
+            .write(
+                &placement,
+                ConsistencyLevel::Quorum,
+                Command::Put {
+                    key: b"repair-replay".to_vec(),
+                    value: b"through-engine".to_vec(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let replay_transport = Arc::new(InMemoryReplicaTransport::new());
+        let repaired_storage = Arc::new(MemoryStorage::new());
+        replay_transport.register("node-3", repaired_storage.clone());
+        let report = db.replay_repairs(replay_transport, 10).await.unwrap();
+
+        assert_eq!(report.attempted, 1);
+        assert_eq!(report.completed, 1);
+        assert!(db
+            .open_repair_queue()
+            .unwrap()
+            .pending()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            repaired_storage.get(b"repair-replay"),
+            Some(b"through-engine".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_builds_scheduled_repair_worker() {
+        use copperdb_replication::{
+            Command, InMemoryReplicaTransport, MemoryStorage, RepairWorkerConfig,
+        };
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            distributed_repair_queue_dir: Some(
+                dir.path().join("repair").to_string_lossy().into_owned(),
+            ),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let first_transport = Arc::new(InMemoryReplicaTransport::new());
+        first_transport.register("node-1", Arc::new(MemoryStorage::new()));
+        first_transport.register("node-2", Arc::new(MemoryStorage::new()));
+        db.build_cassandra_coordinator(first_transport)
+            .unwrap()
+            .write(
+                &placement,
+                ConsistencyLevel::Quorum,
+                Command::Put {
+                    key: b"scheduled-engine-repair".to_vec(),
+                    value: b"done".to_vec(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+
+        let replay_transport = Arc::new(InMemoryReplicaTransport::new());
+        let repaired_storage = Arc::new(MemoryStorage::new());
+        replay_transport.register("node-3", repaired_storage.clone());
+        let worker = db
+            .build_repair_worker(
+                replay_transport,
+                RepairWorkerConfig {
+                    interval: Duration::from_millis(10),
+                    max_records_per_tick: 10,
+                },
+            )
+            .unwrap();
+
+        let report = worker.run_once().await.unwrap();
+
+        assert_eq!(report.attempted, 1);
+        assert_eq!(report.completed, 1);
+        assert_eq!(
+            repaired_storage.get(b"scheduled-engine-repair"),
+            Some(b"done".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_routes_mutating_cypher_through_cassandra_coordinator() {
+        use copperdb_replication::{InMemoryReplicaTransport, MemoryStorage};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            distributed_repair_queue_dir: Some(
+                dir.path().join("repair").to_string_lossy().into_owned(),
+            ),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        let replica1 = Arc::new(MemoryStorage::new());
+        let replica2 = Arc::new(MemoryStorage::new());
+        transport.register("node-1", replica1.clone());
+        transport.register("node-2", replica2.clone());
+        let outcome = db
+            .execute_distributed_as(
+                "CREATE (n:Distributed {v: 1})",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::Quorum,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        let write = outcome.write_outcome.unwrap();
+        assert_eq!(write.acknowledged_by, vec!["node-1", "node-2"]);
+        assert_eq!(write.failed_replicas, vec!["node-3"]);
+        assert_eq!(replica1.cypher_log().len(), 1);
+        assert_eq!(replica2.cypher_log().len(), 1);
+        assert_eq!(outcome.result.stats.nodes_created, 1);
+    }
+
+    #[tokio::test]
+    async fn engine_routes_read_cypher_through_distributed_read_plan() {
+        use copperdb_replication::InMemoryReplicaTransport;
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        db.execute("CREATE (n:DistributedRead {v: 1})", HashMap::new())
+            .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH (n:DistributedRead) RETURN n",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::Quorum,
+                None,
+                Arc::new(InMemoryReplicaTransport::new()),
+            )
+            .await
+            .unwrap();
+
+        assert!(outcome.write_outcome.is_none());
+        let read = outcome.read_outcome.unwrap();
+        assert_eq!(read.plan.required_responses, 2);
+        assert_eq!(read.plan.replicas.len(), 3);
+        assert_eq!(outcome.result.rows.len(), 1);
     }
 
     #[test]

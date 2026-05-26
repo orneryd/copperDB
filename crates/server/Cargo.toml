@@ -13,6 +13,7 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+futures.workspace = true
 axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true
@@ -29,8 +30,14 @@ copperdb-engine = { workspace = true }
 copperdb-envutil = { workspace = true }
 copperdb-graphql = { workspace = true }
 copperdb-multidb = { workspace = true }
+copperdb-replication = { workspace = true }
+copperdb-topology = { workspace = true }
 copperdb-util = { workspace = true }
 copperdb-retention = { workspace = true }
 copperdb-otel = { workspace = true }
 copperdb-security = { workspace = true }
 copperdb-storage = { workspace = true }
+
+[dev-dependencies]
+copperdb-compliance = { workspace = true }
+tempfile.workspace = true

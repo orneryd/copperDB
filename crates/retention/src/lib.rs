@@ -4,9 +4,17 @@
 //! Automatically expires nodes and relationships that exceed their TTL.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 use uuid::Uuid;
+
+use copperdb_storage::{NodeRecord, StorageEngine};
+
+const POLICY_LABEL: &str = "RetentionPolicy";
+const HOLD_LABEL: &str = "RetentionLegalHold";
+const ERASURE_LABEL: &str = "RetentionErasureRequest";
+const PAYLOAD_PROPERTY: &str = "payload";
 
 #[derive(Debug, Error)]
 pub enum RetentionError {
@@ -22,6 +30,20 @@ pub enum RetentionError {
     ErasureNotFound(String),
     #[error("active legal hold prevents erasure for subject: {0}")]
     ActiveLegalHold(String),
+    #[error("serialization error: {0}")]
+    SerializationError(String),
+}
+
+impl From<copperdb_storage::StorageError> for RetentionError {
+    fn from(error: copperdb_storage::StorageError) -> Self {
+        RetentionError::StorageError(error.to_string())
+    }
+}
+
+impl From<serde_json::Error> for RetentionError {
+    fn from(error: serde_json::Error) -> Self {
+        RetentionError::SerializationError(error.to_string())
+    }
 }
 
 /// Units for expressing retention durations.
@@ -208,6 +230,15 @@ pub struct RetentionSweepConfig {
     pub dry_run: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct RetentionSweepReport {
+    pub inspected: usize,
+    pub expired: usize,
+    pub deleted: usize,
+    pub held: usize,
+    pub dry_run: bool,
+}
+
 impl Default for RetentionSweepConfig {
     fn default() -> Self {
         Self {
@@ -218,16 +249,49 @@ impl Default for RetentionSweepConfig {
 }
 
 /// Full-featured retention manager, mirroring NornicDB's `retention.Manager`.
-#[derive(Default)]
 pub struct Manager {
     policies: HashMap<String, Policy>,
     holds: HashMap<String, LegalHold>,
     erasures: HashMap<String, ErasureRequest>,
+    storage_path: Option<PathBuf>,
+}
+
+impl Default for Manager {
+    fn default() -> Self {
+        Self {
+            policies: HashMap::new(),
+            holds: HashMap::new(),
+            erasures: HashMap::new(),
+            storage_path: None,
+        }
+    }
 }
 
 impl Manager {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, RetentionError> {
+        let storage_path = path.as_ref().to_path_buf();
+        let storage = StorageEngine::open(&storage_path)?;
+        let mut manager = Self {
+            storage_path: Some(storage_path),
+            ..Self::default()
+        };
+        for node in storage.get_nodes_by_label(POLICY_LABEL)? {
+            let policy: Policy = payload_from_node(&node)?;
+            manager.policies.insert(policy.id.clone(), policy);
+        }
+        for node in storage.get_nodes_by_label(HOLD_LABEL)? {
+            let hold: LegalHold = payload_from_node(&node)?;
+            manager.holds.insert(hold.id.clone(), hold);
+        }
+        for node in storage.get_nodes_by_label(ERASURE_LABEL)? {
+            let erasure: ErasureRequest = payload_from_node(&node)?;
+            manager.erasures.insert(erasure.id.clone(), erasure);
+        }
+        Ok(manager)
     }
 
     // ── Policy CRUD ──────────────────────────────────────────────────────────
@@ -236,6 +300,7 @@ impl Manager {
         if self.policies.contains_key(&policy.id) {
             return Err(RetentionError::AlreadyExists(policy.id.clone()));
         }
+        self.persist_record(POLICY_LABEL, &policy.id, &policy)?;
         self.policies.insert(policy.id.clone(), policy);
         Ok(())
     }
@@ -252,6 +317,7 @@ impl Manager {
         if !self.policies.contains_key(&policy.id) {
             return Err(RetentionError::PolicyNotFound(policy.id.clone()));
         }
+        self.persist_record(POLICY_LABEL, &policy.id, &policy)?;
         self.policies.insert(policy.id.clone(), policy);
         Ok(())
     }
@@ -260,6 +326,7 @@ impl Manager {
         self.policies
             .remove(id)
             .ok_or_else(|| RetentionError::PolicyNotFound(id.to_string()))?;
+        self.delete_record(POLICY_LABEL, id)?;
         Ok(())
     }
 
@@ -269,7 +336,7 @@ impl Manager {
         &mut self,
         subject_id: impl Into<String>,
         reason: impl Into<String>,
-    ) -> LegalHold {
+    ) -> Result<LegalHold, RetentionError> {
         let hold = LegalHold {
             id: Uuid::new_v4().to_string(),
             subject_id: subject_id.into(),
@@ -278,8 +345,9 @@ impl Manager {
             released_at: None,
             active: true,
         };
+        self.persist_record(HOLD_LABEL, &hold.id, &hold)?;
         self.holds.insert(hold.id.clone(), hold.clone());
-        hold
+        Ok(hold)
     }
 
     pub fn release_legal_hold(&mut self, id: &str) -> Result<(), RetentionError> {
@@ -289,6 +357,8 @@ impl Manager {
             .ok_or_else(|| RetentionError::HoldNotFound(id.to_string()))?;
         hold.active = false;
         hold.released_at = Some(std::time::SystemTime::now());
+        let hold = hold.clone();
+        self.persist_record(HOLD_LABEL, id, &hold)?;
         Ok(())
     }
 
@@ -321,6 +391,7 @@ impl Manager {
             created_at: std::time::SystemTime::now(),
             processed_at: None,
         };
+        self.persist_record(ERASURE_LABEL, &req.id, &req)?;
         self.erasures.insert(req.id.clone(), req.clone());
         Ok(req)
     }
@@ -341,8 +412,124 @@ impl Manager {
             .ok_or_else(|| RetentionError::ErasureNotFound(id.to_string()))?;
         req.status = ErasureStatus::Completed;
         req.processed_at = Some(std::time::SystemTime::now());
+        let req = req.clone();
+        self.persist_record(ERASURE_LABEL, id, &req)?;
         Ok(())
     }
+
+    pub fn sweep(
+        &self,
+        config: RetentionSweepConfig,
+    ) -> Result<RetentionSweepReport, RetentionError> {
+        let Some(path) = &self.storage_path else {
+            return Ok(RetentionSweepReport {
+                dry_run: config.dry_run,
+                ..Default::default()
+            });
+        };
+        let storage = StorageEngine::open(path)?;
+        let mut report = RetentionSweepReport {
+            dry_run: config.dry_run,
+            ..Default::default()
+        };
+
+        for policy in self.policies.values().filter(|policy| policy.enabled) {
+            for node in storage.get_nodes_by_label(&policy.label)? {
+                if report.inspected >= config.batch_size {
+                    return Ok(report);
+                }
+                report.inspected += 1;
+                let created_at_secs = (node.created_at_unix_ms.max(0) as u64) / 1000;
+                if !policy_is_expired(policy, created_at_secs) {
+                    continue;
+                }
+                report.expired += 1;
+                let subject = node_subject_id(&node);
+                if self.has_active_hold(&subject) {
+                    report.held += 1;
+                    continue;
+                }
+                if !config.dry_run {
+                    storage.delete_node_record(&node.id)?;
+                    report.deleted += 1;
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    fn persist_record<T: Serialize>(
+        &self,
+        label: &str,
+        id: &str,
+        value: &T,
+    ) -> Result<(), RetentionError> {
+        let Some(path) = &self.storage_path else {
+            return Ok(());
+        };
+        let storage = StorageEngine::open(path)?;
+        let mut properties = BTreeMap::new();
+        properties.insert("id".into(), serde_json::Value::String(id.into()));
+        properties.insert(PAYLOAD_PROPERTY.into(), serde_json::to_value(value)?);
+        storage.put_node_record(&NodeRecord {
+            id: retention_node_id(label, id),
+            labels: vec![label.into()],
+            properties,
+            created_at_unix_ms: now_unix_ms(),
+            updated_at_unix_ms: now_unix_ms(),
+        })?;
+        Ok(())
+    }
+
+    fn delete_record(&self, label: &str, id: &str) -> Result<(), RetentionError> {
+        let Some(path) = &self.storage_path else {
+            return Ok(());
+        };
+        let storage = StorageEngine::open(path)?;
+        storage.delete_node_record(&retention_node_id(label, id))?;
+        Ok(())
+    }
+}
+
+fn retention_node_id(label: &str, id: &str) -> String {
+    format!("retention:{label}:{id}")
+}
+
+fn payload_from_node<T: for<'de> Deserialize<'de>>(node: &NodeRecord) -> Result<T, RetentionError> {
+    let payload = node
+        .properties
+        .get(PAYLOAD_PROPERTY)
+        .cloned()
+        .ok_or_else(|| RetentionError::SerializationError("missing payload".into()))?;
+    Ok(serde_json::from_value(payload)?)
+}
+
+fn policy_is_expired(policy: &Policy, created_at_secs: u64) -> bool {
+    if !policy.enabled {
+        return false;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    now.saturating_sub(created_at_secs) > policy.max_age_seconds
+}
+
+fn node_subject_id(node: &NodeRecord) -> String {
+    node.properties
+        .get("subject_id")
+        .or_else(|| node.properties.get("user_id"))
+        .or_else(|| node.properties.get("id"))
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| node.id.clone())
+}
+
+fn now_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 /// Returns a vec of 5 sensible default policies (User 2yr, Audit 7yr,
@@ -475,5 +662,127 @@ mod tests {
     fn test_policy_with_cascade() {
         let p = RetentionPolicy::new("Node", 3600).with_cascade();
         assert!(p.cascade_delete);
+    }
+
+    #[test]
+    fn manager_persists_policies_holds_and_erasures() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage_path = dir.path().to_path_buf();
+
+        let erasure_id;
+        let hold_id;
+        {
+            let mut manager = Manager::open(&storage_path).unwrap();
+            manager
+                .add_policy(Policy {
+                    id: "audit-policy".into(),
+                    label: "AuditLog".into(),
+                    max_age_seconds: 7 * 365 * 86_400,
+                    enabled: true,
+                    cascade_delete: false,
+                    description: Some("audit retention".into()),
+                    data_category: Some(DataCategory::AUDIT.into()),
+                })
+                .unwrap();
+            let hold = manager
+                .place_legal_hold("subject-1", "active investigation")
+                .unwrap();
+            hold_id = hold.id.clone();
+            manager.release_legal_hold(&hold_id).unwrap();
+            let erasure = manager
+                .create_erasure_request("subject-1", Some("subject@example.com".into()))
+                .unwrap();
+            erasure_id = erasure.id.clone();
+            manager.process_erasure(&erasure_id).unwrap();
+        }
+
+        let reloaded = Manager::open(&storage_path).unwrap();
+        assert_eq!(reloaded.list_policies().len(), 1);
+        assert_eq!(
+            reloaded.get_policy("audit-policy").unwrap().label,
+            "AuditLog"
+        );
+        assert!(
+            !reloaded
+                .list_legal_holds()
+                .into_iter()
+                .find(|hold| hold.id == hold_id)
+                .unwrap()
+                .active
+        );
+        assert_eq!(
+            reloaded.get_erasure_request(&erasure_id).unwrap().status,
+            ErasureStatus::Completed
+        );
+    }
+
+    #[test]
+    fn sweep_deletes_expired_nodes_and_respects_legal_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage_path = dir.path().to_path_buf();
+        let storage = StorageEngine::open(&storage_path).unwrap();
+        let old_ms = now_unix_ms() - 10_000;
+        storage
+            .put_node_record(&NodeRecord {
+                id: "user:expired".into(),
+                labels: vec!["User".into()],
+                properties: BTreeMap::from([(
+                    "subject_id".into(),
+                    serde_json::Value::String("expired".into()),
+                )]),
+                created_at_unix_ms: old_ms,
+                updated_at_unix_ms: old_ms,
+            })
+            .unwrap();
+        storage
+            .put_node_record(&NodeRecord {
+                id: "user:held".into(),
+                labels: vec!["User".into()],
+                properties: BTreeMap::from([(
+                    "subject_id".into(),
+                    serde_json::Value::String("held".into()),
+                )]),
+                created_at_unix_ms: old_ms,
+                updated_at_unix_ms: old_ms,
+            })
+            .unwrap();
+        drop(storage);
+
+        let mut manager = Manager::open(&storage_path).unwrap();
+        manager
+            .add_policy(Policy {
+                id: "short-user".into(),
+                label: "User".into(),
+                max_age_seconds: 1,
+                enabled: true,
+                cascade_delete: false,
+                description: None,
+                data_category: Some(DataCategory::USER.into()),
+            })
+            .unwrap();
+        manager.place_legal_hold("held", "preserve").unwrap();
+
+        let dry_run = manager
+            .sweep(RetentionSweepConfig {
+                batch_size: 100,
+                dry_run: true,
+            })
+            .unwrap();
+        assert_eq!(dry_run.expired, 2);
+        assert_eq!(dry_run.deleted, 0);
+        assert_eq!(dry_run.held, 1);
+
+        let report = manager
+            .sweep(RetentionSweepConfig {
+                batch_size: 100,
+                dry_run: false,
+            })
+            .unwrap();
+        assert_eq!(report.deleted, 1);
+        assert_eq!(report.held, 1);
+
+        let storage = StorageEngine::open(&storage_path).unwrap();
+        assert!(storage.get_node_record("user:expired").unwrap().is_none());
+        assert!(storage.get_node_record("user:held").unwrap().is_some());
     }
 }

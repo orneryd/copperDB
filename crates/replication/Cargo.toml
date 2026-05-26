@@ -1,6 +1,6 @@
 [package]
 name = "copperdb-replication"
-description = "Raft-based consensus and replication: leader election, log replication, HA standby"
+description = "Cassandra-like distributed write/read coordination, quorum replication, and HA transport seams"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -17,3 +17,6 @@ tokio.workspace = true
 tracing.workspace = true
 copperdb-storage = { workspace = true }
 copperdb-topology = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true

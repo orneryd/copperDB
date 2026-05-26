@@ -6,7 +6,14 @@
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
+
+use copperdb_storage::{NodeRecord, StorageEngine};
+
+const DATABASE_LABEL: &str = "DatabaseCatalogEntry";
+const DATABASE_PAYLOAD_PROPERTY: &str = "payload";
 
 #[derive(Debug, Error)]
 pub enum MultiDbError {
@@ -16,6 +23,22 @@ pub enum MultiDbError {
     NotFound(String),
     #[error("cannot drop system database")]
     CannotDropSystem,
+    #[error("storage error: {0}")]
+    Storage(String),
+    #[error("serialization error: {0}")]
+    Serialization(String),
+}
+
+impl From<copperdb_storage::StorageError> for MultiDbError {
+    fn from(error: copperdb_storage::StorageError) -> Self {
+        MultiDbError::Storage(error.to_string())
+    }
+}
+
+impl From<serde_json::Error> for MultiDbError {
+    fn from(error: serde_json::Error) -> Self {
+        MultiDbError::Serialization(error.to_string())
+    }
 }
 
 /// Database metadata.
@@ -35,35 +58,61 @@ pub enum DatabaseStatus {
 }
 
 /// System-level database manager.
-#[derive(Default)]
 pub struct DatabaseManager {
     databases: DashMap<String, Database>,
+    catalog_path: Option<PathBuf>,
+}
+
+impl Default for DatabaseManager {
+    fn default() -> Self {
+        Self {
+            databases: DashMap::new(),
+            catalog_path: None,
+        }
+    }
 }
 
 impl DatabaseManager {
     pub fn new() -> Self {
         let manager = Self::default();
-        // Create the system database (always exists)
-        manager.databases.insert(
-            "system".into(),
-            Database {
+        manager.seed_builtin_databases();
+        manager
+    }
+
+    pub fn open(catalog_path: impl AsRef<Path>) -> Result<Self, MultiDbError> {
+        let catalog_path = catalog_path.as_ref().to_path_buf();
+        let storage = StorageEngine::open(&catalog_path)?;
+        let manager = Self {
+            databases: DashMap::new(),
+            catalog_path: Some(catalog_path),
+        };
+        for node in storage.get_nodes_by_label(DATABASE_LABEL)? {
+            let database = database_from_node(&node)?;
+            manager.databases.insert(database.name.clone(), database);
+        }
+        drop(storage);
+        manager.seed_builtin_databases();
+        manager.persist_all()?;
+        Ok(manager)
+    }
+
+    fn seed_builtin_databases(&self) {
+        self.databases
+            .entry("system".into())
+            .or_insert_with(|| Database {
                 name: "system".into(),
                 storage_path: "./data/system".into(),
                 status: DatabaseStatus::Online,
                 created_at: 0,
-            },
-        );
-        // Create the default database
-        manager.databases.insert(
-            "default".into(),
-            Database {
+            });
+        self.databases
+            .entry("default".into())
+            .or_insert_with(|| Database {
                 name: "default".into(),
                 storage_path: "./data/default".into(),
                 status: DatabaseStatus::Online,
                 created_at: 0,
-            },
-        );
-        manager
+            });
     }
 
     pub fn create(
@@ -79,15 +128,14 @@ impl DatabaseManager {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        self.databases.insert(
-            name.clone(),
-            Database {
-                name,
-                storage_path: storage_path.into(),
-                status: DatabaseStatus::Online,
-                created_at: now,
-            },
-        );
+        let database = Database {
+            name: name.clone(),
+            storage_path: storage_path.into(),
+            status: DatabaseStatus::Online,
+            created_at: now,
+        };
+        self.persist_database(&database)?;
+        self.databases.insert(name, database);
         Ok(())
     }
 
@@ -102,12 +150,77 @@ impl DatabaseManager {
         self.databases
             .remove(name)
             .ok_or_else(|| MultiDbError::NotFound(name.to_owned()))?;
+        self.delete_database_record(name)?;
         Ok(())
     }
 
     pub fn list(&self) -> Vec<Database> {
         self.databases.iter().map(|e| e.value().clone()).collect()
     }
+
+    fn persist_all(&self) -> Result<(), MultiDbError> {
+        for database in self.list() {
+            self.persist_database(&database)?;
+        }
+        Ok(())
+    }
+
+    fn persist_database(&self, database: &Database) -> Result<(), MultiDbError> {
+        let Some(path) = &self.catalog_path else {
+            return Ok(());
+        };
+        let storage = StorageEngine::open(path)?;
+        storage.put_node_record(&database_to_node(database)?)?;
+        Ok(())
+    }
+
+    fn delete_database_record(&self, name: &str) -> Result<(), MultiDbError> {
+        let Some(path) = &self.catalog_path else {
+            return Ok(());
+        };
+        let storage = StorageEngine::open(path)?;
+        storage.delete_node_record(&database_node_id(name))?;
+        Ok(())
+    }
+}
+
+fn database_node_id(name: &str) -> String {
+    format!("multidb:database:{name}")
+}
+
+fn database_to_node(database: &Database) -> Result<NodeRecord, MultiDbError> {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "name".into(),
+        serde_json::Value::String(database.name.clone()),
+    );
+    properties.insert(
+        DATABASE_PAYLOAD_PROPERTY.into(),
+        serde_json::to_value(database)?,
+    );
+    Ok(NodeRecord {
+        id: database_node_id(&database.name),
+        labels: vec![DATABASE_LABEL.into()],
+        properties,
+        created_at_unix_ms: now_unix_ms(),
+        updated_at_unix_ms: now_unix_ms(),
+    })
+}
+
+fn database_from_node(node: &NodeRecord) -> Result<Database, MultiDbError> {
+    let payload = node
+        .properties
+        .get(DATABASE_PAYLOAD_PROPERTY)
+        .cloned()
+        .ok_or_else(|| MultiDbError::Serialization("missing payload".into()))?;
+    Ok(serde_json::from_value(payload)?)
+}
+
+fn now_unix_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 #[cfg(test)]
@@ -129,5 +242,26 @@ mod tests {
             manager.drop("system"),
             Err(MultiDbError::CannotDropSystem)
         ));
+    }
+
+    #[test]
+    fn catalog_persists_created_and_dropped_databases() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog_path = dir.path().join("catalog");
+
+        let manager = DatabaseManager::open(&catalog_path).unwrap();
+        manager.create("clinic", "./data/clinic").unwrap();
+        manager.create("analytics", "./data/analytics").unwrap();
+        manager.drop("analytics").unwrap();
+        drop(manager);
+
+        let reloaded = DatabaseManager::open(&catalog_path).unwrap();
+        assert_eq!(
+            reloaded.get("clinic").unwrap().storage_path,
+            "./data/clinic"
+        );
+        assert!(reloaded.get("analytics").is_none());
+        assert!(reloaded.get("system").is_some());
+        assert!(reloaded.get("default").is_some());
     }
 }

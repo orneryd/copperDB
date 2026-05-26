@@ -12,8 +12,8 @@
 A Rust implementation of the [NornicDB](https://github.com/orneryd/NornicDB) graph database engine.
 
 copperDB provides the same capabilities as NornicDB — a property-graph database with
-Cypher query support, vector embeddings, temporal data, Raft replication, and GPU
-acceleration — implemented idiomatically in Rust.
+Cypher query support, vector embeddings, temporal data, Cassandra-like distributed
+writes/reads/search, and GPU acceleration — implemented idiomatically in Rust.
 
 ---
 
@@ -156,7 +156,7 @@ The following table maps every significant NornicDB Go dependency to its Rust eq
 | `github.com/spf13/cobra` | CLI framework | `clap = "4"` |
 | `github.com/gorilla/websocket` | WebSocket transport (MCP) | `tokio-tungstenite = "0.24"` |
 | `net/http` (Go stdlib) | HTTP server | `axum = "0.7"` |
-| `github.com/hashicorp/raft` | Raft consensus (implied) | `openraft = "0.9"` |
+| Cassandra/Dynamo-style coordination | Distributed writes and reads | `copperdb-topology` + `copperdb-replication` coordinator contracts |
 | `github.com/ebitengine/purego` + `github.com/jupiterrider/ffi` | CGo-free FFI for native libs | `libloading = "0.8"` |
 | `github.com/hybridgroup/yzma` | WASM runtime for GGUF models | `libloading` (native) or `wasmtime = "20"` |
 | CUDA (NVIDIA) via CGo wrappers | GPU compute | `wgpu = "0.20"` (cross-platform) or `cudarc` (CUDA) |

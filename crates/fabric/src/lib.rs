@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use copperdb_topology::{
-    DistributedSearchPlan, DistributedWriteMode, DistributedWritePlan, HyperscalerProfile,
-    MeshPeer, NodeCapability, PeerHealth, PlacementKey, PlacementRecord, TopologyError,
-    TopologyRegistry,
+    ConsistencyLevel, DistributedReadPlan, DistributedSearchPlan, DistributedWriteMode,
+    DistributedWritePlan, HyperscalerProfile, MeshPeer, NodeCapability, PeerHealth, PlacementKey,
+    PlacementRecord, TopologyError, TopologyRegistry,
 };
 
 #[derive(Debug, Error)]
@@ -79,6 +79,27 @@ impl FabricTopology {
         mode: DistributedWriteMode,
     ) -> Result<DistributedWritePlan, TopologyError> {
         self.registry.plan_write(placement, mode)
+    }
+
+    pub fn plan_write_with_consistency(
+        &self,
+        placement: &PlacementKey,
+        mode: DistributedWriteMode,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+    ) -> Result<DistributedWritePlan, TopologyError> {
+        self.registry
+            .plan_write_with_consistency(placement, mode, consistency, request_region)
+    }
+
+    pub fn plan_read(
+        &self,
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+    ) -> Result<DistributedReadPlan, TopologyError> {
+        self.registry
+            .plan_read(placement, consistency, request_region)
     }
 }
 
@@ -182,7 +203,9 @@ mod tests {
         registry
             .register_peer(
                 MeshPeer::new("n1", "n1.mesh.local:9000")
+                    .with_capability(NodeCapability::Storage)
                     .with_capability(NodeCapability::Search)
+                    .with_capability(NodeCapability::Coordinator)
                     .with_capability(NodeCapability::WriteLeader),
             )
             .unwrap();
@@ -198,6 +221,13 @@ mod tests {
                 .plan_write(&placement, DistributedWriteMode::Standalone)
                 .unwrap()
                 .required_acks,
+            1
+        );
+        assert_eq!(
+            fabric
+                .plan_read(&placement, ConsistencyLevel::One, None)
+                .unwrap()
+                .required_responses,
             1
         );
     }

@@ -344,6 +344,27 @@ pub enum DistributedWriteMode {
     LeaderLease,
     Quorum,
     RaftLog,
+    DynamoQuorum,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ConsistencyLevel {
+    One,
+    Quorum,
+    All,
+    LocalQuorum,
+}
+
+impl ConsistencyLevel {
+    pub fn required(self, total_replicas: usize, local_replicas: usize) -> usize {
+        match self {
+            Self::One => 1,
+            Self::Quorum => total_replicas / 2 + 1,
+            Self::All => total_replicas,
+            Self::LocalQuorum => local_replicas.max(1) / 2 + 1,
+        }
+        .max(1)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -399,9 +420,20 @@ pub struct DistributedSearchPlan {
 pub struct DistributedWritePlan {
     pub placement: PlacementKey,
     pub mode: DistributedWriteMode,
+    pub consistency: ConsistencyLevel,
+    pub coordinator: MeshPeer,
     pub leader: MeshPeer,
     pub replicas: Vec<MeshPeer>,
     pub required_acks: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DistributedReadPlan {
+    pub placement: PlacementKey,
+    pub consistency: ConsistencyLevel,
+    pub coordinator: MeshPeer,
+    pub replicas: Vec<MeshPeer>,
+    pub required_responses: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -551,6 +583,24 @@ impl TopologyRegistry {
         key: &PlacementKey,
         mode: DistributedWriteMode,
     ) -> Result<DistributedWritePlan, TopologyError> {
+        let consistency = match mode {
+            DistributedWriteMode::Standalone | DistributedWriteMode::LeaderLease => {
+                ConsistencyLevel::One
+            }
+            DistributedWriteMode::Quorum
+            | DistributedWriteMode::RaftLog
+            | DistributedWriteMode::DynamoQuorum => ConsistencyLevel::Quorum,
+        };
+        self.plan_write_with_consistency(key, mode, consistency, None)
+    }
+
+    pub fn plan_write_with_consistency(
+        &self,
+        key: &PlacementKey,
+        mode: DistributedWriteMode,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+    ) -> Result<DistributedWritePlan, TopologyError> {
         let placement = self
             .placements
             .get(key)
@@ -559,41 +609,192 @@ impl TopologyRegistry {
             .peers
             .get(&placement.primary_node)
             .ok_or_else(|| TopologyError::MissingPeer(placement.primary_node.clone()))?;
-        if !leader.can_serve(&NodeCapability::WriteLeader) {
+
+        if matches!(
+            mode,
+            DistributedWriteMode::Standalone
+                | DistributedWriteMode::LeaderLease
+                | DistributedWriteMode::Quorum
+                | DistributedWriteMode::RaftLog
+        ) && !leader.can_serve(&NodeCapability::WriteLeader)
+        {
             return Err(TopologyError::NoHealthyPeer(NodeCapability::WriteLeader));
         }
 
-        let replicas = placement
-            .replica_nodes
-            .iter()
-            .filter_map(|node_id| self.peers.get(node_id))
-            .filter(|peer| peer.can_serve(&NodeCapability::WriteReplica))
+        let coordinator = if matches!(mode, DistributedWriteMode::DynamoQuorum) {
+            self.choose_coordinator(placement, request_region)?
+        } else {
+            leader.clone()
+        };
+
+        let replica_ids = if matches!(
+            mode,
+            DistributedWriteMode::LeaderLease
+                | DistributedWriteMode::Quorum
+                | DistributedWriteMode::RaftLog
+        ) {
+            placement
+                .replica_nodes
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        } else {
+            placement.participant_ids()
+        };
+        let replicas = replica_ids
+            .into_iter()
+            .filter_map(|node_id| self.peers.get(&node_id))
+            .filter(|peer| {
+                (peer.capabilities.contains(&NodeCapability::WriteReplica)
+                    || peer.capabilities.contains(&NodeCapability::Storage)
+                    || peer.capabilities.contains(&NodeCapability::WriteLeader))
+                    && peer.health.can_accept_writes()
+            })
             .cloned()
             .collect::<Vec<_>>();
 
+        let local_replicas = replicas
+            .iter()
+            .filter(|peer| {
+                request_region
+                    .map(|region| peer.region == region)
+                    .unwrap_or(true)
+            })
+            .count();
         let required_acks = match mode {
             DistributedWriteMode::Standalone => 1,
             DistributedWriteMode::LeaderLease => 1 + placement.min_write_replicas,
             DistributedWriteMode::Quorum | DistributedWriteMode::RaftLog => {
-                let voters = 1 + placement.replica_nodes.len();
-                voters / 2 + 1
+                consistency.required(1 + replicas.len(), local_replicas + 1)
+            }
+            DistributedWriteMode::DynamoQuorum => {
+                consistency.required(replicas.len(), local_replicas)
             }
         };
+        let available_acks = if matches!(
+            mode,
+            DistributedWriteMode::LeaderLease
+                | DistributedWriteMode::Quorum
+                | DistributedWriteMode::RaftLog
+        ) {
+            1 + replicas.len()
+        } else {
+            replicas.len()
+        };
 
-        if 1 + replicas.len() < required_acks {
+        if available_acks < required_acks {
             return Err(TopologyError::InvalidTopology(format!(
                 "write plan requires {required_acks} acknowledgements but only {} healthy participants are available",
-                1 + replicas.len()
+                available_acks
             )));
         }
 
         Ok(DistributedWritePlan {
             placement: key.clone(),
             mode,
-            leader: leader.clone(),
+            consistency,
+            coordinator: coordinator.clone(),
+            leader: if matches!(
+                mode,
+                DistributedWriteMode::LeaderLease
+                    | DistributedWriteMode::Quorum
+                    | DistributedWriteMode::RaftLog
+            ) {
+                leader.clone()
+            } else {
+                coordinator
+            },
             replicas,
             required_acks,
         })
+    }
+
+    pub fn plan_read(
+        &self,
+        key: &PlacementKey,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+    ) -> Result<DistributedReadPlan, TopologyError> {
+        let placement = self
+            .placements
+            .get(key)
+            .ok_or_else(|| TopologyError::MissingPlacement(key.stable_id()))?;
+        let coordinator = self.choose_coordinator(placement, request_region)?;
+        let mut replicas = Vec::new();
+        for node_id in placement.participant_ids() {
+            let peer = self
+                .peers
+                .get(&node_id)
+                .ok_or_else(|| TopologyError::MissingPeer(node_id.clone()))?;
+            if (peer.capabilities.contains(&NodeCapability::Storage)
+                || peer.capabilities.contains(&NodeCapability::WriteReplica)
+                || peer.capabilities.contains(&NodeCapability::WriteLeader))
+                && peer.health.can_serve_reads()
+            {
+                replicas.push(peer.clone());
+            }
+        }
+        replicas.sort_by_key(|peer| {
+            let locality = request_region
+                .map(|region| if peer.region == region { 0 } else { 1 })
+                .unwrap_or(0);
+            (locality, peer.observed_rtt_micros, peer.node_id.clone())
+        });
+        let local_replicas = replicas
+            .iter()
+            .filter(|peer| {
+                request_region
+                    .map(|region| peer.region == region)
+                    .unwrap_or(true)
+            })
+            .count();
+        let required_responses = consistency.required(replicas.len(), local_replicas);
+        if replicas.len() < required_responses {
+            return Err(TopologyError::InvalidTopology(format!(
+                "read plan requires {required_responses} responses but only {} healthy replicas are available",
+                replicas.len()
+            )));
+        }
+        Ok(DistributedReadPlan {
+            placement: key.clone(),
+            consistency,
+            coordinator,
+            replicas,
+            required_responses,
+        })
+    }
+
+    fn choose_coordinator(
+        &self,
+        placement: &PlacementRecord,
+        request_region: Option<&str>,
+    ) -> Result<MeshPeer, TopologyError> {
+        let mut candidates = placement
+            .participant_ids()
+            .into_iter()
+            .filter_map(|node_id| self.peers.get(&node_id))
+            .filter(|peer| peer.can_serve(&NodeCapability::Coordinator))
+            .cloned()
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            candidates = placement
+                .participant_ids()
+                .into_iter()
+                .filter_map(|node_id| self.peers.get(&node_id))
+                .filter(|peer| peer.health.can_accept_writes())
+                .cloned()
+                .collect();
+        }
+        candidates.sort_by_key(|peer| {
+            let locality = request_region
+                .map(|region| if peer.region == region { 0 } else { 1 })
+                .unwrap_or(0);
+            (locality, peer.observed_rtt_micros, peer.node_id.clone())
+        });
+        candidates
+            .into_iter()
+            .next()
+            .ok_or(TopologyError::NoHealthyPeer(NodeCapability::Coordinator))
     }
 }
 
@@ -680,6 +881,66 @@ mod tests {
             .unwrap();
         assert_eq!(plan.required_acks, 2);
         assert_eq!(plan.replicas.len(), 2);
+    }
+
+    #[test]
+    fn dynamo_quorum_write_and_read_plans_use_any_coordinator() {
+        let mut registry = TopologyRegistry::new();
+        registry
+            .register_peer(
+                peer(
+                    "n1",
+                    &[NodeCapability::Storage, NodeCapability::Coordinator],
+                )
+                .with_region_zone("us-east-1", "us-east-1a")
+                .with_observed_rtt_micros(2_000),
+            )
+            .unwrap();
+        registry
+            .register_peer(
+                peer(
+                    "n2",
+                    &[NodeCapability::Storage, NodeCapability::Coordinator],
+                )
+                .with_region_zone("us-east-1", "us-east-1b")
+                .with_observed_rtt_micros(500),
+            )
+            .unwrap();
+        registry
+            .register_peer(
+                peer("n3", &[NodeCapability::Storage]).with_region_zone("eu-west-1", "eu-west-1a"),
+            )
+            .unwrap();
+        registry
+            .register_placement(PlacementRecord {
+                key: PlacementKey::default_for_database("neo4j"),
+                primary_node: "n1".into(),
+                replica_nodes: vec!["n2".into(), "n3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let placement = PlacementKey::default_for_database("neo4j");
+        let write_plan = registry
+            .plan_write_with_consistency(
+                &placement,
+                DistributedWriteMode::DynamoQuorum,
+                ConsistencyLevel::Quorum,
+                Some("us-east-1"),
+            )
+            .unwrap();
+        assert_eq!(write_plan.coordinator.node_id, "n2");
+        assert_eq!(write_plan.required_acks, 2);
+        assert_eq!(write_plan.replicas.len(), 3);
+
+        let read_plan = registry
+            .plan_read(&placement, ConsistencyLevel::LocalQuorum, Some("us-east-1"))
+            .unwrap();
+        assert_eq!(read_plan.coordinator.node_id, "n2");
+        assert_eq!(read_plan.required_responses, 2);
     }
 
     #[test]

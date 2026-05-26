@@ -5,17 +5,23 @@
 //! opening databases whose manifest declares layout version 0.
 
 use bytes::Bytes;
+use copperdb_encryption::{EnvelopeConfig, EnvelopeEncryptor};
+use copperdb_kms::KeyProvider;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use sled::{Db, Tree};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 pub const STORAGE_LAYOUT_VERSION: u8 = 0;
 const META_LAYOUT_MANIFEST_KEY: &[u8] = b"layout_manifest";
+const META_ENCRYPTION_MANIFEST_KEY: &[u8] = b"encryption_manifest";
 const META_TOPOLOGY_PEER_PREFIX: &[u8] = b"topology_peer/";
 const META_TOPOLOGY_PROFILE_PREFIX: &[u8] = b"topology_profile/";
 const META_TOPOLOGY_PLACEMENT_PREFIX: &[u8] = b"topology_placement/";
@@ -81,6 +87,12 @@ pub enum StorageError {
     KnowledgePolicyInUse(String),
     #[error("topology invalid: {0}")]
     TopologyInvalid(String),
+    #[error("storage encryption error: {0}")]
+    Encryption(String),
+    #[error("storage encryption is required for this database")]
+    EncryptionRequired,
+    #[error("storage encryption metadata mismatch: {0}")]
+    EncryptionMismatch(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -232,6 +244,7 @@ pub struct WALStats {
 #[derive(Debug)]
 pub struct WAL {
     config: WALConfig,
+    path: Option<PathBuf>,
     next_seq: AtomicU64,
     closed: AtomicBool,
     degraded: AtomicBool,
@@ -243,12 +256,41 @@ impl WAL {
     pub fn new(config: WALConfig) -> Self {
         Self {
             config,
+            path: None,
             next_seq: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             degraded: AtomicBool::new(false),
             entries: Mutex::new(Vec::new()),
             segments: Mutex::new(Vec::new()),
         }
+    }
+
+    pub fn open(path: impl AsRef<Path>, config: WALConfig) -> Result<Self, StorageError> {
+        let path = path.as_ref().to_path_buf();
+        let entries = if path.exists() {
+            let raw = fs::read(&path)?;
+            if raw.is_empty() {
+                Vec::new()
+            } else {
+                rmp_serde::from_slice::<Vec<WALEntry>>(&raw)
+                    .map_err(|_| StorageError::WalMissingOrInvalidTrailer)?
+            }
+        } else {
+            Vec::new()
+        };
+        let next_seq = entries.iter().map(|entry| entry.seq).max().unwrap_or(0);
+        let wal = Self {
+            config,
+            path: Some(path),
+            next_seq: AtomicU64::new(next_seq),
+            closed: AtomicBool::new(false),
+            degraded: AtomicBool::new(false),
+            entries: Mutex::new(entries),
+            segments: Mutex::new(Vec::new()),
+        };
+        wal.verify_entries()?;
+        wal.recompute_segments(wal.entries.lock().len());
+        Ok(wal)
     }
 
     pub fn append(&self, op: &str, key: &str, payload: &[u8]) -> Result<WALEntry, StorageError> {
@@ -275,6 +317,7 @@ impl WAL {
         {
             let mut entries = self.entries.lock();
             entries.push(entry.clone());
+            self.persist_entries(&entries)?;
             self.recompute_segments(entries.len());
         }
         Ok(entry)
@@ -289,6 +332,9 @@ impl WAL {
         }
         if self.closed.load(Ordering::SeqCst) {
             return Err(StorageError::WalClosed);
+        }
+        if !self.config.enabled {
+            return Ok((0, 0));
         }
         let mut staged = Vec::with_capacity(records.len());
         for (op, key, payload) in records {
@@ -305,6 +351,7 @@ impl WAL {
         let last = staged.last().map(|e| e.seq).unwrap_or(0);
         let mut entries = self.entries.lock();
         entries.extend(staged);
+        self.persist_entries(&entries)?;
         self.recompute_segments(entries.len());
         Ok((first, last))
     }
@@ -352,6 +399,34 @@ impl WAL {
             segments: self.segments.lock().len(),
             degraded: self.is_degraded(),
         }
+    }
+
+    fn verify_entries(&self) -> Result<(), StorageError> {
+        let entries = self.entries.lock();
+        for entry in entries.iter() {
+            let expected = wal_checksum(&entry.op, &entry.key, &entry.payload);
+            if entry.checksum != expected {
+                self.degraded.store(true, Ordering::SeqCst);
+                return Err(StorageError::WalChecksumVerificationFailed);
+            }
+        }
+        Ok(())
+    }
+
+    fn persist_entries(&self, entries: &[WALEntry]) -> Result<(), StorageError> {
+        if !self.config.enabled {
+            return Ok(());
+        }
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let tmp_path = path.with_extension("tmp");
+        fs::write(&tmp_path, rmp_serde::to_vec(entries)?)?;
+        fs::rename(tmp_path, path)?;
+        Ok(())
     }
 
     fn recompute_segments(&self, total_entries: usize) {
@@ -574,6 +649,16 @@ pub struct StorageLayoutManifest {
     pub created_at_unix_ms: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StorageEncryptionManifest {
+    pub version: u8,
+    pub algorithm: String,
+    pub key_uri: String,
+    pub created_at_unix_ms: i64,
+}
+
+pub const STORAGE_ENCRYPTION_MANIFEST_VERSION: u8 = 1;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NodeRecord {
     pub id: String,
@@ -602,14 +687,74 @@ pub struct StorageEngine {
     nodes: Tree,
     edges: Tree,
     indexes: Tree,
+    encryption: Option<StorageEncryption>,
     temp_dir: Option<tempfile::TempDir>,
+}
+
+struct StorageEncryption {
+    encryptor: EnvelopeEncryptor,
+    runtime: tokio::runtime::Runtime,
+    key_uri: String,
+}
+
+impl fmt::Debug for StorageEncryption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StorageEncryption")
+            .field("key_uri", &self.key_uri)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StorageEncryption {
+    fn new(provider: Arc<dyn KeyProvider>, key_uri: String) -> Result<Self, StorageError> {
+        let encryptor = EnvelopeEncryptor::new(
+            provider,
+            EnvelopeConfig {
+                associated_data: b"copperdb-storage-v0".to_vec(),
+                ..Default::default()
+            },
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| StorageError::Encryption(err.to_string()))?;
+        Ok(Self {
+            encryptor,
+            runtime,
+            key_uri,
+        })
+    }
+
+    fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, StorageError> {
+        self.runtime
+            .block_on(self.encryptor.encrypt(plaintext))
+            .map_err(|err| StorageError::Encryption(err.to_string()))
+    }
+
+    fn decrypt(&self, ciphertext: &[u8]) -> Result<Vec<u8>, StorageError> {
+        self.runtime
+            .block_on(self.encryptor.decrypt(ciphertext))
+            .map_err(|err| StorageError::Encryption(err.to_string()))
+    }
 }
 
 impl StorageEngine {
     /// Open (or create) a storage engine at the given path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         let db = sled::open(path)?;
-        Self::open_with_db(db)
+        Self::open_with_db(db, None)
+    }
+
+    /// Open (or create) a storage engine whose graph records are encrypted using
+    /// provider-backed envelope encryption.
+    pub fn open_encrypted(
+        path: impl AsRef<Path>,
+        provider: Arc<dyn KeyProvider>,
+        key_uri: impl Into<String>,
+    ) -> Result<Self, StorageError> {
+        let db = sled::open(path)?;
+        let encryption = StorageEncryption::new(provider, key_uri.into())?;
+        Self::open_with_db(db, Some(encryption))
     }
 
     /// Open an in-memory (temporary) storage engine for testing.
@@ -626,13 +771,15 @@ impl StorageEngine {
             nodes,
             edges,
             indexes,
+            encryption: None,
             temp_dir: Some(temp_dir),
         };
         engine.ensure_layout_manifest()?;
+        engine.ensure_encryption_manifest()?;
         Ok(engine)
     }
 
-    fn open_with_db(db: Db) -> Result<Self, StorageError> {
+    fn open_with_db(db: Db, encryption: Option<StorageEncryption>) -> Result<Self, StorageError> {
         let meta = db.open_tree("meta")?;
         let nodes = db.open_tree("nodes")?;
         let edges = db.open_tree("edges")?;
@@ -643,9 +790,11 @@ impl StorageEngine {
             nodes,
             edges,
             indexes,
+            encryption,
             temp_dir: None,
         };
         engine.ensure_layout_manifest()?;
+        engine.ensure_encryption_manifest()?;
         Ok(engine)
     }
 
@@ -670,6 +819,49 @@ impl StorageEngine {
         Ok(())
     }
 
+    fn ensure_encryption_manifest(&self) -> Result<(), StorageError> {
+        match (
+            self.meta.get(META_ENCRYPTION_MANIFEST_KEY)?,
+            &self.encryption,
+        ) {
+            (Some(raw), Some(encryption)) => {
+                let manifest: StorageEncryptionManifest = rmp_serde::from_slice(raw.as_ref())?;
+                if manifest.version != STORAGE_ENCRYPTION_MANIFEST_VERSION {
+                    return Err(StorageError::EncryptionMismatch(format!(
+                        "expected manifest version {STORAGE_ENCRYPTION_MANIFEST_VERSION}, got {}",
+                        manifest.version
+                    )));
+                }
+                if manifest.algorithm != copperdb_encryption::ALGORITHM_AES_256_GCM {
+                    return Err(StorageError::EncryptionMismatch(format!(
+                        "unsupported algorithm {}",
+                        manifest.algorithm
+                    )));
+                }
+                if manifest.key_uri != encryption.key_uri {
+                    return Err(StorageError::EncryptionMismatch(format!(
+                        "expected key URI {}, got {}",
+                        manifest.key_uri, encryption.key_uri
+                    )));
+                }
+                Ok(())
+            }
+            (Some(_), None) => Err(StorageError::EncryptionRequired),
+            (None, Some(encryption)) => {
+                let manifest = StorageEncryptionManifest {
+                    version: STORAGE_ENCRYPTION_MANIFEST_VERSION,
+                    algorithm: copperdb_encryption::ALGORITHM_AES_256_GCM.into(),
+                    key_uri: encryption.key_uri.clone(),
+                    created_at_unix_ms: now_unix_ms(),
+                };
+                self.meta
+                    .insert(META_ENCRYPTION_MANIFEST_KEY, rmp_serde::to_vec(&manifest)?)?;
+                Ok(())
+            }
+            (None, None) => Ok(()),
+        }
+    }
+
     pub fn layout_manifest(&self) -> Result<StorageLayoutManifest, StorageError> {
         let raw = self
             .meta
@@ -686,17 +878,46 @@ impl StorageEngine {
         self.temp_dir.is_some()
     }
 
+    pub fn is_encrypted(&self) -> bool {
+        self.encryption.is_some()
+    }
+
+    pub fn encryption_manifest(&self) -> Result<Option<StorageEncryptionManifest>, StorageError> {
+        match self.meta.get(META_ENCRYPTION_MANIFEST_KEY)? {
+            Some(raw) => Ok(Some(rmp_serde::from_slice(raw.as_ref())?)),
+            None => Ok(None),
+        }
+    }
+
+    fn encode_record_bytes(&self, plaintext: Vec<u8>) -> Result<Vec<u8>, StorageError> {
+        match &self.encryption {
+            Some(encryption) => encryption.encrypt(&plaintext),
+            None => Ok(plaintext),
+        }
+    }
+
+    fn decode_record_bytes(&self, stored: &[u8]) -> Result<Vec<u8>, StorageError> {
+        match &self.encryption {
+            Some(encryption) => encryption.decrypt(stored),
+            None => Ok(stored.to_vec()),
+        }
+    }
+
     // --- Raw node operations ---
 
     /// Store a node's serialized properties.
     pub fn put_node(&self, id: &str, value: &[u8]) -> Result<(), StorageError> {
-        self.nodes.insert(id.as_bytes(), value)?;
+        self.nodes
+            .insert(id.as_bytes(), self.encode_record_bytes(value.to_vec())?)?;
         Ok(())
     }
 
     /// Retrieve a node's serialized properties.
     pub fn get_node(&self, id: &str) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self.nodes.get(id.as_bytes())?.map(|v| v.to_vec()))
+        self.nodes
+            .get(id.as_bytes())?
+            .map(|v| self.decode_record_bytes(v.as_ref()))
+            .transpose()
     }
 
     /// Delete a node.
@@ -711,8 +932,11 @@ impl StorageEngine {
         prefix: &str,
     ) -> impl Iterator<Item = Result<(Bytes, Bytes), StorageError>> + '_ {
         self.nodes.scan_prefix(prefix.as_bytes()).map(|res| {
-            res.map(|(k, v)| (Bytes::from(k.to_vec()), Bytes::from(v.to_vec())))
-                .map_err(StorageError::from)
+            let (k, v) = res.map_err(StorageError::from)?;
+            Ok((
+                Bytes::from(k.to_vec()),
+                Bytes::from(self.decode_record_bytes(v.as_ref())?),
+            ))
         })
     }
 
@@ -720,13 +944,17 @@ impl StorageEngine {
 
     /// Store an edge's serialized properties.
     pub fn put_edge(&self, id: &str, value: &[u8]) -> Result<(), StorageError> {
-        self.edges.insert(id.as_bytes(), value)?;
+        self.edges
+            .insert(id.as_bytes(), self.encode_record_bytes(value.to_vec())?)?;
         Ok(())
     }
 
     /// Retrieve an edge's serialized properties.
     pub fn get_edge(&self, id: &str) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self.edges.get(id.as_bytes())?.map(|v| v.to_vec()))
+        self.edges
+            .get(id.as_bytes())?
+            .map(|v| self.decode_record_bytes(v.as_ref()))
+            .transpose()
     }
 
     /// Delete an edge.
@@ -742,8 +970,10 @@ impl StorageEngine {
             self.unindex_node_labels(&old)?;
             self.unindex_node_properties(&old)?;
         }
-        self.nodes
-            .insert(node.id.as_bytes(), rmp_serde::to_vec(node)?)?;
+        self.nodes.insert(
+            node.id.as_bytes(),
+            self.encode_record_bytes(rmp_serde::to_vec(node)?)?,
+        )?;
         self.index_node_labels(node)?;
         self.index_node_properties(node)?;
         Ok(())
@@ -751,7 +981,9 @@ impl StorageEngine {
 
     pub fn get_node_record(&self, id: &str) -> Result<Option<NodeRecord>, StorageError> {
         match self.nodes.get(id.as_bytes())? {
-            Some(v) => Ok(Some(rmp_serde::from_slice(v.as_ref())?)),
+            Some(v) => Ok(Some(rmp_serde::from_slice(
+                self.decode_record_bytes(v.as_ref())?.as_slice(),
+            )?)),
             None => Ok(None),
         }
     }
@@ -818,15 +1050,19 @@ impl StorageEngine {
         if let Some(old) = self.get_edge_record(&edge.id)? {
             self.unindex_edge_type(&old)?;
         }
-        self.edges
-            .insert(edge.id.as_bytes(), rmp_serde::to_vec(edge)?)?;
+        self.edges.insert(
+            edge.id.as_bytes(),
+            self.encode_record_bytes(rmp_serde::to_vec(edge)?)?,
+        )?;
         self.index_edge_type(edge)?;
         Ok(())
     }
 
     pub fn get_edge_record(&self, id: &str) -> Result<Option<EdgeRecord>, StorageError> {
         match self.edges.get(id.as_bytes())? {
-            Some(v) => Ok(Some(rmp_serde::from_slice(v.as_ref())?)),
+            Some(v) => Ok(Some(rmp_serde::from_slice(
+                self.decode_record_bytes(v.as_ref())?.as_slice(),
+            )?)),
             None => Ok(None),
         }
     }
@@ -1660,8 +1896,13 @@ fn now_unix_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use copperdb_kms::{LocalKms, LocalKmsConfig};
     use serde_json::json;
     use std::fs;
+
+    fn local_provider(byte: u8) -> Arc<dyn KeyProvider> {
+        Arc::new(LocalKms::new(LocalKmsConfig::new(vec![byte; 32])).unwrap())
+    }
 
     fn sample_node(id: &str, labels: &[&str]) -> NodeRecord {
         NodeRecord {
@@ -1752,6 +1993,77 @@ mod tests {
 
         assert!(engine.get_node("node:1").unwrap().is_none());
         assert!(engine.get_edge("edge:1").unwrap().is_none());
+    }
+
+    #[test]
+    fn encrypted_storage_round_trips_records_and_rejects_plain_open() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "copperdb-storage-encryption-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let engine =
+            StorageEngine::open_encrypted(&test_dir, local_provider(0x42), "kms://local/default")
+                .unwrap();
+        assert!(engine.is_encrypted());
+        let manifest = engine.encryption_manifest().unwrap().unwrap();
+        assert_eq!(manifest.key_uri, "kms://local/default");
+
+        let node = sample_node("db1:n1", &["Secret"]);
+        let edge = sample_edge("db1:e1", "SECRET_EDGE", "db1:n1", "db1:n2");
+        engine.put_node_record(&node).unwrap();
+        engine.put_edge_record(&edge).unwrap();
+        engine.put_node("raw:1", b"classified").unwrap();
+        engine.flush().unwrap();
+        drop(engine);
+
+        let raw_db = sled::open(&test_dir).unwrap();
+        let raw_nodes = raw_db.open_tree("nodes").unwrap();
+        let stored = raw_nodes.get("db1:n1").unwrap().unwrap();
+        assert_ne!(
+            stored.as_ref(),
+            rmp_serde::to_vec(&node).unwrap().as_slice()
+        );
+        drop(raw_nodes);
+        drop(raw_db);
+
+        let reopened =
+            StorageEngine::open_encrypted(&test_dir, local_provider(0x42), "kms://local/default")
+                .unwrap();
+        assert_eq!(reopened.get_node_record("db1:n1").unwrap(), Some(node));
+        assert_eq!(reopened.get_edge_record("db1:e1").unwrap(), Some(edge));
+        assert_eq!(
+            reopened.get_node("raw:1").unwrap(),
+            Some(b"classified".to_vec())
+        );
+        drop(reopened);
+        assert!(matches!(
+            StorageEngine::open(&test_dir),
+            Err(StorageError::EncryptionRequired)
+        ));
+        let _ = fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn encrypted_storage_rejects_wrong_key_uri() {
+        let test_dir = std::env::temp_dir().join(format!(
+            "copperdb-storage-encryption-key-uri-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&test_dir).unwrap();
+
+        let engine =
+            StorageEngine::open_encrypted(&test_dir, local_provider(0x42), "kms://local/a")
+                .unwrap();
+        engine.flush().unwrap();
+        drop(engine);
+
+        let err = StorageEngine::open_encrypted(&test_dir, local_provider(0x42), "kms://local/b")
+            .err()
+            .unwrap();
+        assert!(matches!(err, StorageError::EncryptionMismatch(_)));
+        let _ = fs::remove_dir_all(&test_dir);
     }
 
     #[test]
@@ -1994,6 +2306,47 @@ mod tests {
         let err = wal.replay_after(0).unwrap_err();
         assert!(matches!(err, StorageError::WalChecksumVerificationFailed));
         assert!(wal.is_degraded());
+    }
+
+    #[test]
+    fn wal_persists_entries_and_reopens_next_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal_path = dir.path().join("wal.rmp");
+        let config = WALConfig {
+            enabled: true,
+            max_entries_per_segment: 2,
+        };
+
+        let wal = WAL::open(&wal_path, config.clone()).unwrap();
+        let first = wal.append("put", "node:1", b"a").unwrap();
+        assert_eq!(first.seq, 1);
+        let (_start, end) = wal
+            .append_batch(vec![
+                ("put".to_string(), "node:2".to_string(), b"b".to_vec()),
+                ("delete".to_string(), "node:1".to_string(), Vec::new()),
+            ])
+            .unwrap();
+        assert_eq!(end, 3);
+        assert_eq!(wal.stats().segments, 2);
+        drop(wal);
+
+        let reopened = WAL::open(&wal_path, config).unwrap();
+        let replay = reopened.replay_after(0).unwrap();
+        assert_eq!(replay.len(), 3);
+        assert_eq!(replay[0].key, "node:1");
+        assert_eq!(replay[2].op, "delete");
+        let next = reopened.append("put", "node:3", b"c").unwrap();
+        assert_eq!(next.seq, 4);
+    }
+
+    #[test]
+    fn wal_rejects_invalid_persistent_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal_path = dir.path().join("wal.rmp");
+        fs::write(&wal_path, b"not-messagepack").unwrap();
+
+        let err = WAL::open(&wal_path, WALConfig::default()).unwrap_err();
+        assert!(matches!(err, StorageError::WalMissingOrInvalidTrailer));
     }
 
     #[test]
