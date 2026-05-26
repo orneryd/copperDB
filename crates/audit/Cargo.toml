@@ -15,4 +15,8 @@ tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 copperdb-auth = { workspace = true }
+copperdb-storage = { workspace = true }
 copperdb-util = { workspace = true }
+parking_lot.workspace = true
+sha2.workspace = true
+hex.workspace = true

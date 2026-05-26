@@ -28,13 +28,13 @@ These packages depend on layer 0 and gate every externally reachable surface.
 - [x] `kms` -> provider-backed data keys, local KEK wrapping, metadata, audit signing, provider factory.
 - [x] `encryption` -> versioned envelopes, provider-backed `EnvelopeEncryptor`, DEK cache, rewrap rotation surface.
 - [x] `auth` -> JWT/RBAC identity, persistent users, roles, allowlists, privileges, entitlements, token cache.
+- [x] `audit` -> durable security and data-access event trail, append-only storage, hash-chain verification.
 - [ ] `security` -> hardening and auth-adjacent enforcement.
-- [ ] `audit` -> durable security and data-access event trail.
 - [ ] `compliance` -> policy enforcement and regulated-data controls.
 
 Required direction: API surfaces call into this layer; this layer must not depend on HTTP/Bolt/GraphQL/MCP implementations.
 
-Current Rust status: `kms`, `encryption`, and `auth` are implemented as durable package-owned paths. `auth` persists system users, role records, role-to-database allowlists, per-database privilege matrices, and role entitlement overrides through `copperdb-storage` system nodes; in-memory maps are reloadable caches only.
+Current Rust status: `kms`, `encryption`, `auth`, and `audit` are implemented as durable package-owned paths. `auth` persists system users, role records, role-to-database allowlists, per-database privilege matrices, and role entitlement overrides through `copperdb-storage` system nodes; in-memory maps are reloadable caches only. `audit` persists append-only system audit events through `copperdb-storage`, reloads the trail from durable nodes, and verifies sequence continuity plus event hash chaining.
 
 ## Layer 2: Storage, Transactions, And Metadata
 
@@ -131,7 +131,7 @@ Required direction: protocol packages should not implement storage/query semanti
 ## Implementation Walk Order
 
 1. Finish layer 0 contracts and keep `topology` as the single distributed contract path.
-2. Complete layer 1 durable security packages before calling protocol surfaces complete: `security`, `audit`, then `compliance`.
+2. Complete layer 1 durable security packages before calling protocol surfaces complete: `audit`, `security`, then `compliance`.
 3. Expand layer 2 storage and transaction metadata only when the package being implemented owns durable state there.
 4. Keep layer 3 distributed execution as real planning and persistence contracts first; do not check a package until its state is durable and its immediate consumers compile against it.
 5. Port layer 4 package behavior one package at a time, starting with `cypher`, `filter`, `indexing`, `eval`, then `knowledgepolicy`.
