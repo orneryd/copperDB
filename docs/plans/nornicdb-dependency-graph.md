@@ -11,31 +11,31 @@ A checked package means the Rust package has a single-path implementation, full 
 These packages define vocabulary, errors, startup/shutdown behavior, and observability contracts. They must be implemented first because every other layer consumes them.
 
 - [x] `util` -> shared helpers, deterministic ID hashing, bounded MessagePack decode.
-- [x] `buildinfo` -> build/version metadata, product version, display version, server announcement.
-- [x] `envutil` -> environment parsing helpers for strings, numbers, loose/strict booleans, durations.
-- [x] `config` -> config files, env, CLI/default precedence and listener resolution.
-- [x] `errors` -> Neo4j-compatible transient error codes, retry classification, conflict sentinels.
+- [ ] `buildinfo` -> build/version metadata, product version, display version, server announcement.
+- [ ] `envutil` -> environment parsing helpers for strings, numbers, loose/strict booleans, durations.
+- [ ] `config` -> config files, env, CLI/default precedence and listener resolution.
+- [ ] `errors` -> Neo4j-compatible transient error codes, retry classification, conflict sentinels.
 - [x] `otel` (`observability` in NornicDB) -> metrics catalog, runtime config, endpoint precedence, readiness checks, resource identity, redaction, mandatory fields, recovery.
-- [x] `lifecycle` -> component supervisor, first-error cancellation, reverse-order shutdown, fresh shutdown budget.
+- [ ] `lifecycle` -> component supervisor, first-error cancellation, reverse-order shutdown, fresh shutdown budget.
 - [x] `topology` -> hyperscaler placement, latency-aware distributed search fan-out, high-availability write planning contracts, and syscall-free distributed transaction ordering.
 
-Current Rust status: all Layer 0 packages have focused implementations and tests. `topology` is the single contract path for enterprise placement, search routing, and HA write planning.
+Current Rust status: `util`, `otel`, and `topology` have focused implementations, active consumer wiring, and tests. `buildinfo`, `envutil`, `config`, `errors`, and `lifecycle` have useful package contracts but are unchecked after audit because their immediate consumer wiring is incomplete: server/version surfaces do not consume `buildinfo`, config/server paths bypass `envutil`, loaded config is not consistently threaded into component state, retry classification is not consumed by storage/txsession, and lifecycle supervision is not used for process startup/shutdown.
 `topology` also owns the distributed transaction timestamp contract: logical IDs are `(epoch, counter, node_ordinal)`, allocated by atomics without wall-clock syscalls, batch-reservable for multi-core writers, and mergeable from peer observations for distributed transaction ordering.
 
 ## Layer 1: Security, Identity, And Compliance
 
 These packages depend on layer 0 and gate every externally reachable surface.
 
-- [x] `kms` -> provider-backed data keys, local KEK wrapping, metadata, audit signing, provider factory.
-- [x] `encryption` -> versioned envelopes, provider-backed `EnvelopeEncryptor`, DEK cache, rewrap rotation surface.
-- [x] `auth` -> JWT/RBAC identity, persistent users, roles, allowlists, privileges, entitlements, token cache.
-- [x] `audit` -> durable security and data-access event trail, append-only storage, hash-chain verification.
+- [ ] `kms` -> provider-backed data keys, local KEK wrapping, metadata, audit signing, provider factory.
+- [ ] `encryption` -> versioned envelopes, provider-backed `EnvelopeEncryptor`, DEK cache, rewrap rotation surface.
+- [ ] `auth` -> JWT/RBAC identity, persistent users, roles, allowlists, privileges, entitlements, token cache.
+- [ ] `audit` -> durable security and data-access event trail, append-only storage, hash-chain verification.
 - [x] `security` -> token/header/URL validation, SSRF and injection defenses, server ingress enforcement.
-- [x] `compliance` -> durable governance policies, access controls, retention markers, audit-backed HIPAA/SOC2 evidence.
+- [ ] `compliance` -> durable governance policies, access controls, retention markers, audit-backed HIPAA/SOC2 evidence.
 
 Required direction: API surfaces call into this layer; this layer must not depend on HTTP/Bolt/GraphQL/MCP implementations.
 
-Current Rust status: all Layer 1 packages are implemented as package-owned paths. `auth` persists system users, role records, role-to-database allowlists, per-database privilege matrices, and role entitlement overrides through `copperdb-storage` system nodes; in-memory maps are reloadable caches only. `audit` persists append-only system audit events through `copperdb-storage`, reloads the trail from durable nodes, and verifies sequence continuity plus event hash chaining. `security` owns no durable state; its completed path is deterministic validation for tokens, headers, graph identifiers, outbound URLs, and protocol-neutral request validation threaded into the HTTP server. `compliance` persists governance policies through `copperdb-storage` and derives HIPAA/SOC2 evidence from the durable audit trail.
+Current Rust status: `security` remains checked because protocol-neutral request validation is threaded into the HTTP server and owns no durable state. `kms`, `encryption`, `auth`, `audit`, and `compliance` have focused package implementations and tests, but they are unchecked after audit because they are not yet wired into the engine/server execution path: KMS/encryption are not bootstrapped as the storage encryption path, `Authenticator` is not instantiated for ingress or engine authorization, `AuditLog` is not recording query/protocol operations, and compliance policy/reporting is not enforced or exposed through consumers.
 
 ## Layer 2: Storage, Transactions, And Metadata
 
@@ -43,7 +43,7 @@ These packages own durable graph state and storage-adjacent state.
 
 - [ ] `storage` -> graph records, metadata catalogs, MVCC, WAL, schema, indexes, namespace primitives.
 - [x] `cache` -> query/result/write-through caches.
-- [x] `pool` -> reusable query-execution resource pooling.
+- [ ] `pool` -> reusable query-execution resource pooling.
 - [x] `txsession` -> transaction/session lifecycle and conflict semantics.
 - [ ] `retention` -> retention policies, legal holds, erasure request model and sweeper hooks.
 - [ ] `multidb` -> logical database catalog and namespace routing.
@@ -54,7 +54,7 @@ Distributed foundation hooks in this layer:
 - storage rebuilds a validated `TopologyRegistry` from durable metadata.
 - transaction errors should route through `errors`.
 
-Current Rust status: `cache` is complete for its Layer 2 contract. It owns no source-of-truth durable state; its package-owned state is bounded, reloadable acceleration state. The crate provides query-plan LRU caching, parameter-sensitive query-result caching, write-through cache wrappers that update memory only after backing writes succeed, enable/disable controls, TTL expiration, explicit invalidation, eviction stats, and focused concurrency/contract tests. `pool` is complete for reusable execution scratch objects: row slices, pooled nodes, byte buffers, string builders, maps, string slices, and value slices with global configuration, bounded retention, oversized-object rejection, disabled-mode behavior, clearing-on-return, and concurrency tests. `txsession` is complete for package-owned transaction/session state: logical begin/commit timestamps from `topology`, pending write buffers, read-only enforcement, terminal state errors, explicit owner-bound sessions, TTL refresh/cleanup, terminal-error replay, and commit/rollback deletion. Its active sessions are runtime coordination state, not durable graph source-of-truth.
+Current Rust status: `cache` is complete for its Layer 2 contract. It owns no source-of-truth durable state; its package-owned state is bounded, reloadable acceleration state. The crate provides query-plan LRU caching, parameter-sensitive query-result caching with non-deterministic query rejection, write-through cache wrappers that update memory only after backing writes succeed, enable/disable controls, TTL expiration, explicit invalidation, eviction stats, and focused concurrency/contract tests. `pool` has the reusable execution scratch object implementation and tests for row slices, pooled nodes, byte buffers, string builders, maps, string slices, value slices, bounded retention, oversized-object rejection, disabled-mode behavior, clearing-on-return, and concurrency, but remains unchecked until eval/cypher consumers actually use it. `txsession` is complete for package-owned transaction/session state: logical begin/commit timestamps from `topology`, pending write buffers, read-only enforcement, terminal state errors, explicit owner-bound sessions, TTL refresh/cleanup, terminal-error replay, and commit/rollback deletion. Its active sessions are runtime coordination state, not durable graph source-of-truth.
 
 ## Layer 3: Distributed Execution Foundation
 

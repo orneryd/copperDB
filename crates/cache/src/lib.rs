@@ -210,6 +210,31 @@ impl CacheStats {
     }
 }
 
+pub fn is_cacheable_read_query(cypher: &str) -> bool {
+    let upper = cypher.to_ascii_uppercase();
+    let non_deterministic = [
+        "RAND(",
+        "RANDOMUUID(",
+        "DATETIME(",
+        "DATE(",
+        "TIME(",
+        "TIMESTAMP(",
+    ];
+
+    if non_deterministic
+        .iter()
+        .any(|function_name| upper.contains(function_name))
+    {
+        return false;
+    }
+
+    if upper.contains("CALL DB.INFER(") {
+        return upper.contains("CACHE") && upper.contains("TRUE");
+    }
+
+    true
+}
+
 /// Parameter-sensitive LRU cache for read-only query results.
 pub struct QueryResultCache<V> {
     inner: QueryCache<V>,
@@ -227,7 +252,15 @@ impl<V: Clone> QueryResultCache<V> {
     }
 
     pub fn put(&self, cypher: &str, params: &BTreeMap<String, Value>, value: V) {
+        let _ = self.try_put(cypher, params, value);
+    }
+
+    pub fn try_put(&self, cypher: &str, params: &BTreeMap<String, Value>, value: V) -> bool {
+        if !is_cacheable_read_query(cypher) {
+            return false;
+        }
         self.inner.put(Self::key(cypher, params), value);
+        true
     }
 
     pub fn remove(&self, cypher: &str, params: &BTreeMap<String, Value>) {
@@ -516,6 +549,27 @@ mod tests {
 
         assert!(cache.is_empty());
         assert_eq!(cache.get("MATCH (n) RETURN n", &params), None);
+    }
+
+    #[test]
+    fn test_result_cache_rejects_non_deterministic_queries() {
+        let cache = QueryResultCache::new(10, None);
+        let params = BTreeMap::new();
+
+        assert!(!cache.try_put("RETURN rand()", &params, 1));
+        assert_eq!(cache.get("RETURN rand()", &params), None);
+
+        assert!(!cache.try_put("RETURN datetime()", &params, 2));
+        assert_eq!(cache.get("RETURN datetime()", &params), None);
+    }
+
+    #[test]
+    fn test_inference_queries_require_explicit_cache_opt_in() {
+        let cache = QueryResultCache::new(10, None);
+        let params = BTreeMap::new();
+
+        assert!(!cache.try_put("CALL db.infer({text: 'hello'})", &params, 1));
+        assert!(cache.try_put("CALL db.infer({text: 'hello', cache: true})", &params, 2));
     }
 
     #[derive(Default)]

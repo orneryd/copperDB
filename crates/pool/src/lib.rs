@@ -302,12 +302,19 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn test_guard() -> parking_lot::MutexGuard<'static, ()> {
+        TEST_LOCK.get_or_init(|| Mutex::new(())).lock()
+    }
+
     fn reset_pool() {
         configure(PoolConfig::default());
     }
 
     #[test]
     fn configure_controls_enabled_and_size() {
+        let _guard = test_guard();
         configure(PoolConfig {
             enabled: false,
             max_size: 50,
@@ -321,6 +328,7 @@ mod tests {
 
     #[test]
     fn row_slice_round_trips_empty_and_cleared() {
+        let _guard = test_guard();
         reset_pool();
         let mut rows = get_row_slice();
         assert!(rows.is_empty());
@@ -335,6 +343,7 @@ mod tests {
 
     #[test]
     fn node_slice_round_trips_empty_and_cleared() {
+        let _guard = test_guard();
         reset_pool();
         let mut nodes = get_node_slice();
         nodes.push(PooledNode {
@@ -351,6 +360,7 @@ mod tests {
 
     #[test]
     fn string_builder_round_trips_reset() {
+        let _guard = test_guard();
         reset_pool();
         let mut builder = get_string_builder();
         builder.write_str("hello");
@@ -366,6 +376,7 @@ mod tests {
 
     #[test]
     fn byte_buffer_round_trips_reset() {
+        let _guard = test_guard();
         reset_pool();
         let mut buffer = get_byte_buffer();
         buffer.extend_from_slice(b"test data");
@@ -379,6 +390,7 @@ mod tests {
 
     #[test]
     fn map_round_trips_cleared() {
+        let _guard = test_guard();
         reset_pool();
         let mut map = get_map();
         map.insert("key".to_string(), Value::from("value"));
@@ -391,6 +403,7 @@ mod tests {
 
     #[test]
     fn string_slice_round_trips_cleared() {
+        let _guard = test_guard();
         reset_pool();
         let mut values = get_string_slice();
         values.push("hello".to_string());
@@ -404,6 +417,7 @@ mod tests {
 
     #[test]
     fn value_slice_round_trips_cleared() {
+        let _guard = test_guard();
         reset_pool();
         let mut values = get_value_slice();
         values.push(Value::from(1));
@@ -417,6 +431,7 @@ mod tests {
 
     #[test]
     fn disabled_pool_returns_fresh_objects_and_ignores_puts() {
+        let _guard = test_guard();
         configure(PoolConfig {
             enabled: false,
             max_size: DEFAULT_MAX_SIZE,
@@ -432,14 +447,24 @@ mod tests {
 
     #[test]
     fn oversized_objects_are_not_pooled() {
+        let _guard = test_guard();
         configure(PoolConfig {
             enabled: true,
             max_size: 3,
         });
 
-        put_string_slice(vec!["x".to_string(); 20]);
-        put_value_slice(vec![Value::from(1); 20]);
-        put_byte_buffer(vec![0; 20]);
+        let oversized_strings = vec!["x".to_string(); 20];
+        let oversized_string_capacity = oversized_strings.capacity();
+        put_string_slice(oversized_strings);
+
+        let oversized_values = vec![Value::from(1); 20];
+        let oversized_value_capacity = oversized_values.capacity();
+        put_value_slice(oversized_values);
+
+        let oversized_buffer = vec![0; 20];
+        let oversized_buffer_capacity = oversized_buffer.capacity();
+        put_byte_buffer(oversized_buffer);
+
         put_map(BTreeMap::from([
             ("a".to_string(), Value::from(1)),
             ("b".to_string(), Value::from(2)),
@@ -447,11 +472,17 @@ mod tests {
             ("d".to_string(), Value::from(4)),
         ]));
 
+        assert_ne!(get_string_slice().capacity(), oversized_string_capacity);
+        assert_ne!(get_value_slice().capacity(), oversized_value_capacity);
+        assert_ne!(get_byte_buffer().capacity(), oversized_buffer_capacity);
+        assert!(get_map().is_empty());
+
         reset_pool();
     }
 
     #[test]
     fn concurrent_pool_access_is_safe() {
+        let _guard = test_guard();
         reset_pool();
         let barrier = Arc::new(std::sync::Barrier::new(16));
         let mut handles = Vec::new();
