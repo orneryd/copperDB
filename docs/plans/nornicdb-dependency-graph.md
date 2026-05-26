@@ -42,9 +42,9 @@ Current Rust status: all Layer 1 packages are implemented as package-owned paths
 These packages own durable graph state and storage-adjacent state.
 
 - [ ] `storage` -> graph records, metadata catalogs, MVCC, WAL, schema, indexes, namespace primitives.
-- [ ] `cache` -> query/result/write-through caches.
-- [ ] `pool` -> connection/resource pooling.
-- [ ] `txsession` -> transaction/session lifecycle and conflict semantics.
+- [x] `cache` -> query/result/write-through caches.
+- [x] `pool` -> reusable query-execution resource pooling.
+- [x] `txsession` -> transaction/session lifecycle and conflict semantics.
 - [ ] `retention` -> retention policies, legal holds, erasure request model and sweeper hooks.
 - [ ] `multidb` -> logical database catalog and namespace routing.
 
@@ -53,6 +53,8 @@ Distributed foundation hooks in this layer:
 - storage metadata persists topology-native hyperscaler profiles, mesh peers, placements, search policies, and HA write policy inputs.
 - storage rebuilds a validated `TopologyRegistry` from durable metadata.
 - transaction errors should route through `errors`.
+
+Current Rust status: `cache` is complete for its Layer 2 contract. It owns no source-of-truth durable state; its package-owned state is bounded, reloadable acceleration state. The crate provides query-plan LRU caching, parameter-sensitive query-result caching, write-through cache wrappers that update memory only after backing writes succeed, enable/disable controls, TTL expiration, explicit invalidation, eviction stats, and focused concurrency/contract tests. `pool` is complete for reusable execution scratch objects: row slices, pooled nodes, byte buffers, string builders, maps, string slices, and value slices with global configuration, bounded retention, oversized-object rejection, disabled-mode behavior, clearing-on-return, and concurrency tests. `txsession` is complete for package-owned transaction/session state: logical begin/commit timestamps from `topology`, pending write buffers, read-only enforcement, terminal state errors, explicit owner-bound sessions, TTL refresh/cleanup, terminal-error replay, and commit/rollback deletion. Its active sessions are runtime coordination state, not durable graph source-of-truth.
 
 ## Layer 3: Distributed Execution Foundation
 

@@ -13,4 +13,5 @@ parking_lot.workspace = true
 dashmap.workspace = true
 fnv.workspace = true
 tracing.workspace = true
+serde_json.workspace = true
 copperdb-util = { workspace = true }

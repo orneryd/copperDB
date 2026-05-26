@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum TxError {
     #[error("no active transaction")]
     NoActiveTransaction,
@@ -29,6 +29,8 @@ pub enum TxError {
     TimedOut,
     #[error("transaction conflict")]
     Conflict,
+    #[error("terminal transaction error: {0}")]
+    Terminal(String),
 }
 
 // ─── Enums ───────────────────────────────────────────────────────────────────
@@ -54,7 +56,6 @@ pub enum BookmarkMode {
     Optional,
 }
 
-/// Isolation level (kept for backward compatibility).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IsolationLevel {
     ReadCommitted,
@@ -93,7 +94,6 @@ pub struct Transaction {
     pub begin_timestamp: LogicalTransactionId,
     pub commit_timestamp: Option<LogicalTransactionId>,
     pub(crate) pending: Vec<TxOperation>,
-    // Legacy fields
     pub isolation: IsolationLevel,
 }
 
@@ -121,7 +121,6 @@ impl Transaction {
         }
     }
 
-    /// Legacy constructor used in tests.
     pub fn begin(database: impl Into<String>, isolation: IsolationLevel) -> Self {
         let db_str = database.into();
         Self {
@@ -209,11 +208,6 @@ impl Transaction {
     }
 }
 
-// ─── TxState (legacy alias) ──────────────────────────────────────────────────
-
-/// Legacy alias kept for backward compat.
-pub type TxState = TransactionState;
-
 // ─── SessionConfig ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -245,6 +239,187 @@ impl Default for SessionConfig {
 pub struct TransactionManager {
     active: DashMap<Uuid, Transaction>,
     clock: Arc<DistributedTransactionClock>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Session {
+    pub id: Uuid,
+    pub transaction_id: Uuid,
+    pub database: Option<String>,
+    pub owner: Option<String>,
+    pub expires_at: Instant,
+    terminal_error: Option<TxError>,
+}
+
+impl Session {
+    pub fn terminal_error(&self) -> Option<&TxError> {
+        self.terminal_error.as_ref()
+    }
+
+    pub fn is_expired(&self) -> bool {
+        Instant::now() > self.expires_at
+    }
+}
+
+pub struct SessionManager {
+    sessions: DashMap<Uuid, Session>,
+    transactions: Arc<TransactionManager>,
+    ttl: Duration,
+}
+
+impl SessionManager {
+    pub fn new(ttl: Duration) -> Self {
+        Self::with_transactions(ttl, Arc::new(TransactionManager::new()))
+    }
+
+    pub fn with_transactions(ttl: Duration, transactions: Arc<TransactionManager>) -> Self {
+        Self {
+            sessions: DashMap::new(),
+            transactions,
+            ttl: if ttl.is_zero() {
+                Duration::from_secs(30)
+            } else {
+                ttl
+            },
+        }
+    }
+
+    pub fn transactions(&self) -> &Arc<TransactionManager> {
+        &self.transactions
+    }
+
+    pub fn open(&self, config: &SessionConfig) -> Result<Uuid, TxError> {
+        self.open_for_owner(config, None)
+    }
+
+    pub fn open_for_owner(
+        &self,
+        config: &SessionConfig,
+        owner: Option<&str>,
+    ) -> Result<Uuid, TxError> {
+        let transaction_id = self.transactions.begin(config)?;
+        let session_id = Uuid::new_v4();
+        let owner = owner.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        let session = Session {
+            id: session_id,
+            transaction_id,
+            database: config.database.clone(),
+            owner,
+            expires_at: Instant::now() + self.ttl,
+            terminal_error: None,
+        };
+        self.sessions.insert(session_id, session);
+        Ok(session_id)
+    }
+
+    pub fn get(&self, session_id: &Uuid) -> Option<dashmap::mapref::one::Ref<'_, Uuid, Session>> {
+        self.get_for_owner(session_id, None)
+    }
+
+    pub fn get_for_owner(
+        &self,
+        session_id: &Uuid,
+        owner: Option<&str>,
+    ) -> Option<dashmap::mapref::one::Ref<'_, Uuid, Session>> {
+        let session = self.sessions.get(session_id)?;
+        match (
+            &session.owner,
+            owner.map(str::trim).filter(|value| !value.is_empty()),
+        ) {
+            (Some(bound_owner), Some(request_owner)) if bound_owner == request_owner => {
+                Some(session)
+            }
+            (Some(_), _) => None,
+            (None, _) => Some(session),
+        }
+    }
+
+    pub fn touch(&self, session_id: &Uuid) -> Result<(), TxError> {
+        let mut session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or(TxError::NoActiveTransaction)?;
+        session.expires_at = Instant::now() + self.ttl;
+        Ok(())
+    }
+
+    pub fn record_terminal_error(
+        &self,
+        session_id: &Uuid,
+        err: TxError,
+    ) -> Result<TxError, TxError> {
+        let mut session = self
+            .sessions
+            .get_mut(session_id)
+            .ok_or(TxError::NoActiveTransaction)?;
+        if let Some(existing) = &session.terminal_error {
+            return Ok(existing.clone());
+        }
+        session.terminal_error = Some(err.clone());
+        Ok(err)
+    }
+
+    pub fn commit_and_delete(&self, session_id: Uuid) -> Result<(), TxError> {
+        let (_, session) = self
+            .sessions
+            .remove(&session_id)
+            .ok_or(TxError::NoActiveTransaction)?;
+        if let Some(err) = session.terminal_error {
+            self.transactions.remove(&session.transaction_id);
+            return Err(err);
+        }
+        self.transactions.commit(session.transaction_id)
+    }
+
+    pub fn rollback_and_delete(&self, session_id: Uuid) -> Result<(), TxError> {
+        let (_, session) = self
+            .sessions
+            .remove(&session_id)
+            .ok_or(TxError::NoActiveTransaction)?;
+        if session.terminal_error.is_some() {
+            self.transactions.remove(&session.transaction_id);
+            return Ok(());
+        }
+        self.transactions.rollback(session.transaction_id)
+    }
+
+    pub fn delete(&self, session_id: &Uuid) {
+        if let Some((_, session)) = self.sessions.remove(session_id) {
+            self.transactions.remove(&session.transaction_id);
+        }
+    }
+
+    pub fn cleanup_expired(&self) {
+        let expired: Vec<(Uuid, Uuid)> = self
+            .sessions
+            .iter()
+            .filter_map(|entry| {
+                if entry.is_expired() {
+                    Some((*entry.key(), entry.transaction_id))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (session_id, transaction_id) in expired {
+            self.sessions.remove(&session_id);
+            self.transactions.remove(&transaction_id);
+        }
+    }
+}
+
+impl Default for SessionManager {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(30))
+    }
 }
 
 impl TransactionManager {
@@ -528,5 +703,101 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, TxError::TransactionReadOnly));
+    }
+
+    #[test]
+    fn session_manager_opens_owner_bound_sessions() {
+        let manager = SessionManager::new(Duration::from_secs(30));
+        let config = SessionConfig {
+            database: Some("neo4j".to_string()),
+            ..SessionConfig::default()
+        };
+
+        let session_id = manager
+            .open_for_owner(&config, Some("  user:alice  "))
+            .unwrap();
+
+        assert!(manager
+            .get_for_owner(&session_id, Some("user:alice"))
+            .is_some());
+        assert!(manager
+            .get_for_owner(&session_id, Some("user:bob"))
+            .is_none());
+        assert!(manager.get_for_owner(&session_id, None).is_none());
+        assert_eq!(
+            manager
+                .get_for_owner(&session_id, Some("user:alice"))
+                .unwrap()
+                .database,
+            Some("neo4j".to_string())
+        );
+    }
+
+    #[test]
+    fn session_manager_commit_deletes_session_and_transaction() {
+        let transactions = Arc::new(TransactionManager::new());
+        let manager =
+            SessionManager::with_transactions(Duration::from_secs(30), Arc::clone(&transactions));
+        let session_id = manager.open(&SessionConfig::default()).unwrap();
+        let transaction_id = manager.get(&session_id).unwrap().transaction_id;
+
+        manager.commit_and_delete(session_id).unwrap();
+
+        assert!(manager.get(&session_id).is_none());
+        assert!(!transactions.is_active(&transaction_id));
+    }
+
+    #[test]
+    fn session_manager_rollback_after_terminal_error_succeeds() {
+        let transactions = Arc::new(TransactionManager::new());
+        let manager =
+            SessionManager::with_transactions(Duration::from_secs(30), Arc::clone(&transactions));
+        let session_id = manager.open(&SessionConfig::default()).unwrap();
+        let transaction_id = manager.get(&session_id).unwrap().transaction_id;
+
+        let terminal = manager
+            .record_terminal_error(
+                &session_id,
+                TxError::Terminal("snapshot cancelled".to_string()),
+            )
+            .unwrap();
+        assert_eq!(
+            terminal,
+            TxError::Terminal("snapshot cancelled".to_string())
+        );
+
+        manager.rollback_and_delete(session_id).unwrap();
+
+        assert!(manager.get(&session_id).is_none());
+        assert!(!transactions.is_active(&transaction_id));
+    }
+
+    #[test]
+    fn session_manager_commit_replays_terminal_error_and_deletes() {
+        let manager = SessionManager::new(Duration::from_secs(30));
+        let session_id = manager.open(&SessionConfig::default()).unwrap();
+        manager
+            .record_terminal_error(&session_id, TxError::Terminal("hard expired".to_string()))
+            .unwrap();
+
+        let err = manager.commit_and_delete(session_id).unwrap_err();
+
+        assert_eq!(err, TxError::Terminal("hard expired".to_string()));
+        assert!(manager.get(&session_id).is_none());
+    }
+
+    #[test]
+    fn session_manager_cleanup_expired_removes_transaction() {
+        let transactions = Arc::new(TransactionManager::new());
+        let manager =
+            SessionManager::with_transactions(Duration::from_millis(1), Arc::clone(&transactions));
+        let session_id = manager.open(&SessionConfig::default()).unwrap();
+        let transaction_id = manager.get(&session_id).unwrap().transaction_id;
+
+        std::thread::sleep(Duration::from_millis(5));
+        manager.cleanup_expired();
+
+        assert!(manager.get(&session_id).is_none());
+        assert!(!transactions.is_active(&transaction_id));
     }
 }
