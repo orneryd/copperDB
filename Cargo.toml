@@ -14,6 +14,7 @@ members = [
     "crates/embed",
     "crates/embeddingutil",
     "crates/encryption",
+    "crates/errors",
     "crates/envutil",
     "crates/eval",
     "crates/fabric",
@@ -24,12 +25,14 @@ members = [
     "crates/indexing",
     "crates/inference",
     "crates/kms",
+    "crates/lifecycle",
     "crates/linkpredict",
     "crates/localllm",
     "crates/math",
     "crates/mcp",
     "crates/multidb",
     "crates/copperdb",
+    "crates/engine",
     "crates/nornicgrpc",
     "crates/otel",
     "crates/pool",
@@ -43,6 +46,7 @@ members = [
     "crates/storage",
     "crates/temporal",
     "crates/textchunk",
+    "crates/topology",
     "crates/txsession",
     "crates/util",
     "crates/vectorspace",
@@ -61,6 +65,7 @@ repository = "https://github.com/orneryd/copperdb"
 # Async runtime
 tokio = { version = "1.52.1", features = ["full"] }
 tokio-stream = "0.1.18"
+tokio-util = "0.7.18"
 async-trait = "0.1.89"
 
 # Serialization
@@ -163,6 +168,7 @@ copperdb-storage = { path = "crates/storage" }
 copperdb-cypher = { path = "crates/cypher" }
 copperdb-auth = { path = "crates/auth" }
 copperdb-encryption = { path = "crates/encryption" }
+copperdb-errors = { path = "crates/errors" }
 copperdb-cache = { path = "crates/cache" }
 copperdb-simd = { path = "crates/simd" }
 copperdb-vectorspace = { path = "crates/vectorspace" }
@@ -174,6 +180,7 @@ copperdb-bolt = { path = "crates/bolt" }
 copperdb-embed = { path = "crates/embed" }
 copperdb-gpu = { path = "crates/gpu" }
 copperdb-kms = { path = "crates/kms" }
+copperdb-lifecycle = { path = "crates/lifecycle" }
 copperdb-config = { path = "crates/config" }
 copperdb-server = { path = "crates/server" }
 copperdb-graphql = { path = "crates/graphql" }
@@ -192,10 +199,11 @@ copperdb-multidb = { path = "crates/multidb" }
 copperdb-mcp = { path = "crates/mcp" }
 copperdb-inference = { path = "crates/inference" }
 copperdb-localllm = { path = "crates/localllm" }
-copperdb-copperdb = { path = "crates/magnetdb" }
+copperdb-engine = { path = "crates/engine" }
 copperdb-linkpredict = { path = "crates/linkpredict" }
 copperdb-embeddingutil = { path = "crates/embeddingutil" }
 copperdb-textchunk = { path = "crates/textchunk" }
+copperdb-topology = { path = "crates/topology" }
 copperdb-retention = { path = "crates/retention" }
 copperdb-convert = { path = "crates/convert" }
 copperdb-envutil = { path = "crates/envutil" }

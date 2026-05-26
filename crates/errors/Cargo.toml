@@ -1,0 +1,13 @@
+[package]
+name = "copperdb-errors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+copperdb-storage = { workspace = true }
+thiserror.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true

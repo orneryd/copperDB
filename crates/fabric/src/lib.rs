@@ -7,6 +7,12 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use copperdb_topology::{
+    DistributedSearchPlan, DistributedWriteMode, DistributedWritePlan, HyperscalerProfile,
+    MeshPeer, NodeCapability, PeerHealth, PlacementKey, PlacementRecord, TopologyError,
+    TopologyRegistry,
+};
+
 #[derive(Debug, Error)]
 pub enum FabricError {
     #[error("no available node for database {0}")]
@@ -36,6 +42,44 @@ pub enum NodeRole {
 #[derive(Default)]
 pub struct Router {
     nodes: Vec<ClusterNode>,
+}
+
+/// Shared topology-backed routing facade for future distributed execution.
+///
+/// This is a planning seam only: callers get a search or write plan, while
+/// transport execution remains in `search`/`replication` until HA is enabled.
+#[derive(Debug, Clone, Default)]
+pub struct FabricTopology {
+    registry: TopologyRegistry,
+}
+
+impl FabricTopology {
+    pub fn new(registry: TopologyRegistry) -> Self {
+        Self { registry }
+    }
+
+    pub fn registry(&self) -> &TopologyRegistry {
+        &self.registry
+    }
+
+    pub fn registry_mut(&mut self) -> &mut TopologyRegistry {
+        &mut self.registry
+    }
+
+    pub fn plan_search(
+        &self,
+        placement: &PlacementKey,
+    ) -> Result<DistributedSearchPlan, TopologyError> {
+        self.registry.plan_search(placement)
+    }
+
+    pub fn plan_write(
+        &self,
+        placement: &PlacementKey,
+        mode: DistributedWriteMode,
+    ) -> Result<DistributedWritePlan, TopologyError> {
+        self.registry.plan_write(placement, mode)
+    }
 }
 
 impl Router {
@@ -130,5 +174,31 @@ mod tests {
     fn test_node_roles() {
         assert_ne!(NodeRole::Primary, NodeRole::Secondary);
         assert_ne!(NodeRole::Secondary, NodeRole::ReadReplica);
+    }
+
+    #[test]
+    fn topology_facade_returns_search_and_write_plans() {
+        let mut registry = TopologyRegistry::new();
+        registry
+            .register_peer(
+                MeshPeer::new("n1", "n1.mesh.local:9000")
+                    .with_capability(NodeCapability::Search)
+                    .with_capability(NodeCapability::WriteLeader),
+            )
+            .unwrap();
+        registry
+            .register_placement(PlacementRecord::standalone("neo4j", "n1"))
+            .unwrap();
+
+        let fabric = FabricTopology::new(registry);
+        let placement = PlacementKey::default_for_database("neo4j");
+        assert_eq!(fabric.plan_search(&placement).unwrap().fanout.len(), 1);
+        assert_eq!(
+            fabric
+                .plan_write(&placement, DistributedWriteMode::Standalone)
+                .unwrap()
+                .required_acks,
+            1
+        );
     }
 }

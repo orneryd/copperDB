@@ -21,3 +21,4 @@ uuid.workspace = true
 sled.workspace = true
 tempfile.workspace = true
 copperdb-util = { workspace = true }
+copperdb-topology = { workspace = true }

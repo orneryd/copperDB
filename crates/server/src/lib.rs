@@ -13,7 +13,7 @@ use axum::{
     Json, Router,
 };
 use copperdb_auth::{AuthError, TokenManager};
-use copperdb_copperdb::{copperdb as GraphEngine, DatabaseConfig as EngineConfig};
+use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig};
 use copperdb_multidb::{DatabaseManager, DatabaseStatus, MultiDbError};
 use copperdb_otel::{classify_cypher_op_type, Telemetry};
 use copperdb_retention::{
@@ -689,7 +689,7 @@ fn execute_statement(
     Ok(convert_engine_result(result))
 }
 
-fn convert_engine_result(result: copperdb_copperdb::QueryResult) -> Neo4jResult {
+fn convert_engine_result(result: copperdb_engine::QueryResult) -> Neo4jResult {
     let columns = result.columns;
     let data = result
         .rows

@@ -2,7 +2,10 @@
 
 mod catalog;
 
-pub use catalog::{EnumSpec, MetricSpec, ENUM_CATALOG, METRIC_CATALOG, NORNICDB_MAIN_REF, NORNICDB_OBSERVABILITY_PATH};
+pub use catalog::{
+    EnumSpec, MetricSpec, ENUM_CATALOG, METRIC_CATALOG, NORNICDB_MAIN_REF,
+    NORNICDB_OBSERVABILITY_PATH,
+};
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
@@ -62,7 +65,11 @@ impl Telemetry {
         METRIC_CATALOG.iter().find(|metric| metric.name == name)
     }
 
-    pub fn record_counter(&self, name: &str, labels: &[(&str, &str)]) -> Result<(), TelemetryError> {
+    pub fn record_counter(
+        &self,
+        name: &str,
+        labels: &[(&str, &str)],
+    ) -> Result<(), TelemetryError> {
         let key = validate_labels(name, labels)?;
         self.with_value(key, "counter", |current| match current {
             None => Ok(MetricValue::Counter(1.0)),
@@ -138,10 +145,7 @@ impl Telemetry {
             if shape.is_empty() {
                 let _ = self.set_gauge(spec.name, &[], 0.0);
             } else {
-                let labels = shape
-                    .iter()
-                    .map(|name| (*name, "mock"))
-                    .collect::<Vec<_>>();
+                let labels = shape.iter().map(|name| (*name, "mock")).collect::<Vec<_>>();
                 let _ = self.set_gauge(spec.name, &labels, 0.0);
             }
         }
@@ -218,9 +222,16 @@ pub fn classify_cypher_op_type(query: &str) -> &'static str {
         "schema"
     } else if normalized.starts_with("MATCH") || normalized.starts_with("RETURN") {
         "read"
-    } else if normalized.starts_with("CREATE") || normalized.starts_with("MERGE") || normalized.starts_with("DELETE") || normalized.starts_with("SET") {
+    } else if normalized.starts_with("CREATE")
+        || normalized.starts_with("MERGE")
+        || normalized.starts_with("DELETE")
+        || normalized.starts_with("SET")
+    {
         "write"
-    } else if normalized.starts_with("SHOW DATABASE") || normalized.starts_with("CREATE DATABASE") || normalized.starts_with("DROP DATABASE") {
+    } else if normalized.starts_with("SHOW DATABASE")
+        || normalized.starts_with("CREATE DATABASE")
+        || normalized.starts_with("DROP DATABASE")
+    {
         "admin"
     } else if normalized.starts_with("USE ") {
         "fabric"
@@ -236,19 +247,36 @@ mod tests {
     #[test]
     fn catalog_is_copied_from_nornicdb_observability() {
         assert!(METRIC_CATALOG.len() >= 70);
-        assert!(METRIC_CATALOG.iter().any(|m| m.name == "nornicdb_auth_attempts_total"));
-        assert!(METRIC_CATALOG.iter().any(|m| m.name == "nornicdb_http_requests_total"));
-        assert!(METRIC_CATALOG.iter().any(|m| m.name == "nornicdb_replication_last_contact_seconds"));
-        assert!(METRIC_CATALOG.iter().any(|m| m.name == "nornicdb_knowledge_policy_decay_score"));
-        assert!(ENUM_CATALOG.iter().any(|e| e.name == "AllowedCypherOpTypes"));
-        assert!(ENUM_CATALOG.iter().any(|e| e.name == "AllowedStorageIndexes"));
+        assert!(METRIC_CATALOG
+            .iter()
+            .any(|m| m.name == "nornicdb_auth_attempts_total"));
+        assert!(METRIC_CATALOG
+            .iter()
+            .any(|m| m.name == "nornicdb_http_requests_total"));
+        assert!(METRIC_CATALOG
+            .iter()
+            .any(|m| m.name == "nornicdb_replication_last_contact_seconds"));
+        assert!(METRIC_CATALOG
+            .iter()
+            .any(|m| m.name == "nornicdb_knowledge_policy_decay_score"));
+        assert!(ENUM_CATALOG
+            .iter()
+            .any(|e| e.name == "AllowedCypherOpTypes"));
+        assert!(ENUM_CATALOG
+            .iter()
+            .any(|e| e.name == "AllowedStorageIndexes"));
     }
 
     #[test]
     fn record_unknown_metric_returns_error() {
         let telemetry = Telemetry::new();
-        let err = telemetry.record_counter("nornicdb_missing_metric_total", &[]).unwrap_err();
-        assert_eq!(err, TelemetryError::UnknownMetric("nornicdb_missing_metric_total".into()));
+        let err = telemetry
+            .record_counter("nornicdb_missing_metric_total", &[])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            TelemetryError::UnknownMetric("nornicdb_missing_metric_total".into())
+        );
     }
 
     #[test]
@@ -257,7 +285,11 @@ mod tests {
         let err = telemetry
             .record_counter(
                 "nornicdb_auth_attempts_total",
-                &[("result", "success"), ("protocol", "http"), ("protocol", "bolt")],
+                &[
+                    ("result", "success"),
+                    ("protocol", "http"),
+                    ("protocol", "bolt"),
+                ],
             )
             .unwrap_err();
         assert_eq!(err, TelemetryError::DuplicateLabel("protocol".into()));
@@ -274,12 +306,25 @@ mod tests {
             .unwrap_err();
 
         match err {
-            TelemetryError::InvalidLabels { metric, expected, got } => {
+            TelemetryError::InvalidLabels {
+                metric,
+                expected,
+                got,
+            } => {
                 assert_eq!(metric, "nornicdb_http_requests_total");
                 assert_eq!(got, vec!["method".to_string(), "path_template".to_string()]);
                 assert_eq!(expected.len(), 2);
-                assert!(expected.contains(&vec!["method".into(), "path_template".into(), "status_class".into()]));
-                assert!(expected.contains(&vec!["method".into(), "path_template".into(), "status_class".into(), "database".into()]));
+                assert!(expected.contains(&vec![
+                    "method".into(),
+                    "path_template".into(),
+                    "status_class".into()
+                ]));
+                assert!(expected.contains(&vec![
+                    "method".into(),
+                    "path_template".into(),
+                    "status_class".into(),
+                    "database".into()
+                ]));
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -288,7 +333,9 @@ mod tests {
     #[test]
     fn metric_type_mismatch_errors_are_covered() {
         let telemetry = Telemetry::new();
-        telemetry.set_gauge("nornicdb_storage_wal_lag_bytes", &[], 8.0).unwrap();
+        telemetry
+            .set_gauge("nornicdb_storage_wal_lag_bytes", &[], 8.0)
+            .unwrap();
         let err = telemetry
             .record_counter("nornicdb_storage_wal_lag_bytes", &[])
             .unwrap_err();
@@ -366,10 +413,13 @@ mod tests {
     #[test]
     fn classify_cypher_op_type_matches_expected_mapping() {
         assert_eq!(classify_cypher_op_type("MATCH (n) RETURN n"), "read");
-        assert_eq!(classify_cypher_op_type("CREATE (n)") , "write");
+        assert_eq!(classify_cypher_op_type("CREATE (n)"), "write");
         assert_eq!(classify_cypher_op_type("CREATE INDEX foo"), "schema");
         assert_eq!(classify_cypher_op_type("SHOW DATABASES"), "admin");
-        assert_eq!(classify_cypher_op_type("USE db MATCH (n) RETURN n"), "fabric");
+        assert_eq!(
+            classify_cypher_op_type("USE db MATCH (n) RETURN n"),
+            "fabric"
+        );
         assert_eq!(classify_cypher_op_type("   "), "parse_error");
     }
 }

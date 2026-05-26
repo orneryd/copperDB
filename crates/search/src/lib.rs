@@ -7,6 +7,10 @@
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
+use copperdb_topology::{
+    DistributedSearchPlan, PlacementKey, SearchRoutingPolicy, TopologyError, TopologyRegistry,
+};
+
 #[derive(Debug, Error)]
 pub enum SearchError {
     #[error("tantivy error: {0}")]
@@ -61,6 +65,41 @@ pub struct SearchIndex {
     inverted: HashMap<String, HashSet<String>>,
     /// word -> field -> set of doc IDs (for field-scoped search)
     field_inverted: HashMap<String, HashMap<String, HashSet<String>>>,
+}
+
+/// Distributed search planning seam.
+///
+/// The search engine remains local today. This router makes the cluster fan-out
+/// contract explicit so mesh execution can be added without changing query APIs.
+#[derive(Debug, Clone, Default)]
+pub struct DistributedSearchRouter {
+    topology: TopologyRegistry,
+}
+
+impl DistributedSearchRouter {
+    pub fn new(topology: TopologyRegistry) -> Self {
+        Self { topology }
+    }
+
+    pub fn topology(&self) -> &TopologyRegistry {
+        &self.topology
+    }
+
+    pub fn plan(&self, placement: &PlacementKey) -> Result<DistributedSearchPlan, TopologyError> {
+        self.topology.plan_search(placement)
+    }
+
+    pub fn plan_low_latency(
+        &self,
+        placement: &PlacementKey,
+        request_region: impl Into<String>,
+        max_fanout: usize,
+    ) -> Result<DistributedSearchPlan, TopologyError> {
+        self.topology.plan_search_with_policy(
+            placement,
+            SearchRoutingPolicy::low_latency(request_region, max_fanout),
+        )
+    }
 }
 
 impl Default for SearchIndex {
@@ -290,5 +329,71 @@ mod tests {
         let tokens = SearchIndex::tokenize("Hello, world! It's great.");
         assert!(tokens.contains(&"hello".to_string()));
         assert!(tokens.contains(&"world".to_string()));
+    }
+
+    #[test]
+    fn distributed_router_plans_mesh_fanout() {
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementRecord};
+
+        let mut topology = TopologyRegistry::new();
+        topology
+            .register_peer(
+                MeshPeer::new("search-a", "search-a.mesh.local:9000")
+                    .with_capability(NodeCapability::Search)
+                    .with_capability(NodeCapability::WriteLeader),
+            )
+            .unwrap();
+        topology
+            .register_placement(PlacementRecord::standalone("neo4j", "search-a"))
+            .unwrap();
+
+        let router = DistributedSearchRouter::new(topology);
+        let plan = router
+            .plan(&PlacementKey::default_for_database("neo4j"))
+            .unwrap();
+        assert_eq!(plan.fanout[0].node_id, "search-a");
+    }
+
+    #[test]
+    fn distributed_router_prefers_low_latency_local_peers() {
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let mut topology = TopologyRegistry::new();
+        topology
+            .register_peer(
+                MeshPeer::new("search-remote", "search-remote.mesh.local:9000")
+                    .with_capability(NodeCapability::Search)
+                    .with_region_zone("eu-west-1", "eu-west-1a")
+                    .with_observed_rtt_micros(500)
+                    .with_load(0, 8),
+            )
+            .unwrap();
+        topology
+            .register_peer(
+                MeshPeer::new("search-local", "search-local.mesh.local:9000")
+                    .with_capability(NodeCapability::Search)
+                    .with_region_zone("us-east-1", "us-east-1a")
+                    .with_observed_rtt_micros(1_500)
+                    .with_load(0, 8),
+            )
+            .unwrap();
+        topology
+            .register_placement(PlacementRecord {
+                key: PlacementKey::default_for_database("neo4j"),
+                primary_node: "search-local".into(),
+                replica_nodes: vec![],
+                search_nodes: vec!["search-remote".into(), "search-local".into()],
+                hyperscaler_profile: None,
+                min_write_replicas: 0,
+                search_fanout: 2,
+            })
+            .unwrap();
+
+        let router = DistributedSearchRouter::new(topology);
+        let plan = router
+            .plan_low_latency(&PlacementKey::default_for_database("neo4j"), "us-east-1", 2)
+            .unwrap();
+        assert_eq!(plan.parallelism, 2);
+        assert_eq!(plan.fanout[0].node_id, "search-local");
     }
 }

@@ -8,6 +8,9 @@
 
 use async_trait::async_trait;
 use copperdb_storage::{StorageEngine, StorageError};
+use copperdb_topology::{
+    DistributedWriteMode, DistributedWritePlan, PlacementKey, TopologyError, TopologyRegistry,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -59,6 +62,35 @@ pub struct ReplicationConfig {
     pub peers: Vec<String>,
     pub heartbeat_interval: Duration,
     pub election_timeout: Duration,
+}
+
+/// High-availability write planner.
+///
+/// This deliberately plans quorum/raft participation without performing network
+/// replication yet. The execution layer can consume this once distributed writes
+/// are enabled.
+#[derive(Debug, Clone)]
+pub struct HighAvailabilityWritePlanner {
+    topology: TopologyRegistry,
+    mode: DistributedWriteMode,
+}
+
+impl HighAvailabilityWritePlanner {
+    pub fn new(topology: TopologyRegistry, mode: DistributedWriteMode) -> Self {
+        Self { topology, mode }
+    }
+
+    pub fn topology(&self) -> &TopologyRegistry {
+        &self.topology
+    }
+
+    pub fn mode(&self) -> DistributedWriteMode {
+        self.mode
+    }
+
+    pub fn plan(&self, placement: &PlacementKey) -> Result<DistributedWritePlan, TopologyError> {
+        self.topology.plan_write(placement, self.mode)
+    }
 }
 
 impl Default for ReplicationConfig {
@@ -1353,5 +1385,49 @@ mod tests {
         restored.install_snapshot(snapshot).await.unwrap();
 
         assert_eq!(restored_storage.get(b"snap"), Some(b"state".to_vec()));
+    }
+
+    #[test]
+    fn high_availability_planner_uses_topology_quorum() {
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let mut topology = TopologyRegistry::new();
+        topology
+            .register_peer(
+                MeshPeer::new("node-1", "node-1.mesh.local:9000")
+                    .with_capability(NodeCapability::WriteLeader),
+            )
+            .unwrap();
+        topology
+            .register_peer(
+                MeshPeer::new("node-2", "node-2.mesh.local:9000")
+                    .with_capability(NodeCapability::WriteReplica),
+            )
+            .unwrap();
+        topology
+            .register_peer(
+                MeshPeer::new("node-3", "node-3.mesh.local:9000")
+                    .with_capability(NodeCapability::WriteReplica),
+            )
+            .unwrap();
+        topology
+            .register_placement(PlacementRecord {
+                key: PlacementKey::default_for_database("neo4j"),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let planner = HighAvailabilityWritePlanner::new(topology, DistributedWriteMode::RaftLog);
+        let plan = planner
+            .plan(&PlacementKey::default_for_database("neo4j"))
+            .unwrap();
+        assert_eq!(plan.leader.node_id, "node-1");
+        assert_eq!(plan.required_acks, 2);
+        assert_eq!(plan.replicas.len(), 2);
     }
 }

@@ -1,5 +1,5 @@
 [package]
-name = "copperdb-copperdb"
+name = "copperdb-engine"
 description = "copperdb core engine: integrates all subsystems into a unified database"
 version.workspace = true
 edition.workspace = true

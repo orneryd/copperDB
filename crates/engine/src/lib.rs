@@ -52,7 +52,7 @@ use thiserror::Error;
 // ─── Errors ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
-pub enum MagnetError {
+pub enum CopperDbError {
     #[error("storage error: {0}")]
     Storage(String),
     #[error("parse error: {0}")]
@@ -63,28 +63,28 @@ pub enum MagnetError {
     Init(String),
 }
 
-impl From<copperdb_storage::StorageError> for MagnetError {
+impl From<copperdb_storage::StorageError> for CopperDbError {
     fn from(e: copperdb_storage::StorageError) -> Self {
-        MagnetError::Storage(e.to_string())
+        CopperDbError::Storage(e.to_string())
     }
 }
 
-impl From<copperdb_cypher::CypherError> for MagnetError {
+impl From<copperdb_cypher::CypherError> for CopperDbError {
     fn from(e: copperdb_cypher::CypherError) -> Self {
-        MagnetError::Parse(e.to_string())
+        CopperDbError::Parse(e.to_string())
     }
 }
 
-impl From<copperdb_eval::EvalError> for MagnetError {
+impl From<copperdb_eval::EvalError> for CopperDbError {
     fn from(e: copperdb_eval::EvalError) -> Self {
-        MagnetError::Eval(e.to_string())
+        CopperDbError::Eval(e.to_string())
     }
 }
 
 // ─── Legacy error (kept for existing tests) ──────────────────────────────────
 
 #[derive(Debug, Error)]
-pub enum copperdbError {
+pub enum CopperDbServerError {
     #[error("storage error: {0}")]
     Storage(String),
     #[error("auth error: {0}")]
@@ -153,7 +153,7 @@ impl From<QueryStats> for ResultStats {
 // ─── copperdb (embedded sync engine) ─────────────────────────────────────────
 
 /// The primary embedded database engine.
-pub struct copperdb {
+pub struct CopperDb {
     config: DatabaseConfig,
     storage: Arc<StorageEngine>,
     eval: EvalEngine,
@@ -161,18 +161,18 @@ pub struct copperdb {
     query_cache: Arc<QueryCache<copperdb_cypher::Query>>,
 }
 
-impl copperdb {
+impl CopperDb {
     /// Create a new in-memory (temporary) database instance.
-    pub fn open_temporary() -> Result<Self, MagnetError> {
+    pub fn open_temporary() -> Result<Self, CopperDbError> {
         let storage = Arc::new(StorageEngine::open_temporary()?);
         Ok(Self::from_storage(storage, DatabaseConfig::default()))
     }
 
     /// Create a persistent database at the given path.
-    pub fn open(config: DatabaseConfig) -> Result<Self, MagnetError> {
+    pub fn open(config: DatabaseConfig) -> Result<Self, CopperDbError> {
         let storage = Arc::new(
             StorageEngine::open(&config.data_dir)
-                .map_err(|e| MagnetError::Storage(e.to_string()))?,
+                .map_err(|e| CopperDbError::Storage(e.to_string()))?,
         );
         Ok(Self::from_storage(storage, config))
     }
@@ -196,7 +196,7 @@ impl copperdb {
         &self,
         cypher: &str,
         params: HashMap<String, Value>,
-    ) -> Result<QueryResult, MagnetError> {
+    ) -> Result<QueryResult, CopperDbError> {
         let start = Instant::now();
 
         if self.config.log_queries {
@@ -236,7 +236,7 @@ impl copperdb {
     }
 
     /// Flush all pending writes to disk.
-    pub fn flush(&self) -> Result<(), MagnetError> {
+    pub fn flush(&self) -> Result<(), CopperDbError> {
         self.storage.flush()?;
         Ok(())
     }
@@ -266,13 +266,13 @@ pub struct CopperDbServer {
 
 impl CopperDbServer {
     /// Initialize and start the database engine.
-    pub async fn start(config: copperdb_config::Config) -> Result<Self, copperdbError> {
+    pub async fn start(config: copperdb_config::Config) -> Result<Self, CopperDbServerError> {
         tracing::info!("Starting copperdb v{}", env!("CARGO_PKG_VERSION"));
         Ok(Self { config })
     }
 
     /// Gracefully shut down all subsystems.
-    pub async fn shutdown(&self) -> Result<(), copperdbError> {
+    pub async fn shutdown(&self) -> Result<(), CopperDbServerError> {
         tracing::info!("Shutting down copperdb");
         Ok(())
     }
@@ -295,13 +295,13 @@ mod tests {
 
     #[test]
     fn test_open_temporary() {
-        let db = copperdb::open_temporary().unwrap();
+        let db = CopperDb::open_temporary().unwrap();
         assert_eq!(db.config.default_database, "copperdb");
     }
 
     #[test]
     fn test_create_and_match() {
-        let db = copperdb::open_temporary().unwrap();
+        let db = CopperDb::open_temporary().unwrap();
 
         let result = db
             .execute(
@@ -319,7 +319,7 @@ mod tests {
 
     #[test]
     fn test_match_with_where() {
-        let db = copperdb::open_temporary().unwrap();
+        let db = CopperDb::open_temporary().unwrap();
         db.execute(
             "CREATE (n:Person {name: 'Alice', age: 30})",
             Default::default(),
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn test_flush_and_size() {
-        let db = copperdb::open_temporary().unwrap();
+        let db = CopperDb::open_temporary().unwrap();
         db.execute("CREATE (n:Test {x: 1})", Default::default())
             .unwrap();
         db.flush().unwrap();
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn test_query_caching() {
-        let db = copperdb::open_temporary().unwrap();
+        let db = CopperDb::open_temporary().unwrap();
         db.execute("CREATE (n:Cached {v: 1})", Default::default())
             .unwrap();
         // Second identical query hits cache
@@ -379,7 +379,7 @@ mod tests {
 
     #[test]
     fn test_multiple_creates_and_match() {
-        let db = copperdb::open_temporary().unwrap();
+        let db = CopperDb::open_temporary().unwrap();
         for i in 0..5 {
             db.execute(
                 &format!("CREATE (n:Item {{idx: {i}}})", i = i),
@@ -412,7 +412,7 @@ mod smoke_tests {
                 data_dir: path.clone(),
                 ..Default::default()
             };
-            let db = copperdb::open(cfg).unwrap();
+            let db = CopperDb::open(cfg).unwrap();
             let result = db
                 .execute(
                     "CREATE (n:Person {name: 'Alice', age: 30}) RETURN n",
@@ -432,7 +432,7 @@ mod smoke_tests {
                 data_dir: path.clone(),
                 ..Default::default()
             };
-            let db = copperdb::open(cfg).unwrap();
+            let db = CopperDb::open(cfg).unwrap();
             let result = db
                 .execute("MATCH (n:Person) RETURN n", HashMap::new())
                 .unwrap();
@@ -472,7 +472,7 @@ mod smoke_tests {
                 data_dir: path.clone(),
                 ..Default::default()
             };
-            let db = copperdb::open(cfg).unwrap();
+            let db = CopperDb::open(cfg).unwrap();
             db.execute(
                 "CREATE (a:City {name: 'London', pop: 9000000})",
                 HashMap::new(),
@@ -495,7 +495,7 @@ mod smoke_tests {
                 data_dir: path.clone(),
                 ..Default::default()
             };
-            let db = copperdb::open(cfg).unwrap();
+            let db = CopperDb::open(cfg).unwrap();
             let result = db
                 .execute("MATCH (c:City) RETURN c", HashMap::new())
                 .unwrap();
@@ -536,7 +536,7 @@ mod smoke_tests {
                 data_dir: path.clone(),
                 ..Default::default()
             };
-            let db = copperdb::open(cfg).unwrap();
+            let db = CopperDb::open(cfg).unwrap();
             for (name, age) in &[("Alice", 30), ("Bob", 20), ("Carol", 35)] {
                 db.execute(
                     &format!("CREATE (n:User {{name: '{name}', age: {age}}})"),
@@ -552,7 +552,7 @@ mod smoke_tests {
                 data_dir: path.clone(),
                 ..Default::default()
             };
-            let db = copperdb::open(cfg).unwrap();
+            let db = CopperDb::open(cfg).unwrap();
             let result = db
                 .execute("MATCH (n:User) WHERE n.age > 25 RETURN n", HashMap::new())
                 .unwrap();

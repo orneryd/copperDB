@@ -1,7 +1,7 @@
 //! Embedded key-value storage engine for copperdb.
 //!
 //! Storage layout policy for copper: **version 0 only**.
-//! This crate intentionally avoids legacy migration arms and only supports
+//! This crate intentionally avoids alternate layout migration arms and only supports
 //! opening databases whose manifest declares layout version 0.
 
 use bytes::Bytes;
@@ -16,8 +16,9 @@ use thiserror::Error;
 
 pub const STORAGE_LAYOUT_VERSION: u8 = 0;
 const META_LAYOUT_MANIFEST_KEY: &[u8] = b"layout_manifest";
-const META_SEARCH_PEER_PREFIX: &[u8] = b"search_peer/";
-const META_HYPERSCALER_PROFILE_PREFIX: &[u8] = b"hyperscaler_profile/";
+const META_TOPOLOGY_PEER_PREFIX: &[u8] = b"topology_peer/";
+const META_TOPOLOGY_PROFILE_PREFIX: &[u8] = b"topology_profile/";
+const META_TOPOLOGY_PLACEMENT_PREFIX: &[u8] = b"topology_placement/";
 const META_SCHEMA_CONSTRAINT_PREFIX: &[u8] = b"schema_constraint/";
 const META_SCHEMA_INDEX_PREFIX: &[u8] = b"schema_index/";
 const META_KP_DECAY_PROFILE_PREFIX: &[u8] = b"kp_decay_profile/";
@@ -77,6 +78,8 @@ pub enum StorageError {
     KnowledgePolicyInvalid(String),
     #[error("knowledge policy in use: {0}")]
     KnowledgePolicyInUse(String),
+    #[error("topology invalid: {0}")]
+    TopologyInvalid(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -590,24 +593,6 @@ pub struct EdgeRecord {
     pub updated_at_unix_ms: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SearchPeerRecord {
-    pub peer_id: String,
-    pub endpoint: String,
-    pub region: String,
-    pub capacity_class: String,
-    pub last_heartbeat_unix_ms: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HyperscalerProfile {
-    pub profile_id: String,
-    pub provider: String,
-    pub region: String,
-    pub tier: String,
-    pub enabled: bool,
-}
-
 /// A single opened copperdb storage instance.
 #[derive(Debug)]
 pub struct StorageEngine {
@@ -700,7 +685,7 @@ impl StorageEngine {
         self.temp_dir.is_some()
     }
 
-    // --- Compatibility node operations (raw bytes) ---
+    // --- Raw node operations ---
 
     /// Store a node's serialized properties.
     pub fn put_node(&self, id: &str, value: &[u8]) -> Result<(), StorageError> {
@@ -730,7 +715,7 @@ impl StorageEngine {
         })
     }
 
-    // --- Compatibility edge operations (raw bytes) ---
+    // --- Raw edge operations ---
 
     /// Store an edge's serialized properties.
     pub fn put_edge(&self, id: &str, value: &[u8]) -> Result<(), StorageError> {
@@ -867,45 +852,90 @@ impl StorageEngine {
         Ok(out.into_iter().collect())
     }
 
-    // --- Distributed search mesh / hyperscaler metadata baselines ---
+    // --- Topology-native distributed search / hyperscaler metadata ---
 
-    pub fn register_search_peer(&self, peer: &SearchPeerRecord) -> Result<(), StorageError> {
-        let key = [META_SEARCH_PEER_PREFIX, peer.peer_id.as_bytes()].concat();
+    pub fn register_topology_peer(
+        &self,
+        peer: &copperdb_topology::MeshPeer,
+    ) -> Result<(), StorageError> {
+        let key = [META_TOPOLOGY_PEER_PREFIX, peer.node_id.as_bytes()].concat();
         self.meta.insert(key, rmp_serde::to_vec(peer)?)?;
         Ok(())
     }
 
-    pub fn list_search_peers(&self) -> Result<Vec<SearchPeerRecord>, StorageError> {
-        let mut peers: Vec<SearchPeerRecord> = Vec::new();
-        for entry in self.meta.scan_prefix(META_SEARCH_PEER_PREFIX) {
+    pub fn list_topology_peers(&self) -> Result<Vec<copperdb_topology::MeshPeer>, StorageError> {
+        let mut peers: Vec<copperdb_topology::MeshPeer> = Vec::new();
+        for entry in self.meta.scan_prefix(META_TOPOLOGY_PEER_PREFIX) {
             let (_, v) = entry?;
             peers.push(rmp_serde::from_slice(v.as_ref())?);
         }
-        peers.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
+        peers.sort_by(|a, b| a.node_id.cmp(&b.node_id));
         Ok(peers)
     }
 
-    pub fn register_hyperscaler_profile(
+    pub fn register_topology_hyperscaler_profile(
         &self,
-        profile: &HyperscalerProfile,
+        profile: &copperdb_topology::HyperscalerProfile,
     ) -> Result<(), StorageError> {
-        let key = [
-            META_HYPERSCALER_PROFILE_PREFIX,
-            profile.profile_id.as_bytes(),
-        ]
-        .concat();
+        let key = [META_TOPOLOGY_PROFILE_PREFIX, profile.profile_id.as_bytes()].concat();
         self.meta.insert(key, rmp_serde::to_vec(profile)?)?;
         Ok(())
     }
 
-    pub fn list_hyperscaler_profiles(&self) -> Result<Vec<HyperscalerProfile>, StorageError> {
-        let mut profiles: Vec<HyperscalerProfile> = Vec::new();
-        for entry in self.meta.scan_prefix(META_HYPERSCALER_PROFILE_PREFIX) {
+    pub fn list_topology_hyperscaler_profiles(
+        &self,
+    ) -> Result<Vec<copperdb_topology::HyperscalerProfile>, StorageError> {
+        let mut profiles: Vec<copperdb_topology::HyperscalerProfile> = Vec::new();
+        for entry in self.meta.scan_prefix(META_TOPOLOGY_PROFILE_PREFIX) {
             let (_, v) = entry?;
             profiles.push(rmp_serde::from_slice(v.as_ref())?);
         }
         profiles.sort_by(|a, b| a.profile_id.cmp(&b.profile_id));
         Ok(profiles)
+    }
+
+    pub fn register_topology_placement(
+        &self,
+        placement: &copperdb_topology::PlacementRecord,
+    ) -> Result<(), StorageError> {
+        let stable_id = placement.key.stable_id();
+        let key = [META_TOPOLOGY_PLACEMENT_PREFIX, stable_id.as_bytes()].concat();
+        self.meta.insert(key, rmp_serde::to_vec(placement)?)?;
+        Ok(())
+    }
+
+    pub fn list_topology_placements(
+        &self,
+    ) -> Result<Vec<copperdb_topology::PlacementRecord>, StorageError> {
+        let mut placements: Vec<copperdb_topology::PlacementRecord> = Vec::new();
+        for entry in self.meta.scan_prefix(META_TOPOLOGY_PLACEMENT_PREFIX) {
+            let (_, v) = entry?;
+            placements.push(rmp_serde::from_slice(v.as_ref())?);
+        }
+        placements.sort_by(|a, b| a.key.cmp(&b.key));
+        Ok(placements)
+    }
+
+    pub fn load_topology_registry(
+        &self,
+    ) -> Result<copperdb_topology::TopologyRegistry, StorageError> {
+        let mut registry = copperdb_topology::TopologyRegistry::new();
+        for profile in self.list_topology_hyperscaler_profiles()? {
+            registry
+                .register_hyperscaler_profile(profile)
+                .map_err(|err| StorageError::TopologyInvalid(err.to_string()))?;
+        }
+        for peer in self.list_topology_peers()? {
+            registry
+                .register_peer(peer)
+                .map_err(|err| StorageError::TopologyInvalid(err.to_string()))?;
+        }
+        for placement in self.list_topology_placements()? {
+            registry
+                .register_placement(placement)
+                .map_err(|err| StorageError::TopologyInvalid(err.to_string()))?;
+        }
+        Ok(registry)
     }
 
     pub fn persist_constraint(&self, constraint: &Constraint) -> Result<(), StorageError> {
@@ -1533,7 +1563,7 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_raw_node_edge_round_trip() {
+    fn raw_node_edge_round_trip() {
         let engine = StorageEngine::open_temporary().unwrap();
         engine.put_node("node:1", b"node_data").unwrap();
         engine.put_edge("edge:1", b"edge_data").unwrap();
@@ -1643,57 +1673,60 @@ mod tests {
     }
 
     #[test]
-    fn distributed_mesh_and_hyperscaler_metadata_round_trip() {
+    fn topology_metadata_round_trip_builds_valid_registry() {
+        use copperdb_topology::{
+            DistributedWriteMode, HyperscalerProfile as TopologyHyperscalerProfile, MeshPeer,
+            NodeCapability, PlacementKey, PlacementRecord, SearchRoutingPolicy,
+        };
+
         let engine = StorageEngine::open_temporary().unwrap();
-
         engine
-            .register_search_peer(&SearchPeerRecord {
-                peer_id: "peer-b".to_string(),
-                endpoint: "https://b.mesh.local".to_string(),
-                region: "us-west-2".to_string(),
-                capacity_class: "medium".to_string(),
-                last_heartbeat_unix_ms: 200,
-            })
+            .register_topology_hyperscaler_profile(&TopologyHyperscalerProfile::local("local-prod"))
             .unwrap();
         engine
-            .register_search_peer(&SearchPeerRecord {
-                peer_id: "peer-a".to_string(),
-                endpoint: "https://a.mesh.local".to_string(),
-                region: "us-east-1".to_string(),
-                capacity_class: "large".to_string(),
-                last_heartbeat_unix_ms: 100,
-            })
-            .unwrap();
-
-        let peers = engine.list_search_peers().unwrap();
-        assert_eq!(peers.len(), 2);
-        assert_eq!(peers[0].peer_id, "peer-a");
-        assert_eq!(peers[1].peer_id, "peer-b");
-
-        engine
-            .register_hyperscaler_profile(&HyperscalerProfile {
-                profile_id: "aws-primary".to_string(),
-                provider: "aws".to_string(),
-                region: "us-east-1".to_string(),
-                tier: "prod".to_string(),
-                enabled: true,
-            })
+            .register_topology_peer(
+                &MeshPeer::new("node-a", "node-a.mesh.local:9000")
+                    .with_capability(NodeCapability::Search)
+                    .with_capability(NodeCapability::WriteLeader)
+                    .with_hyperscaler_profile("local-prod")
+                    .with_region_zone("us-east-1", "us-east-1a")
+                    .with_observed_rtt_micros(1_000),
+            )
             .unwrap();
         engine
-            .register_hyperscaler_profile(&HyperscalerProfile {
-                profile_id: "gcp-burst".to_string(),
-                provider: "gcp".to_string(),
-                region: "us-central1".to_string(),
-                tier: "burst".to_string(),
-                enabled: false,
+            .register_topology_peer(
+                &MeshPeer::new("node-b", "node-b.mesh.local:9000")
+                    .with_capability(NodeCapability::Search)
+                    .with_capability(NodeCapability::WriteReplica)
+                    .with_hyperscaler_profile("local-prod")
+                    .with_region_zone("us-east-1", "us-east-1b")
+                    .with_observed_rtt_micros(2_000),
+            )
+            .unwrap();
+        engine
+            .register_topology_placement(&PlacementRecord {
+                key: PlacementKey::default_for_database("neo4j"),
+                primary_node: "node-a".into(),
+                replica_nodes: vec!["node-b".into()],
+                search_nodes: vec!["node-a".into(), "node-b".into()],
+                hyperscaler_profile: Some("local-prod".into()),
+                min_write_replicas: 1,
+                search_fanout: 2,
             })
             .unwrap();
 
-        let profiles = engine.list_hyperscaler_profiles().unwrap();
-        assert_eq!(profiles.len(), 2);
-        assert_eq!(profiles[0].profile_id, "aws-primary");
-        assert_eq!(profiles[1].profile_id, "gcp-burst");
-        assert!(!profiles[1].enabled);
+        let registry = engine.load_topology_registry().unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        let search_plan = registry
+            .plan_search_with_policy(&placement, SearchRoutingPolicy::low_latency("us-east-1", 2))
+            .unwrap();
+        let write_plan = registry
+            .plan_write(&placement, DistributedWriteMode::LeaderLease)
+            .unwrap();
+
+        assert_eq!(search_plan.fanout.len(), 2);
+        assert_eq!(search_plan.fanout[0].node_id, "node-a");
+        assert_eq!(write_plan.required_acks, 2);
     }
 
     #[test]

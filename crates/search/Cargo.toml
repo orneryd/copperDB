@@ -17,4 +17,5 @@ tracing.workspace = true
 tantivy.workspace = true
 copperdb-storage = { workspace = true }
 copperdb-indexing = { workspace = true }
+copperdb-topology = { workspace = true }
 copperdb-util = { workspace = true }

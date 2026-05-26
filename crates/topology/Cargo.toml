@@ -1,0 +1,13 @@
+[package]
+name = "copperdb-topology"
+description = "Cluster topology, hyperscaler placement, distributed search, and HA write planning contracts"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true

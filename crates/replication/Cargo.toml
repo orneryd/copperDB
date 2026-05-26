@@ -16,3 +16,4 @@ hex.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 copperdb-storage = { workspace = true }
+copperdb-topology = { workspace = true }
