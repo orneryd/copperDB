@@ -3,21 +3,74 @@
 //! Equivalent to Go's `pkg/util` in NornicDB.
 //! Provides common helpers used across all other crates.
 
+use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use thiserror::Error;
 use uuid::Uuid;
+
+pub const DEFAULT_MAX_MSGPACK_DECODE_BYTES: i64 = 256 * 1024 * 1024;
+pub const MAX_MSGPACK_DECODE_BYTES_ENV_KEY: &str = "COPPERDB_MAX_MSGPACK_DECODE_BYTES";
+
+const FNV_OFFSET_BASIS_64: u64 = 14_695_981_039_346_656_037;
+const FNV_PRIME_64: u64 = 1_099_511_628_211;
 
 #[derive(Debug, Error)]
 pub enum UtilError {
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("msgpack decode error: {0}")]
+    MsgpackDecode(#[from] rmp_serde::decode::Error),
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid msgpack payload size: {0}")]
+    InvalidMsgpackPayloadSize(i64),
+    #[error("msgpack payload exceeds decode limit ({size} > {limit} bytes)")]
+    MsgpackPayloadTooLarge { size: i64, limit: i64 },
 }
 
 /// Generate a new random UUID v4.
 pub fn new_id() -> String {
     Uuid::new_v4().to_string()
+}
+
+/// Convert a string ID to a deterministic positive i64 using FNV-1a 64-bit.
+///
+/// This mirrors NornicDB's Bolt compatibility boundary: copperDB stores string
+/// IDs, while some protocol surfaces need stable integer IDs.
+pub fn hash_string_to_i64(s: &str) -> i64 {
+    let mut hash = FNV_OFFSET_BASIS_64;
+    for byte in s.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME_64);
+    }
+    (hash & 0x7FFF_FFFF_FFFF_FFFF) as i64
+}
+
+pub fn max_msgpack_decode_bytes() -> i64 {
+    std::env::var(MAX_MSGPACK_DECODE_BYTES_ENV_KEY)
+        .ok()
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_MSGPACK_DECODE_BYTES)
+}
+
+pub fn validate_msgpack_payload_size(size: i64) -> Result<(), UtilError> {
+    if size < 0 {
+        return Err(UtilError::InvalidMsgpackPayloadSize(size));
+    }
+    let limit = max_msgpack_decode_bytes();
+    if size > limit {
+        return Err(UtilError::MsgpackPayloadTooLarge { size, limit });
+    }
+    Ok(())
+}
+
+pub fn decode_msgpack_bytes<T>(data: &[u8]) -> Result<T, UtilError>
+where
+    T: DeserializeOwned,
+{
+    validate_msgpack_payload_size(data.len() as i64)?;
+    Ok(rmp_serde::from_slice(data)?)
 }
 
 /// Flatten a nested map into a dot-separated key structure.
@@ -90,6 +143,37 @@ mod tests {
         let id = new_id();
         assert_eq!(id.len(), 36);
         assert!(id.contains('-'));
+    }
+
+    #[test]
+    fn hash_string_to_i64_is_deterministic_positive_and_distinct() {
+        let first = hash_string_to_i64("user-123");
+        let second = hash_string_to_i64("user-123");
+        let other = hash_string_to_i64("user-124");
+        assert_eq!(first, second);
+        assert!(first >= 0);
+        assert_ne!(first, other);
+    }
+
+    #[test]
+    fn msgpack_payload_size_validation_rejects_negative_and_large_values() {
+        assert!(validate_msgpack_payload_size(0).is_ok());
+        assert!(matches!(
+            validate_msgpack_payload_size(-1),
+            Err(UtilError::InvalidMsgpackPayloadSize(-1))
+        ));
+        assert!(matches!(
+            validate_msgpack_payload_size(DEFAULT_MAX_MSGPACK_DECODE_BYTES + 1),
+            Err(UtilError::MsgpackPayloadTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn decode_msgpack_bytes_round_trips_structured_payload() {
+        let source = vec!["alpha".to_string(), "beta".to_string()];
+        let encoded = rmp_serde::to_vec(&source).unwrap();
+        let decoded: Vec<String> = decode_msgpack_bytes(&encoded).unwrap();
+        assert_eq!(decoded, source);
     }
 
     #[test]

@@ -9,4 +9,5 @@ repository.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+serde = { workspace = true }
 

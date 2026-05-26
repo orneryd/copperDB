@@ -12,5 +12,6 @@ thiserror.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+rmp-serde.workspace = true
 tracing.workspace = true
 uuid.workspace = true

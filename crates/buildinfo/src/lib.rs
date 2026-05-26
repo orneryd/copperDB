@@ -38,6 +38,8 @@ const RUST_VERSION_STR: &str = match option_env!("CARGO_PKG_RUST_VERSION") {
     None => "unknown",
 };
 
+const PRODUCT_NAME: &str = "CopperDB";
+
 /// Global build info populated by compile-time environment variables.
 ///
 /// `GIT_COMMIT` and `BUILD_DATE` are optionally injected by CI (e.g.
@@ -50,6 +52,52 @@ pub const BUILD_INFO: BuildInfo = BuildInfo {
     target: TARGET_STR,
     rust_version: RUST_VERSION_STR,
 };
+
+pub fn version() -> &'static str {
+    let version = BUILD_INFO.version.trim();
+    if version.is_empty() {
+        "dev"
+    } else {
+        BUILD_INFO.version
+    }
+}
+
+pub fn product_version() -> String {
+    format!("v{}", version())
+}
+
+pub fn short_commit() -> &'static str {
+    short_commit_from(BUILD_INFO.git_commit)
+}
+
+pub fn short_commit_from(commit: &'static str) -> &'static str {
+    let commit = commit.trim();
+    if commit.is_empty() || commit == "unknown" {
+        return "dev";
+    }
+    if commit.len() > 7 {
+        &commit[..7]
+    } else {
+        commit
+    }
+}
+
+pub fn display_version() -> String {
+    let mut version_info = product_version();
+    let commit = short_commit();
+    if commit != "dev" {
+        version_info = format!("{version_info}-{commit}");
+    }
+    let build_date = BUILD_INFO.build_date.trim();
+    if !build_date.is_empty() && build_date != "unknown" {
+        version_info = format!("{version_info} (built: {build_date})");
+    }
+    version_info
+}
+
+pub fn server_announcement() -> String {
+    format!("{PRODUCT_NAME}/{}", version())
+}
 
 /// Return a human-readable build summary string.
 pub fn summary() -> String {
@@ -71,5 +119,25 @@ mod tests {
     #[test]
     fn test_summary_non_empty() {
         assert!(!summary().is_empty());
+    }
+
+    #[test]
+    fn product_version_and_server_announcement_match_contract() {
+        assert_eq!(product_version(), format!("v{}", version()));
+        assert_eq!(server_announcement(), format!("CopperDB/{}", version()));
+    }
+
+    #[test]
+    fn short_commit_handles_dev_empty_and_long_hashes() {
+        assert_eq!(short_commit_from("dev"), "dev");
+        assert_eq!(short_commit_from(""), "dev");
+        assert_eq!(short_commit_from("   "), "dev");
+        assert_eq!(short_commit_from("abc1234"), "abc1234");
+        assert_eq!(short_commit_from("abc1234567890def"), "abc1234");
+    }
+
+    #[test]
+    fn display_version_contains_product_version() {
+        assert!(display_version().starts_with(&product_version()));
     }
 }

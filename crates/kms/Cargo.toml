@@ -16,8 +16,11 @@ tokio.workspace = true
 tracing.workspace = true
 aws-config.workspace = true
 aws-sdk-kms.workspace = true
-copperdb-encryption = { workspace = true }
 copperdb-util = { workspace = true }
 async-trait.workspace = true
 aes-gcm = { workspace = true }
 getrandom.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
+hex.workspace = true

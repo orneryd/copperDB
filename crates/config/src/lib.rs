@@ -5,7 +5,9 @@
 //! and a strongly-typed configuration struct for the database engine.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -18,8 +20,43 @@ pub enum ConfigError {
     Toml(#[from] toml::de::Error),
     #[error("missing required field: {0}")]
     MissingField(String),
+    #[error("unsupported config format: {0}")]
+    UnsupportedFormat(String),
     #[error("config parse error: {0}")]
     Parse(#[from] ::config::ConfigError),
+}
+
+pub const ENV_CONFIG_PATH: &str = "COPPERDB_CONFIG";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfigOverrides {
+    pub address: Option<String>,
+    pub http_address: Option<String>,
+    pub bolt_address: Option<String>,
+    pub http_port: Option<u16>,
+    pub bolt_port: Option<u16>,
+    pub http_enabled: Option<bool>,
+    pub bolt_enabled: Option<bool>,
+    pub headless: Option<bool>,
+    pub base_path: Option<String>,
+    pub static_dir: Option<String>,
+}
+
+impl ConfigOverrides {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListenerConfig {
+    pub http_address: String,
+    pub bolt_address: String,
+    pub http_enabled: bool,
+    pub bolt_enabled: bool,
+    pub headless: bool,
+    pub base_path: String,
+    pub static_dir: Option<String>,
 }
 
 /// Top-level copperdb configuration.
@@ -50,6 +87,27 @@ impl Config {
             ));
         }
         Ok(())
+    }
+
+    pub fn listener_config(&self) -> ListenerConfig {
+        let base_address = self.server.address.clone();
+        ListenerConfig {
+            http_address: self
+                .server
+                .http_address
+                .clone()
+                .unwrap_or_else(|| format!("{}:{}", base_address, self.server.http_port)),
+            bolt_address: self
+                .server
+                .bolt_address
+                .clone()
+                .unwrap_or_else(|| format!("{}:{}", self.server.address, self.server.bolt_port)),
+            http_enabled: self.server.http_enabled,
+            bolt_enabled: self.server.bolt_enabled,
+            headless: self.server.headless,
+            base_path: self.server.base_path.clone(),
+            static_dir: self.server.static_dir.clone(),
+        }
     }
 }
 
@@ -271,6 +329,161 @@ pub fn load_toml(path: impl AsRef<Path>) -> Result<Config, ConfigError> {
     Ok(toml::from_str(&contents)?)
 }
 
+pub fn load_file(path: impl AsRef<Path>) -> Result<Config, ConfigError> {
+    let path = path.as_ref();
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("yaml") | Some("yml") => load_yaml(path),
+        Some("toml") => load_toml(path),
+        _ => Err(ConfigError::UnsupportedFormat(path.display().to_string())),
+    }
+}
+
+pub fn default_config_candidates(base_dir: impl AsRef<Path>) -> [PathBuf; 3] {
+    let base_dir = base_dir.as_ref();
+    [
+        base_dir.join("copperdb.yaml"),
+        base_dir.join("copperdb.yml"),
+        base_dir.join("copperdb.toml"),
+    ]
+}
+
+pub fn find_default_config_path_in(base_dir: impl AsRef<Path>) -> Option<PathBuf> {
+    default_config_candidates(base_dir)
+        .into_iter()
+        .find(|path| path.exists())
+}
+
+pub fn load_with_precedence(
+    explicit_path: Option<&Path>,
+    cli: &ConfigOverrides,
+) -> Result<Config, ConfigError> {
+    let env = std::env::vars().collect::<BTreeMap<_, _>>();
+    load_with_precedence_from(explicit_path, &env, &std::env::current_dir()?, cli)
+}
+
+pub fn load_with_precedence_from(
+    explicit_path: Option<&Path>,
+    env: &BTreeMap<String, String>,
+    base_dir: &Path,
+    cli: &ConfigOverrides,
+) -> Result<Config, ConfigError> {
+    let config_path = explicit_path
+        .map(PathBuf::from)
+        .or_else(|| {
+            env.get(ENV_CONFIG_PATH)
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| find_default_config_path_in(base_dir));
+
+    let mut cfg = if let Some(path) = config_path {
+        load_file(path)?
+    } else {
+        Config::default()
+    };
+
+    apply_env_overrides_from(&mut cfg, env);
+    apply_overrides(&mut cfg, cli);
+    Ok(cfg)
+}
+
+pub fn apply_env_overrides(config: &mut Config) {
+    let env = std::env::vars().collect::<BTreeMap<_, _>>();
+    apply_env_overrides_from(config, &env);
+}
+
+pub fn apply_env_overrides_from(config: &mut Config, env: &BTreeMap<String, String>) {
+    set_if_present(env_nonempty(env, "COPPERDB_ADDRESS"), |value| {
+        config.server.address = value
+    });
+    set_if_present(env_nonempty(env, "COPPERDB_HTTP_ADDRESS"), |value| {
+        config.server.http_address = Some(value)
+    });
+    set_if_present(env_nonempty(env, "COPPERDB_BOLT_ADDRESS"), |value| {
+        config.server.bolt_address = Some(value)
+    });
+    set_if_present(
+        parse_env_u16(env, "COPPERDB_HTTP_PORT")
+            .or_else(|| parse_env_u16(env, "NEO4J_dbms_connector_http_listen__address_port")),
+        |value| config.server.http_port = value,
+    );
+    set_if_present(
+        parse_env_u16(env, "COPPERDB_BOLT_PORT")
+            .or_else(|| parse_env_u16(env, "NEO4J_dbms_connector_bolt_listen__address_port")),
+        |value| config.server.bolt_port = value,
+    );
+    set_if_present(parse_env_bool(env, "COPPERDB_HTTP_ENABLED"), |value| {
+        config.server.http_enabled = value
+    });
+    set_if_present(parse_env_bool(env, "COPPERDB_BOLT_ENABLED"), |value| {
+        config.server.bolt_enabled = value
+    });
+    set_if_present(parse_env_bool(env, "COPPERDB_HEADLESS"), |value| {
+        config.server.headless = value
+    });
+    set_if_present(env_nonempty(env, "COPPERDB_BASE_PATH"), |value| {
+        config.server.base_path = value
+    });
+    set_if_present(env_nonempty(env, "COPPERDB_STATIC_DIR"), |value| {
+        config.server.static_dir = Some(value)
+    });
+}
+
+pub fn apply_overrides(config: &mut Config, overrides: &ConfigOverrides) {
+    if let Some(address) = &overrides.address {
+        config.server.address = address.clone();
+    }
+    if let Some(address) = &overrides.http_address {
+        config.server.http_address = Some(address.clone());
+    }
+    if let Some(address) = &overrides.bolt_address {
+        config.server.bolt_address = Some(address.clone());
+    }
+    if let Some(port) = overrides.http_port {
+        config.server.http_port = port;
+    }
+    if let Some(port) = overrides.bolt_port {
+        config.server.bolt_port = port;
+    }
+    if let Some(enabled) = overrides.http_enabled {
+        config.server.http_enabled = enabled;
+    }
+    if let Some(enabled) = overrides.bolt_enabled {
+        config.server.bolt_enabled = enabled;
+    }
+    if let Some(headless) = overrides.headless {
+        config.server.headless = headless;
+    }
+    if let Some(base_path) = &overrides.base_path {
+        config.server.base_path = base_path.clone();
+    }
+    if let Some(static_dir) = &overrides.static_dir {
+        config.server.static_dir = Some(static_dir.clone());
+    }
+}
+
+fn env_nonempty(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    env.get(key).filter(|value| !value.is_empty()).cloned()
+}
+
+fn parse_env_u16(env: &BTreeMap<String, String>, key: &str) -> Option<u16> {
+    env.get(key)?.parse().ok()
+}
+
+fn parse_env_bool(env: &BTreeMap<String, String>, key: &str) -> Option<bool> {
+    match env.get(key)?.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn set_if_present<T>(value: Option<T>, apply: impl FnOnce(T)) {
+    if let Some(value) = value {
+        apply(value);
+    }
+}
+
 /// Load configuration from environment variables using the `config` crate.
 ///
 /// Environment variable prefix: `copperdb_`, separator `__`.
@@ -317,6 +530,74 @@ mod tests {
     fn test_validate_rejects_empty_jwt_secret() {
         let cfg = Config::default();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn listener_config_derives_addresses_from_base_address_and_ports() {
+        let cfg = Config::default();
+        let listeners = cfg.listener_config();
+        assert_eq!(listeners.http_address, "0.0.0.0:7474");
+        assert_eq!(listeners.bolt_address, "0.0.0.0:7687");
+        assert!(listeners.http_enabled);
+        assert!(listeners.bolt_enabled);
+    }
+
+    #[test]
+    fn precedence_is_defaults_file_env_then_cli() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("copperdb.yaml");
+        std::fs::write(
+            &path,
+            r#"
+server:
+  address: "127.0.0.1"
+  http_port: 8000
+  bolt_port: 9000
+  headless: false
+"#,
+        )
+        .unwrap();
+
+        let mut env = BTreeMap::new();
+        env.insert("COPPERDB_HTTP_PORT".to_string(), "8100".to_string());
+        env.insert("COPPERDB_HEADLESS".to_string(), "true".to_string());
+
+        let cli = ConfigOverrides {
+            bolt_port: Some(9100),
+            headless: Some(false),
+            ..Default::default()
+        };
+        let cfg = load_with_precedence_from(None, &env, temp.path(), &cli).unwrap();
+        assert_eq!(cfg.server.address, "127.0.0.1");
+        assert_eq!(cfg.server.http_port, 8100);
+        assert_eq!(cfg.server.bolt_port, 9100);
+        assert!(!cfg.server.headless);
+    }
+
+    #[test]
+    fn explicit_config_path_wins_over_env_and_default_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let explicit = temp.path().join("explicit.toml");
+        let env_path = temp.path().join("from-env.toml");
+        std::fs::write(&explicit, "[server]\nhttp_port = 7001\n").unwrap();
+        std::fs::write(&env_path, "[server]\nhttp_port = 7002\n").unwrap();
+        std::fs::write(
+            temp.path().join("copperdb.toml"),
+            "[server]\nhttp_port = 7003\n",
+        )
+        .unwrap();
+
+        let mut env = BTreeMap::new();
+        env.insert(ENV_CONFIG_PATH.to_string(), env_path.display().to_string());
+
+        let cfg = load_with_precedence_from(
+            Some(explicit.as_path()),
+            &env,
+            temp.path(),
+            &ConfigOverrides::default(),
+        )
+        .unwrap();
+        assert_eq!(cfg.server.http_port, 7001);
     }
 
     #[test]

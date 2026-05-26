@@ -1,12 +1,11 @@
-use std::env;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use copperdb_bolt::server::BoltServer;
-use copperdb_config::{load_toml, load_yaml, Config};
+use copperdb_config::{load_with_precedence, ConfigOverrides};
 use copperdb_otel::Telemetry;
 use copperdb_server::{build_router, AppState};
 use tokio::net::TcpListener;
@@ -71,7 +70,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let startup = resolve_startup_config(&cli)?;
     let telemetry = Arc::new(Telemetry::new());
-    telemetry.mock_unimplemented_catalog_metrics();
+    telemetry.seed_zero_catalog_metrics();
     let state = Arc::new(AppState {
         db_name: startup.db_name.clone(),
         static_dir: startup.static_dir.clone(),
@@ -136,57 +135,23 @@ async fn flatten_task(handle: tokio::task::JoinHandle<Result<()>>) -> Result<()>
 }
 
 fn resolve_startup_config(cli: &Cli) -> Result<StartupConfig> {
-    let mut config = load_config_with_fallback(cli.config.as_deref())?;
-
-    apply_env_overrides(&mut config);
-    apply_cli_overrides(&mut config, cli);
-
-    let base_address = config.server.address.clone();
-    let http_address = config
-        .server
-        .http_address
-        .clone()
-        .unwrap_or_else(|| format!("{}:{}", base_address, config.server.http_port));
-    let bolt_address = config
-        .server
-        .bolt_address
-        .clone()
-        .unwrap_or_else(|| format!("{}:{}", base_address, config.server.bolt_port));
+    let config = load_with_precedence(cli.config.as_deref(), &cli_config_overrides(cli))?;
+    let listeners = config.listener_config();
 
     Ok(StartupConfig {
         db_name: cli.db_name.clone(),
-        http_address,
-        bolt_address,
-        http_enabled: config.server.http_enabled,
-        bolt_enabled: config.server.bolt_enabled,
-        headless: config.server.headless,
-        base_path: config.server.base_path.clone(),
+        http_address: listeners.http_address,
+        bolt_address: listeners.bolt_address,
+        http_enabled: listeners.http_enabled,
+        bolt_enabled: listeners.bolt_enabled,
+        headless: listeners.headless,
+        base_path: listeners.base_path,
         static_dir: cli
             .static_dir
             .clone()
-            .or_else(|| config.server.static_dir.clone())
+            .or(listeners.static_dir)
             .or_else(find_default_ui_dist),
     })
-}
-
-fn load_config_with_fallback(explicit_path: Option<&Path>) -> Result<Config> {
-    let config_path = explicit_path
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("COPPERDB_CONFIG").map(PathBuf::from))
-        .or_else(find_default_config_path);
-
-    if let Some(path) = config_path {
-        load_config_file(&path)
-    } else {
-        Ok(Config::default())
-    }
-}
-
-fn find_default_config_path() -> Option<PathBuf> {
-    ["./copperdb.yaml", "./copperdb.yml", "./copperdb.toml"]
-        .iter()
-        .map(PathBuf::from)
-        .find(|path| path.exists())
 }
 
 fn find_default_ui_dist() -> Option<String> {
@@ -194,92 +159,16 @@ fn find_default_ui_dist() -> Option<String> {
     path.exists().then(|| path.display().to_string())
 }
 
-fn load_config_file(path: &Path) -> Result<Config> {
-    match path.extension().and_then(|ext| ext.to_str()) {
-        Some("yaml") | Some("yml") => load_yaml(path)
-            .with_context(|| format!("failed to load config from {}", path.display())),
-        Some("toml") => load_toml(path)
-            .with_context(|| format!("failed to load config from {}", path.display())),
-        _ => anyhow::bail!("unsupported config format for {}", path.display()),
-    }
-}
-
-fn apply_env_overrides(config: &mut Config) {
-    set_if_present(env::var("COPPERDB_ADDRESS").ok(), |value| {
-        config.server.address = value
-    });
-    set_if_present(env::var("COPPERDB_HTTP_ADDRESS").ok(), |value| {
-        config.server.http_address = Some(value)
-    });
-    set_if_present(env::var("COPPERDB_BOLT_ADDRESS").ok(), |value| {
-        config.server.bolt_address = Some(value)
-    });
-    set_if_present(
-        parse_env_u16("COPPERDB_HTTP_PORT")
-            .or_else(|| parse_env_u16("NEO4J_dbms_connector_http_listen__address_port")),
-        |value| config.server.http_port = value,
-    );
-    set_if_present(
-        parse_env_u16("COPPERDB_BOLT_PORT")
-            .or_else(|| parse_env_u16("NEO4J_dbms_connector_bolt_listen__address_port")),
-        |value| config.server.bolt_port = value,
-    );
-    set_if_present(parse_env_bool("COPPERDB_HTTP_ENABLED"), |value| {
-        config.server.http_enabled = value
-    });
-    set_if_present(parse_env_bool("COPPERDB_BOLT_ENABLED"), |value| {
-        config.server.bolt_enabled = value
-    });
-    set_if_present(parse_env_bool("COPPERDB_HEADLESS"), |value| {
-        config.server.headless = value
-    });
-    set_if_present(env::var("COPPERDB_BASE_PATH").ok(), |value| {
-        config.server.base_path = value
-    });
-    set_if_present(env::var("COPPERDB_STATIC_DIR").ok(), |value| {
-        config.server.static_dir = Some(value)
-    });
-}
-
-fn apply_cli_overrides(config: &mut Config, cli: &Cli) {
-    if let Some(address) = &cli.address {
-        config.server.address = address.clone();
-    }
-    if let Some(address) = &cli.http_address {
-        config.server.http_address = Some(address.clone());
-    }
-    if let Some(address) = &cli.bolt_address {
-        config.server.bolt_address = Some(address.clone());
-    }
-    if let Some(port) = cli.http_port {
-        config.server.http_port = port;
-    }
-    if let Some(port) = cli.bolt_port {
-        config.server.bolt_port = port;
-    }
-    if cli.headless {
-        config.server.headless = true;
-    }
-    if let Some(base_path) = &cli.base_path {
-        config.server.base_path = base_path.clone();
-    }
-}
-
-fn parse_env_u16(name: &str) -> Option<u16> {
-    env::var(name).ok()?.parse().ok()
-}
-
-fn parse_env_bool(name: &str) -> Option<bool> {
-    let value = env::var(name).ok()?;
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
-}
-
-fn set_if_present<T>(value: Option<T>, apply: impl FnOnce(T)) {
-    if let Some(value) = value {
-        apply(value);
+fn cli_config_overrides(cli: &Cli) -> ConfigOverrides {
+    ConfigOverrides {
+        address: cli.address.clone(),
+        http_address: cli.http_address.clone(),
+        bolt_address: cli.bolt_address.clone(),
+        http_port: cli.http_port,
+        bolt_port: cli.bolt_port,
+        headless: cli.headless.then_some(true),
+        base_path: cli.base_path.clone(),
+        static_dir: cli.static_dir.clone(),
+        ..Default::default()
     }
 }

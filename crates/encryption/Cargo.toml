@@ -20,4 +20,9 @@ getrandom.workspace = true
 zeroize.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
+copperdb-kms = { workspace = true }
 copperdb-util = { workspace = true }
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

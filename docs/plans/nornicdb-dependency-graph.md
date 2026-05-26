@@ -10,23 +10,23 @@ A checked package means the Rust package has a single-path implementation, is th
 
 These packages define vocabulary, errors, startup/shutdown behavior, and observability contracts. They must be implemented first because every other layer consumes them.
 
-- [ ] `util` -> shared helpers.
-- [ ] `buildinfo` -> build/version metadata.
-- [ ] `envutil` -> environment parsing helpers.
-- [ ] `config` -> config files, env, CLI/default precedence.
+- [x] `util` -> shared helpers, deterministic ID hashing, bounded MessagePack decode.
+- [x] `buildinfo` -> build/version metadata, product version, display version, server announcement.
+- [x] `envutil` -> environment parsing helpers for strings, numbers, loose/strict booleans, durations.
+- [x] `config` -> config files, env, CLI/default precedence and listener resolution.
 - [x] `errors` -> Neo4j-compatible transient error codes, retry classification, conflict sentinels.
-- [ ] `otel` (`observability` in NornicDB) -> metrics catalog, providers, exporters, redaction, logging, recovery.
+- [x] `otel` (`observability` in NornicDB) -> metrics catalog, runtime config, endpoint precedence, readiness checks, resource identity, redaction, mandatory fields, recovery.
 - [x] `lifecycle` -> component supervisor, first-error cancellation, reverse-order shutdown, fresh shutdown budget.
 - [x] `topology` -> hyperscaler placement, latency-aware distributed search fan-out, and high-availability write planning contracts.
 
-Current Rust status: `errors`, `lifecycle`, and `topology` have focused implementations and tests. `topology` is the single contract path for enterprise placement, search routing, and HA write planning.
+Current Rust status: all Layer 0 packages have focused implementations and tests. `topology` is the single contract path for enterprise placement, search routing, and HA write planning.
 
 ## Layer 1: Security, Identity, And Compliance
 
 These packages depend on layer 0 and gate every externally reachable surface.
 
-- [ ] `encryption` -> envelope encryption primitives.
-- [ ] `kms` -> provider-backed key wrapping.
+- [x] `kms` -> provider-backed data keys, local KEK wrapping, metadata, audit signing, provider factory.
+- [x] `encryption` -> versioned envelopes, provider-backed `EnvelopeEncryptor`, DEK cache, rewrap rotation surface.
 - [ ] `auth` -> JWT/OAuth/RBAC/session identity.
 - [ ] `security` -> hardening and auth-adjacent enforcement.
 - [ ] `audit` -> durable security and data-access event trail.
