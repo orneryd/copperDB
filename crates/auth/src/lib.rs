@@ -1493,10 +1493,10 @@ mod tests {
         let auth = test_auth();
         auth.roles.create_role("analyst").unwrap();
         auth.allowlist
-            .save_role_databases("analyst", vec!["neo4j".into()])
+            .save_role_databases("analyst", vec!["copper".into()])
             .unwrap();
         let mode = auth.allowlist.access_mode_for_roles(vec!["analyst".into()]);
-        assert!(mode.can_access_database("neo4j"));
+        assert!(mode.can_access_database("copper"));
         assert!(!mode.can_access_database("system"));
     }
 
@@ -1505,17 +1505,17 @@ mod tests {
         let auth = test_auth();
         let viewer = vec![ROLE_VIEWER.to_string()];
         assert_eq!(
-            auth.privileges.resolve(&viewer, "neo4j"),
+            auth.privileges.resolve(&viewer, "copper"),
             ResolvedAccess {
                 read: true,
                 write: false
             }
         );
         auth.privileges
-            .save_privilege(ROLE_VIEWER, "neo4j", false, true)
+            .save_privilege(ROLE_VIEWER, "copper", false, true)
             .unwrap();
         assert_eq!(
-            auth.privileges.resolve(&viewer, "neo4j"),
+            auth.privileges.resolve(&viewer, "copper"),
             ResolvedAccess {
                 read: false,
                 write: true
@@ -1561,6 +1561,6 @@ mod tests {
         assert!(FullDatabaseAccessMode.can_access_database("any"));
         assert!(!DenyAllDatabaseAccessMode.can_access_database("any"));
         let mode = AllowlistDatabaseAccessMode::new(HashMap::new(), vec![ROLE_ADMIN.into()]);
-        assert!(!mode.can_access_database("neo4j"));
+        assert!(!mode.can_access_database("copper"));
     }
 }

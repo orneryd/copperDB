@@ -501,12 +501,12 @@ mod tests {
             )
             .unwrap();
         topology
-            .register_placement(PlacementRecord::standalone("neo4j", "search-a"))
+            .register_placement(PlacementRecord::standalone("copper", "search-a"))
             .unwrap();
 
         let router = DistributedSearchRouter::new(topology);
         let plan = router
-            .plan(&PlacementKey::default_for_database("neo4j"))
+            .plan(&PlacementKey::default_for_database("copper"))
             .unwrap();
         assert_eq!(plan.fanout[0].node_id, "search-a");
     }
@@ -536,7 +536,7 @@ mod tests {
             .unwrap();
         topology
             .register_placement(PlacementRecord {
-                key: PlacementKey::default_for_database("neo4j"),
+                key: PlacementKey::default_for_database("copper"),
                 primary_node: "search-local".into(),
                 replica_nodes: vec![],
                 search_nodes: vec!["search-remote".into(), "search-local".into()],
@@ -548,7 +548,11 @@ mod tests {
 
         let router = DistributedSearchRouter::new(topology);
         let plan = router
-            .plan_low_latency(&PlacementKey::default_for_database("neo4j"), "us-east-1", 2)
+            .plan_low_latency(
+                &PlacementKey::default_for_database("copper"),
+                "us-east-1",
+                2,
+            )
             .unwrap();
         assert_eq!(plan.parallelism, 2);
         assert_eq!(plan.fanout[0].node_id, "search-local");
@@ -600,7 +604,7 @@ mod tests {
     async fn distributed_executor_fans_out_and_merges_results() {
         use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
 
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         let mut topology = TopologyRegistry::new();
         for node_id in ["search-a", "search-b", "search-c"] {
             topology

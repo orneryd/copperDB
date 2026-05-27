@@ -4,7 +4,10 @@ use crate::string_patterns::find_keyword_index;
 pub fn match_compound_query_shape(query: &str) -> (ShapeMatch, bool) {
     let trimmed = query.trim();
     if trimmed.is_empty() {
-        return (ShapeMatch::unknown("compound_query_matcher", trimmed, "empty query"), false);
+        return (
+            ShapeMatch::unknown("compound_query_matcher", trimmed, "empty query"),
+            false,
+        );
     }
 
     if let (match_info, true) = match_compound_create_delete_rel_shape(trimmed) {
@@ -45,7 +48,8 @@ pub fn match_compound_prop_create_delete_return_count_rel_shape(query: &str) -> 
         (Some(create_idx), Some(with_idx), Some(delete_idx), Some(return_idx))
             if create_idx > 0 && with_idx > create_idx && delete_idx > with_idx && return_idx > delete_idx
     ) {
-        shape_match.probe.reject_reason = "compound property WITH/DELETE/RETURN shape not found".into();
+        shape_match.probe.reject_reason =
+            "compound property WITH/DELETE/RETURN shape not found".into();
         return (shape_match, false);
     }
 
@@ -104,7 +108,9 @@ pub fn match_compound_prop_create_delete_return_count_rel_shape(query: &str) -> 
         shape_match.probe.reject_reason = "RETURN clause is not COUNT(var)".into();
         return (shape_match, false);
     }
-    let count_var = count_part["COUNT(".len()..count_part.len() - 1].trim().to_string();
+    let count_var = count_part["COUNT(".len()..count_part.len() - 1]
+        .trim()
+        .to_string();
     if count_var.is_empty() {
         shape_match.probe.reject_reason = "missing COUNT variable".into();
         return (shape_match, false);
@@ -114,32 +120,36 @@ pub fn match_compound_prop_create_delete_return_count_rel_shape(query: &str) -> 
         || !delete_var.eq_ignore_ascii_case(&create_match.rel_var)
         || !count_var.eq_ignore_ascii_case(&create_match.rel_var)
     {
-        shape_match.probe.reject_reason = "relationship variable mismatch across WITH/DELETE/RETURN".into();
+        shape_match.probe.reject_reason =
+            "relationship variable mismatch across WITH/DELETE/RETURN".into();
         return (shape_match, false);
     }
 
     shape_match.kind = ShapeKind::CompoundPropCreateDeleteReturnCountRel;
     add_prop_shape_captures(&mut shape_match.captures, &left, &right, &create_match);
-    shape_match.captures.add_string("with_var", with_var.clone());
-    shape_match.captures.add_string("delete_var", delete_var.clone());
-    shape_match.captures.add_string("count_var", count_var.clone());
-    shape_match.probe.matched = true;
     shape_match
-        .probe
-        .captured_fields
-        .extend([
-            ("label1".into(), left.label.clone()),
-            ("label2".into(), right.label.clone()),
-            ("prop1".into(), left.prop_key.clone()),
-            ("prop2".into(), right.prop_key.clone()),
-            ("value1".into(), left.prop_value.clone()),
-            ("value2".into(), right.prop_value.clone()),
-            ("rel_var".into(), create_match.rel_var.clone()),
-            ("rel_type".into(), create_match.rel_type.clone()),
-            ("with_var".into(), with_var),
-            ("delete_var".into(), delete_var),
-            ("count_var".into(), count_var),
-        ]);
+        .captures
+        .add_string("with_var", with_var.clone());
+    shape_match
+        .captures
+        .add_string("delete_var", delete_var.clone());
+    shape_match
+        .captures
+        .add_string("count_var", count_var.clone());
+    shape_match.probe.matched = true;
+    shape_match.probe.captured_fields.extend([
+        ("label1".into(), left.label.clone()),
+        ("label2".into(), right.label.clone()),
+        ("prop1".into(), left.prop_key.clone()),
+        ("prop2".into(), right.prop_key.clone()),
+        ("value1".into(), left.prop_value.clone()),
+        ("value2".into(), right.prop_value.clone()),
+        ("rel_var".into(), create_match.rel_var.clone()),
+        ("rel_type".into(), create_match.rel_type.clone()),
+        ("with_var".into(), with_var),
+        ("delete_var".into(), delete_var),
+        ("count_var".into(), count_var),
+    ]);
     (shape_match, true)
 }
 
@@ -161,7 +171,8 @@ fn match_compound_create_delete_rel_shape(query: &str) -> (ShapeMatch, bool) {
         (Some(with_idx), Some(limit_idx), Some(create_idx), Some(delete_idx))
             if with_idx > 0 && limit_idx > with_idx && create_idx > limit_idx && delete_idx > create_idx
     ) {
-        shape_match.probe.reject_reason = "compound WITH/LIMIT/CREATE/DELETE shape not found".into();
+        shape_match.probe.reject_reason =
+            "compound WITH/LIMIT/CREATE/DELETE shape not found".into();
         return (shape_match, false);
     }
 
@@ -222,11 +233,21 @@ fn match_compound_create_delete_rel_shape(query: &str) -> (ShapeMatch, bool) {
     };
 
     shape_match.kind = ShapeKind::CompoundCreateDeleteRel;
-    shape_match.captures.add_string("label1", left.label.clone());
-    shape_match.captures.add_string("label2", right.label.clone());
-    shape_match.captures.add_string("rel_var", create_match.rel_var.clone());
-    shape_match.captures.add_string("rel_type", create_match.rel_type.clone());
-    shape_match.captures.add_string("delete_var", delete_var.clone());
+    shape_match
+        .captures
+        .add_string("label1", left.label.clone());
+    shape_match
+        .captures
+        .add_string("label2", right.label.clone());
+    shape_match
+        .captures
+        .add_string("rel_var", create_match.rel_var.clone());
+    shape_match
+        .captures
+        .add_string("rel_type", create_match.rel_type.clone());
+    shape_match
+        .captures
+        .add_string("delete_var", delete_var.clone());
     shape_match.captures.add_int("limit", limit);
     shape_match.probe.matched = true;
     shape_match.probe.captured_fields.extend([
@@ -251,7 +272,8 @@ fn match_compound_prop_create_delete_rel_shape(query: &str) -> (ShapeMatch, bool
 
     let create_idx = find_keyword_index(query, "CREATE");
     let delete_idx = find_keyword_index(query, "DELETE");
-    if !matches!((create_idx, delete_idx), (Some(create_idx), Some(delete_idx)) if create_idx > 0 && delete_idx > create_idx) {
+    if !matches!((create_idx, delete_idx), (Some(create_idx), Some(delete_idx)) if create_idx > 0 && delete_idx > create_idx)
+    {
         shape_match.probe.reject_reason = "compound property CREATE/DELETE shape not found".into();
         return (shape_match, false);
     }
@@ -298,7 +320,9 @@ fn match_compound_prop_create_delete_rel_shape(query: &str) -> (ShapeMatch, bool
 
     shape_match.kind = ShapeKind::CompoundPropCreateDeleteRel;
     add_prop_shape_captures(&mut shape_match.captures, &left, &right, &create_match);
-    shape_match.captures.add_string("delete_var", delete_var.clone());
+    shape_match
+        .captures
+        .add_string("delete_var", delete_var.clone());
     shape_match.probe.matched = true;
     shape_match.probe.captured_fields.extend([
         ("label1".into(), left.label),
@@ -374,7 +398,12 @@ fn split_top_level_comma_shape(s: &str) -> Option<(String, String)> {
             '}' if !in_single && !in_double => depth_brace -= 1,
             '[' if !in_single && !in_double => depth_bracket += 1,
             ']' if !in_single && !in_double => depth_bracket -= 1,
-            ',' if !in_single && !in_double && depth_paren == 0 && depth_brace == 0 && depth_bracket == 0 => {
+            ',' if !in_single
+                && !in_double
+                && depth_paren == 0
+                && depth_brace == 0
+                && depth_bracket == 0 =>
+            {
                 let left = s[..index].trim();
                 let right = s[index + 1..].trim();
                 if left.is_empty() || right.is_empty() {
@@ -389,7 +418,9 @@ fn split_top_level_comma_shape(s: &str) -> Option<(String, String)> {
 }
 
 fn first_clause_word(s: &str) -> Option<String> {
-    s.split_whitespace().next().map(|value| value.trim().to_string())
+    s.split_whitespace()
+        .next()
+        .map(|value| value.trim().to_string())
 }
 
 fn parse_labeled_node_pattern(s: &str) -> Option<ParsedNodePattern> {

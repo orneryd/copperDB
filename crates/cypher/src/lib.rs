@@ -41,11 +41,11 @@ pub use compound_query_shape_matcher::{
 pub use executor::{Executor, QueryResult};
 use parse_context::ParseContext;
 pub use parser::Parser;
+use parser_support::{parse_bool_token, trim_quotes};
 pub use pipeline_probe::{
     can_execute_as_pipeline, pending_pipeline_execution_todo, PipelineClause, PipelineClauseKind,
 };
 pub use query_patterns::{detect_query_pattern, PatternInfo, QueryPattern};
-use parser_support::{parse_bool_token, trim_quotes};
 use serde_json::Value;
 pub use shape_matcher::{
     pending_shape_execution_todo, ShapeCaptures, ShapeKind, ShapeMatch, ShapeProbe, ShapeValue,

@@ -355,14 +355,17 @@ impl StorageEngineAdapter {
         format!("replication:cypher:{:x}", hasher.finish())
     }
 
-    fn node_record_bytes(record: &copperdb_storage::NodeRecord) -> Result<Vec<u8>, ReplicationError> {
+    fn node_record_bytes(
+        record: &copperdb_storage::NodeRecord,
+    ) -> Result<Vec<u8>, ReplicationError> {
         let mut props = record.properties.clone();
         props.insert("_id".to_string(), Value::String(record.id.clone()));
         props.insert(
             "_labels".to_string(),
             Value::Array(record.labels.iter().cloned().map(Value::String).collect()),
         );
-        rmp_serde::to_vec_named(&props).map_err(|error| ReplicationError::Storage(error.to_string()))
+        rmp_serde::to_vec_named(&props)
+            .map_err(|error| ReplicationError::Storage(error.to_string()))
     }
 }
 
@@ -411,7 +414,9 @@ impl ReplicationStorage for StorageEngineAdapter {
     ) -> Result<Vec<EdgeRecord>, ReplicationError> {
         let engine = self.engine.lock().unwrap();
         match rel_type {
-            Some(rel_type) => engine.get_edges_from_node_by_type(node_id, rel_type).map_err(Into::into),
+            Some(rel_type) => engine
+                .get_edges_from_node_by_type(node_id, rel_type)
+                .map_err(Into::into),
             None => engine.get_edges_from_node(node_id).map_err(Into::into),
         }
     }
@@ -423,7 +428,9 @@ impl ReplicationStorage for StorageEngineAdapter {
     ) -> Result<Vec<EdgeRecord>, ReplicationError> {
         let engine = self.engine.lock().unwrap();
         match rel_type {
-            Some(rel_type) => engine.get_edges_to_node_by_type(node_id, rel_type).map_err(Into::into),
+            Some(rel_type) => engine
+                .get_edges_to_node_by_type(node_id, rel_type)
+                .map_err(Into::into),
             None => engine.get_edges_to_node(node_id).map_err(Into::into),
         }
     }
@@ -581,7 +588,8 @@ impl ReplicaTransport for InMemoryReplicaTransport {
         node_id: &str,
         rel_type: Option<&str>,
     ) -> Result<Vec<EdgeRecord>, ReplicationError> {
-        self.lookup(target)?.graph_edges_from_node(node_id, rel_type)
+        self.lookup(target)?
+            .graph_edges_from_node(node_id, rel_type)
     }
 
     async fn graph_edges_to_node(
@@ -608,7 +616,8 @@ impl ReplicaTransport for InMemoryReplicaTransport {
         property: &str,
         value: &Value,
     ) -> Result<Vec<Vec<u8>>, ReplicationError> {
-        self.lookup(target)?.graph_nodes_by_property(label, property, value)
+        self.lookup(target)?
+            .graph_nodes_by_property(label, property, value)
     }
 }
 
@@ -2108,7 +2117,7 @@ mod tests {
             .unwrap();
         topology
             .register_placement(PlacementRecord {
-                key: PlacementKey::default_for_database("neo4j"),
+                key: PlacementKey::default_for_database("copper"),
                 primary_node: "node-1".into(),
                 replica_nodes: vec!["node-2".into(), "node-3".into()],
                 search_nodes: vec![],
@@ -2120,7 +2129,7 @@ mod tests {
 
         let planner = HighAvailabilityWritePlanner::new(topology, DistributedWriteMode::RaftLog);
         let plan = planner
-            .plan(&PlacementKey::default_for_database("neo4j"))
+            .plan(&PlacementKey::default_for_database("copper"))
             .unwrap();
         assert_eq!(plan.leader.node_id, "node-1");
         assert_eq!(plan.required_acks, 2);
@@ -2133,7 +2142,7 @@ mod tests {
             ConsistencyLevel, MeshPeer, NodeCapability, PlacementKey, PlacementRecord,
         };
 
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         let mut topology = TopologyRegistry::new();
         for node_id in ["node-1", "node-2", "node-3"] {
             topology
@@ -2200,7 +2209,7 @@ mod tests {
             ConsistencyLevel, MeshPeer, NodeCapability, PlacementKey, PlacementRecord,
         };
 
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         let mut topology = TopologyRegistry::new();
         for node_id in ["node-1", "node-2", "node-3"] {
             topology
@@ -2253,7 +2262,7 @@ mod tests {
             ConsistencyLevel, MeshPeer, NodeCapability, PlacementKey, PlacementRecord,
         };
 
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         let mut topology = TopologyRegistry::new();
         for node_id in ["node-1", "node-2", "node-3"] {
             topology
@@ -2312,7 +2321,7 @@ mod tests {
             ConsistencyLevel, MeshPeer, NodeCapability, PlacementKey, PlacementRecord,
         };
 
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         let mut topology = TopologyRegistry::new();
         for node_id in ["node-1", "node-2", "node-3"] {
             topology
@@ -2378,7 +2387,7 @@ mod tests {
         let repair_path = dir.path().join("repair");
         let queue = DurableRepairQueue::open(&repair_path).unwrap();
         let record = RepairRecord::read_repair_probe(
-            PlacementKey::default_for_database("neo4j"),
+            PlacementKey::default_for_database("copper"),
             "node-2".into(),
             b"key".to_vec(),
         );
@@ -2402,7 +2411,7 @@ mod tests {
         let queue = DurableRepairQueue::open(&repair_path).unwrap();
         queue
             .enqueue(RepairRecord::hinted_handoff(
-                PlacementKey::default_for_database("neo4j"),
+                PlacementKey::default_for_database("copper"),
                 "node-2".into(),
                 Command::Put {
                     key: b"replay".to_vec(),
@@ -2435,7 +2444,7 @@ mod tests {
         let queue = DurableRepairQueue::open(&repair_path).unwrap();
         queue
             .enqueue(RepairRecord::hinted_handoff(
-                PlacementKey::default_for_database("neo4j"),
+                PlacementKey::default_for_database("copper"),
                 "missing-node".into(),
                 Command::Put {
                     key: b"retry".to_vec(),
@@ -2468,7 +2477,7 @@ mod tests {
         let queue = Arc::new(DurableRepairQueue::open(&repair_path).unwrap());
         queue
             .enqueue(RepairRecord::hinted_handoff(
-                PlacementKey::default_for_database("neo4j"),
+                PlacementKey::default_for_database("copper"),
                 "node-2".into(),
                 Command::Put {
                     key: b"scheduled-repair".to_vec(),
@@ -2540,7 +2549,7 @@ mod tests {
             ConsistencyLevel, MeshPeer, NodeCapability, PlacementKey, PlacementRecord,
         };
 
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         let mut topology = TopologyRegistry::new();
         for node_id in ["node-1", "node-2", "node-3"] {
             topology

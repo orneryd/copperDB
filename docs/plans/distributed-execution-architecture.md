@@ -4,6 +4,8 @@ Date: 2026-05-26
 
 This document is the implementation contract for copperDB distributed writes, reads, and search. The target is Cassandra-like distributed coordination rather than a single Raft leader path. Any Raft-style machinery that remains in the Rust workspace is transitional until it is either adapted behind this contract or removed.
 
+This document defines one replicated placement at a time. The higher-level federated multi-shard AI fabric plan is defined in [federated-ai-fabric-architecture.md](federated-ai-fabric-architecture.md).
+
 ## Goals
 
 - Any healthy coordinator-capable node can accept a client write, read, or search request.

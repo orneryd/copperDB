@@ -744,7 +744,7 @@ mod tests {
     fn session_manager_opens_owner_bound_sessions() {
         let manager = SessionManager::new(Duration::from_secs(30));
         let config = SessionConfig {
-            database: Some("neo4j".to_string()),
+            database: Some("copper".to_string()),
             ..SessionConfig::default()
         };
 
@@ -764,7 +764,7 @@ mod tests {
                 .get_for_owner(&session_id, Some("user:alice"))
                 .unwrap()
                 .database,
-            Some("neo4j".to_string())
+            Some("copper".to_string())
         );
     }
 

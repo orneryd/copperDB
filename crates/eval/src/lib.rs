@@ -4,8 +4,8 @@
 
 use copperdb_cypher::{
     Clause, ConstraintKind, EdgeDirection, EdgePattern, Expression, NodePattern, Pattern,
-    PatternInfo, PipelineClause, PipelineClauseKind, Query, QueryPattern, ReturnItem,
-    ShapeKind, ShapeMatch, ShapeValue,
+    PatternInfo, PipelineClause, PipelineClauseKind, Query, QueryPattern, ReturnItem, ShapeKind,
+    ShapeMatch, ShapeValue,
 };
 use copperdb_filter::{eval_expression, eval_predicate};
 use copperdb_storage::{
@@ -537,14 +537,21 @@ impl EvalEngine {
                 }
 
                 Clause::Create(create) => {
-                    current_rows =
-                        self.execute_pipeline_create_clause(&current_rows, create, params, &mut stats)?;
+                    current_rows = self.execute_pipeline_create_clause(
+                        &current_rows,
+                        create,
+                        params,
+                        &mut stats,
+                    )?;
                 }
 
                 Clause::Match(match_clause) => {
                     if !match_clause.pattern.edges.is_empty() {
-                        current_rows =
-                            self.match_relationship_pattern(&current_rows, &match_clause.pattern, params)?;
+                        current_rows = self.match_relationship_pattern(
+                            &current_rows,
+                            &match_clause.pattern,
+                            params,
+                        )?;
                         continue;
                     }
 
@@ -560,15 +567,19 @@ impl EvalEngine {
 
                         let mut new_rows = pooled_binding_rows();
                         for base_row in &current_rows {
-                            let expected_props =
-                                evaluate_pattern_properties(&node_pat.properties, base_row, params)?;
+                            let expected_props = evaluate_pattern_properties(
+                                &node_pat.properties,
+                                base_row,
+                                params,
+                            )?;
                             for item in self.storage.scan_nodes_with_prefix(&prefix) {
                                 let (_key, val) =
                                     item.map_err(|e| EvalError::StorageError(e.to_string()))?;
                                 let props: HashMap<String, Value> = rmp_serde::from_slice(&val)
                                     .map_err(|e| EvalError::SerializationError(e.to_string()))?;
 
-                                if !node_matches_pattern(&props, &node_pat.labels, &expected_props) {
+                                if !node_matches_pattern(&props, &node_pat.labels, &expected_props)
+                                {
                                     continue;
                                 }
 
@@ -624,14 +635,18 @@ impl EvalEngine {
                         let mut new_rows = pooled_binding_rows();
                         let mut found_any = false;
                         for base_row in &current_rows {
-                            let expected_props =
-                                evaluate_pattern_properties(&node_pat.properties, base_row, params)?;
+                            let expected_props = evaluate_pattern_properties(
+                                &node_pat.properties,
+                                base_row,
+                                params,
+                            )?;
                             for item in self.storage.scan_nodes_with_prefix(&prefix) {
                                 let (_key, val) =
                                     item.map_err(|e| EvalError::StorageError(e.to_string()))?;
                                 let props: HashMap<String, Value> = rmp_serde::from_slice(&val)
                                     .map_err(|e| EvalError::SerializationError(e.to_string()))?;
-                                if !node_matches_pattern(&props, &node_pat.labels, &expected_props) {
+                                if !node_matches_pattern(&props, &node_pat.labels, &expected_props)
+                                {
                                     continue;
                                 }
                                 let node_val = serde_json::to_value(&props)
@@ -834,7 +849,8 @@ impl EvalEngine {
                 }
 
                 Clause::Merge(merge) => {
-                    current_rows = self.execute_merge_clause(&current_rows, merge, params, &mut stats)?;
+                    current_rows =
+                        self.execute_merge_clause(&current_rows, merge, params, &mut stats)?;
                 }
             }
         }
@@ -1154,10 +1170,13 @@ impl EvalEngine {
         stats: &EdgeAggStats,
     ) -> Result<Value, EvalError> {
         match &item.expression {
-            Expression::PropertyAccess { property, .. } if property == "name" => end_props
-                .get("name")
-                .cloned()
-                .ok_or_else(|| EvalError::ExecutionError("optimized edge aggregation requires end-node name".into())),
+            Expression::PropertyAccess { property, .. } if property == "name" => {
+                end_props.get("name").cloned().ok_or_else(|| {
+                    EvalError::ExecutionError(
+                        "optimized edge aggregation requires end-node name".into(),
+                    )
+                })
+            }
             Expression::FunctionCall { name, .. } => match name.to_ascii_lowercase().as_str() {
                 "count" => Ok(Value::from(stats.count)),
                 "sum" => Ok(Value::from(stats.sum)),
@@ -1188,10 +1207,14 @@ impl EvalEngine {
             Expression::Variable(variable) if variable == group_var => {
                 Ok(Value::Object(group_props.clone().into_iter().collect()))
             }
-            Expression::PropertyAccess { variable, property } if variable == group_var => group_props
-                .get(property)
-                .cloned()
-                .ok_or_else(|| EvalError::ExecutionError(format!("missing property '{}.{}'", variable, property))),
+            Expression::PropertyAccess { variable, property } if variable == group_var => {
+                group_props.get(property).cloned().ok_or_else(|| {
+                    EvalError::ExecutionError(format!(
+                        "missing property '{}.{}'",
+                        variable, property
+                    ))
+                })
+            }
             Expression::FunctionCall { name, args, .. }
                 if name.eq_ignore_ascii_case("count")
                     && (args.is_empty()
@@ -1209,15 +1232,29 @@ impl EvalEngine {
     fn can_execute_compound_fast_path(&self, query: &Query, shape_match: &ShapeMatch) -> bool {
         match shape_match.kind {
             ShapeKind::CompoundCreateDeleteRel => query.clauses.iter().all(|clause| {
-                matches!(clause, Clause::Match(_) | Clause::With(_) | Clause::Create(_) | Clause::Delete(_))
+                matches!(
+                    clause,
+                    Clause::Match(_) | Clause::With(_) | Clause::Create(_) | Clause::Delete(_)
+                )
             }),
-            ShapeKind::CompoundPropCreateDeleteRel => query
-                .clauses
-                .iter()
-                .all(|clause| matches!(clause, Clause::Match(_) | Clause::Create(_) | Clause::Delete(_))),
-            ShapeKind::CompoundPropCreateDeleteReturnCountRel => query.clauses.iter().all(|clause| {
-                matches!(clause, Clause::Match(_) | Clause::Create(_) | Clause::With(_) | Clause::Delete(_) | Clause::Return(_))
+            ShapeKind::CompoundPropCreateDeleteRel => query.clauses.iter().all(|clause| {
+                matches!(
+                    clause,
+                    Clause::Match(_) | Clause::Create(_) | Clause::Delete(_)
+                )
             }),
+            ShapeKind::CompoundPropCreateDeleteReturnCountRel => {
+                query.clauses.iter().all(|clause| {
+                    matches!(
+                        clause,
+                        Clause::Match(_)
+                            | Clause::Create(_)
+                            | Clause::With(_)
+                            | Clause::Delete(_)
+                            | Clause::Return(_)
+                    )
+                })
+            }
             ShapeKind::Unknown => false,
         }
     }
@@ -1259,7 +1296,10 @@ impl EvalEngine {
         stats.relationships_created = 1;
         stats.relationships_deleted = 1;
 
-        let (columns, rows) = if matches!(shape_match.kind, ShapeKind::CompoundPropCreateDeleteReturnCountRel) {
+        let (columns, rows) = if matches!(
+            shape_match.kind,
+            ShapeKind::CompoundPropCreateDeleteReturnCountRel
+        ) {
             let ret = return_clause(query)?;
             let mut row = Row::new();
             for item in &ret.items {
@@ -1270,7 +1310,11 @@ impl EvalEngine {
             (Vec::new(), Vec::new())
         };
 
-        Ok(Some(EvalResult { columns, rows, stats }))
+        Ok(Some(EvalResult {
+            columns,
+            rows,
+            stats,
+        }))
     }
 
     fn compound_node_exists(
@@ -1299,7 +1343,11 @@ impl EvalEngine {
         Ok(false)
     }
 
-    fn can_execute_pipeline_route(&self, query: &Query, pipeline_clauses: &[PipelineClause]) -> bool {
+    fn can_execute_pipeline_route(
+        &self,
+        query: &Query,
+        pipeline_clauses: &[PipelineClause],
+    ) -> bool {
         if pipeline_clauses.is_empty() {
             return false;
         }
@@ -1337,7 +1385,11 @@ impl EvalEngine {
         for clause in &query.clauses {
             match clause {
                 Clause::Match(match_clause) => {
-                    current_rows = self.execute_pipeline_match_clause(&current_rows, &match_clause.pattern, params)?;
+                    current_rows = self.execute_pipeline_match_clause(
+                        &current_rows,
+                        &match_clause.pattern,
+                        params,
+                    )?;
                 }
                 Clause::Where(where_clause) => {
                     let mut filtered = pooled_binding_rows();
@@ -1353,7 +1405,12 @@ impl EvalEngine {
                     current_rows = filtered;
                 }
                 Clause::Create(create) => {
-                    current_rows = self.execute_pipeline_create_clause(&current_rows, create, params, &mut stats)?;
+                    current_rows = self.execute_pipeline_create_clause(
+                        &current_rows,
+                        create,
+                        params,
+                        &mut stats,
+                    )?;
                 }
                 Clause::With(with) => {
                     let mut projected: Vec<Row> = current_rows
@@ -1498,7 +1555,8 @@ impl EvalEngine {
 
                 let bound_node_props: HashMap<String, Value> =
                     bound_node.clone().into_iter().collect();
-                let expected_props = evaluate_pattern_properties(&node_pat.properties, base_row, params)?;
+                let expected_props =
+                    evaluate_pattern_properties(&node_pat.properties, base_row, params)?;
                 if node_matches_pattern(&bound_node_props, &node_pat.labels, &expected_props) {
                     let mut row = base_row.clone();
                     bind_single_node_path_variable(
@@ -1620,7 +1678,10 @@ impl EvalEngine {
             }
 
             if let Some(path_var) = &create.pattern.path_variable {
-                row.insert(path_var.clone(), path_value(path_node_values, path_edge_values));
+                row.insert(
+                    path_var.clone(),
+                    path_value(path_node_values, path_edge_values),
+                );
             }
 
             output_rows.push(row);
@@ -1648,52 +1709,57 @@ impl EvalEngine {
             let mut next_rows = pooled_binding_rows();
 
             for base_row in &current_rows {
-                let merge_props = evaluate_pattern_properties(&node_pat.properties, base_row, params)?;
+                let merge_props =
+                    evaluate_pattern_properties(&node_pat.properties, base_row, params)?;
 
-                let node_val = if let Some(cached_val) = self.find_in_merge_cache(labels, &merge_props) {
-                    cached_val
-                } else {
-                    let mut found_node: Option<Value> = None;
-                    for item in self.storage.scan_nodes_with_prefix(&prefix) {
-                        let (_key, val) =
-                            item.map_err(|e| EvalError::StorageError(e.to_string()))?;
-                        let props: HashMap<String, Value> = rmp_serde::from_slice(&val)
-                            .map_err(|e| EvalError::SerializationError(e.to_string()))?;
-                        if !node_matches_pattern(&props, labels, &merge_props) {
-                            continue;
-                        }
-                        found_node = Some(
-                            serde_json::to_value(&props)
-                                .map_err(|e| EvalError::SerializationError(e.to_string()))?,
-                        );
-                        break;
-                    }
-
-                    if let Some(existing) = found_node {
-                        self.cache_merge_node(labels, &merge_props, &existing);
-                        existing
+                let node_val =
+                    if let Some(cached_val) = self.find_in_merge_cache(labels, &merge_props) {
+                        cached_val
                     } else {
-                        let id = Uuid::new_v4().to_string();
-                        let key = format!("{label}:{id}");
-                        let mut props = merge_props.clone();
-                        props.insert("_id".to_string(), Value::String(key.clone()));
-                        props.insert(
-                            "_labels".to_string(),
-                            Value::Array(
-                                labels.iter().map(|entry| Value::String(entry.clone())).collect(),
-                            ),
-                        );
-                        let bytes = rmp_serde::to_vec_named(&props)
-                            .map_err(|e| EvalError::SerializationError(e.to_string()))?;
-                        self.storage.put_node(&key, &bytes)?;
-                        stats.nodes_created += 1;
-                        stats.properties_set += node_pat.properties.len();
-                        let created = serde_json::to_value(&props)
-                            .map_err(|e| EvalError::SerializationError(e.to_string()))?;
-                        self.cache_merge_node(labels, &merge_props, &created);
-                        created
-                    }
-                };
+                        let mut found_node: Option<Value> = None;
+                        for item in self.storage.scan_nodes_with_prefix(&prefix) {
+                            let (_key, val) =
+                                item.map_err(|e| EvalError::StorageError(e.to_string()))?;
+                            let props: HashMap<String, Value> = rmp_serde::from_slice(&val)
+                                .map_err(|e| EvalError::SerializationError(e.to_string()))?;
+                            if !node_matches_pattern(&props, labels, &merge_props) {
+                                continue;
+                            }
+                            found_node = Some(
+                                serde_json::to_value(&props)
+                                    .map_err(|e| EvalError::SerializationError(e.to_string()))?,
+                            );
+                            break;
+                        }
+
+                        if let Some(existing) = found_node {
+                            self.cache_merge_node(labels, &merge_props, &existing);
+                            existing
+                        } else {
+                            let id = Uuid::new_v4().to_string();
+                            let key = format!("{label}:{id}");
+                            let mut props = merge_props.clone();
+                            props.insert("_id".to_string(), Value::String(key.clone()));
+                            props.insert(
+                                "_labels".to_string(),
+                                Value::Array(
+                                    labels
+                                        .iter()
+                                        .map(|entry| Value::String(entry.clone()))
+                                        .collect(),
+                                ),
+                            );
+                            let bytes = rmp_serde::to_vec_named(&props)
+                                .map_err(|e| EvalError::SerializationError(e.to_string()))?;
+                            self.storage.put_node(&key, &bytes)?;
+                            stats.nodes_created += 1;
+                            stats.properties_set += node_pat.properties.len();
+                            let created = serde_json::to_value(&props)
+                                .map_err(|e| EvalError::SerializationError(e.to_string()))?;
+                            self.cache_merge_node(labels, &merge_props, &created);
+                            created
+                        }
+                    };
 
                 let mut row = base_row.clone();
                 if let Some(var) = &node_pat.variable {
@@ -1736,7 +1802,10 @@ impl EvalEngine {
             )));
         };
 
-        Ok(Some((existing_id.to_string(), Value::Object(props.clone()))))
+        Ok(Some((
+            existing_id.to_string(),
+            Value::Object(props.clone()),
+        )))
     }
 
     fn match_relationship_pattern(
@@ -1754,7 +1823,10 @@ impl EvalEngine {
         let edge_pattern = &pattern.edges[0];
         let end_pattern = &pattern.nodes[1];
 
-        if pattern.shortest_path || edge_pattern.min_hops.is_some() || edge_pattern.max_hops.is_some() {
+        if pattern.shortest_path
+            || edge_pattern.min_hops.is_some()
+            || edge_pattern.max_hops.is_some()
+        {
             return self.match_variable_length_relationship_pattern(
                 base_rows,
                 pattern,
@@ -1767,7 +1839,8 @@ impl EvalEngine {
 
         let mut rows = pooled_binding_rows();
         for base_row in base_rows {
-            let start_candidates = self.bound_or_matching_node_props(base_row, start_pattern, params)?;
+            let start_candidates =
+                self.bound_or_matching_node_props(base_row, start_pattern, params)?;
             for start_props in start_candidates {
                 let Some(start_id) = node_id(&start_props) else {
                     continue;
@@ -1785,7 +1858,8 @@ impl EvalEngine {
                     if !bound_edge_matches_row(base_row, edge_pattern.variable.as_deref(), &edge) {
                         continue;
                     }
-                    let Some(end_id) = related_node_id(start_id, &edge, &edge_pattern.direction) else {
+                    let Some(end_id) = related_node_id(start_id, &edge, &edge_pattern.direction)
+                    else {
                         continue;
                     };
                     let Some(end_props) = self.node_props_by_id(end_id)? else {
@@ -1794,7 +1868,11 @@ impl EvalEngine {
                     if !node_matches_pattern(&end_props, &end_pattern.labels, &expected_end_props) {
                         continue;
                     }
-                    if !bound_node_matches_row(base_row, end_pattern.variable.as_deref(), &end_props) {
+                    if !bound_node_matches_row(
+                        base_row,
+                        end_pattern.variable.as_deref(),
+                        &end_props,
+                    ) {
                         continue;
                     }
                     let end_value = serde_json::to_value(&end_props)
@@ -1852,49 +1930,57 @@ impl EvalEngine {
 
         for base_row in base_rows {
             for start_props in self.bound_or_matching_node_props(base_row, start_pattern, params)? {
-            let Some(start_id) = node_id(&start_props).map(str::to_string) else {
-                continue;
-            };
-            let start_value = serde_json::to_value(&start_props)
-                .map_err(|e| EvalError::SerializationError(e.to_string()))?;
-            let expected_end_props =
-                evaluate_pattern_properties(&end_pattern.properties, base_row, params)?;
-            let expected_edge_props =
-                evaluate_pattern_properties(&edge_pattern.properties, base_row, params)?;
-            let mut frontier = VecDeque::new();
-            let mut visited = HashSet::new();
-            frontier.push_back((
-                start_id.clone(),
-                0_u32,
-                vec![start_id.clone()],
-                Vec::<EdgeRecord>::new(),
-            ));
-            visited.insert((start_id.clone(), 0_u32));
+                let Some(start_id) = node_id(&start_props).map(str::to_string) else {
+                    continue;
+                };
+                let start_value = serde_json::to_value(&start_props)
+                    .map_err(|e| EvalError::SerializationError(e.to_string()))?;
+                let expected_end_props =
+                    evaluate_pattern_properties(&end_pattern.properties, base_row, params)?;
+                let expected_edge_props =
+                    evaluate_pattern_properties(&edge_pattern.properties, base_row, params)?;
+                let mut frontier = VecDeque::new();
+                let mut visited = HashSet::new();
+                frontier.push_back((
+                    start_id.clone(),
+                    0_u32,
+                    vec![start_id.clone()],
+                    Vec::<EdgeRecord>::new(),
+                ));
+                visited.insert((start_id.clone(), 0_u32));
 
-            while let Some((current_id, depth, path_node_ids, path_edges)) = frontier.pop_front() {
-                if depth >= min_hops {
-                    if let Some(end_props) = self.node_props_by_id(&current_id)? {
-                        if node_matches_pattern(&end_props, &end_pattern.labels, &expected_end_props) {
-                            let end_value = serde_json::to_value(&end_props)
-                                .map_err(|e| EvalError::SerializationError(e.to_string()))?;
-                            let node_values = path_node_ids
-                                .iter()
-                                .map(|node_id| {
-                                    let props = self.node_props_by_id(node_id)?.ok_or_else(|| {
-                                        EvalError::ExecutionError(format!(
-                                            "path node '{}' disappeared during traversal",
-                                            node_id
-                                        ))
-                                    })?;
-                                    serde_json::to_value(&props)
-                                        .map_err(|e| EvalError::SerializationError(e.to_string()))
-                                })
-                                .collect::<Result<Vec<_>, _>>()?;
-                            let edge_values = path_edges
-                                .iter()
-                                .map(edge_record_to_value)
-                                .collect::<Result<Vec<_>, _>>()?;
-                            let mut row = base_row.clone();
+                while let Some((current_id, depth, path_node_ids, path_edges)) =
+                    frontier.pop_front()
+                {
+                    if depth >= min_hops {
+                        if let Some(end_props) = self.node_props_by_id(&current_id)? {
+                            if node_matches_pattern(
+                                &end_props,
+                                &end_pattern.labels,
+                                &expected_end_props,
+                            ) {
+                                let end_value = serde_json::to_value(&end_props)
+                                    .map_err(|e| EvalError::SerializationError(e.to_string()))?;
+                                let node_values = path_node_ids
+                                    .iter()
+                                    .map(|node_id| {
+                                        let props =
+                                            self.node_props_by_id(node_id)?.ok_or_else(|| {
+                                                EvalError::ExecutionError(format!(
+                                                    "path node '{}' disappeared during traversal",
+                                                    node_id
+                                                ))
+                                            })?;
+                                        serde_json::to_value(&props).map_err(|e| {
+                                            EvalError::SerializationError(e.to_string())
+                                        })
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?;
+                                let edge_values = path_edges
+                                    .iter()
+                                    .map(edge_record_to_value)
+                                    .collect::<Result<Vec<_>, _>>()?;
+                                let mut row = base_row.clone();
                                 if let Some(var) = &start_pattern.variable {
                                     row.insert(var.clone(), start_value.clone());
                                 }
@@ -1914,37 +2000,37 @@ impl EvalEngine {
                                 if pattern.shortest_path {
                                     break;
                                 }
+                            }
                         }
                     }
-                }
 
-                if depth >= max_hops {
-                    continue;
-                }
-
-                for edge in self.relationship_candidates(&current_id, edge_pattern)? {
-                    if !edge_matches_pattern(&edge, &expected_edge_props) {
+                    if depth >= max_hops {
                         continue;
                     }
-                    let Some(next_id) =
-                        related_node_id(&current_id, &edge, &edge_pattern.direction)
-                            .map(str::to_string)
-                    else {
-                        continue;
-                    };
-                    let next_depth = depth + 1;
-                    let visit_key = (next_id.clone(), next_depth);
-                    if !visited.insert(visit_key) {
-                        continue;
+
+                    for edge in self.relationship_candidates(&current_id, edge_pattern)? {
+                        if !edge_matches_pattern(&edge, &expected_edge_props) {
+                            continue;
+                        }
+                        let Some(next_id) =
+                            related_node_id(&current_id, &edge, &edge_pattern.direction)
+                                .map(str::to_string)
+                        else {
+                            continue;
+                        };
+                        let next_depth = depth + 1;
+                        let visit_key = (next_id.clone(), next_depth);
+                        if !visited.insert(visit_key) {
+                            continue;
+                        }
+                        let mut next_node_ids = path_node_ids.clone();
+                        next_node_ids.push(next_id.clone());
+                        let mut next_edges = path_edges.clone();
+                        next_edges.push(edge);
+                        frontier.push_back((next_id, next_depth, next_node_ids, next_edges));
                     }
-                    let mut next_node_ids = path_node_ids.clone();
-                    next_node_ids.push(next_id.clone());
-                    let mut next_edges = path_edges.clone();
-                    next_edges.push(edge);
-                    frontier.push_back((next_id, next_depth, next_node_ids, next_edges));
                 }
             }
-        }
         }
 
         Ok(rows)
@@ -2141,7 +2227,10 @@ fn node_id(props: &HashMap<String, Value>) -> Option<&str> {
     props.get("_id").and_then(Value::as_str)
 }
 
-fn pipeline_bound_node<'a>(row: &'a Row, variable: &str) -> Option<&'a serde_json::Map<String, Value>> {
+fn pipeline_bound_node<'a>(
+    row: &'a Row,
+    variable: &str,
+) -> Option<&'a serde_json::Map<String, Value>> {
     row.get(variable).and_then(|value| match value {
         Value::Object(props) => Some(props),
         _ => None,
@@ -2231,10 +2320,7 @@ fn path_value(node_values: Vec<Value>, edge_values: Vec<Value>) -> Value {
                 "relationships".to_string(),
                 Value::Array(edge_values.clone()),
             ),
-            (
-                "length".to_string(),
-                Value::from(edge_values.len() as i64),
-            ),
+            ("length".to_string(), Value::from(edge_values.len() as i64)),
         ]
         .into_iter()
         .collect(),
@@ -2865,8 +2951,14 @@ mod tests {
             )
             .unwrap();
         assert_eq!(all_customers.rows.len(), 2);
-        assert_eq!(all_customers.rows[0].get("customerID"), Some(&Value::from(1)));
-        assert_eq!(all_customers.rows[1].get("customerID"), Some(&Value::from(2)));
+        assert_eq!(
+            all_customers.rows[0].get("customerID"),
+            Some(&Value::from(1))
+        );
+        assert_eq!(
+            all_customers.rows[1].get("customerID"),
+            Some(&Value::from(2))
+        );
     }
 
     #[test]
@@ -2887,11 +2979,20 @@ mod tests {
 
         assert_eq!(result.columns, vec!["product", "avgRating", "reviewCount"]);
         assert_eq!(result.rows.len(), 2);
-        assert_eq!(result.rows[0].get("product"), Some(&Value::String("Thing".into())));
+        assert_eq!(
+            result.rows[0].get("product"),
+            Some(&Value::String("Thing".into()))
+        );
         assert_eq!(result.rows[0].get("avgRating"), Some(&Value::from(5.0)));
         assert_eq!(result.rows[0].get("reviewCount"), Some(&Value::from(1)));
-        assert_eq!(result.rows[1].get("product"), Some(&Value::String("Widget".into())));
-        assert_eq!(result.rows[1].get("avgRating"), Some(&Value::from(13.0 / 3.0)));
+        assert_eq!(
+            result.rows[1].get("product"),
+            Some(&Value::String("Widget".into()))
+        );
+        assert_eq!(
+            result.rows[1].get("avgRating"),
+            Some(&Value::from(13.0 / 3.0))
+        );
         assert_eq!(result.rows[1].get("reviewCount"), Some(&Value::from(3)));
     }
 
@@ -2919,7 +3020,10 @@ mod tests {
         ] {
             let mut stored = props;
             stored.insert("_id".into(), Value::String(id.into()));
-            stored.insert("_labels".into(), Value::Array(vec![Value::String(label.into())]));
+            stored.insert(
+                "_labels".into(),
+                Value::Array(vec![Value::String(label.into())]),
+            );
             let bytes = rmp_serde::to_vec_named(&stored).unwrap();
             engine.storage.put_node(id, &bytes).unwrap();
         }
@@ -2982,9 +3086,22 @@ mod tests {
             .execute_with_pattern(&query, &HashMap::new(), &pattern)
             .unwrap();
 
-        assert_eq!(result.columns, vec!["product", "avgRating", "reviewCount", "minRating", "maxRating", "totalRating"]);
+        assert_eq!(
+            result.columns,
+            vec![
+                "product",
+                "avgRating",
+                "reviewCount",
+                "minRating",
+                "maxRating",
+                "totalRating"
+            ]
+        );
         assert_eq!(result.rows.len(), 1);
-        assert_eq!(result.rows[0].get("product"), Some(&Value::String("P1".into())));
+        assert_eq!(
+            result.rows[0].get("product"),
+            Some(&Value::String("P1".into()))
+        );
         assert_eq!(result.rows[0].get("avgRating"), Some(&Value::from(4.75)));
         assert_eq!(result.rows[0].get("reviewCount"), Some(&Value::from(2)));
         assert_eq!(result.rows[0].get("minRating"), Some(&Value::from(4.5)));
@@ -3075,7 +3192,10 @@ mod tests {
 
         assert_eq!(pattern.pattern, QueryPattern::IncomingCountAgg);
         assert_eq!(result.rows.len(), 2);
-        assert_eq!(result.rows[0].get("person"), Some(&Value::String("Alice".into())));
+        assert_eq!(
+            result.rows[0].get("person"),
+            Some(&Value::String("Alice".into()))
+        );
         assert_eq!(result.rows[0].get("followers"), Some(&Value::from(3)));
     }
 
@@ -3095,7 +3215,10 @@ mod tests {
 
         assert_eq!(pattern.pattern, QueryPattern::IncomingCountAgg);
         assert_eq!(result.rows.len(), 2);
-        assert_eq!(result.rows[0].get("person"), Some(&Value::String("Alice".into())));
+        assert_eq!(
+            result.rows[0].get("person"),
+            Some(&Value::String("Alice".into()))
+        );
         assert_eq!(result.rows[0].get("followers"), Some(&Value::from(3)));
     }
 
@@ -3134,7 +3257,10 @@ mod tests {
         assert_eq!(pattern.pattern, QueryPattern::IncomingCountAgg);
         assert_eq!(pattern.rel_type, "");
         assert_eq!(result.rows.len(), 2);
-        assert_eq!(result.rows[0].get("person"), Some(&Value::String("Alice".into())));
+        assert_eq!(
+            result.rows[0].get("person"),
+            Some(&Value::String("Alice".into()))
+        );
         assert_eq!(result.rows[0].get("followers"), Some(&Value::from(3)));
     }
 
@@ -3154,7 +3280,10 @@ mod tests {
 
         assert_eq!(pattern.pattern, QueryPattern::OutgoingCountAgg);
         assert_eq!(result.rows.len(), 2);
-        assert_eq!(result.rows[0].get("person"), Some(&Value::String("Alice".into())));
+        assert_eq!(
+            result.rows[0].get("person"),
+            Some(&Value::String("Alice".into()))
+        );
         assert_eq!(result.rows[0].get("following"), Some(&Value::from(2)));
     }
 
@@ -3175,9 +3304,15 @@ mod tests {
         assert_eq!(pattern.pattern, QueryPattern::EdgePropertyAgg);
         assert_eq!(pattern.rel_type, "");
         assert_eq!(result.rows.len(), 2);
-        assert_eq!(result.rows[0].get("product"), Some(&Value::String("Thing".into())));
+        assert_eq!(
+            result.rows[0].get("product"),
+            Some(&Value::String("Thing".into()))
+        );
         assert_eq!(result.rows[0].get("reviewCount"), Some(&Value::from(1)));
-        assert_eq!(result.rows[1].get("product"), Some(&Value::String("Widget".into())));
+        assert_eq!(
+            result.rows[1].get("product"),
+            Some(&Value::String("Widget".into()))
+        );
         assert_eq!(result.rows[1].get("reviewCount"), Some(&Value::from(3)));
     }
 
@@ -3221,15 +3356,28 @@ mod tests {
         let (shape_match, ok) = match_compound_query_shape(cypher);
 
         let result = engine
-            .execute_with_routes(&query, &HashMap::new(), &pattern, ok.then_some(&shape_match), None)
+            .execute_with_routes(
+                &query,
+                &HashMap::new(),
+                &pattern,
+                ok.then_some(&shape_match),
+                None,
+            )
             .unwrap();
 
         assert!(ok);
         assert_eq!(result.columns, vec!["count(r)"]);
-        assert_eq!(result.rows, vec![HashMap::from([("count(r)".into(), Value::from(1))])]);
+        assert_eq!(
+            result.rows,
+            vec![HashMap::from([("count(r)".into(), Value::from(1))])]
+        );
         assert_eq!(result.stats.relationships_created, 1);
         assert_eq!(result.stats.relationships_deleted, 1);
-        assert!(engine.storage.get_edges_by_type("TEMP_KNOWS").unwrap().is_empty());
+        assert!(engine
+            .storage
+            .get_edges_by_type("TEMP_KNOWS")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -3249,13 +3397,20 @@ mod tests {
             )
             .unwrap();
 
-        let cypher = "MATCH (a:Actor), (m:Movie) WITH a, m LIMIT 0 CREATE (a)-[r:TEMP_REL]->(m) DELETE r";
+        let cypher =
+            "MATCH (a:Actor), (m:Movie) WITH a, m LIMIT 0 CREATE (a)-[r:TEMP_REL]->(m) DELETE r";
         let query = parser.parse(cypher).unwrap();
         let pattern = detect_query_pattern(cypher);
         let (shape_match, ok) = match_compound_query_shape(cypher);
 
         let result = engine
-            .execute_with_routes(&query, &HashMap::new(), &pattern, ok.then_some(&shape_match), None)
+            .execute_with_routes(
+                &query,
+                &HashMap::new(),
+                &pattern,
+                ok.then_some(&shape_match),
+                None,
+            )
             .unwrap();
 
         assert!(ok);
@@ -3263,7 +3418,11 @@ mod tests {
         assert!(result.rows.is_empty());
         assert_eq!(result.stats.relationships_created, 0);
         assert_eq!(result.stats.relationships_deleted, 0);
-        assert!(engine.storage.get_edges_by_type("TEMP_REL").unwrap().is_empty());
+        assert!(engine
+            .storage
+            .get_edges_by_type("TEMP_REL")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -3283,14 +3442,24 @@ mod tests {
         let (shape_match, ok) = match_compound_query_shape(cypher);
 
         let result = engine
-            .execute_with_routes(&query, &HashMap::new(), &pattern, ok.then_some(&shape_match), None)
+            .execute_with_routes(
+                &query,
+                &HashMap::new(),
+                &pattern,
+                ok.then_some(&shape_match),
+                None,
+            )
             .unwrap();
 
         assert!(ok);
         assert!(result.rows.is_empty());
         assert_eq!(result.stats.relationships_created, 0);
         assert_eq!(result.stats.relationships_deleted, 0);
-        assert!(engine.storage.get_edges_by_type("TEMP_KNOWS").unwrap().is_empty());
+        assert!(engine
+            .storage
+            .get_edges_by_type("TEMP_KNOWS")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -3299,13 +3468,17 @@ mod tests {
         let parser = Parser::new();
         engine
             .execute(
-                &parser.parse("CREATE (p1:Person {id: 1, name: 'Alice'})").unwrap(),
+                &parser
+                    .parse("CREATE (p1:Person {id: 1, name: 'Alice'})")
+                    .unwrap(),
                 &HashMap::new(),
             )
             .unwrap();
         engine
             .execute(
-                &parser.parse("CREATE (p2:Person {id: 2, name: 'Bob'})").unwrap(),
+                &parser
+                    .parse("CREATE (p2:Person {id: 2, name: 'Bob'})")
+                    .unwrap(),
                 &HashMap::new(),
             )
             .unwrap();
@@ -3316,14 +3489,24 @@ mod tests {
         let (shape_match, ok) = match_compound_query_shape(cypher);
 
         let result = engine
-            .execute_with_routes(&query, &HashMap::new(), &pattern, ok.then_some(&shape_match), None)
+            .execute_with_routes(
+                &query,
+                &HashMap::new(),
+                &pattern,
+                ok.then_some(&shape_match),
+                None,
+            )
             .unwrap();
 
         assert!(ok);
         assert!(result.rows.is_empty());
         assert_eq!(result.stats.relationships_created, 1);
         assert_eq!(result.stats.relationships_deleted, 1);
-        assert!(engine.storage.get_edges_by_type("TEMP_KNOWS").unwrap().is_empty());
+        assert!(engine
+            .storage
+            .get_edges_by_type("TEMP_KNOWS")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -3336,7 +3519,13 @@ mod tests {
         let (clauses, ok) = can_execute_as_pipeline(cypher);
 
         let result = engine
-            .execute_with_routes(&query, &HashMap::new(), &pattern, None, ok.then_some(clauses.as_slice()))
+            .execute_with_routes(
+                &query,
+                &HashMap::new(),
+                &pattern,
+                None,
+                ok.then_some(clauses.as_slice()),
+            )
             .unwrap();
 
         assert!(ok);
@@ -3412,7 +3601,9 @@ mod tests {
             "CREATE (o:Order {orderID: 100})",
             "CREATE (o:Order {orderID: 200})",
         ] {
-            engine.execute(&parser.parse(cypher).unwrap(), &HashMap::new()).unwrap();
+            engine
+                .execute(&parser.parse(cypher).unwrap(), &HashMap::new())
+                .unwrap();
         }
 
         let node_id_for = |label: &str, property: &str, expected: i64| {
@@ -3520,7 +3711,8 @@ mod tests {
         quantities.sort_unstable();
         assert_eq!(quantities, vec![3, 5]);
 
-        let order_ids: HashSet<String> = orders.iter().map(|edge| edge.start_node.clone()).collect();
+        let order_ids: HashSet<String> =
+            orders.iter().map(|edge| edge.start_node.clone()).collect();
         assert_eq!(order_ids.len(), 1);
         assert!(order_ids.contains(&purchased[0].end_node));
 
@@ -3576,7 +3768,8 @@ mod tests {
         quantities.sort_unstable();
         assert_eq!(quantities, vec![3, 5]);
 
-        let order_ids: HashSet<String> = orders.iter().map(|edge| edge.start_node.clone()).collect();
+        let order_ids: HashSet<String> =
+            orders.iter().map(|edge| edge.start_node.clone()).collect();
         assert_eq!(order_ids.len(), 1);
         assert!(order_ids.contains(&purchased[0].end_node));
 
@@ -3598,7 +3791,9 @@ mod tests {
 
         engine
             .execute(
-                &parser.parse("CREATE (p:Person {id: 1, name: 'Alice'})").unwrap(),
+                &parser
+                    .parse("CREATE (p:Person {id: 1, name: 'Alice'})")
+                    .unwrap(),
                 &HashMap::new(),
             )
             .unwrap();
@@ -3616,7 +3811,10 @@ mod tests {
 
         assert_eq!(result.columns, vec!["person", "friend", "rel"]);
         assert_eq!(result.rows.len(), 1);
-        assert_eq!(result.rows[0].get("person"), Some(&Value::String("Alice".into())));
+        assert_eq!(
+            result.rows[0].get("person"),
+            Some(&Value::String("Alice".into()))
+        );
         assert_eq!(result.rows[0].get("friend"), Some(&Value::Null));
         assert_eq!(result.rows[0].get("rel"), Some(&Value::Null));
     }
@@ -3649,9 +3847,18 @@ mod tests {
 
         assert_eq!(result.columns, vec!["person", "friendName", "relType"]);
         assert_eq!(result.rows.len(), 1);
-        assert_eq!(result.rows[0].get("person"), Some(&Value::String("Alice".into())));
-        assert_eq!(result.rows[0].get("friendName"), Some(&Value::String("Bob".into())));
-        assert_eq!(result.rows[0].get("relType"), Some(&Value::String("FOLLOWS".into())));
+        assert_eq!(
+            result.rows[0].get("person"),
+            Some(&Value::String("Alice".into()))
+        );
+        assert_eq!(
+            result.rows[0].get("friendName"),
+            Some(&Value::String("Bob".into()))
+        );
+        assert_eq!(
+            result.rows[0].get("relType"),
+            Some(&Value::String("FOLLOWS".into()))
+        );
     }
 
     #[test]
@@ -3689,13 +3896,22 @@ mod tests {
             .and_then(Value::as_array)
             .expect("expected optional hit nodes");
         assert_eq!(hit_nodes.len(), 1);
-        assert_eq!(hit_result.rows[0].get("rels"), Some(&Value::Array(Vec::new())));
+        assert_eq!(
+            hit_result.rows[0].get("rels"),
+            Some(&Value::Array(Vec::new()))
+        );
 
         assert_eq!(miss_result.rows.len(), 1);
         assert_eq!(miss_result.rows[0].get("path"), Some(&Value::Null));
         assert_eq!(miss_result.rows[0].get("hops"), Some(&Value::Null));
-        assert_eq!(miss_result.rows[0].get("nodes"), Some(&Value::Array(Vec::new())));
-        assert_eq!(miss_result.rows[0].get("rels"), Some(&Value::Array(Vec::new())));
+        assert_eq!(
+            miss_result.rows[0].get("nodes"),
+            Some(&Value::Array(Vec::new()))
+        );
+        assert_eq!(
+            miss_result.rows[0].get("rels"),
+            Some(&Value::Array(Vec::new()))
+        );
     }
 
     #[test]
@@ -3893,30 +4109,15 @@ mod tests {
             .and_then(Value::as_array)
             .expect("expected path nodes");
         assert_eq!(nodes.len(), 3);
-        assert_eq!(
-            nodes[0]
-                .get("name")
-                .and_then(Value::as_str),
-            Some("a")
-        );
-        assert_eq!(
-            nodes[2]
-                .get("name")
-                .and_then(Value::as_str),
-            Some("c")
-        );
+        assert_eq!(nodes[0].get("name").and_then(Value::as_str), Some("a"));
+        assert_eq!(nodes[2].get("name").and_then(Value::as_str), Some("c"));
 
         let rels = result.rows[0]
             .get("rels")
             .and_then(Value::as_array)
             .expect("expected path relationships");
         assert_eq!(rels.len(), 2);
-        assert_eq!(
-            rels[0]
-                .get("rank")
-                .and_then(Value::as_i64),
-            Some(1)
-        );
+        assert_eq!(rels[0].get("rank").and_then(Value::as_i64), Some(1));
 
         let path = result.rows[0]
             .get("path")
@@ -4024,7 +4225,10 @@ mod tests {
             props.insert("name".to_string(), Value::String(format!("n{index:02}")));
             engine
                 .storage
-                .put_node(&format!("Node:{index}"), &rmp_serde::to_vec(&props).unwrap())
+                .put_node(
+                    &format!("Node:{index}"),
+                    &rmp_serde::to_vec(&props).unwrap(),
+                )
                 .unwrap();
         }
 

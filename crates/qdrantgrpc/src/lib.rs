@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn qdrant_request_preserves_distributed_search_targets() {
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         let mut topology = TopologyRegistry::new();
         for node_id in ["search-a", "search-b"] {
             topology
@@ -323,7 +323,7 @@ mod tests {
         let plan = topology.plan_search(&placement).unwrap();
 
         let request = QdrantSearchRequest::from_search_plan(
-            "neo4j_vectors",
+            "copper_vectors",
             &plan,
             QdrantVectorQuery {
                 vector: vec![0.1, 0.2, 0.3],
@@ -333,8 +333,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(request.collection, "neo4j_vectors");
-        assert_eq!(request.placement_id, "default/neo4j/primary");
+        assert_eq!(request.collection, "copper_vectors");
+        assert_eq!(request.placement_id, "default/copper/primary");
         assert_eq!(request.targets.len(), 2);
         assert_eq!(request.targets[0].node_id, "search-a");
     }
@@ -362,8 +362,8 @@ mod tests {
         );
         let executor = QdrantDistributedSearchExecutor::new(client.clone());
         let request = QdrantSearchRequest {
-            collection: "neo4j_vectors".into(),
-            placement_id: "default/neo4j/primary".into(),
+            collection: "copper_vectors".into(),
+            placement_id: "default/copper/primary".into(),
             targets: vec![
                 QdrantSearchTarget {
                     node_id: "search-a".into(),
@@ -402,12 +402,12 @@ mod tests {
             min_score: Some(0.75),
         };
 
-        let url = QdrantHttpClient::search_url(&target, "neo4j_vectors");
+        let url = QdrantHttpClient::search_url(&target, "copper_vectors");
         let body = serde_json::to_value(QdrantHttpClient::search_body(&query)).unwrap();
 
         assert_eq!(
             url,
-            "http://search-a.mesh.local:6333/collections/neo4j_vectors/points/search"
+            "http://search-a.mesh.local:6333/collections/copper_vectors/points/search"
         );
         assert_eq!(body["vector"].as_array().unwrap().len(), 3);
         assert_eq!(body["limit"], 7);

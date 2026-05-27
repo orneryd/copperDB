@@ -831,7 +831,7 @@ mod tests {
             .unwrap();
         registry
             .register_placement(PlacementRecord {
-                key: PlacementKey::default_for_database("neo4j"),
+                key: PlacementKey::default_for_database("copper"),
                 primary_node: "n1".into(),
                 replica_nodes: vec!["n2".into()],
                 search_nodes: vec!["n1".into(), "n2".into()],
@@ -842,7 +842,7 @@ mod tests {
             .unwrap();
 
         let plan = registry
-            .plan_search(&PlacementKey::default_for_database("neo4j"))
+            .plan_search(&PlacementKey::default_for_database("copper"))
             .unwrap();
         assert_eq!(plan.fanout.len(), 2);
         assert_eq!(plan.fanout[0].node_id, "n1");
@@ -863,7 +863,7 @@ mod tests {
             .unwrap();
         registry
             .register_placement(PlacementRecord {
-                key: PlacementKey::default_for_database("neo4j"),
+                key: PlacementKey::default_for_database("copper"),
                 primary_node: "n1".into(),
                 replica_nodes: vec!["n2".into(), "n3".into()],
                 search_nodes: vec![],
@@ -875,7 +875,7 @@ mod tests {
 
         let plan = registry
             .plan_write(
-                &PlacementKey::default_for_database("neo4j"),
+                &PlacementKey::default_for_database("copper"),
                 DistributedWriteMode::Quorum,
             )
             .unwrap();
@@ -913,7 +913,7 @@ mod tests {
             .unwrap();
         registry
             .register_placement(PlacementRecord {
-                key: PlacementKey::default_for_database("neo4j"),
+                key: PlacementKey::default_for_database("copper"),
                 primary_node: "n1".into(),
                 replica_nodes: vec!["n2".into(), "n3".into()],
                 search_nodes: vec![],
@@ -923,7 +923,7 @@ mod tests {
             })
             .unwrap();
 
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         let write_plan = registry
             .plan_write_with_consistency(
                 &placement,
@@ -974,12 +974,12 @@ mod tests {
         leader.health = PeerHealth::Degraded;
         registry.register_peer(leader).unwrap();
         registry
-            .register_placement(PlacementRecord::standalone("neo4j", "n1"))
+            .register_placement(PlacementRecord::standalone("copper", "n1"))
             .unwrap();
 
         let error = registry
             .plan_write(
-                &PlacementKey::default_for_database("neo4j"),
+                &PlacementKey::default_for_database("copper"),
                 DistributedWriteMode::Standalone,
             )
             .unwrap_err();
@@ -1018,7 +1018,7 @@ mod tests {
             .unwrap();
         registry
             .register_placement(PlacementRecord {
-                key: PlacementKey::default_for_database("neo4j"),
+                key: PlacementKey::default_for_database("copper"),
                 primary_node: "local-healthy".into(),
                 replica_nodes: vec![],
                 search_nodes: vec![
@@ -1034,7 +1034,7 @@ mod tests {
 
         let plan = registry
             .plan_search_with_policy(
-                &PlacementKey::default_for_database("neo4j"),
+                &PlacementKey::default_for_database("copper"),
                 SearchRoutingPolicy::low_latency("us-east-1", 2),
             )
             .unwrap();

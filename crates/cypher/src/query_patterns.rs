@@ -521,7 +521,12 @@ fn split_top_level_commas(input: &str) -> Vec<&str> {
             ']' if !in_single && !in_double => depth_bracket -= 1,
             '{' if !in_single && !in_double => depth_brace += 1,
             '}' if !in_single && !in_double => depth_brace -= 1,
-            ',' if !in_single && !in_double && depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 => {
+            ',' if !in_single
+                && !in_double
+                && depth_paren == 0
+                && depth_bracket == 0
+                && depth_brace == 0 =>
+            {
                 parts.push(input[start..index].trim());
                 start = index + 1;
             }

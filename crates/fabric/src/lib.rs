@@ -210,11 +210,11 @@ mod tests {
             )
             .unwrap();
         registry
-            .register_placement(PlacementRecord::standalone("neo4j", "n1"))
+            .register_placement(PlacementRecord::standalone("copper", "n1"))
             .unwrap();
 
         let fabric = FabricTopology::new(registry);
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         assert_eq!(fabric.plan_search(&placement).unwrap().fanout.len(), 1);
         assert_eq!(
             fabric

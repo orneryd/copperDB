@@ -25,7 +25,10 @@ pub fn can_execute_as_pipeline(cypher: &str) -> (Vec<PipelineClause>, bool) {
         return (Vec::new(), false);
     }
     if !clauses.iter().any(|clause| {
-        matches!(clause.kind, PipelineClauseKind::With | PipelineClauseKind::Unwind)
+        matches!(
+            clause.kind,
+            PipelineClauseKind::With | PipelineClauseKind::Unwind
+        )
     }) {
         return (Vec::new(), false);
     }
@@ -38,7 +41,15 @@ pub fn pending_pipeline_execution_todo() -> &'static str {
 
 fn split_pipeline_clauses(cypher: &str) -> Option<Vec<PipelineClause>> {
     let upper = cypher.to_ascii_uppercase();
-    for unsupported in ["OPTIONAL MATCH", "MERGE", "FOREACH", "CALL", "DELETE", "REMOVE", "SET"] {
+    for unsupported in [
+        "OPTIONAL MATCH",
+        "MERGE",
+        "FOREACH",
+        "CALL",
+        "DELETE",
+        "REMOVE",
+        "SET",
+    ] {
         if find_keyword_index(&upper, unsupported).is_some() {
             return None;
         }
@@ -64,14 +75,20 @@ fn split_pipeline_clauses(cypher: &str) -> Option<Vec<PipelineClause>> {
     }
     boundaries.sort_by_key(|(pos, _)| *pos);
 
-    let trimmed_left = cypher.len() - cypher.trim_start_matches(|c: char| c.is_ascii_whitespace()).len();
+    let trimmed_left = cypher.len()
+        - cypher
+            .trim_start_matches(|c: char| c.is_ascii_whitespace())
+            .len();
     if boundaries[0].0 != trimmed_left {
         return None;
     }
 
     let mut clauses = Vec::new();
     for (index, (start, kind)) in boundaries.iter().enumerate() {
-        let end = boundaries.get(index + 1).map(|(pos, _)| *pos).unwrap_or(cypher.len());
+        let end = boundaries
+            .get(index + 1)
+            .map(|(pos, _)| *pos)
+            .unwrap_or(cypher.len());
         let text = cypher[*start..end].trim();
         if !text.is_empty() {
             clauses.push(PipelineClause {
@@ -141,6 +158,8 @@ mod tests {
         assert_eq!(clauses[4].kind, PipelineClauseKind::Unwind);
         assert_eq!(clauses[5].kind, PipelineClauseKind::Match);
         assert_eq!(clauses[6].kind, PipelineClauseKind::Create);
-        assert!(pending_pipeline_execution_todo().contains("dedicated eval/engine pipeline executor"));
+        assert!(
+            pending_pipeline_execution_todo().contains("dedicated eval/engine pipeline executor")
+        );
     }
 }

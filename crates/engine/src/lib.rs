@@ -43,10 +43,10 @@ use copperdb_cache::QueryCache;
 use copperdb_compliance::{ComplianceManager, ComplianceReporter};
 use copperdb_cypher::{
     can_execute_as_pipeline, detect_query_pattern, match_compound_query_shape, Clause,
-    EdgeDirection, Expression, Parser, Pattern, QueryType, ReturnItem, WhereClause,
+    EdgeDirection, Expression, Parser, Pattern, QueryType, ReturnItem, WhereClause, WithClause,
 };
 use copperdb_eval::{EvalEngine, QueryStats};
-use copperdb_filter::eval_predicate;
+use copperdb_filter::{eval_expression, eval_predicate};
 use copperdb_kms::{new_provider, ProviderFactoryConfig};
 use copperdb_replication::{
     CassandraCoordinator, Command, DistributedReadOutcome, DistributedWriteOutcome,
@@ -418,9 +418,9 @@ impl CopperDb {
                     read_outcome: Some(read_outcome),
                 });
             }
-            if let Some(shape) = distributed_leading_match_optional_path_query_shape(&parsed) {
+            if let Some(shape) = distributed_leading_path_query_shape(&parsed) {
                 let (result, read_outcome) = self
-                    .execute_distributed_leading_match_optional_path_query(
+                    .execute_distributed_leading_path_query(
                         &shape,
                         &params,
                         placement,
@@ -727,9 +727,9 @@ impl CopperDb {
         ))
     }
 
-    async fn execute_distributed_leading_match_optional_path_query(
+    async fn execute_distributed_leading_path_query(
         &self,
-        shape: &DistributedLeadingMatchOptionalPathQueryShape,
+        shape: &DistributedLeadingPathQueryShape,
         params: &HashMap<String, Value>,
         placement: &PlacementKey,
         consistency: ConsistencyLevel,
@@ -793,7 +793,9 @@ impl CopperDb {
                                     let Some(nodes) = distributed_path_nodes(&matched_path) else {
                                         continue;
                                     };
-                                    let Some(relationships) = distributed_path_relationships(&matched_path) else {
+                                    let Some(relationships) =
+                                        distributed_path_relationships(&matched_path)
+                                    else {
                                         continue;
                                     };
                                     if nodes.len() < 2 || relationships.is_empty() {
@@ -805,7 +807,10 @@ impl CopperDb {
                                         row.insert(variable.clone(), nodes[0].clone());
                                     }
                                     if let Some(variable) = end_variable {
-                                        row.insert(variable.clone(), nodes[nodes.len() - 1].clone());
+                                        row.insert(
+                                            variable.clone(),
+                                            nodes[nodes.len() - 1].clone(),
+                                        );
                                     }
                                     if let Some(variable) = edge_variable {
                                         if relationships.len() != 1 {
@@ -813,6 +818,108 @@ impl CopperDb {
                                         }
                                         row.insert(variable.clone(), relationships[0].clone());
                                     }
+                                    next_rows.push(row);
+                                }
+                            }
+                        }
+                    }
+                    base_rows = next_rows;
+                }
+                DistributedLeadingStep::OptionalMatch(leading_match) => {
+                    let mut next_rows = Vec::new();
+                    for base_row in &base_rows {
+                        match leading_match {
+                            DistributedLeadingMatch::Node { selector, variable } => {
+                                let matched_nodes = self
+                                    .distributed_resolve_node_candidates_for_row(
+                                        &plan,
+                                        transport.as_ref(),
+                                        selector,
+                                        base_row,
+                                        &mut responded_by,
+                                        &mut failed_replicas,
+                                    )
+                                    .await?;
+                                if responded_by.len() < plan.required_responses {
+                                    return Err(ReplicationError::NoQuorum {
+                                        required: plan.required_responses,
+                                        received: responded_by.len(),
+                                    }
+                                    .into());
+                                }
+                                if matched_nodes.is_empty() {
+                                    let mut row = base_row.clone();
+                                    if let Some(variable) = variable {
+                                        if !row.contains_key(variable) {
+                                            row.insert(variable.clone(), Value::Null);
+                                        }
+                                    }
+                                    next_rows.push(row);
+                                    continue;
+                                }
+                                for matched_node in matched_nodes {
+                                    let mut row = base_row.clone();
+                                    if let Some(variable) = variable {
+                                        row.insert(variable.clone(), matched_node);
+                                    }
+                                    next_rows.push(row);
+                                }
+                            }
+                            DistributedLeadingMatch::Relationship {
+                                pattern,
+                                start_variable,
+                                end_variable,
+                                edge_variable,
+                            } => {
+                                let matched_paths = self
+                                    .distributed_direct_path_values_for_row(
+                                        &plan,
+                                        transport.as_ref(),
+                                        pattern,
+                                        base_row,
+                                        &mut responded_by,
+                                        &mut failed_replicas,
+                                    )
+                                    .await?;
+                                let mut matched_any = false;
+                                for matched_path in matched_paths {
+                                    let Some(nodes) = distributed_path_nodes(&matched_path) else {
+                                        continue;
+                                    };
+                                    let Some(relationships) =
+                                        distributed_path_relationships(&matched_path)
+                                    else {
+                                        continue;
+                                    };
+                                    if nodes.len() < 2 || relationships.is_empty() {
+                                        continue;
+                                    }
+
+                                    let mut row = base_row.clone();
+                                    if let Some(variable) = start_variable {
+                                        row.insert(variable.clone(), nodes[0].clone());
+                                    }
+                                    if let Some(variable) = end_variable {
+                                        row.insert(
+                                            variable.clone(),
+                                            nodes[nodes.len() - 1].clone(),
+                                        );
+                                    }
+                                    if let Some(variable) = edge_variable {
+                                        if relationships.len() != 1 {
+                                            continue;
+                                        }
+                                        row.insert(variable.clone(), relationships[0].clone());
+                                    }
+                                    matched_any = true;
+                                    next_rows.push(row);
+                                }
+                                if !matched_any {
+                                    let mut row = base_row.clone();
+                                    distributed_bind_optional_leading_match_nulls(
+                                        &mut row,
+                                        leading_match,
+                                    );
                                     next_rows.push(row);
                                 }
                             }
@@ -830,6 +937,30 @@ impl CopperDb {
                         }
                     }
                     base_rows = filtered_rows;
+                }
+                DistributedLeadingStep::With(with_clause) => {
+                    let mut projected_rows = base_rows
+                        .into_iter()
+                        .map(|row| distributed_project_row(&row, &with_clause.items, params))
+                        .collect::<Result<Vec<_>, CopperDbError>>()?;
+
+                    if let Some(limit) = with_clause.limit {
+                        projected_rows.truncate(limit.max(0) as usize);
+                    }
+
+                    if let Some(where_clause) = &with_clause.where_clause {
+                        let mut filtered_rows = Vec::new();
+                        for row in projected_rows {
+                            let keep = eval_predicate(&where_clause.expression, &row, params)
+                                .map_err(|err| CopperDbError::Eval(err.to_string()))?;
+                            if keep {
+                                filtered_rows.push(row);
+                            }
+                        }
+                        base_rows = filtered_rows;
+                    } else {
+                        base_rows = projected_rows;
+                    }
                 }
             }
             if base_rows.is_empty() {
@@ -850,7 +981,9 @@ impl CopperDb {
                 )
                 .await?;
             if row_path_values.is_empty() {
-                path_values.push(Value::Null);
+                if shape.path_shape.optional {
+                    path_values.push(Value::Null);
+                }
             } else {
                 path_values.extend(row_path_values);
             }
@@ -946,7 +1079,9 @@ impl CopperDb {
                     .into());
                 }
 
-                let end_ids = distributed_node_ids(&end_nodes).into_iter().collect::<HashSet<_>>();
+                let end_ids = distributed_node_ids(&end_nodes)
+                    .into_iter()
+                    .collect::<HashSet<_>>();
                 for start_node_id in distributed_node_ids(&start_nodes) {
                     for path in self
                         .distributed_relationship_paths(
@@ -965,8 +1100,10 @@ impl CopperDb {
                         .await?
                     {
                         path_values.push(
-                            self.materialize_distributed_path_value(plan, transport, &path, direction)
-                                .await?,
+                            self.materialize_distributed_path_value(
+                                plan, transport, &path, direction,
+                            )
+                            .await?,
                         );
                     }
                 }
@@ -1063,7 +1200,9 @@ impl CopperDb {
                     .into());
                 }
 
-                let end_ids = distributed_node_ids(&end_nodes).into_iter().collect::<HashSet<_>>();
+                let end_ids = distributed_node_ids(&end_nodes)
+                    .into_iter()
+                    .collect::<HashSet<_>>();
                 for start_node_id in distributed_node_ids(&start_nodes) {
                     for path in self
                         .distributed_relationship_paths(
@@ -1082,8 +1221,10 @@ impl CopperDb {
                         .await?
                     {
                         path_values.push(
-                            self.materialize_distributed_path_value(plan, transport, &path, direction)
-                                .await?,
+                            self.materialize_distributed_path_value(
+                                plan, transport, &path, direction,
+                            )
+                            .await?,
                         );
                     }
                 }
@@ -1157,7 +1298,9 @@ impl CopperDb {
         let mut visited = HashSet::from([(start_node_id.to_string(), 0_u32)]);
         let mut paths = Vec::new();
 
-        while let Some((current_node_id, depth, path_node_ids, path_edge_ids)) = frontier.pop_front() {
+        while let Some((current_node_id, depth, path_node_ids, path_edge_ids)) =
+            frontier.pop_front()
+        {
             if depth >= min_hops && end_ids.contains(&current_node_id) {
                 paths.push(DistributedPath {
                     node_ids: path_node_ids.clone(),
@@ -1186,7 +1329,8 @@ impl CopperDb {
                 if !distributed_edge_matches(&edge, edge_properties) {
                     continue;
                 }
-                let Some(next_node_id) = distributed_related_node_id(&current_node_id, &edge, direction)
+                let Some(next_node_id) =
+                    distributed_related_node_id(&current_node_id, &edge, direction)
                 else {
                     continue;
                 };
@@ -1334,7 +1478,10 @@ impl CopperDb {
         Ok(Value::Object(
             [
                 ("nodes".to_string(), Value::Array(node_values)),
-                ("relationships".to_string(), Value::Array(edge_values.clone())),
+                (
+                    "relationships".to_string(),
+                    Value::Array(edge_values.clone()),
+                ),
                 ("length".to_string(), Value::from(edge_values.len() as i64)),
             ]
             .into_iter()
@@ -1404,7 +1551,10 @@ impl CopperDb {
     ) -> Result<Vec<Value>, CopperDbError> {
         let mut nodes = BTreeMap::new();
         for replica in &plan.replicas {
-            match transport.graph_nodes_by_label(&replica.node_id, label).await {
+            match transport
+                .graph_nodes_by_label(&replica.node_id, label)
+                .await
+            {
                 Ok(raw_nodes) => {
                     responded_by.insert(replica.node_id.clone());
                     for raw in raw_nodes {
@@ -1603,14 +1753,21 @@ impl CopperDb {
                 let next_node_id = match direction {
                     EdgeDirection::Outgoing => edge.end_node.clone(),
                     EdgeDirection::Incoming => edge.start_node.clone(),
-                    EdgeDirection::Both if edge.start_node == current_node_id => edge.end_node.clone(),
-                    EdgeDirection::Both if edge.end_node == current_node_id => edge.start_node.clone(),
+                    EdgeDirection::Both if edge.start_node == current_node_id => {
+                        edge.end_node.clone()
+                    }
+                    EdgeDirection::Both if edge.end_node == current_node_id => {
+                        edge.start_node.clone()
+                    }
                     EdgeDirection::Both => continue,
                 };
                 if !visited.insert(next_node_id.clone()) {
                     continue;
                 }
-                predecessors.insert(next_node_id.clone(), (current_node_id.clone(), edge.id.clone()));
+                predecessors.insert(
+                    next_node_id.clone(),
+                    (current_node_id.clone(), edge.id.clone()),
+                );
                 if next_node_id == end_node_id {
                     let mut node_ids = vec![end_node_id.to_string()];
                     let mut edge_ids = Vec::new();
@@ -1871,7 +2028,7 @@ struct DistributedDirectPathQueryShape {
 }
 
 #[derive(Debug, Clone)]
-struct DistributedLeadingMatchOptionalPathQueryShape {
+struct DistributedLeadingPathQueryShape {
     leading_steps: Vec<DistributedLeadingStep>,
     path_shape: DistributedDirectPathQueryShape,
 }
@@ -1879,6 +2036,8 @@ struct DistributedLeadingMatchOptionalPathQueryShape {
 #[derive(Debug, Clone)]
 enum DistributedLeadingStep {
     Match(DistributedLeadingMatch),
+    OptionalMatch(DistributedLeadingMatch),
+    With(WithClause),
     Where(WhereClause),
 }
 
@@ -1954,9 +2113,11 @@ fn distributed_shortest_path_query_shape(
     let end_selector = distributed_node_selector(&match_clause.pattern.nodes[1], &[])?;
     let edge = &match_clause.pattern.edges[0];
 
-    if !return_clause.items.iter().all(|item| {
-        supported_distributed_path_return_expression(&item.expression, &path_variable)
-    }) {
+    if !return_clause
+        .items
+        .iter()
+        .all(|item| supported_distributed_path_return_expression(&item.expression, &path_variable))
+    {
         return None;
     }
 
@@ -2001,13 +2162,18 @@ fn distributed_direct_path_query_shape_with_bound_nodes(
     }
 
     let path_variable = match_clause.pattern.path_variable.clone()?;
-    if !return_clause.items.iter().all(|item| {
-        supported_distributed_path_return_expression(&item.expression, &path_variable)
-    }) {
+    if !return_clause
+        .items
+        .iter()
+        .all(|item| supported_distributed_path_return_expression(&item.expression, &path_variable))
+    {
         return None;
     }
 
-    let pattern = match (&match_clause.pattern.nodes[..], &match_clause.pattern.edges[..]) {
+    let pattern = match (
+        &match_clause.pattern.nodes[..],
+        &match_clause.pattern.edges[..],
+    ) {
         ([node], []) => DistributedDirectPathPattern::SingleNode {
             selector: distributed_node_selector(node, bound_variables)?,
         },
@@ -2035,17 +2201,19 @@ fn distributed_direct_path_query_shape_with_bound_nodes(
     })
 }
 
-fn distributed_leading_match_optional_path_query_shape(
+fn distributed_leading_path_query_shape(
     query: &copperdb_cypher::Query,
-) -> Option<DistributedLeadingMatchOptionalPathQueryShape> {
+) -> Option<DistributedLeadingPathQueryShape> {
     if query.clauses.len() < 3 {
         return None;
     }
     let Clause::Return(return_clause) = query.clauses.last()? else {
         return None;
     };
-    let Clause::OptionalMatch(optional_match_clause) = &query.clauses[query.clauses.len() - 2] else {
-        return None;
+    let path_clause = match &query.clauses[query.clauses.len() - 2] {
+        Clause::Match(match_clause) => Clause::Match(match_clause.clone()),
+        Clause::OptionalMatch(match_clause) => Clause::OptionalMatch(match_clause.clone()),
+        _ => return None,
     };
     if return_clause.distinct
         || return_clause.skip.is_some()
@@ -2059,6 +2227,26 @@ fn distributed_leading_match_optional_path_query_shape(
     let mut leading_steps = Vec::new();
     for clause in &query.clauses[..query.clauses.len() - 2] {
         match clause {
+            Clause::OptionalMatch(leading_match_clause) => {
+                let leading_match =
+                    distributed_leading_match(&leading_match_clause.pattern, &bound_variables)?;
+                leading_steps.push(DistributedLeadingStep::OptionalMatch(leading_match));
+                distributed_extend_bound_variables(
+                    &mut bound_variables,
+                    &leading_match_clause.pattern,
+                );
+            }
+            Clause::With(with_clause) => {
+                if !distributed_supported_leading_with_clause(with_clause) {
+                    return None;
+                }
+                leading_steps.push(DistributedLeadingStep::With(with_clause.clone()));
+                bound_variables = with_clause
+                    .items
+                    .iter()
+                    .map(distributed_leading_with_column_name)
+                    .collect();
+            }
             Clause::Where(where_clause) => {
                 if leading_steps.is_empty() {
                     return None;
@@ -2066,78 +2254,28 @@ fn distributed_leading_match_optional_path_query_shape(
                 leading_steps.push(DistributedLeadingStep::Where(where_clause.clone()));
             }
             Clause::Match(leading_match_clause) => {
-                if leading_match_clause.pattern.shortest_path
-                    || leading_match_clause.pattern.path_variable.is_some()
-                {
-                    return None;
-                }
-
-                match (
-                    &leading_match_clause.pattern.nodes[..],
-                    &leading_match_clause.pattern.edges[..],
-                ) {
-                    ([node], []) => {
-                        leading_steps.push(DistributedLeadingStep::Match(DistributedLeadingMatch::Node {
-                            selector: distributed_node_selector(node, &bound_variables)?,
-                            variable: node.variable.clone(),
-                        }));
-                        if let Some(variable) = &node.variable {
-                            bound_variables.push(variable.clone());
-                        }
-                    }
-                    ([start, end], [edge]) => {
-                        let min_hops = edge.min_hops.unwrap_or(1);
-                        let max_hops = edge.max_hops.unwrap_or(1).max(min_hops);
-                        if max_hops > 1 && edge.variable.is_some() {
-                            return None;
-                        }
-                        leading_steps.push(DistributedLeadingStep::Match(
-                            DistributedLeadingMatch::Relationship {
-                                pattern: DistributedDirectPathPattern::RelationshipPath {
-                                    start_selector: distributed_node_selector(start, &bound_variables)?,
-                                    end_selector: distributed_node_selector(end, &bound_variables)?,
-                                    rel_type: edge.rel_type.clone(),
-                                    direction: edge.direction.clone(),
-                                    edge_properties: distributed_literal_properties(&edge.properties)?,
-                                    min_hops,
-                                    max_hops,
-                                },
-                                start_variable: start.variable.clone(),
-                                end_variable: end.variable.clone(),
-                                edge_variable: edge.variable.clone(),
-                            },
-                        ));
-                        if let Some(variable) = &start.variable {
-                            if !bound_variables.iter().any(|bound| bound == variable) {
-                                bound_variables.push(variable.clone());
-                            }
-                        }
-                        if let Some(variable) = &end.variable {
-                            if !bound_variables.iter().any(|bound| bound == variable) {
-                                bound_variables.push(variable.clone());
-                            }
-                        }
-                    }
-                    _ => return None,
-                }
+                let leading_match =
+                    distributed_leading_match(&leading_match_clause.pattern, &bound_variables)?;
+                leading_steps.push(DistributedLeadingStep::Match(leading_match));
+                distributed_extend_bound_variables(
+                    &mut bound_variables,
+                    &leading_match_clause.pattern,
+                );
             }
             _ => return None,
         }
     }
 
-    let optional_query = copperdb_cypher::Query {
+    let path_query = copperdb_cypher::Query {
         query_type: QueryType::Match,
-        clauses: vec![
-            Clause::OptionalMatch(optional_match_clause.clone()),
-            Clause::Return(return_clause.clone()),
-        ],
+        clauses: vec![path_clause, Clause::Return(return_clause.clone())],
         parameters: HashMap::new(),
     };
 
-    Some(DistributedLeadingMatchOptionalPathQueryShape {
+    Some(DistributedLeadingPathQueryShape {
         leading_steps,
         path_shape: distributed_direct_path_query_shape_with_bound_nodes(
-            &optional_query,
+            &path_query,
             &bound_variables,
         )?,
     })
@@ -2153,6 +2291,126 @@ fn distributed_literal_properties(
             _ => None,
         })
         .collect::<Option<BTreeMap<_, _>>>()
+}
+
+fn distributed_leading_match(
+    pattern: &Pattern,
+    bound_variables: &[String],
+) -> Option<DistributedLeadingMatch> {
+    if pattern.shortest_path || pattern.path_variable.is_some() {
+        return None;
+    }
+
+    match (&pattern.nodes[..], &pattern.edges[..]) {
+        ([node], []) => Some(DistributedLeadingMatch::Node {
+            selector: distributed_node_selector(node, bound_variables)?,
+            variable: node.variable.clone(),
+        }),
+        ([start, end], [edge]) => {
+            let min_hops = edge.min_hops.unwrap_or(1);
+            let max_hops = edge.max_hops.unwrap_or(1).max(min_hops);
+            if max_hops > 1 && edge.variable.is_some() {
+                return None;
+            }
+            Some(DistributedLeadingMatch::Relationship {
+                pattern: DistributedDirectPathPattern::RelationshipPath {
+                    start_selector: distributed_node_selector(start, bound_variables)?,
+                    end_selector: distributed_node_selector(end, bound_variables)?,
+                    rel_type: edge.rel_type.clone(),
+                    direction: edge.direction.clone(),
+                    edge_properties: distributed_literal_properties(&edge.properties)?,
+                    min_hops,
+                    max_hops,
+                },
+                start_variable: start.variable.clone(),
+                end_variable: end.variable.clone(),
+                edge_variable: edge.variable.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn distributed_extend_bound_variables(bound_variables: &mut Vec<String>, pattern: &Pattern) {
+    for node in &pattern.nodes {
+        if let Some(variable) = &node.variable {
+            if !bound_variables.iter().any(|bound| bound == variable) {
+                bound_variables.push(variable.clone());
+            }
+        }
+    }
+}
+
+fn distributed_bind_optional_leading_match_nulls(
+    row: &mut HashMap<String, Value>,
+    leading_match: &DistributedLeadingMatch,
+) {
+    match leading_match {
+        DistributedLeadingMatch::Node { variable, .. } => {
+            if let Some(variable) = variable {
+                if !row.contains_key(variable) {
+                    row.insert(variable.clone(), Value::Null);
+                }
+            }
+        }
+        DistributedLeadingMatch::Relationship {
+            start_variable,
+            end_variable,
+            edge_variable,
+            ..
+        } => {
+            for variable in [start_variable, end_variable, edge_variable]
+                .into_iter()
+                .flatten()
+            {
+                if !row.contains_key(variable) {
+                    row.insert(variable.clone(), Value::Null);
+                }
+            }
+        }
+    }
+}
+
+fn distributed_supported_leading_with_clause(with_clause: &WithClause) -> bool {
+    with_clause
+        .items
+        .iter()
+        .all(distributed_supported_leading_with_item)
+}
+
+fn distributed_supported_leading_with_item(item: &ReturnItem) -> bool {
+    item.alias.is_some()
+        || matches!(
+            item.expression,
+            Expression::Variable(_) | Expression::PropertyAccess { .. }
+        )
+}
+
+fn distributed_leading_with_column_name(item: &ReturnItem) -> String {
+    if let Some(alias) = &item.alias {
+        return alias.clone();
+    }
+    match &item.expression {
+        Expression::Variable(variable) => variable.clone(),
+        Expression::PropertyAccess { variable, property } => format!("{variable}.{property}"),
+        _ => "expr".to_string(),
+    }
+}
+
+fn distributed_project_row(
+    row: &HashMap<String, Value>,
+    items: &[ReturnItem],
+    params: &HashMap<String, Value>,
+) -> Result<HashMap<String, Value>, CopperDbError> {
+    let mut projected = HashMap::new();
+    for item in items {
+        projected.insert(
+            distributed_leading_with_column_name(item),
+            eval_expression(&item.expression, row, params)
+                .map_err(|err| CopperDbError::Eval(err.to_string()))?,
+        );
+    }
+    Ok(projected)
 }
 
 fn distributed_node_selector(
@@ -2173,7 +2431,9 @@ fn distributed_node_selector(
 
     if node.labels.is_empty() {
         return match literal_properties.get("_id") {
-            Some(Value::String(node_id)) => Some(DistributedNodeSelector::LiteralId(node_id.clone())),
+            Some(Value::String(node_id)) => {
+                Some(DistributedNodeSelector::LiteralId(node_id.clone()))
+            }
             _ => None,
         };
     }
@@ -2194,7 +2454,10 @@ fn supported_distributed_path_return_expression(
             if args.len() == 1
                 && matches!(&args[0], Expression::Variable(variable) if variable == path_variable) =>
         {
-            matches!(name.to_ascii_lowercase().as_str(), "nodes" | "relationships" | "length")
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "nodes" | "relationships" | "length"
+            )
         }
         _ => false,
     }
@@ -2352,7 +2615,9 @@ fn distributed_return_value(
                     _ => Value::Array(Vec::new()),
                 }),
                 "length" => Ok(match path_value {
-                    Value::Object(path_map) => path_map.get("length").cloned().unwrap_or(Value::Null),
+                    Value::Object(path_map) => {
+                        path_map.get("length").cloned().unwrap_or(Value::Null)
+                    }
                     _ => Value::Null,
                 }),
                 other => Err(CopperDbError::Eval(format!(
@@ -2405,7 +2670,9 @@ fn distributed_path_nodes(path_value: &Value) -> Option<&[Value]> {
     let Value::Object(map) = path_value else {
         return None;
     };
-    map.get("nodes").and_then(Value::as_array).map(Vec::as_slice)
+    map.get("nodes")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
 }
 
 fn distributed_path_relationships(path_value: &Value) -> Option<&[Value]> {
@@ -2429,12 +2696,18 @@ fn distributed_node_matches(
     let label_match = labels.iter().all(|label| {
         map.get("_labels")
             .and_then(Value::as_array)
-            .map(|values| values.iter().any(|value| value.as_str() == Some(label.as_str())))
+            .map(|values| {
+                values
+                    .iter()
+                    .any(|value| value.as_str() == Some(label.as_str()))
+            })
             .unwrap_or(false)
     });
-    let prop_match = properties
-        .iter()
-        .all(|(key, value)| map.get(key).map(|candidate| candidate == value).unwrap_or(false));
+    let prop_match = properties.iter().all(|(key, value)| {
+        map.get(key)
+            .map(|candidate| candidate == value)
+            .unwrap_or(false)
+    });
 
     label_match && prop_match
 }
@@ -2457,8 +2730,12 @@ fn distributed_related_node_id(
     direction: &EdgeDirection,
 ) -> Option<String> {
     match direction {
-        EdgeDirection::Outgoing if edge.start_node == current_node_id => Some(edge.end_node.clone()),
-        EdgeDirection::Incoming if edge.end_node == current_node_id => Some(edge.start_node.clone()),
+        EdgeDirection::Outgoing if edge.start_node == current_node_id => {
+            Some(edge.end_node.clone())
+        }
+        EdgeDirection::Incoming if edge.end_node == current_node_id => {
+            Some(edge.start_node.clone())
+        }
         EdgeDirection::Both if edge.start_node == current_node_id => Some(edge.end_node.clone()),
         EdgeDirection::Both if edge.end_node == current_node_id => Some(edge.start_node.clone()),
         _ => None,
@@ -2663,7 +2940,10 @@ mod tests {
 
         assert_eq!(result.columns, vec!["person", "friend", "rel"]);
         assert_eq!(result.rows.len(), 1);
-        assert_eq!(result.rows[0].get("person"), Some(&Value::String("Alice".into())));
+        assert_eq!(
+            result.rows[0].get("person"),
+            Some(&Value::String("Alice".into()))
+        );
         assert_eq!(result.rows[0].get("friend"), Some(&Value::Null));
         assert_eq!(result.rows[0].get("rel"), Some(&Value::Null));
     }
@@ -2688,9 +2968,18 @@ mod tests {
 
         assert_eq!(result.columns, vec!["person", "friendName", "relType"]);
         assert_eq!(result.rows.len(), 1);
-        assert_eq!(result.rows[0].get("person"), Some(&Value::String("Alice".into())));
-        assert_eq!(result.rows[0].get("friendName"), Some(&Value::String("Bob".into())));
-        assert_eq!(result.rows[0].get("relType"), Some(&Value::String("FOLLOWS".into())));
+        assert_eq!(
+            result.rows[0].get("person"),
+            Some(&Value::String("Alice".into()))
+        );
+        assert_eq!(
+            result.rows[0].get("friendName"),
+            Some(&Value::String("Bob".into()))
+        );
+        assert_eq!(
+            result.rows[0].get("relType"),
+            Some(&Value::String("FOLLOWS".into()))
+        );
     }
 
     #[test]
@@ -2743,7 +3032,9 @@ mod tests {
                 BTreeMap::from([("name".to_string(), Value::String("Thing".into()))]),
             ),
         ] {
-            db.storage().put_node(id, &rmp_serde::to_vec(&props).unwrap()).unwrap();
+            db.storage()
+                .put_node(id, &rmp_serde::to_vec(&props).unwrap())
+                .unwrap();
         }
         for edge in [
             EdgeRecord {
@@ -2786,9 +3077,15 @@ mod tests {
 
         assert_eq!(result.columns, vec!["product", "avgRating", "reviewCount"]);
         assert_eq!(result.rows.len(), 2);
-        assert_eq!(result.rows[0].get("product"), Some(&Value::String("Thing".into())));
+        assert_eq!(
+            result.rows[0].get("product"),
+            Some(&Value::String("Thing".into()))
+        );
         assert_eq!(result.rows[0].get("reviewCount"), Some(&Value::from(1)));
-        assert_eq!(result.rows[1].get("product"), Some(&Value::String("Widget".into())));
+        assert_eq!(
+            result.rows[1].get("product"),
+            Some(&Value::String("Widget".into()))
+        );
         assert_eq!(result.rows[1].get("reviewCount"), Some(&Value::from(2)));
     }
 
@@ -2870,9 +3167,22 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(result.columns, vec!["product", "avgRating", "reviewCount", "minRating", "maxRating", "totalRating"]);
+        assert_eq!(
+            result.columns,
+            vec![
+                "product",
+                "avgRating",
+                "reviewCount",
+                "minRating",
+                "maxRating",
+                "totalRating"
+            ]
+        );
         assert_eq!(result.rows.len(), 1);
-        assert_eq!(result.rows[0].get("product"), Some(&Value::String("P1".into())));
+        assert_eq!(
+            result.rows[0].get("product"),
+            Some(&Value::String("P1".into()))
+        );
         assert_eq!(result.rows[0].get("avgRating"), Some(&Value::from(4.75)));
         assert_eq!(result.rows[0].get("reviewCount"), Some(&Value::from(2)));
         assert_eq!(result.rows[0].get("minRating"), Some(&Value::from(4.5)));
@@ -2905,7 +3215,9 @@ mod tests {
                 BTreeMap::from([("name".to_string(), Value::String("Eve".into()))]),
             ),
         ] {
-            db.storage().put_node(id, &rmp_serde::to_vec(&props).unwrap()).unwrap();
+            db.storage()
+                .put_node(id, &rmp_serde::to_vec(&props).unwrap())
+                .unwrap();
         }
         for edge in [
             EdgeRecord {
@@ -2956,7 +3268,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.rows.len(), 2);
-        assert_eq!(result.rows[0].get("person"), Some(&Value::String("Alice".into())));
+        assert_eq!(
+            result.rows[0].get("person"),
+            Some(&Value::String("Alice".into()))
+        );
         assert_eq!(result.rows[0].get("followers"), Some(&Value::from(3)));
     }
 
@@ -2973,7 +3288,9 @@ mod tests {
                 BTreeMap::from([("name".to_string(), Value::String("Bob".into()))]),
             ),
         ] {
-            db.storage().put_node(id, &rmp_serde::to_vec(&props).unwrap()).unwrap();
+            db.storage()
+                .put_node(id, &rmp_serde::to_vec(&props).unwrap())
+                .unwrap();
         }
         db.storage()
             .put_edge_record(&EdgeRecord {
@@ -3014,7 +3331,11 @@ mod tests {
 
         assert_eq!(result.stats.relationships_created, 1);
         assert_eq!(result.stats.relationships_deleted, 1);
-        assert!(db.storage().get_edges_by_type("TEMP_REL").unwrap().is_empty());
+        assert!(db
+            .storage()
+            .get_edges_by_type("TEMP_REL")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -3034,7 +3355,11 @@ mod tests {
 
         assert_eq!(result.stats.relationships_created, 0);
         assert_eq!(result.stats.relationships_deleted, 0);
-        assert!(db.storage().get_edges_by_type("TEMP_REL").unwrap().is_empty());
+        assert!(db
+            .storage()
+            .get_edges_by_type("TEMP_REL")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -3052,16 +3377,26 @@ mod tests {
 
         assert_eq!(result.stats.relationships_created, 0);
         assert_eq!(result.stats.relationships_deleted, 0);
-        assert!(db.storage().get_edges_by_type("TEMP_KNOWS").unwrap().is_empty());
+        assert!(db
+            .storage()
+            .get_edges_by_type("TEMP_KNOWS")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn test_execute_routes_property_match_compound_fast_path() {
         let db = CopperDb::open_temporary().unwrap();
-        db.execute("CREATE (p1:Person {id: 1, name: 'Alice'})", Default::default())
-            .unwrap();
-        db.execute("CREATE (p2:Person {id: 2, name: 'Bob'})", Default::default())
-            .unwrap();
+        db.execute(
+            "CREATE (p1:Person {id: 1, name: 'Alice'})",
+            Default::default(),
+        )
+        .unwrap();
+        db.execute(
+            "CREATE (p2:Person {id: 2, name: 'Bob'})",
+            Default::default(),
+        )
+        .unwrap();
 
         let result = db
             .execute(
@@ -3072,7 +3407,11 @@ mod tests {
 
         assert_eq!(result.stats.relationships_created, 1);
         assert_eq!(result.stats.relationships_deleted, 1);
-        assert!(db.storage().get_edges_by_type("TEMP_KNOWS").unwrap().is_empty());
+        assert!(db
+            .storage()
+            .get_edges_by_type("TEMP_KNOWS")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -3091,10 +3430,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.columns, vec!["count(r)"]);
-        assert_eq!(result.rows, vec![HashMap::from([("count(r)".into(), Value::from(1))])]);
+        assert_eq!(
+            result.rows,
+            vec![HashMap::from([("count(r)".into(), Value::from(1))])]
+        );
         assert_eq!(result.stats.relationships_created, 1);
         assert_eq!(result.stats.relationships_deleted, 1);
-        assert!(db.storage().get_edges_by_type("TEMP_KNOWS").unwrap().is_empty());
+        assert!(db
+            .storage()
+            .get_edges_by_type("TEMP_KNOWS")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -3308,13 +3654,13 @@ mod tests {
                     "_labels".to_string(),
                     Value::Array(vec![Value::String("Node".into())]),
                 ),
-                (
-                    "name".to_string(),
-                    Value::String(format!("n{index:02}")),
-                ),
+                ("name".to_string(), Value::String(format!("n{index:02}"))),
             ]);
             db.storage()
-                .put_node(&format!("Node:{index}"), &rmp_serde::to_vec(&props).unwrap())
+                .put_node(
+                    &format!("Node:{index}"),
+                    &rmp_serde::to_vec(&props).unwrap(),
+                )
                 .unwrap();
         }
 
@@ -3565,7 +3911,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -3614,7 +3960,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -3675,7 +4021,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -3750,7 +4096,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -3826,7 +4172,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -3887,7 +4233,7 @@ mod tests {
         .unwrap();
         db.execute("CREATE (n:DistributedRead {v: 1})", HashMap::new())
             .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -3952,7 +4298,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -4033,7 +4379,9 @@ mod tests {
                 updated_at_unix_ms: 0,
             })
             .unwrap();
-        peer_two.put_node("Node:C", &graph_node("Node:C", "c")).unwrap();
+        peer_two
+            .put_node("Node:C", &graph_node("Node:C", "c"))
+            .unwrap();
         peer_two
             .put_edge_record(&EdgeRecord {
                 id: "edge:a-c".into(),
@@ -4095,7 +4443,9 @@ mod tests {
             .unwrap();
 
         assert!(outcome.write_outcome.is_none());
-        let read = outcome.read_outcome.expect("expected distributed read outcome");
+        let read = outcome
+            .read_outcome
+            .expect("expected distributed read outcome");
         assert_eq!(read.plan.required_responses, 2);
         assert_eq!(outcome.result.rows.len(), 1);
         assert_eq!(outcome.result.rows[0].get("hops"), Some(&Value::from(2)));
@@ -4135,7 +4485,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -4306,7 +4656,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -4390,7 +4740,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -4478,7 +4828,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(outcome.result.columns, vec!["hops", "rels", "nodes", "path"]);
+        assert_eq!(
+            outcome.result.columns,
+            vec!["hops", "rels", "nodes", "path"]
+        );
         assert_eq!(outcome.result.rows.len(), 1);
         assert_eq!(outcome.result.rows[0].get("hops"), Some(&Value::from(1)));
         let rels = outcome.result.rows[0]
@@ -4509,7 +4862,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -4650,7 +5003,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -4781,7 +5134,12 @@ mod tests {
                     .and_then(Value::as_array)
                     .unwrap()
                     .iter()
-                    .map(|node| node.get("name").and_then(Value::as_str).unwrap().to_string())
+                    .map(|node| {
+                        node.get("name")
+                            .and_then(Value::as_str)
+                            .unwrap()
+                            .to_string()
+                    })
                     .collect::<Vec<_>>();
                 (hops, names)
             })
@@ -4802,7 +5160,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -4878,13 +5236,22 @@ mod tests {
             .and_then(Value::as_array)
             .expect("expected optional hit nodes");
         assert_eq!(hit_nodes.len(), 1);
-        assert_eq!(hit.result.rows[0].get("rels"), Some(&Value::Array(Vec::new())));
+        assert_eq!(
+            hit.result.rows[0].get("rels"),
+            Some(&Value::Array(Vec::new()))
+        );
 
         assert_eq!(miss.result.rows.len(), 1);
         assert_eq!(miss.result.rows[0].get("path"), Some(&Value::Null));
         assert_eq!(miss.result.rows[0].get("hops"), Some(&Value::Null));
-        assert_eq!(miss.result.rows[0].get("nodes"), Some(&Value::Array(Vec::new())));
-        assert_eq!(miss.result.rows[0].get("rels"), Some(&Value::Array(Vec::new())));
+        assert_eq!(
+            miss.result.rows[0].get("nodes"),
+            Some(&Value::Array(Vec::new()))
+        );
+        assert_eq!(
+            miss.result.rows[0].get("rels"),
+            Some(&Value::Array(Vec::new()))
+        );
     }
 
     #[tokio::test]
@@ -4898,7 +5265,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -5029,7 +5396,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -5164,7 +5531,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -5308,7 +5675,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -5470,7 +5837,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -5632,7 +5999,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -5777,8 +6144,24 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome.result.rows.len(), 2);
-        assert_eq!(outcome.result.rows.iter().filter(|row| row.get("hops") == Some(&Value::from(1))).count(), 1);
-        assert_eq!(outcome.result.rows.iter().filter(|row| row.get("path") == Some(&Value::Null)).count(), 1);
+        assert_eq!(
+            outcome
+                .result
+                .rows
+                .iter()
+                .filter(|row| row.get("hops") == Some(&Value::from(1)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcome
+                .result
+                .rows
+                .iter()
+                .filter(|row| row.get("path") == Some(&Value::Null))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -5792,7 +6175,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -5927,6 +6310,520 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn engine_routes_distributed_where_filtered_prefix_match_path() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("copper");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        for definition in [
+            copperdb_storage::IndexDefinition {
+                name: "seed_id".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Seed".into(),
+                properties: vec!["id".into()],
+            },
+            copperdb_storage::IndexDefinition {
+                name: "tag_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Tag".into(),
+                properties: vec!["name".into()],
+            },
+            copperdb_storage::IndexDefinition {
+                name: "person_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Person".into(),
+                properties: vec!["name".into()],
+            },
+        ] {
+            peer_one.persist_index_definition(&definition).unwrap();
+        }
+        for (id, label, properties) in [
+            (
+                "Seed:1",
+                "Seed",
+                BTreeMap::from([("id".into(), Value::from(1))]),
+            ),
+            (
+                "Seed:2",
+                "Seed",
+                BTreeMap::from([("id".into(), Value::from(2))]),
+            ),
+            (
+                "Tag:blue",
+                "Tag",
+                BTreeMap::from([("name".into(), Value::String("blue".into()))]),
+            ),
+            (
+                "Tag:red",
+                "Tag",
+                BTreeMap::from([("name".into(), Value::String("red".into()))]),
+            ),
+            (
+                "Person:Alice",
+                "Person",
+                BTreeMap::from([("name".into(), Value::String("Alice".into()))]),
+            ),
+        ] {
+            peer_one
+                .put_node_record(&copperdb_storage::NodeRecord {
+                    id: id.into(),
+                    labels: vec![label.into()],
+                    properties,
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+        for edge in [
+            EdgeRecord {
+                id: "edge:seed1-blue".into(),
+                start_node: "Seed:1".into(),
+                end_node: "Tag:blue".into(),
+                edge_type: "TAGGED".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "edge:seed2-red".into(),
+                start_node: "Seed:2".into(),
+                end_node: "Tag:red".into(),
+                edge_type: "TAGGED".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "edge:seed1-alice".into(),
+                start_node: "Seed:1".into(),
+                end_node: "Person:Alice".into(),
+                edge_type: "KNOWS".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+        ] {
+            peer_one.put_edge_record(&edge).unwrap();
+        }
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH (s:Seed) WHERE s.id = 1 MATCH (s)-[:TAGGED]->(t:Tag) WHERE t.name = 'blue' MATCH p = (s)-[:KNOWS]->(n:Person) RETURN p AS path, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result.rows.len(), 1);
+        assert_eq!(outcome.result.rows[0].get("hops"), Some(&Value::from(1)));
+    }
+
+    #[tokio::test]
+    async fn engine_routes_distributed_with_prefix_match_path() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("copper");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        for definition in [
+            copperdb_storage::IndexDefinition {
+                name: "seed_id".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Seed".into(),
+                properties: vec!["id".into()],
+            },
+            copperdb_storage::IndexDefinition {
+                name: "person_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Person".into(),
+                properties: vec!["name".into()],
+            },
+        ] {
+            peer_one.persist_index_definition(&definition).unwrap();
+        }
+        for (id, label, properties) in [
+            (
+                "Seed:1",
+                "Seed",
+                BTreeMap::from([("id".into(), Value::from(1))]),
+            ),
+            (
+                "Seed:2",
+                "Seed",
+                BTreeMap::from([("id".into(), Value::from(2))]),
+            ),
+            (
+                "Person:Alice",
+                "Person",
+                BTreeMap::from([("name".into(), Value::String("Alice".into()))]),
+            ),
+        ] {
+            peer_one
+                .put_node_record(&copperdb_storage::NodeRecord {
+                    id: id.into(),
+                    labels: vec![label.into()],
+                    properties,
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+        peer_one
+            .put_edge_record(&EdgeRecord {
+                id: "edge:seed1-alice".into(),
+                start_node: "Seed:1".into(),
+                end_node: "Person:Alice".into(),
+                edge_type: "KNOWS".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH (s:Seed) WITH s AS seed WHERE seed.id = 1 MATCH p = (seed)-[:KNOWS]->(n:Person) RETURN p AS path, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result.rows.len(), 1);
+        assert_eq!(outcome.result.rows[0].get("hops"), Some(&Value::from(1)));
+    }
+
+    #[tokio::test]
+    async fn engine_routes_distributed_optional_prefix_miss_match_path() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("copper");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        for definition in [
+            copperdb_storage::IndexDefinition {
+                name: "seed_id".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Seed".into(),
+                properties: vec!["id".into()],
+            },
+            copperdb_storage::IndexDefinition {
+                name: "tag_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Tag".into(),
+                properties: vec!["name".into()],
+            },
+            copperdb_storage::IndexDefinition {
+                name: "person_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Person".into(),
+                properties: vec!["name".into()],
+            },
+        ] {
+            peer_one.persist_index_definition(&definition).unwrap();
+        }
+        for (id, label, properties) in [
+            (
+                "Seed:1",
+                "Seed",
+                BTreeMap::from([("id".into(), Value::from(1))]),
+            ),
+            (
+                "Tag:blue",
+                "Tag",
+                BTreeMap::from([("name".into(), Value::String("blue".into()))]),
+            ),
+            (
+                "Person:Alice",
+                "Person",
+                BTreeMap::from([("name".into(), Value::String("Alice".into()))]),
+            ),
+        ] {
+            peer_one
+                .put_node_record(&copperdb_storage::NodeRecord {
+                    id: id.into(),
+                    labels: vec![label.into()],
+                    properties,
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+        peer_one
+            .put_edge_record(&EdgeRecord {
+                id: "edge:seed1-alice".into(),
+                start_node: "Seed:1".into(),
+                end_node: "Person:Alice".into(),
+                edge_type: "KNOWS".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH (s:Seed) WHERE s.id = 1 OPTIONAL MATCH (s)-[:TAGGED]->(t:Tag) MATCH p = (s)-[:KNOWS]->(n:Person) RETURN p AS path, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result.rows.len(), 1);
+        assert_eq!(outcome.result.rows[0].get("hops"), Some(&Value::from(1)));
+    }
+
+    #[tokio::test]
+    async fn engine_routes_distributed_edge_variable_filtered_prefix_optional_path() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("copper");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        for definition in [
+            copperdb_storage::IndexDefinition {
+                name: "seed_id".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Seed".into(),
+                properties: vec!["id".into()],
+            },
+            copperdb_storage::IndexDefinition {
+                name: "tag_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Tag".into(),
+                properties: vec!["name".into()],
+            },
+            copperdb_storage::IndexDefinition {
+                name: "person_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Person".into(),
+                properties: vec!["name".into()],
+            },
+        ] {
+            peer_one.persist_index_definition(&definition).unwrap();
+        }
+        for (id, label, properties) in [
+            (
+                "Seed:1",
+                "Seed",
+                BTreeMap::from([("id".into(), Value::from(1))]),
+            ),
+            (
+                "Seed:2",
+                "Seed",
+                BTreeMap::from([("id".into(), Value::from(2))]),
+            ),
+            (
+                "Tag:blue",
+                "Tag",
+                BTreeMap::from([("name".into(), Value::String("blue".into()))]),
+            ),
+            (
+                "Tag:red",
+                "Tag",
+                BTreeMap::from([("name".into(), Value::String("red".into()))]),
+            ),
+            (
+                "Person:Alice",
+                "Person",
+                BTreeMap::from([("name".into(), Value::String("Alice".into()))]),
+            ),
+        ] {
+            peer_one
+                .put_node_record(&copperdb_storage::NodeRecord {
+                    id: id.into(),
+                    labels: vec![label.into()],
+                    properties,
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+        for edge in [
+            EdgeRecord {
+                id: "edge:seed1-blue".into(),
+                start_node: "Seed:1".into(),
+                end_node: "Tag:blue".into(),
+                edge_type: "TAGGED".into(),
+                properties: BTreeMap::from([("weight".into(), Value::from(1))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "edge:seed2-red".into(),
+                start_node: "Seed:2".into(),
+                end_node: "Tag:red".into(),
+                edge_type: "TAGGED".into(),
+                properties: BTreeMap::from([("weight".into(), Value::from(2))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "edge:seed1-alice".into(),
+                start_node: "Seed:1".into(),
+                end_node: "Person:Alice".into(),
+                edge_type: "KNOWS".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+        ] {
+            peer_one.put_edge_record(&edge).unwrap();
+        }
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH (s:Seed)-[r:TAGGED]->(t:Tag) WHERE r.weight = 1 OPTIONAL MATCH p = (s)-[:KNOWS]->(n:Person) RETURN p AS path, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result.rows.len(), 1);
+        assert_eq!(outcome.result.rows[0].get("hops"), Some(&Value::from(1)));
+    }
+
+    #[tokio::test]
     async fn engine_distributed_bfs_traverses_mesh_peers_and_returns_path() {
         use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
         use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
@@ -5950,7 +6847,7 @@ mod tests {
         })
         .unwrap();
 
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -5973,7 +6870,9 @@ mod tests {
             .unwrap();
 
         let peer_one = StorageEngine::open_temporary().unwrap();
-        peer_one.put_node("Node:A", &graph_node("Node:A", "A")).unwrap();
+        peer_one
+            .put_node("Node:A", &graph_node("Node:A", "A"))
+            .unwrap();
         peer_one
             .put_edge_record(&EdgeRecord {
                 id: "edge:a-b".into(),
@@ -5987,7 +6886,9 @@ mod tests {
             .unwrap();
 
         let peer_two = StorageEngine::open_temporary().unwrap();
-        peer_two.put_node("Node:B", &graph_node("Node:B", "B")).unwrap();
+        peer_two
+            .put_node("Node:B", &graph_node("Node:B", "B"))
+            .unwrap();
         peer_two
             .put_edge_record(&EdgeRecord {
                 id: "edge:b-c".into(),
@@ -6001,8 +6902,12 @@ mod tests {
             .unwrap();
 
         let peer_three = StorageEngine::open_temporary().unwrap();
-        peer_three.put_node("Node:C", &graph_node("Node:C", "C")).unwrap();
-        peer_three.put_node("Node:D", &graph_node("Node:D", "D")).unwrap();
+        peer_three
+            .put_node("Node:C", &graph_node("Node:C", "C"))
+            .unwrap();
+        peer_three
+            .put_node("Node:D", &graph_node("Node:D", "D"))
+            .unwrap();
         peer_three
             .put_edge_record(&EdgeRecord {
                 id: "edge:c-d".into(),
@@ -6040,7 +6945,12 @@ mod tests {
         assert_eq!(
             outcome.path,
             Some(DistributedPath {
-                node_ids: vec!["Node:A".into(), "Node:B".into(), "Node:C".into(), "Node:D".into()],
+                node_ids: vec![
+                    "Node:A".into(),
+                    "Node:B".into(),
+                    "Node:C".into(),
+                    "Node:D".into()
+                ],
                 edge_ids: vec!["edge:a-b".into(), "edge:b-c".into(), "edge:c-d".into()],
             })
         );
@@ -6069,7 +6979,7 @@ mod tests {
         })
         .unwrap();
 
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -6212,7 +7122,7 @@ mod tests {
         })
         .unwrap();
 
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -6253,7 +7163,9 @@ mod tests {
         peer_two.put_node("Node:C", &graph_node("Node:C")).unwrap();
 
         let peer_three = StorageEngine::open_temporary().unwrap();
-        peer_three.put_node("Node:D", &graph_node("Node:D")).unwrap();
+        peer_three
+            .put_node("Node:D", &graph_node("Node:D"))
+            .unwrap();
 
         let transport = Arc::new(InMemoryReplicaTransport::new());
         transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
@@ -6303,7 +7215,7 @@ mod tests {
         })
         .unwrap();
 
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -6377,7 +7289,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -6429,7 +7341,9 @@ mod tests {
             .unwrap();
 
         let peer_three = StorageEngine::open_temporary().unwrap();
-        peer_three.put_node("Node:D", &graph_node("Node:D")).unwrap();
+        peer_three
+            .put_node("Node:D", &graph_node("Node:D"))
+            .unwrap();
         peer_three
             .put_edge_record(&EdgeRecord {
                 id: "edge:c-d".into(),
@@ -6464,7 +7378,12 @@ mod tests {
         assert_eq!(
             outcome.path,
             Some(DistributedPath {
-                node_ids: vec!["Node:D".into(), "Node:C".into(), "Node:B".into(), "Node:A".into()],
+                node_ids: vec![
+                    "Node:D".into(),
+                    "Node:C".into(),
+                    "Node:B".into(),
+                    "Node:A".into()
+                ],
                 edge_ids: vec!["edge:c-d".into(), "edge:b-c".into(), "edge:a-b".into()],
             })
         );
@@ -6492,7 +7411,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -6544,7 +7463,9 @@ mod tests {
             .unwrap();
 
         let peer_three = StorageEngine::open_temporary().unwrap();
-        peer_three.put_node("Node:D", &graph_node("Node:D")).unwrap();
+        peer_three
+            .put_node("Node:D", &graph_node("Node:D"))
+            .unwrap();
         peer_three
             .put_edge_record(&EdgeRecord {
                 id: "edge:c-d".into(),
@@ -6579,7 +7500,12 @@ mod tests {
         assert_eq!(
             outcome.path,
             Some(DistributedPath {
-                node_ids: vec!["Node:D".into(), "Node:C".into(), "Node:B".into(), "Node:A".into()],
+                node_ids: vec![
+                    "Node:D".into(),
+                    "Node:C".into(),
+                    "Node:B".into(),
+                    "Node:A".into()
+                ],
                 edge_ids: vec!["edge:c-d".into(), "edge:b-c".into(), "edge:a-b".into()],
             })
         );
@@ -6607,7 +7533,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(
@@ -6658,7 +7584,9 @@ mod tests {
             .unwrap();
 
         let peer_three = StorageEngine::open_temporary().unwrap();
-        peer_three.put_node("Node:C", &graph_node("Node:C")).unwrap();
+        peer_three
+            .put_node("Node:C", &graph_node("Node:C"))
+            .unwrap();
 
         let transport = Arc::new(InMemoryReplicaTransport::new());
         transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
@@ -6730,7 +7658,7 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         for node_id in ["node-1", "node-2", "node-3"] {
             db.storage()
                 .register_topology_peer(

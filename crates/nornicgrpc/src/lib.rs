@@ -12,10 +12,12 @@ use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Response, Status};
 
 use copperdb_replication::{Command, ReplicaTransport, ReplicationError};
+use copperdb_storage::EdgeRecord;
 use copperdb_topology::{
     ConsistencyLevel, DistributedReadPlan, DistributedSearchPlan, DistributedWriteMode,
     DistributedWritePlan, PlacementKey,
 };
+use serde_json::Value;
 
 pub mod proto {
     tonic::include_proto!("copperdb.nornic.v1");
@@ -297,6 +299,12 @@ impl NornicGrpcReplicaTransport {
             .cloned()
             .ok_or_else(|| ReplicationError::Transport(format!("unknown remote replica {target}")))
     }
+
+    fn graph_read_unavailable(&self, target: &str, operation: &str) -> ReplicationError {
+        ReplicationError::Transport(format!(
+            "remote graph read operation {operation} is not implemented for nornic gRPC replica {target}"
+        ))
+    }
 }
 
 #[async_trait]
@@ -325,6 +333,55 @@ impl ReplicaTransport for NornicGrpcReplicaTransport {
             })
             .await
             .map_err(|error| ReplicationError::Transport(error.to_string()))
+    }
+
+    async fn graph_node(
+        &self,
+        target: &str,
+        _node_id: &str,
+    ) -> Result<Option<Vec<u8>>, ReplicationError> {
+        self.endpoint_for(target)?;
+        Err(self.graph_read_unavailable(target, "graph_node"))
+    }
+
+    async fn graph_edges_from_node(
+        &self,
+        target: &str,
+        _node_id: &str,
+        _rel_type: Option<&str>,
+    ) -> Result<Vec<EdgeRecord>, ReplicationError> {
+        self.endpoint_for(target)?;
+        Err(self.graph_read_unavailable(target, "graph_edges_from_node"))
+    }
+
+    async fn graph_edges_to_node(
+        &self,
+        target: &str,
+        _node_id: &str,
+        _rel_type: Option<&str>,
+    ) -> Result<Vec<EdgeRecord>, ReplicationError> {
+        self.endpoint_for(target)?;
+        Err(self.graph_read_unavailable(target, "graph_edges_to_node"))
+    }
+
+    async fn graph_nodes_by_label(
+        &self,
+        target: &str,
+        _label: &str,
+    ) -> Result<Vec<Vec<u8>>, ReplicationError> {
+        self.endpoint_for(target)?;
+        Err(self.graph_read_unavailable(target, "graph_nodes_by_label"))
+    }
+
+    async fn graph_nodes_by_property(
+        &self,
+        target: &str,
+        _label: &str,
+        _property: &str,
+        _value: &Value,
+    ) -> Result<Vec<Vec<u8>>, ReplicationError> {
+        self.endpoint_for(target)?;
+        Err(self.graph_read_unavailable(target, "graph_nodes_by_property"))
     }
 }
 
@@ -538,7 +595,7 @@ mod tests {
     fn remote_execution_envelopes_preserve_write_plan_targets() {
         use copperdb_topology::{MeshPeer, NodeCapability, PlacementRecord, TopologyRegistry};
 
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         let mut topology = TopologyRegistry::new();
         for node_id in ["node-1", "node-2", "node-3"] {
             topology
@@ -674,7 +731,7 @@ mod tests {
             target_node: "node-2".into(),
             target_addr: "node-2.mesh.local:50051".into(),
             command: Command::CypherMutation {
-                database: "neo4j".into(),
+                database: "copper".into(),
                 query: "CREATE (n:Proto)".into(),
                 params: serde_json::json!({"v": 1}),
             },

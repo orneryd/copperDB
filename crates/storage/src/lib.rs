@@ -1100,7 +1100,8 @@ impl StorageEngine {
         let mut out = Vec::new();
         for entry in self.edges.iter() {
             let (key, _) = entry?;
-            let key_str = std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            let key_str =
+                std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
             if let Some(edge) = self.get_edge_record(key_str)? {
                 out.push(edge);
             }
@@ -2327,7 +2328,7 @@ mod tests {
             .unwrap();
         engine
             .register_topology_placement(&PlacementRecord {
-                key: PlacementKey::default_for_database("neo4j"),
+                key: PlacementKey::default_for_database("copper"),
                 primary_node: "node-a".into(),
                 replica_nodes: vec!["node-b".into()],
                 search_nodes: vec!["node-a".into(), "node-b".into()],
@@ -2338,7 +2339,7 @@ mod tests {
             .unwrap();
 
         let registry = engine.load_topology_registry().unwrap();
-        let placement = PlacementKey::default_for_database("neo4j");
+        let placement = PlacementKey::default_for_database("copper");
         let search_plan = registry
             .plan_search_with_policy(&placement, SearchRoutingPolicy::low_latency("us-east-1", 2))
             .unwrap();
