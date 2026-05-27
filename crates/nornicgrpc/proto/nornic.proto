@@ -5,6 +5,8 @@ package copperdb.nornic.v1;
 service NornicReplica {
   rpc ApplyReplica(RemoteReplicaApplyRequest) returns (RemoteReplicaApplyResponse);
   rpc ReadReplica(RemoteReplicaReadRequest) returns (RemoteReplicaReadResponse);
+  rpc SearchRanked(RemoteRankedSearchRequest) returns (RemoteRankedSearchResponse);
+  rpc HydrateEntities(RemoteHydrationRequest) returns (RemoteHydrationResponse);
 }
 
 message RemoteReplicaApplyRequest {
@@ -24,4 +26,26 @@ message RemoteReplicaReadRequest {
 message RemoteReplicaReadResponse {
   bool found = 1;
   bytes value = 2;
+}
+
+message RemoteRankedSearchRequest {
+  string target_node = 1;
+  string target_addr = 2;
+  bytes placement_json = 3;
+  bytes query_json = 4;
+}
+
+message RemoteRankedSearchResponse {
+  bytes batch_json = 1;
+}
+
+message RemoteHydrationRequest {
+  string target_node = 1;
+  string target_addr = 2;
+  bytes placement_json = 3;
+  bytes global_ids_json = 4;
+}
+
+message RemoteHydrationResponse {
+  bytes records_json = 1;
 }

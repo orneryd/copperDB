@@ -46,6 +46,11 @@ use copperdb_cypher::{
     EdgeDirection, Expression, Parser, Pattern, QueryType, ReturnItem, WhereClause, WithClause,
 };
 use copperdb_eval::{EvalEngine, QueryStats};
+use copperdb_fabric::{
+    merge_fabric_aggregates, merge_fabric_paths, merge_fabric_rows, FabricAggregateOptions,
+    FabricMergedPaths, FabricMergedRows, FabricPathBatch, FabricPathMergeOptions, FabricReadPlan,
+    FabricReadRequest, FabricRowBatch, FabricRowMergeOptions, FabricTopology,
+};
 use copperdb_filter::{eval_expression, eval_predicate};
 use copperdb_kms::{new_provider, ProviderFactoryConfig};
 use copperdb_replication::{
@@ -53,10 +58,17 @@ use copperdb_replication::{
     DurableRepairQueue, RepairReplayReport, RepairWorkerConfig, ReplicaTransport, ReplicationError,
     ScheduledRepairWorker,
 };
+use copperdb_search::{
+    collect_fabric_hydration_records, collect_planned_fabric_ranked_batches,
+    execute_planned_fabric_ranked_search, hydrate_rrf_search_outcome, merge_rrf_search_batches,
+    FabricHydrationRequest, FabricRankedSearchExecution, HydrationTransport, RankedSearchTransport,
+    RrfConfig, RrfHydratedSearchOutcome, RrfHydrationRecord, RrfSearchBatch, RrfSearchOutcome,
+    RrfSearchPolicy, SearchQuery,
+};
 use copperdb_storage::StorageEngine;
 use copperdb_topology::{
-    ConsistencyLevel, DistributedReadPlan, DistributedWriteMode, DistributedWritePlan,
-    PlacementKey, TopologyRegistry,
+    ConsistencyLevel, DistributedReadPlan, DistributedSearchPlan, DistributedWriteMode,
+    DistributedWritePlan, FabricDatabase, PlacementKey, TopologyRegistry,
 };
 use copperdb_txsession::TransactionManager;
 use serde_json::Value;
@@ -1848,6 +1860,221 @@ impl CopperDb {
         self.load_distributed_topology()?
             .plan_read(placement, consistency, request_region)
             .map_err(|error| CopperDbError::Replication(error.to_string()))
+    }
+
+    pub fn register_fabric_database(&self, database: &FabricDatabase) -> Result<(), CopperDbError> {
+        self.storage.register_fabric_database(database)?;
+        Ok(())
+    }
+
+    pub fn list_fabric_databases(&self) -> Result<Vec<FabricDatabase>, CopperDbError> {
+        self.storage.list_fabric_databases().map_err(Into::into)
+    }
+
+    pub fn load_fabric_database(
+        &self,
+        tenant: &str,
+        database: &str,
+    ) -> Result<Option<FabricDatabase>, CopperDbError> {
+        Ok(self
+            .list_fabric_databases()?
+            .into_iter()
+            .find(|fabric| fabric.tenant == tenant && fabric.database == database))
+    }
+
+    pub fn plan_fabric_reads(
+        &self,
+        database: &FabricDatabase,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+    ) -> Result<Vec<DistributedReadPlan>, CopperDbError> {
+        database
+            .validate()
+            .map_err(|error| CopperDbError::Replication(error.to_string()))?;
+        let topology = self.load_distributed_topology()?;
+        database
+            .placement_keys()
+            .iter()
+            .map(|placement| {
+                topology
+                    .plan_read(placement, consistency, request_region)
+                    .map_err(|error| CopperDbError::Replication(error.to_string()))
+            })
+            .collect()
+    }
+
+    pub fn plan_fabric_query_reads(
+        &self,
+        database: &FabricDatabase,
+        request: FabricReadRequest,
+    ) -> Result<FabricReadPlan, CopperDbError> {
+        FabricTopology::new(self.load_distributed_topology()?)
+            .plan_fabric_query_reads(database, request)
+            .map_err(|error| CopperDbError::Replication(error.to_string()))
+    }
+
+    pub fn merge_fabric_rows(
+        &self,
+        rows: Vec<FabricRowBatch>,
+        options: FabricRowMergeOptions,
+    ) -> FabricMergedRows {
+        merge_fabric_rows(rows, options)
+    }
+
+    pub fn merge_fabric_aggregates(
+        &self,
+        rows: Vec<FabricRowBatch>,
+        options: FabricAggregateOptions,
+    ) -> FabricMergedRows {
+        merge_fabric_aggregates(rows, options)
+    }
+
+    pub fn merge_fabric_paths(
+        &self,
+        paths: Vec<FabricPathBatch>,
+        options: FabricPathMergeOptions,
+    ) -> FabricMergedPaths {
+        merge_fabric_paths(paths, options)
+    }
+
+    pub fn merge_fabric_ranked_search(
+        &self,
+        batches: Vec<RrfSearchBatch>,
+        config: RrfConfig,
+    ) -> RrfSearchOutcome {
+        merge_rrf_search_batches(batches, config)
+    }
+
+    pub fn hydrate_fabric_ranked_search(
+        &self,
+        outcome: RrfSearchOutcome,
+        hydration: Vec<RrfHydrationRecord>,
+        policy: RrfSearchPolicy,
+    ) -> RrfHydratedSearchOutcome {
+        hydrate_rrf_search_outcome(outcome, hydration, policy)
+    }
+
+    pub fn execute_fabric_ranked_search(
+        &self,
+        database: &FabricDatabase,
+        batches: Vec<RrfSearchBatch>,
+        hydration: Vec<RrfHydrationRecord>,
+        config: RrfConfig,
+        policy: RrfSearchPolicy,
+    ) -> Result<FabricRankedSearchExecution, CopperDbError> {
+        let plans = self.plan_fabric_searches(database)?;
+        Ok(execute_planned_fabric_ranked_search(
+            plans, batches, hydration, config, policy,
+        ))
+    }
+
+    pub async fn execute_fabric_ranked_search_with_transport(
+        &self,
+        database: &FabricDatabase,
+        query: SearchQuery,
+        hydration: Vec<RrfHydrationRecord>,
+        config: RrfConfig,
+        policy: RrfSearchPolicy,
+        transport: Arc<dyn RankedSearchTransport>,
+    ) -> Result<FabricRankedSearchExecution, CopperDbError> {
+        let plans = self.plan_fabric_searches(database)?;
+        let collected = collect_planned_fabric_ranked_batches(plans.clone(), query, transport)
+            .await
+            .map_err(|error| CopperDbError::Replication(error.to_string()))?;
+        let mut execution = execute_planned_fabric_ranked_search(
+            plans,
+            collected.batches,
+            hydration,
+            config,
+            policy,
+        );
+        execution.responded_nodes = collected.responded_nodes;
+        execution.failed_nodes = collected.failed_nodes;
+        Ok(execution)
+    }
+
+    pub async fn fetch_fabric_ranked_hydration_with_transport(
+        &self,
+        outcome: &RrfSearchOutcome,
+        consistency: ConsistencyLevel,
+        transport: Arc<dyn HydrationTransport>,
+    ) -> Result<Vec<RrfHydrationRecord>, CopperDbError> {
+        let mut by_placement: BTreeMap<PlacementKey, Vec<_>> = BTreeMap::new();
+        for hit in &outcome.results {
+            by_placement
+                .entry(hit.global_id.placement.clone())
+                .or_default()
+                .push(hit.global_id.clone());
+        }
+
+        let mut requests = Vec::new();
+        for (placement, global_ids) in by_placement {
+            let plan = self.plan_distributed_read(&placement, consistency, None)?;
+            requests.push(FabricHydrationRequest {
+                node_id: plan.coordinator.node_id,
+                placement,
+                global_ids,
+            });
+        }
+
+        let collected = collect_fabric_hydration_records(requests, transport)
+            .await
+            .map_err(|error| CopperDbError::Replication(error.to_string()))?;
+        Ok(collected.records)
+    }
+
+    pub async fn execute_fabric_ranked_search_with_full_transport(
+        &self,
+        database: &FabricDatabase,
+        query: SearchQuery,
+        hydration_consistency: ConsistencyLevel,
+        config: RrfConfig,
+        policy: RrfSearchPolicy,
+        ranked_transport: Arc<dyn RankedSearchTransport>,
+        hydration_transport: Arc<dyn HydrationTransport>,
+    ) -> Result<FabricRankedSearchExecution, CopperDbError> {
+        let plans = self.plan_fabric_searches(database)?;
+        let collected =
+            collect_planned_fabric_ranked_batches(plans.clone(), query, ranked_transport)
+                .await
+                .map_err(|error| CopperDbError::Replication(error.to_string()))?;
+        let merged = merge_rrf_search_batches(collected.batches.clone(), config);
+        let hydration = self
+            .fetch_fabric_ranked_hydration_with_transport(
+                &merged,
+                hydration_consistency,
+                hydration_transport,
+            )
+            .await?;
+        let mut execution = execute_planned_fabric_ranked_search(
+            plans,
+            collected.batches,
+            hydration,
+            config,
+            policy,
+        );
+        execution.responded_nodes = collected.responded_nodes;
+        execution.failed_nodes = collected.failed_nodes;
+        Ok(execution)
+    }
+
+    pub fn plan_fabric_searches(
+        &self,
+        database: &FabricDatabase,
+    ) -> Result<Vec<DistributedSearchPlan>, CopperDbError> {
+        database
+            .validate()
+            .map_err(|error| CopperDbError::Replication(error.to_string()))?;
+        let topology = self.load_distributed_topology()?;
+        database
+            .placement_keys()
+            .iter()
+            .map(|placement| {
+                topology
+                    .plan_search(placement)
+                    .map_err(|error| CopperDbError::Replication(error.to_string()))
+            })
+            .collect()
     }
 
     pub fn open_repair_queue(&self) -> Result<Arc<DurableRepairQueue>, CopperDbError> {
@@ -3944,6 +4171,457 @@ mod tests {
             .unwrap();
         assert_eq!(read_plan.required_responses, 2);
         assert_eq!(read_plan.replicas.len(), 3);
+    }
+
+    #[test]
+    fn engine_persists_and_plans_fabric_database_shards() {
+        use copperdb_fabric::{
+            FabricAggregateOptions, FabricAggregateSpec, FabricPath, FabricPathBatch,
+            FabricPathMergeOptions, FabricReadRequest, FabricReadScope, FabricRowBatch,
+            FabricRowMergeOptions, FabricSortKey,
+        };
+        use copperdb_search::{
+            RrfConfig, RrfHydrationRecord, RrfSearchBatch, RrfSearchHit, RrfSearchPolicy,
+        };
+        use copperdb_topology::{
+            FabricDatabase, FabricGlobalId, FabricPartitionPolicy, FabricShard, FabricShardKind,
+            MeshPeer, NodeCapability, PlacementKey, PlacementRecord,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        for node_id in ["node-1", "node-2"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Search)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        for (shard, node_id) in [("primary", "node-1"), ("person-00", "node-2")] {
+            db.storage()
+                .register_topology_placement(&PlacementRecord {
+                    key: PlacementKey::new("default", "copper", shard),
+                    primary_node: node_id.into(),
+                    replica_nodes: vec![],
+                    search_nodes: vec![node_id.into()],
+                    hyperscaler_profile: None,
+                    min_write_replicas: 0,
+                    search_fanout: 1,
+                })
+                .unwrap();
+        }
+        let fabric = FabricDatabase {
+            tenant: "default".into(),
+            database: "copper".into(),
+            default_shard: "primary".into(),
+            partition_policy: FabricPartitionPolicy::HashByKey { buckets: 2 },
+            shards: vec![
+                FabricShard::mixed(PlacementKey::new("default", "copper", "primary")),
+                FabricShard {
+                    placement: PlacementKey::new("default", "copper", "person-00"),
+                    kind: FabricShardKind::Graph,
+                    labels: vec!["Person".into()],
+                    relationship_types: vec![],
+                    collections: vec![],
+                },
+            ],
+        };
+
+        db.register_fabric_database(&fabric).unwrap();
+        assert_eq!(db.list_fabric_databases().unwrap(), vec![fabric.clone()]);
+        assert_eq!(
+            db.load_fabric_database("default", "copper")
+                .unwrap()
+                .unwrap(),
+            fabric
+        );
+
+        let read_plans = db
+            .plan_fabric_reads(&fabric, ConsistencyLevel::One, None)
+            .unwrap();
+        let search_plans = db.plan_fabric_searches(&fabric).unwrap();
+
+        assert_eq!(read_plans.len(), 2);
+        assert_eq!(search_plans.len(), 2);
+        assert_eq!(read_plans[0].placement.shard, "primary");
+        assert_eq!(read_plans[1].placement.shard, "person-00");
+
+        let person_plan = db
+            .plan_fabric_query_reads(
+                &fabric,
+                FabricReadRequest {
+                    scope: FabricReadScope::Label("Person".into()),
+                    consistency: ConsistencyLevel::One,
+                    request_region: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(person_plan.shards.len(), 1);
+        assert_eq!(person_plan.shards[0].shard.placement.shard, "person-00");
+
+        let merged = db.merge_fabric_rows(
+            vec![
+                FabricRowBatch {
+                    shard: PlacementKey::new("default", "copper", "primary"),
+                    rows: vec![serde_json::json!({"id": "a", "score": 2})],
+                },
+                FabricRowBatch {
+                    shard: PlacementKey::new("default", "copper", "person-00"),
+                    rows: vec![serde_json::json!({"id": "b", "score": 3})],
+                },
+            ],
+            FabricRowMergeOptions {
+                order_by: vec![FabricSortKey::descending("score")],
+                limit: Some(1),
+                ..Default::default()
+            },
+        );
+        assert_eq!(merged.rows.len(), 1);
+        assert_eq!(merged.rows[0]["id"], "b");
+
+        let aggregates = db.merge_fabric_aggregates(
+            vec![
+                FabricRowBatch {
+                    shard: PlacementKey::new("default", "copper", "primary"),
+                    rows: vec![serde_json::json!({"label": "Person", "score": 2})],
+                },
+                FabricRowBatch {
+                    shard: PlacementKey::new("default", "copper", "person-00"),
+                    rows: vec![serde_json::json!({"label": "Person", "score": 4})],
+                },
+            ],
+            FabricAggregateOptions {
+                group_by: vec!["label".into()],
+                aggregates: vec![
+                    FabricAggregateSpec::count("count"),
+                    FabricAggregateSpec::average("avg_score", "score"),
+                ],
+                order_by: Vec::new(),
+                skip: 0,
+                limit: None,
+            },
+        );
+        assert_eq!(aggregates.rows.len(), 1);
+        assert_eq!(aggregates.rows[0]["count"], 2);
+        assert_eq!(aggregates.rows[0]["avg_score"], 3.0);
+
+        let path = FabricPath::new(
+            vec![
+                FabricGlobalId::new(
+                    PlacementKey::new("default", "copper", "primary"),
+                    "node",
+                    "a",
+                ),
+                FabricGlobalId::new(
+                    PlacementKey::new("default", "copper", "person-00"),
+                    "node",
+                    "b",
+                ),
+            ],
+            vec![FabricGlobalId::new(
+                PlacementKey::new("default", "copper", "primary"),
+                "relationship",
+                "ab",
+            )],
+        );
+        let paths = db.merge_fabric_paths(
+            vec![
+                FabricPathBatch {
+                    shard: PlacementKey::new("default", "copper", "primary"),
+                    paths: vec![path.clone()],
+                },
+                FabricPathBatch {
+                    shard: PlacementKey::new("default", "copper", "person-00"),
+                    paths: vec![path.clone()],
+                },
+            ],
+            FabricPathMergeOptions::default(),
+        );
+        assert_eq!(paths.input_paths, 2);
+        assert_eq!(paths.output_paths, 1);
+        assert_eq!(paths.paths, vec![path]);
+
+        let ranked_batches = vec![
+            RrfSearchBatch {
+                shard: PlacementKey::new("default", "copper", "primary"),
+                source: "lexical".into(),
+                hits: vec![RrfSearchHit {
+                    global_id: FabricGlobalId::new(
+                        PlacementKey::new("default", "copper", "primary"),
+                        "node",
+                        "a",
+                    ),
+                    rank: 1,
+                    score: 0.7,
+                    source: "lexical".into(),
+                    shard: PlacementKey::new("default", "copper", "primary"),
+                    label: "Person".into(),
+                    snippet: None,
+                }],
+            },
+            RrfSearchBatch {
+                shard: PlacementKey::new("default", "copper", "person-00"),
+                source: "vector".into(),
+                hits: vec![RrfSearchHit {
+                    global_id: FabricGlobalId::new(
+                        PlacementKey::new("default", "copper", "primary"),
+                        "node",
+                        "a",
+                    ),
+                    rank: 1,
+                    score: 0.9,
+                    source: "vector".into(),
+                    shard: PlacementKey::new("default", "copper", "primary"),
+                    label: "Person".into(),
+                    snippet: Some("fresh".into()),
+                }],
+            },
+        ];
+        let hydration = vec![RrfHydrationRecord {
+            global_id: FabricGlobalId::new(
+                PlacementKey::new("default", "copper", "primary"),
+                "node",
+                "a",
+            ),
+            labels: vec!["Person".into()],
+            entity: serde_json::json!({
+                "id": "a",
+                "name": "Alice",
+                "secret": "internal"
+            }),
+        }];
+        let ranked_policy = RrfSearchPolicy {
+            allowed_labels: vec!["Person".into()],
+            denied_labels: Vec::new(),
+            denied_sources: Vec::new(),
+            require_hydration: true,
+            redact_fields: vec!["secret".into()],
+        };
+        let ranked =
+            db.merge_fabric_ranked_search(ranked_batches.clone(), RrfConfig::new(60.0, 10));
+        assert_eq!(ranked.input_hits, 2);
+        assert_eq!(ranked.output_hits, 1);
+        assert_eq!(ranked.results[0].sources, vec!["lexical", "vector"]);
+        assert_eq!(ranked.results[0].best_score, 0.9);
+
+        let hydrated =
+            db.hydrate_fabric_ranked_search(ranked, hydration.clone(), ranked_policy.clone());
+        assert_eq!(hydrated.output_hits, 1);
+        assert_eq!(hydrated.filtered_hits, 0);
+        assert_eq!(hydrated.missing_hydration_hits, 0);
+        assert_eq!(hydrated.results[0].labels, vec!["Person"]);
+        assert_eq!(hydrated.results[0].redacted_fields, vec!["secret"]);
+        assert_eq!(
+            hydrated.results[0].entity.as_ref().unwrap()["name"],
+            "Alice"
+        );
+        assert!(hydrated.results[0]
+            .entity
+            .as_ref()
+            .unwrap()
+            .get("secret")
+            .is_none());
+
+        let executed = db
+            .execute_fabric_ranked_search(
+                &fabric,
+                {
+                    let mut batches = ranked_batches;
+                    batches.push(RrfSearchBatch {
+                        shard: PlacementKey::new("default", "copper", "rogue-00"),
+                        source: "rogue".into(),
+                        hits: vec![RrfSearchHit {
+                            global_id: FabricGlobalId::new(
+                                PlacementKey::new("default", "copper", "rogue-00"),
+                                "node",
+                                "rogue",
+                            ),
+                            rank: 1,
+                            score: 1.0,
+                            source: "rogue".into(),
+                            shard: PlacementKey::new("default", "copper", "rogue-00"),
+                            label: "Person".into(),
+                            snippet: Some("ignore me".into()),
+                        }],
+                    });
+                    batches
+                },
+                hydration,
+                RrfConfig::new(60.0, 10),
+                ranked_policy,
+            )
+            .unwrap();
+        assert_eq!(executed.planned_shards.len(), 2);
+        assert_eq!(executed.responded_shards.len(), 2);
+        assert_eq!(executed.missing_shards, Vec::<PlacementKey>::new());
+        assert_eq!(
+            executed.ignored_shards,
+            vec![PlacementKey::new("default", "copper", "rogue-00")]
+        );
+        assert_eq!(executed.hydrated.output_hits, 1);
+        assert_eq!(
+            executed.hydrated.results[0].entity.as_ref().unwrap()["name"],
+            "Alice"
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_executes_fabric_ranked_search_with_transport() {
+        use copperdb_search::{InMemorySearchTransport, RrfSearchHit};
+        use copperdb_topology::{
+            FabricDatabase, FabricGlobalId, FabricPartitionPolicy, FabricShard, FabricShardKind,
+            MeshPeer, NodeCapability, PlacementKey, PlacementRecord,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        for node_id in ["search-a", "search-b", "search-c"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Search)
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        for (shard, nodes) in [
+            ("primary", vec!["search-a", "search-c"]),
+            ("person-00", vec!["search-b"]),
+        ] {
+            db.storage()
+                .register_topology_placement(&PlacementRecord {
+                    key: PlacementKey::new("default", "copper", shard),
+                    primary_node: nodes[0].into(),
+                    replica_nodes: vec![],
+                    search_nodes: nodes.into_iter().map(str::to_string).collect(),
+                    hyperscaler_profile: None,
+                    min_write_replicas: 0,
+                    search_fanout: 2,
+                })
+                .unwrap();
+        }
+
+        let fabric = FabricDatabase {
+            tenant: "default".into(),
+            database: "copper".into(),
+            default_shard: "primary".into(),
+            partition_policy: FabricPartitionPolicy::HashByKey { buckets: 2 },
+            shards: vec![
+                FabricShard::mixed(PlacementKey::new("default", "copper", "primary")),
+                FabricShard {
+                    placement: PlacementKey::new("default", "copper", "person-00"),
+                    kind: FabricShardKind::Graph,
+                    labels: vec!["Person".into()],
+                    relationship_types: vec![],
+                    collections: vec![],
+                },
+            ],
+        };
+
+        let transport = Arc::new(InMemorySearchTransport::new());
+        transport.register_ranked_results(
+            "search-a",
+            RrfSearchBatch {
+                shard: PlacementKey::new("default", "copper", "primary"),
+                source: "lexical".into(),
+                hits: vec![RrfSearchHit {
+                    global_id: FabricGlobalId::new(
+                        PlacementKey::new("default", "copper", "primary"),
+                        "node",
+                        "a",
+                    ),
+                    rank: 1,
+                    score: 0.8,
+                    source: "lexical".into(),
+                    shard: PlacementKey::new("default", "copper", "primary"),
+                    label: "Person".into(),
+                    snippet: None,
+                }],
+            },
+        );
+        transport.register_ranked_results(
+            "search-b",
+            RrfSearchBatch {
+                shard: PlacementKey::new("default", "copper", "person-00"),
+                source: "vector".into(),
+                hits: vec![RrfSearchHit {
+                    global_id: FabricGlobalId::new(
+                        PlacementKey::new("default", "copper", "primary"),
+                        "node",
+                        "a",
+                    ),
+                    rank: 1,
+                    score: 0.9,
+                    source: "vector".into(),
+                    shard: PlacementKey::new("default", "copper", "person-00"),
+                    label: "Person".into(),
+                    snippet: Some("fresh".into()),
+                }],
+            },
+        );
+
+        transport.register_hydration_results(
+            "search-a",
+            vec![RrfHydrationRecord {
+                global_id: FabricGlobalId::new(
+                    PlacementKey::new("default", "copper", "primary"),
+                    "node",
+                    "a",
+                ),
+                labels: vec!["Person".into()],
+                entity: serde_json::json!({"id": "a", "name": "Alice", "secret": "internal"}),
+            }],
+        );
+
+        let execution = db
+            .execute_fabric_ranked_search_with_full_transport(
+                &fabric,
+                SearchQuery::FullText {
+                    query: "alice".into(),
+                    fields: vec!["body".into()],
+                    limit: 10,
+                },
+                ConsistencyLevel::One,
+                RrfConfig::new(60.0, 10),
+                RrfSearchPolicy {
+                    allowed_labels: vec!["Person".into()],
+                    denied_labels: Vec::new(),
+                    denied_sources: Vec::new(),
+                    require_hydration: true,
+                    redact_fields: vec!["secret".into()],
+                },
+                transport.clone(),
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(execution.responded_nodes, vec!["search-a", "search-b"]);
+        assert_eq!(execution.failed_nodes, vec!["search-c"]);
+        assert_eq!(execution.responded_shards.len(), 2);
+        assert_eq!(execution.hydrated.output_hits, 1);
+        assert_eq!(
+            execution.hydrated.results[0].entity.as_ref().unwrap()["name"],
+            "Alice"
+        );
+        assert!(execution.hydrated.results[0]
+            .entity
+            .as_ref()
+            .unwrap()
+            .get("secret")
+            .is_none());
     }
 
     #[tokio::test]

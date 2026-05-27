@@ -31,6 +31,7 @@ pub mod query_patterns;
 pub mod shape_matcher;
 pub mod string_patterns;
 pub mod tokenizer;
+mod validator;
 
 use std::collections::HashMap;
 
@@ -63,12 +64,23 @@ pub enum CypherError {
     UnterminatedString,
 }
 
-impl ParseContext {
+fn is_simple_expression_identifier(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return false;
+    }
+    bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+impl<'a> ParseContext<'a> {
     fn parse_pattern_with_optional_path_variable(
         &mut self,
         allow_shortest_path: bool,
     ) -> Result<Pattern, CypherError> {
-        let path_variable = if self.tokens.get(self.pos + 1).map(String::as_str) == Some("=") {
+        let path_variable = if self.tokens.get(self.pos + 1).copied() == Some("=") {
             let variable = self.advance_identifier()?;
             self.expect("=")?;
             Some(variable)
@@ -76,9 +88,7 @@ impl ParseContext {
             None
         };
 
-        let mut pattern = if allow_shortest_path
-            && matches!(self.peek_upper().as_deref(), Some("SHORTESTPATH"))
-        {
+        let mut pattern = if allow_shortest_path && self.peek_is("SHORTESTPATH") {
             self.advance();
             self.expect("(")?;
             let mut pattern = self.parse_pattern()?;
@@ -112,10 +122,34 @@ impl ParseContext {
         Ok(MergeClause { pattern })
     }
 
+    fn parse_call(&mut self) -> Result<CallClause, CypherError> {
+        let mut procedure_parts = vec![self.advance_identifier()?];
+        while self.peek() == Some(".") {
+            self.advance();
+            procedure_parts.push(self.advance_identifier()?);
+        }
+
+        self.expect("(")?;
+        let mut args = Vec::new();
+        if self.peek() != Some(")") {
+            args.push(self.parse_expression_item(&[",", ")"])?);
+            while self.peek() == Some(",") {
+                self.advance();
+                args.push(self.parse_expression_item(&[",", ")"])?);
+            }
+        }
+        self.expect(")")?;
+
+        Ok(CallClause {
+            procedure: procedure_parts.join("."),
+            args,
+        })
+    }
+
     // ── RETURN ───────────────────────────────────────────────────────────────
 
     fn parse_return(&mut self) -> Result<ReturnClause, CypherError> {
-        let distinct = if self.peek_upper().as_deref() == Some("DISTINCT") {
+        let distinct = if self.peek_is("DISTINCT") {
             self.advance();
             true
         } else {
@@ -131,7 +165,7 @@ impl ParseContext {
 
         // Optional ORDER BY
         let mut order_by: Vec<OrderItem> = Vec::new();
-        if self.peek_upper().as_deref() == Some("ORDER") {
+        if self.peek_is("ORDER") {
             self.advance();
             self.expect("BY")?;
             order_by.push(self.parse_order_item()?);
@@ -145,16 +179,14 @@ impl ParseContext {
         let mut skip: Option<i64> = None;
         let mut limit: Option<i64> = None;
         loop {
-            match self.peek_upper().as_deref() {
-                Some("SKIP") => {
-                    self.advance();
-                    skip = Some(self.parse_i64()?);
-                }
-                Some("LIMIT") => {
-                    self.advance();
-                    limit = Some(self.parse_i64()?);
-                }
-                _ => break,
+            if self.peek_is("SKIP") {
+                self.advance();
+                skip = Some(self.parse_i64()?);
+            } else if self.peek_is("LIMIT") {
+                self.advance();
+                limit = Some(self.parse_i64()?);
+            } else {
+                break;
             }
         }
 
@@ -168,8 +200,8 @@ impl ParseContext {
     }
 
     fn parse_return_item(&mut self) -> Result<ReturnItem, CypherError> {
-        let expression = self.parse_expression()?;
-        let alias = if self.peek_upper().as_deref() == Some("AS") {
+        let expression = self.parse_expression_item(&[",", "AS", "ORDER", "SKIP", "LIMIT"])?;
+        let alias = if self.peek_is("AS") {
             self.advance();
             Some(self.advance_identifier()?)
         } else {
@@ -179,17 +211,19 @@ impl ParseContext {
     }
 
     fn parse_order_item(&mut self) -> Result<OrderItem, CypherError> {
-        let expression = self.parse_expression()?;
-        let descending = matches!(
-            self.peek_upper().as_deref(),
-            Some("DESC") | Some("DESCENDING")
-        );
+        let expression = self.parse_expression_item(&[
+            ",",
+            "ASC",
+            "ASCENDING",
+            "DESC",
+            "DESCENDING",
+            "SKIP",
+            "LIMIT",
+        ])?;
+        let descending = self.peek_is_one_of(&["DESC", "DESCENDING"]);
         if descending {
             self.advance();
-        } else if matches!(
-            self.peek_upper().as_deref(),
-            Some("ASC") | Some("ASCENDING")
-        ) {
+        } else if self.peek_is_one_of(&["ASC", "ASCENDING"]) {
             self.advance();
         }
         Ok(OrderItem {
@@ -233,7 +267,10 @@ impl ParseContext {
         self.expect(".")?;
         let property = self.advance_identifier()?;
         self.expect("=")?;
-        let value = self.parse_expression()?;
+        let value = self.parse_expression_item(&[
+            ",", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "RETURN", "WITH", "UNWIND",
+            "CALL",
+        ])?;
         Ok(SetItem {
             variable,
             property,
@@ -263,14 +300,14 @@ impl ParseContext {
             items.push(self.parse_return_item()?);
         }
 
-        let where_clause = if self.peek_upper().as_deref() == Some("WHERE") {
+        let where_clause = if self.peek_is("WHERE") {
             self.advance();
             Some(self.parse_where()?)
         } else {
             None
         };
 
-        let limit = if self.peek_upper().as_deref() == Some("LIMIT") {
+        let limit = if self.peek_is("LIMIT") {
             self.advance();
             Some(self.parse_i64()?)
         } else {
@@ -296,6 +333,60 @@ impl ParseContext {
         })
     }
 
+    pub(crate) fn parse_expression_item(
+        &mut self,
+        terminators: &[&str],
+    ) -> Result<Expression, CypherError> {
+        let start = self.pos;
+        if let Some(expression) = self.try_parse_simple_expression_item(terminators) {
+            return Ok(expression);
+        }
+
+        self.pos = start;
+        self.parse_expression()
+    }
+
+    fn try_parse_simple_expression_item(&mut self, terminators: &[&str]) -> Option<Expression> {
+        let start = self.pos;
+        let first = self.advance()?;
+        let expression = if let Some(value) = parse_bool_token(first) {
+            Expression::Literal(LiteralValue::Bool(value))
+        } else if first.eq_ignore_ascii_case("null") {
+            Expression::Literal(LiteralValue::Null)
+        } else if first.starts_with('"') || first.starts_with('\'') {
+            Expression::Literal(LiteralValue::String(trim_quotes(first).to_string()))
+        } else if first.bytes().all(|byte| byte.is_ascii_digit()) {
+            Expression::Literal(LiteralValue::Integer(first.parse().ok()?))
+        } else if is_simple_expression_identifier(first) {
+            if self.peek() == Some(".") {
+                self.advance();
+                let property = self.advance()?;
+                if !is_simple_expression_identifier(property) {
+                    self.pos = start;
+                    return None;
+                }
+                Expression::PropertyAccess {
+                    variable: first.to_string(),
+                    property: property.to_string(),
+                }
+            } else {
+                Expression::Variable(first.to_string())
+            }
+        } else {
+            self.pos = start;
+            return None;
+        };
+
+        if self.peek().is_none()
+            || matches!(self.peek(), Some(token) if terminators.iter().any(|terminator| token.eq_ignore_ascii_case(terminator)))
+        {
+            Some(expression)
+        } else {
+            self.pos = start;
+            None
+        }
+    }
+
     fn parse_create_constraint(&mut self) -> Result<CreateConstraintClause, CypherError> {
         let name = self.advance_identifier()?;
         let if_not_exists = self.consume_if_not_exists()?;
@@ -315,12 +406,12 @@ impl ParseContext {
         }
         self.expect("IS")?;
 
-        let kind = match self.peek_upper().as_deref() {
-            Some("UNIQUE") => {
+        let kind = match self.peek() {
+            Some(other) if other.eq_ignore_ascii_case("UNIQUE") => {
                 self.advance();
                 ConstraintKind::Unique
             }
-            Some("NOT") => {
+            Some(other) if other.eq_ignore_ascii_case("NOT") => {
                 self.advance();
                 self.expect("NULL")?;
                 ConstraintKind::Exists
@@ -514,7 +605,7 @@ impl ParseContext {
         self.expect("PROFILE")?;
         let profile_ref = self.advance_identifier()?;
         let mut predicate = "true".to_string();
-        if self.peek_upper().as_deref() == Some("WHEN") {
+        if self.peek_is("WHEN") {
             self.advance();
             let token = self
                 .advance()
@@ -631,7 +722,7 @@ impl ParseContext {
     }
 
     fn consume_if_not_exists(&mut self) -> Result<bool, CypherError> {
-        if self.peek_upper().as_deref() == Some("IF") {
+        if self.peek_is("IF") {
             self.advance();
             self.expect("NOT")?;
             self.expect("EXISTS")?;
@@ -642,7 +733,7 @@ impl ParseContext {
     }
 
     fn consume_if_exists(&mut self) -> Result<bool, CypherError> {
-        if self.peek_upper().as_deref() == Some("IF") {
+        if self.peek_is("IF") {
             self.advance();
             self.expect("EXISTS")?;
             Ok(true)
@@ -854,7 +945,10 @@ mod tests {
         assert!(matches!(q.query_type, QueryType::Match));
         if let Some(Clause::Match(m)) = q.clauses.first() {
             let node = &m.pattern.nodes[0];
-            assert_eq!(node.labels, vec!["Person", "Employee"]);
+            assert_eq!(
+                node.labels,
+                vec!["Person".to_string(), "Employee".to_string()]
+            );
         } else {
             panic!("expected Match clause");
         }
@@ -994,7 +1088,7 @@ mod tests {
         });
         assert!(matches!(
             where_clause.unwrap().expression,
-            Expression::And(_, _)
+            Expression::And(_)
         ));
     }
 
@@ -1166,7 +1260,7 @@ mod tests {
             assert_eq!(c.name, "person_idx");
             assert!(c.if_not_exists);
             assert_eq!(c.label, "Person");
-            assert_eq!(c.properties, vec!["email", "name"]);
+            assert_eq!(c.properties, vec!["email".to_string(), "name".to_string()]);
         } else {
             panic!("expected CreateIndex clause");
         }
@@ -1244,7 +1338,7 @@ mod tests {
             create_policy.clauses.first().expect("clause missing")
         {
             assert_eq!(c.name, "fact_policy");
-            assert_eq!(c.target_labels, vec!["KnowledgeFact"]);
+            assert_eq!(c.target_labels, vec!["KnowledgeFact".to_string()]);
             assert_eq!(c.when_clauses.len(), 1);
             assert_eq!(c.when_clauses[0].profile_ref, "boost_profile");
         } else {

@@ -28,9 +28,12 @@ copperdb-bolt = { workspace = true }
 copperdb-buildinfo = { workspace = true }
 copperdb-engine = { workspace = true }
 copperdb-envutil = { workspace = true }
+copperdb-fabric = { workspace = true }
 copperdb-graphql = { workspace = true }
 copperdb-multidb = { workspace = true }
+copperdb-nornicgrpc = { workspace = true }
 copperdb-replication = { workspace = true }
+copperdb-search = { workspace = true }
 copperdb-topology = { workspace = true }
 copperdb-util = { workspace = true }
 copperdb-retention = { workspace = true }
@@ -39,5 +42,7 @@ copperdb-security = { workspace = true }
 copperdb-storage = { workspace = true }
 
 [dev-dependencies]
+async-trait.workspace = true
 copperdb-compliance = { workspace = true }
 tempfile.workspace = true
+tonic.workspace = true

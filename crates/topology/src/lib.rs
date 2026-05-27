@@ -338,6 +338,198 @@ impl PlacementRecord {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FabricPartitionPolicy {
+    SingleShard,
+    HashByKey { buckets: usize },
+    LabelAware,
+    VectorCollection,
+    Temporal,
+    Manual,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FabricShardKind {
+    Graph,
+    Vector,
+    Search,
+    Temporal,
+    Mixed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FabricShard {
+    pub placement: PlacementKey,
+    pub kind: FabricShardKind,
+    pub labels: Vec<String>,
+    pub relationship_types: Vec<String>,
+    pub collections: Vec<String>,
+}
+
+impl FabricShard {
+    pub fn mixed(placement: PlacementKey) -> Self {
+        Self {
+            placement,
+            kind: FabricShardKind::Mixed,
+            labels: Vec::new(),
+            relationship_types: Vec::new(),
+            collections: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FabricDatabase {
+    pub tenant: String,
+    pub database: String,
+    pub default_shard: String,
+    pub partition_policy: FabricPartitionPolicy,
+    pub shards: Vec<FabricShard>,
+}
+
+impl FabricDatabase {
+    pub fn single_shard(database: impl Into<String>) -> Self {
+        let database = database.into();
+        let placement = PlacementKey::default_for_database(database.clone());
+        Self {
+            tenant: placement.tenant.clone(),
+            database,
+            default_shard: placement.shard.clone(),
+            partition_policy: FabricPartitionPolicy::SingleShard,
+            shards: vec![FabricShard::mixed(placement)],
+        }
+    }
+
+    pub fn stable_id(&self) -> String {
+        format!("{}/{}", self.tenant, self.database)
+    }
+
+    pub fn placement_keys(&self) -> Vec<PlacementKey> {
+        self.shards
+            .iter()
+            .map(|shard| shard.placement.clone())
+            .collect()
+    }
+
+    pub fn default_placement_key(&self) -> Option<PlacementKey> {
+        self.shards
+            .iter()
+            .find(|shard| shard.placement.shard == self.default_shard)
+            .map(|shard| shard.placement.clone())
+    }
+
+    pub fn validate(&self) -> Result<(), TopologyError> {
+        if self.tenant.trim().is_empty() {
+            return Err(TopologyError::InvalidTopology(
+                "fabric database tenant must not be empty".into(),
+            ));
+        }
+        if self.database.trim().is_empty() {
+            return Err(TopologyError::InvalidTopology(
+                "fabric database name must not be empty".into(),
+            ));
+        }
+        if self.default_shard.trim().is_empty() {
+            return Err(TopologyError::InvalidTopology(
+                "fabric database default shard must not be empty".into(),
+            ));
+        }
+        if self.shards.is_empty() {
+            return Err(TopologyError::InvalidTopology(format!(
+                "fabric database {} has no shards",
+                self.stable_id()
+            )));
+        }
+
+        let mut seen = BTreeSet::new();
+        let mut has_default = false;
+        for shard in &self.shards {
+            if shard.placement.tenant != self.tenant || shard.placement.database != self.database {
+                return Err(TopologyError::InvalidTopology(format!(
+                    "fabric shard {} does not belong to database {}",
+                    shard.placement.stable_id(),
+                    self.stable_id()
+                )));
+            }
+            if shard.placement.shard == self.default_shard {
+                has_default = true;
+            }
+            if !seen.insert(shard.placement.clone()) {
+                return Err(TopologyError::InvalidTopology(format!(
+                    "duplicate fabric shard {}",
+                    shard.placement.stable_id()
+                )));
+            }
+        }
+        if !has_default {
+            return Err(TopologyError::InvalidTopology(format!(
+                "fabric database {} missing default shard {}",
+                self.stable_id(),
+                self.default_shard
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FabricGlobalId {
+    pub placement: PlacementKey,
+    pub entity_kind: String,
+    pub local_id: String,
+}
+
+impl FabricGlobalId {
+    pub const SCHEME: &'static str = "fabric://";
+
+    pub fn new(
+        placement: PlacementKey,
+        entity_kind: impl Into<String>,
+        local_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            placement,
+            entity_kind: entity_kind.into(),
+            local_id: local_id.into(),
+        }
+    }
+
+    pub fn stable_id(&self) -> String {
+        format!(
+            "{}{}",
+            Self::SCHEME,
+            [
+                self.placement.tenant.as_str(),
+                self.placement.database.as_str(),
+                self.placement.shard.as_str(),
+                self.entity_kind.as_str(),
+                self.local_id.as_str(),
+            ]
+            .join("/")
+        )
+    }
+
+    pub fn parse(stable_id: &str) -> Result<Self, TopologyError> {
+        let Some(rest) = stable_id.strip_prefix(Self::SCHEME) else {
+            return Err(TopologyError::InvalidTopology(format!(
+                "fabric global id must start with {}",
+                Self::SCHEME
+            )));
+        };
+        let parts = rest.splitn(5, '/').collect::<Vec<_>>();
+        if parts.len() != 5 || parts.iter().any(|part| part.is_empty()) {
+            return Err(TopologyError::InvalidTopology(format!(
+                "invalid fabric global id {stable_id}"
+            )));
+        }
+        Ok(Self {
+            placement: PlacementKey::new(parts[0], parts[1], parts[2]),
+            entity_kind: parts[3].into(),
+            local_id: parts[4].into(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DistributedWriteMode {
     Standalone,
@@ -987,6 +1179,76 @@ mod tests {
             error,
             TopologyError::NoHealthyPeer(NodeCapability::WriteLeader)
         );
+    }
+
+    #[test]
+    fn fabric_database_tracks_default_and_scatter_placements() {
+        let fabric = FabricDatabase {
+            tenant: "default".into(),
+            database: "copper".into(),
+            default_shard: "primary".into(),
+            partition_policy: FabricPartitionPolicy::HashByKey { buckets: 2 },
+            shards: vec![
+                FabricShard::mixed(PlacementKey::default_for_database("copper")),
+                FabricShard {
+                    placement: PlacementKey::new("default", "copper", "person-00"),
+                    kind: FabricShardKind::Graph,
+                    labels: vec!["Person".into()],
+                    relationship_types: vec![],
+                    collections: vec![],
+                },
+            ],
+        };
+
+        fabric.validate().unwrap();
+        assert_eq!(fabric.stable_id(), "default/copper");
+        assert_eq!(fabric.placement_keys().len(), 2);
+        assert_eq!(
+            fabric.default_placement_key().unwrap(),
+            PlacementKey::default_for_database("copper")
+        );
+    }
+
+    #[test]
+    fn fabric_database_rejects_shards_from_other_databases() {
+        let fabric = FabricDatabase {
+            tenant: "default".into(),
+            database: "copper".into(),
+            default_shard: "primary".into(),
+            partition_policy: FabricPartitionPolicy::Manual,
+            shards: vec![FabricShard::mixed(PlacementKey::default_for_database(
+                "other",
+            ))],
+        };
+
+        assert!(matches!(
+            fabric.validate(),
+            Err(TopologyError::InvalidTopology(_))
+        ));
+    }
+
+    #[test]
+    fn fabric_global_id_round_trips_home_shard_and_local_id() {
+        let id = FabricGlobalId::new(
+            PlacementKey::new("default", "copper", "person-00"),
+            "node",
+            "Person:42",
+        );
+
+        let stable_id = id.stable_id();
+        assert_eq!(
+            stable_id,
+            "fabric://default/copper/person-00/node/Person:42"
+        );
+        assert_eq!(FabricGlobalId::parse(&stable_id).unwrap(), id);
+    }
+
+    #[test]
+    fn fabric_global_id_rejects_invalid_scheme() {
+        assert!(matches!(
+            FabricGlobalId::parse("node://default/copper/primary/node/1"),
+            Err(TopologyError::InvalidTopology(_))
+        ));
     }
 
     #[test]

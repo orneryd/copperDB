@@ -1,8 +1,26 @@
 use crate::{keyword_scan::is_ascii_space, CypherError};
 
-const SINGLE_CHAR_TOKENS: &[char] = &[
-    '(', ')', '[', ']', '{', '}', ':', ',', '.', '=', '<', '>', '-', '+', '*', '/',
-];
+#[inline]
+fn is_single_char_token(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'(' | b')'
+            | b'['
+            | b']'
+            | b'{'
+            | b'}'
+            | b':'
+            | b','
+            | b'.'
+            | b'='
+            | b'<'
+            | b'>'
+            | b'-'
+            | b'+'
+            | b'*'
+            | b'/'
+    )
+}
 
 /// Tokenize a Cypher string.
 ///
@@ -13,10 +31,10 @@ const SINGLE_CHAR_TOKENS: &[char] = &[
 ///   String scanning uses the same escape-aware logic as [`crate::keyword_scan`] so that
 ///   keywords inside quoted values are never mistaken for clause delimiters.
 /// - `<>`, `<=`, `>=`, `!=`, `=~` are kept as two-character tokens.
-pub fn tokenize(input: &str) -> Result<Vec<String>, CypherError> {
+pub fn tokenize(input: &str) -> Result<Vec<&str>, CypherError> {
     let sb = input.as_bytes();
     let len = sb.len();
-    let mut tokens: Vec<String> = Vec::new();
+    let mut tokens: Vec<&str> = Vec::with_capacity((len / 3).max(8));
     let mut i = 0;
 
     while i < len {
@@ -29,8 +47,7 @@ pub fn tokenize(input: &str) -> Result<Vec<String>, CypherError> {
 
         if b == b'\'' || b == b'"' {
             let quote = b;
-            let mut s = String::new();
-            s.push(b as char);
+            let start = i;
             i += 1;
             loop {
                 if i >= len {
@@ -38,26 +55,20 @@ pub fn tokenize(input: &str) -> Result<Vec<String>, CypherError> {
                 }
                 let c = sb[i];
                 if c == b'\\' && i + 1 < len {
-                    s.push(c as char);
-                    s.push(sb[i + 1] as char);
                     i += 2;
                     continue;
                 }
                 if c == quote {
                     if i + 1 < len && sb[i + 1] == quote {
-                        s.push(c as char);
-                        s.push(c as char);
                         i += 2;
                         continue;
                     }
-                    s.push(c as char);
                     i += 1;
                     break;
                 }
-                s.push(c as char);
                 i += 1;
             }
-            tokens.push(s);
+            tokens.push(&input[start..i]);
             continue;
         }
 
@@ -67,14 +78,14 @@ pub fn tokenize(input: &str) -> Result<Vec<String>, CypherError> {
                 pair,
                 (b'<', b'>') | (b'<', b'=') | (b'>', b'=') | (b'!', b'=') | (b'=', b'~')
             ) {
-                tokens.push(format!("{}{}", b as char, sb[i + 1] as char));
+                tokens.push(&input[i..i + 2]);
                 i += 2;
                 continue;
             }
         }
 
-        if b.is_ascii() && SINGLE_CHAR_TOKENS.contains(&(b as char)) {
-            tokens.push((b as char).to_string());
+        if is_single_char_token(b) {
+            tokens.push(&input[i..i + 1]);
             i += 1;
             continue;
         }
@@ -85,13 +96,13 @@ pub fn tokenize(input: &str) -> Result<Vec<String>, CypherError> {
             if is_ascii_space(c) {
                 break;
             }
-            if c.is_ascii() && SINGLE_CHAR_TOKENS.contains(&(c as char)) {
+            if is_single_char_token(c) {
                 break;
             }
             i += 1;
         }
         if i > start {
-            tokens.push(input[start..i].to_owned());
+            tokens.push(&input[start..i]);
         }
     }
 

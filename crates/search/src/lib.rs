@@ -5,12 +5,15 @@
 //! vector similarity search via copperdb-vectorspace.
 
 use async_trait::async_trait;
-use std::collections::{HashMap, HashSet};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
 
 use copperdb_topology::{
-    DistributedSearchPlan, PlacementKey, SearchRoutingPolicy, TopologyError, TopologyRegistry,
+    DistributedSearchPlan, FabricGlobalId, PlacementKey, SearchRoutingPolicy, TopologyError,
+    TopologyRegistry,
 };
 
 #[derive(Debug, Error)]
@@ -28,12 +31,369 @@ pub enum SearchError {
 }
 
 /// A search result with relevance score.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchResult {
     pub id: String,
     pub score: f32,
     pub label: String,
     pub snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RrfSearchHit {
+    pub global_id: FabricGlobalId,
+    pub rank: usize,
+    pub score: f32,
+    pub source: String,
+    pub shard: PlacementKey,
+    pub label: String,
+    pub snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RrfMergedHit {
+    pub global_id: FabricGlobalId,
+    pub rrf_score: f32,
+    pub best_score: f32,
+    pub sources: Vec<String>,
+    pub shard: PlacementKey,
+    pub label: String,
+    pub snippet: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct RrfConfig {
+    pub k: f32,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RrfSearchBatch {
+    pub shard: PlacementKey,
+    pub source: String,
+    pub hits: Vec<RrfSearchHit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RrfSearchOutcome {
+    pub results: Vec<RrfMergedHit>,
+    pub touched_shards: Vec<PlacementKey>,
+    pub sources: Vec<String>,
+    pub input_hits: usize,
+    pub output_hits: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RrfHydrationRecord {
+    pub global_id: FabricGlobalId,
+    pub labels: Vec<String>,
+    pub entity: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RrfSearchPolicy {
+    pub allowed_labels: Vec<String>,
+    pub denied_labels: Vec<String>,
+    pub denied_sources: Vec<String>,
+    pub require_hydration: bool,
+    pub redact_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RrfHydratedHit {
+    pub hit: RrfMergedHit,
+    pub labels: Vec<String>,
+    pub entity: Option<Value>,
+    pub redacted_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RrfHydratedSearchOutcome {
+    pub results: Vec<RrfHydratedHit>,
+    pub touched_shards: Vec<PlacementKey>,
+    pub sources: Vec<String>,
+    pub input_hits: usize,
+    pub output_hits: usize,
+    pub filtered_hits: usize,
+    pub missing_hydration_hits: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FabricRankedSearchExecution {
+    pub planned_shards: Vec<PlacementKey>,
+    pub responded_shards: Vec<PlacementKey>,
+    pub missing_shards: Vec<PlacementKey>,
+    pub ignored_shards: Vec<PlacementKey>,
+    pub responded_nodes: Vec<String>,
+    pub failed_nodes: Vec<String>,
+    pub merged: RrfSearchOutcome,
+    pub hydrated: RrfHydratedSearchOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FabricRankedBatchCollection {
+    pub responded_nodes: Vec<String>,
+    pub failed_nodes: Vec<String>,
+    pub batches: Vec<RrfSearchBatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FabricHydrationRequest {
+    pub node_id: String,
+    pub placement: PlacementKey,
+    pub global_ids: Vec<FabricGlobalId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FabricHydrationCollection {
+    pub responded_nodes: Vec<String>,
+    pub failed_nodes: Vec<String>,
+    pub records: Vec<RrfHydrationRecord>,
+    pub missing_global_ids: Vec<FabricGlobalId>,
+}
+
+impl RrfConfig {
+    pub fn new(k: f32, limit: usize) -> Self {
+        Self {
+            k: k.max(1.0),
+            limit,
+        }
+    }
+}
+
+impl Default for RrfConfig {
+    fn default() -> Self {
+        Self { k: 60.0, limit: 10 }
+    }
+}
+
+pub fn merge_rrf_search_hits(
+    ranked_hits: Vec<Vec<RrfSearchHit>>,
+    config: RrfConfig,
+) -> Vec<RrfMergedHit> {
+    let mut merged: HashMap<String, RrfMergedHit> = HashMap::new();
+    for hit in ranked_hits.into_iter().flatten() {
+        let stable_id = hit.global_id.stable_id();
+        let contribution = 1.0 / (config.k + hit.rank.max(1) as f32);
+        let entry = merged.entry(stable_id).or_insert_with(|| RrfMergedHit {
+            global_id: hit.global_id.clone(),
+            rrf_score: 0.0,
+            best_score: hit.score,
+            sources: Vec::new(),
+            shard: hit.shard.clone(),
+            label: hit.label.clone(),
+            snippet: hit.snippet.clone(),
+        });
+        entry.rrf_score += contribution;
+        if hit.score > entry.best_score {
+            entry.best_score = hit.score;
+            entry.label = hit.label.clone();
+            entry.snippet = hit.snippet.clone();
+        }
+        if !entry.sources.iter().any(|source| source == &hit.source) {
+            entry.sources.push(hit.source);
+            entry.sources.sort();
+        }
+    }
+
+    let mut out = merged.into_values().collect::<Vec<_>>();
+    out.sort_by(|left, right| {
+        right
+            .rrf_score
+            .total_cmp(&left.rrf_score)
+            .then(right.best_score.total_cmp(&left.best_score))
+            .then(left.global_id.stable_id().cmp(&right.global_id.stable_id()))
+    });
+    out.truncate(config.limit);
+    out
+}
+
+pub fn merge_rrf_search_batches(
+    batches: Vec<RrfSearchBatch>,
+    config: RrfConfig,
+) -> RrfSearchOutcome {
+    let mut touched_shards = Vec::new();
+    let mut sources = BTreeSet::new();
+    let mut input_hits = 0;
+    let mut ranked_hits = Vec::with_capacity(batches.len());
+
+    for batch in batches {
+        if !touched_shards.iter().any(|shard| shard == &batch.shard) {
+            touched_shards.push(batch.shard.clone());
+        }
+        if !batch.source.is_empty() {
+            sources.insert(batch.source.clone());
+        }
+        for hit in &batch.hits {
+            if !hit.source.is_empty() {
+                sources.insert(hit.source.clone());
+            }
+        }
+        input_hits += batch.hits.len();
+        ranked_hits.push(batch.hits);
+    }
+
+    let results = merge_rrf_search_hits(ranked_hits, config);
+    let output_hits = results.len();
+    RrfSearchOutcome {
+        results,
+        touched_shards,
+        sources: sources.into_iter().collect(),
+        input_hits,
+        output_hits,
+    }
+}
+
+pub fn hydrate_rrf_search_outcome(
+    outcome: RrfSearchOutcome,
+    hydration: Vec<RrfHydrationRecord>,
+    policy: RrfSearchPolicy,
+) -> RrfHydratedSearchOutcome {
+    let hydration_by_id = hydration
+        .into_iter()
+        .map(|record| (record.global_id.stable_id(), record))
+        .collect::<HashMap<_, _>>();
+    let mut results = Vec::new();
+    let mut filtered_hits = 0;
+    let mut missing_hydration_hits = 0;
+
+    for hit in outcome.results {
+        let stable_id = hit.global_id.stable_id();
+        let hydration = hydration_by_id.get(&stable_id);
+        if hydration.is_none() && policy.require_hydration {
+            missing_hydration_hits += 1;
+            filtered_hits += 1;
+            continue;
+        }
+
+        let labels = hydration
+            .map(|record| record.labels.clone())
+            .unwrap_or_else(|| vec![hit.label.clone()]);
+        if labels_denied(&labels, &policy) || sources_denied(&hit.sources, &policy) {
+            filtered_hits += 1;
+            continue;
+        }
+
+        let mut redacted_fields = Vec::new();
+        let entity =
+            hydration.map(|record| redact_entity(&record.entity, &policy, &mut redacted_fields));
+        results.push(RrfHydratedHit {
+            hit,
+            labels,
+            entity,
+            redacted_fields,
+        });
+    }
+
+    let output_hits = results.len();
+    RrfHydratedSearchOutcome {
+        results,
+        touched_shards: outcome.touched_shards,
+        sources: outcome.sources,
+        input_hits: outcome.input_hits,
+        output_hits,
+        filtered_hits,
+        missing_hydration_hits,
+    }
+}
+
+pub fn execute_planned_fabric_ranked_search(
+    plans: Vec<DistributedSearchPlan>,
+    batches: Vec<RrfSearchBatch>,
+    hydration: Vec<RrfHydrationRecord>,
+    config: RrfConfig,
+    policy: RrfSearchPolicy,
+) -> FabricRankedSearchExecution {
+    let planned_shards = plans
+        .into_iter()
+        .map(|plan| plan.placement)
+        .collect::<Vec<_>>();
+    let mut responded_shards = Vec::new();
+    let mut ignored_shards = Vec::new();
+    let mut filtered_batches = Vec::new();
+
+    for batch in batches {
+        if planned_shards.iter().any(|shard| shard == &batch.shard) {
+            if !responded_shards.iter().any(|shard| shard == &batch.shard) {
+                responded_shards.push(batch.shard.clone());
+            }
+            filtered_batches.push(batch);
+        } else if !ignored_shards.iter().any(|shard| shard == &batch.shard) {
+            ignored_shards.push(batch.shard);
+        }
+    }
+
+    let missing_shards = planned_shards
+        .iter()
+        .filter(|planned| !responded_shards.iter().any(|shard| shard == *planned))
+        .cloned()
+        .collect::<Vec<_>>();
+    let merged = merge_rrf_search_batches(filtered_batches, config);
+    let hydrated = hydrate_rrf_search_outcome(merged.clone(), hydration, policy);
+    FabricRankedSearchExecution {
+        planned_shards,
+        responded_shards,
+        missing_shards,
+        ignored_shards,
+        responded_nodes: Vec::new(),
+        failed_nodes: Vec::new(),
+        merged,
+        hydrated,
+    }
+}
+
+fn labels_denied(labels: &[String], policy: &RrfSearchPolicy) -> bool {
+    if !policy.allowed_labels.is_empty()
+        && !labels
+            .iter()
+            .any(|label| policy.allowed_labels.iter().any(|allowed| allowed == label))
+    {
+        return true;
+    }
+    labels
+        .iter()
+        .any(|label| policy.denied_labels.iter().any(|denied| denied == label))
+}
+
+fn sources_denied(sources: &[String], policy: &RrfSearchPolicy) -> bool {
+    sources
+        .iter()
+        .any(|source| policy.denied_sources.iter().any(|denied| denied == source))
+}
+
+fn redact_entity(
+    entity: &Value,
+    policy: &RrfSearchPolicy,
+    redacted_fields: &mut Vec<String>,
+) -> Value {
+    let mut entity = entity.clone();
+    for field in &policy.redact_fields {
+        if remove_path(&mut entity, field) {
+            redacted_fields.push(field.clone());
+        }
+    }
+    entity
+}
+
+fn remove_path(entity: &mut Value, path: &str) -> bool {
+    let mut current = entity;
+    let mut parts = path.split('.').peekable();
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            return current
+                .as_object_mut()
+                .map(|object| object.remove(part).is_some())
+                .unwrap_or(false);
+        }
+        let Some(next) = current
+            .as_object_mut()
+            .and_then(|object| object.get_mut(part))
+        else {
+            return false;
+        };
+        current = next;
+    }
+    false
 }
 
 pub fn merge_distributed_results(
@@ -62,7 +422,7 @@ pub fn merge_distributed_results(
 }
 
 /// Search query types.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SearchQuery {
     /// BM25 full-text search.
     FullText {
@@ -116,9 +476,31 @@ pub trait SearchTransport: Send + Sync {
     ) -> Result<Vec<SearchResult>, SearchError>;
 }
 
+#[async_trait]
+pub trait RankedSearchTransport: Send + Sync {
+    async fn search_ranked_node(
+        &self,
+        node_id: &str,
+        placement: &PlacementKey,
+        query: &SearchQuery,
+    ) -> Result<RrfSearchBatch, SearchError>;
+}
+
+#[async_trait]
+pub trait HydrationTransport: Send + Sync {
+    async fn hydrate_node(
+        &self,
+        node_id: &str,
+        placement: &PlacementKey,
+        global_ids: &[FabricGlobalId],
+    ) -> Result<Vec<RrfHydrationRecord>, SearchError>;
+}
+
 #[derive(Default)]
 pub struct InMemorySearchTransport {
     node_results: RwLock<HashMap<String, Vec<SearchResult>>>,
+    node_ranked_results: RwLock<HashMap<String, RrfSearchBatch>>,
+    node_hydration_results: RwLock<HashMap<String, Vec<RrfHydrationRecord>>>,
 }
 
 impl InMemorySearchTransport {
@@ -131,6 +513,24 @@ impl InMemorySearchTransport {
             .write()
             .unwrap()
             .insert(node_id.into(), results);
+    }
+
+    pub fn register_ranked_results(&self, node_id: impl Into<String>, batch: RrfSearchBatch) {
+        self.node_ranked_results
+            .write()
+            .unwrap()
+            .insert(node_id.into(), batch);
+    }
+
+    pub fn register_hydration_results(
+        &self,
+        node_id: impl Into<String>,
+        records: Vec<RrfHydrationRecord>,
+    ) {
+        self.node_hydration_results
+            .write()
+            .unwrap()
+            .insert(node_id.into(), records);
     }
 }
 
@@ -150,6 +550,49 @@ impl SearchTransport for InMemorySearchTransport {
     }
 }
 
+#[async_trait]
+impl RankedSearchTransport for InMemorySearchTransport {
+    async fn search_ranked_node(
+        &self,
+        node_id: &str,
+        _placement: &PlacementKey,
+        _query: &SearchQuery,
+    ) -> Result<RrfSearchBatch, SearchError> {
+        self.node_ranked_results
+            .read()
+            .unwrap()
+            .get(node_id)
+            .cloned()
+            .ok_or_else(|| SearchError::Transport(format!("unknown ranked search node {node_id}")))
+    }
+}
+
+#[async_trait]
+impl HydrationTransport for InMemorySearchTransport {
+    async fn hydrate_node(
+        &self,
+        node_id: &str,
+        _placement: &PlacementKey,
+        global_ids: &[FabricGlobalId],
+    ) -> Result<Vec<RrfHydrationRecord>, SearchError> {
+        let requested = global_ids
+            .iter()
+            .map(FabricGlobalId::stable_id)
+            .collect::<HashSet<_>>();
+        let records = self
+            .node_hydration_results
+            .read()
+            .unwrap()
+            .get(node_id)
+            .cloned()
+            .ok_or_else(|| SearchError::Transport(format!("unknown hydration node {node_id}")))?;
+        Ok(records
+            .into_iter()
+            .filter(|record| requested.contains(&record.global_id.stable_id()))
+            .collect())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DistributedSearchOutcome {
     pub plan: DistributedSearchPlan,
@@ -161,6 +604,10 @@ pub struct DistributedSearchOutcome {
 pub struct DistributedSearchExecutor {
     router: DistributedSearchRouter,
     transport: Arc<dyn SearchTransport>,
+}
+
+pub struct DistributedRankedSearchExecutor {
+    transport: Arc<dyn RankedSearchTransport>,
 }
 
 impl DistributedSearchExecutor {
@@ -231,6 +678,109 @@ impl DistributedSearchExecutor {
             results,
         })
     }
+}
+
+impl DistributedRankedSearchExecutor {
+    pub fn new(transport: Arc<dyn RankedSearchTransport>) -> Self {
+        Self { transport }
+    }
+
+    pub async fn collect_planned(
+        &self,
+        plans: Vec<DistributedSearchPlan>,
+        query: SearchQuery,
+    ) -> Result<FabricRankedBatchCollection, SearchError> {
+        collect_planned_fabric_ranked_batches(plans, query, self.transport.clone()).await
+    }
+}
+
+pub async fn collect_planned_fabric_ranked_batches(
+    plans: Vec<DistributedSearchPlan>,
+    query: SearchQuery,
+    transport: Arc<dyn RankedSearchTransport>,
+) -> Result<FabricRankedBatchCollection, SearchError> {
+    let mut responded_nodes = Vec::new();
+    let mut failed_nodes = Vec::new();
+    let mut batches = Vec::new();
+
+    for plan in plans {
+        for peer in &plan.fanout {
+            match transport
+                .search_ranked_node(&peer.node_id, &plan.placement, &query)
+                .await
+            {
+                Ok(batch) => {
+                    responded_nodes.push(peer.node_id.clone());
+                    batches.push(batch);
+                }
+                Err(_) => failed_nodes.push(peer.node_id.clone()),
+            }
+        }
+    }
+
+    if batches.is_empty() {
+        return Err(SearchError::Transport(
+            "distributed ranked search returned no shard responses".into(),
+        ));
+    }
+
+    Ok(FabricRankedBatchCollection {
+        responded_nodes,
+        failed_nodes,
+        batches,
+    })
+}
+
+pub async fn collect_fabric_hydration_records(
+    requests: Vec<FabricHydrationRequest>,
+    transport: Arc<dyn HydrationTransport>,
+) -> Result<FabricHydrationCollection, SearchError> {
+    let mut responded_nodes = Vec::new();
+    let mut failed_nodes = Vec::new();
+    let mut records = Vec::new();
+    let mut requested_ids = Vec::new();
+
+    for request in requests {
+        requested_ids.extend(request.global_ids.iter().cloned());
+        match transport
+            .hydrate_node(&request.node_id, &request.placement, &request.global_ids)
+            .await
+        {
+            Ok(mut node_records) => {
+                responded_nodes.push(request.node_id);
+                records.append(&mut node_records);
+            }
+            Err(_) => failed_nodes.push(request.node_id),
+        }
+    }
+
+    let returned = records
+        .iter()
+        .map(|record| record.global_id.stable_id())
+        .collect::<HashSet<_>>();
+    let mut missing_global_ids = Vec::new();
+    for global_id in requested_ids {
+        if !returned.contains(&global_id.stable_id())
+            && !missing_global_ids
+                .iter()
+                .any(|candidate: &FabricGlobalId| candidate == &global_id)
+        {
+            missing_global_ids.push(global_id);
+        }
+    }
+
+    if records.is_empty() && responded_nodes.is_empty() {
+        return Err(SearchError::Transport(
+            "distributed hydration returned no shard responses".into(),
+        ));
+    }
+
+    Ok(FabricHydrationCollection {
+        responded_nodes,
+        failed_nodes,
+        records,
+        missing_global_ids,
+    })
 }
 
 impl DistributedSearchRouter {
@@ -598,6 +1148,441 @@ mod tests {
         assert_eq!(merged[0].snippet, Some("fresh".into()));
         assert_eq!(merged[1].id, "b");
         assert_eq!(merged[2].id, "c");
+    }
+
+    #[test]
+    fn rrf_merge_fuses_ranked_hits_across_sources_and_shards() {
+        let primary = PlacementKey::new("default", "copper", "primary");
+        let vector = PlacementKey::new("default", "copper", "vector-00");
+        let doc_a = FabricGlobalId::new(primary.clone(), "node", "Person:1");
+        let doc_b = FabricGlobalId::new(vector.clone(), "node", "Memory:7");
+        let doc_c = FabricGlobalId::new(primary.clone(), "node", "Person:2");
+
+        let merged = merge_rrf_search_hits(
+            vec![
+                vec![
+                    RrfSearchHit {
+                        global_id: doc_a.clone(),
+                        rank: 1,
+                        score: 0.70,
+                        source: "lexical".into(),
+                        shard: primary.clone(),
+                        label: "Person".into(),
+                        snippet: Some("lexical a".into()),
+                    },
+                    RrfSearchHit {
+                        global_id: doc_b.clone(),
+                        rank: 2,
+                        score: 0.95,
+                        source: "lexical".into(),
+                        shard: vector.clone(),
+                        label: "Memory".into(),
+                        snippet: Some("lexical b".into()),
+                    },
+                ],
+                vec![
+                    RrfSearchHit {
+                        global_id: doc_b,
+                        rank: 1,
+                        score: 0.88,
+                        source: "vector".into(),
+                        shard: vector.clone(),
+                        label: "Memory".into(),
+                        snippet: Some("vector b".into()),
+                    },
+                    RrfSearchHit {
+                        global_id: doc_a,
+                        rank: 2,
+                        score: 0.99,
+                        source: "vector".into(),
+                        shard: primary,
+                        label: "Person".into(),
+                        snippet: Some("vector a".into()),
+                    },
+                    RrfSearchHit {
+                        global_id: doc_c,
+                        rank: 3,
+                        score: 0.80,
+                        source: "vector".into(),
+                        shard: PlacementKey::new("default", "copper", "primary"),
+                        label: "Person".into(),
+                        snippet: None,
+                    },
+                ],
+            ],
+            RrfConfig::new(60.0, 2),
+        );
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].global_id.local_id, "Person:1");
+        assert_eq!(merged[0].best_score, 0.99);
+        assert_eq!(merged[0].snippet, Some("vector a".into()));
+        assert_eq!(merged[0].sources, vec!["lexical", "vector"]);
+        assert_eq!(merged[1].global_id.local_id, "Memory:7");
+        assert_eq!(merged[1].sources, vec!["lexical", "vector"]);
+    }
+
+    #[test]
+    fn rrf_batch_merge_tracks_sources_shards_and_counts() {
+        let primary = PlacementKey::new("default", "copper", "primary");
+        let vector = PlacementKey::new("default", "copper", "vector-00");
+        let doc_a = FabricGlobalId::new(primary.clone(), "node", "Person:1");
+        let doc_b = FabricGlobalId::new(vector.clone(), "node", "Memory:7");
+
+        let outcome = merge_rrf_search_batches(
+            vec![
+                RrfSearchBatch {
+                    shard: primary.clone(),
+                    source: "lexical".into(),
+                    hits: vec![RrfSearchHit {
+                        global_id: doc_a.clone(),
+                        rank: 1,
+                        score: 0.7,
+                        source: "lexical".into(),
+                        shard: primary.clone(),
+                        label: "Person".into(),
+                        snippet: None,
+                    }],
+                },
+                RrfSearchBatch {
+                    shard: vector.clone(),
+                    source: "vector".into(),
+                    hits: vec![
+                        RrfSearchHit {
+                            global_id: doc_a,
+                            rank: 1,
+                            score: 0.9,
+                            source: "vector".into(),
+                            shard: primary.clone(),
+                            label: "Person".into(),
+                            snippet: Some("fresh".into()),
+                        },
+                        RrfSearchHit {
+                            global_id: doc_b,
+                            rank: 2,
+                            score: 0.8,
+                            source: "vector".into(),
+                            shard: vector.clone(),
+                            label: "Memory".into(),
+                            snippet: None,
+                        },
+                    ],
+                },
+            ],
+            RrfConfig::new(60.0, 10),
+        );
+
+        assert_eq!(outcome.touched_shards, vec![primary, vector]);
+        assert_eq!(outcome.sources, vec!["lexical", "vector"]);
+        assert_eq!(outcome.input_hits, 3);
+        assert_eq!(outcome.output_hits, 2);
+        assert_eq!(outcome.results[0].global_id.local_id, "Person:1");
+        assert_eq!(outcome.results[0].best_score, 0.9);
+        assert_eq!(outcome.results[0].snippet, Some("fresh".into()));
+    }
+
+    #[test]
+    fn rrf_hydration_filters_and_redacts_ranked_results() {
+        let primary = PlacementKey::new("default", "copper", "primary");
+        let doc_a = FabricGlobalId::new(primary.clone(), "node", "Person:1");
+        let doc_b = FabricGlobalId::new(primary.clone(), "node", "Secret:2");
+        let outcome = RrfSearchOutcome {
+            results: vec![
+                RrfMergedHit {
+                    global_id: doc_a.clone(),
+                    rrf_score: 0.032,
+                    best_score: 0.9,
+                    sources: vec!["lexical".into(), "vector".into()],
+                    shard: primary.clone(),
+                    label: "Person".into(),
+                    snippet: Some("Alice".into()),
+                },
+                RrfMergedHit {
+                    global_id: doc_b,
+                    rrf_score: 0.016,
+                    best_score: 0.4,
+                    sources: vec!["lexical".into()],
+                    shard: primary.clone(),
+                    label: "Secret".into(),
+                    snippet: None,
+                },
+            ],
+            touched_shards: vec![primary.clone()],
+            sources: vec!["lexical".into(), "vector".into()],
+            input_hits: 3,
+            output_hits: 2,
+        };
+
+        let hydrated = hydrate_rrf_search_outcome(
+            outcome,
+            vec![RrfHydrationRecord {
+                global_id: doc_a,
+                labels: vec!["Person".into()],
+                entity: serde_json::json!({
+                    "id": "Person:1",
+                    "name": "Alice",
+                    "secret": "internal",
+                    "profile": {"ssn": "000-00-0000", "city": "Boston"}
+                }),
+            }],
+            RrfSearchPolicy {
+                allowed_labels: vec!["Person".into()],
+                denied_labels: vec!["Secret".into()],
+                denied_sources: Vec::new(),
+                require_hydration: true,
+                redact_fields: vec!["secret".into(), "profile.ssn".into()],
+            },
+        );
+
+        assert_eq!(hydrated.input_hits, 3);
+        assert_eq!(hydrated.output_hits, 1);
+        assert_eq!(hydrated.filtered_hits, 1);
+        assert_eq!(hydrated.missing_hydration_hits, 1);
+        assert_eq!(hydrated.results[0].labels, vec!["Person"]);
+        assert_eq!(
+            hydrated.results[0].redacted_fields,
+            vec!["secret", "profile.ssn"]
+        );
+        let entity = hydrated.results[0].entity.as_ref().unwrap();
+        assert_eq!(entity["name"], "Alice");
+        assert!(entity.get("secret").is_none());
+        assert!(entity["profile"].get("ssn").is_none());
+        assert_eq!(entity["profile"]["city"], "Boston");
+    }
+
+    #[test]
+    fn planned_fabric_ranked_search_tracks_missing_and_ignored_shards() {
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementRecord};
+
+        let primary = PlacementKey::new("default", "copper", "primary");
+        let person = PlacementKey::new("default", "copper", "person-00");
+        let ignored = PlacementKey::new("default", "copper", "rogue-00");
+        let doc_a = FabricGlobalId::new(primary.clone(), "node", "Person:1");
+        let mut topology = TopologyRegistry::new();
+        for node_id in ["search-a", "search-b"] {
+            topology
+                .register_peer(
+                    MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Search),
+                )
+                .unwrap();
+        }
+        for (placement, node_id) in [(primary.clone(), "search-a"), (person.clone(), "search-b")] {
+            topology
+                .register_placement(PlacementRecord {
+                    key: placement,
+                    primary_node: node_id.into(),
+                    replica_nodes: vec![],
+                    search_nodes: vec![node_id.into()],
+                    hyperscaler_profile: None,
+                    min_write_replicas: 0,
+                    search_fanout: 1,
+                })
+                .unwrap();
+        }
+
+        let router = DistributedSearchRouter::new(topology);
+        let execution = execute_planned_fabric_ranked_search(
+            vec![
+                router.plan(&primary).unwrap(),
+                router.plan(&person).unwrap(),
+            ],
+            vec![
+                RrfSearchBatch {
+                    shard: primary.clone(),
+                    source: "lexical".into(),
+                    hits: vec![RrfSearchHit {
+                        global_id: doc_a.clone(),
+                        rank: 1,
+                        score: 0.7,
+                        source: "lexical".into(),
+                        shard: primary.clone(),
+                        label: "Person".into(),
+                        snippet: None,
+                    }],
+                },
+                RrfSearchBatch {
+                    shard: ignored.clone(),
+                    source: "rogue".into(),
+                    hits: vec![RrfSearchHit {
+                        global_id: doc_a.clone(),
+                        rank: 1,
+                        score: 1.0,
+                        source: "rogue".into(),
+                        shard: ignored.clone(),
+                        label: "Person".into(),
+                        snippet: Some("ignored".into()),
+                    }],
+                },
+            ],
+            vec![RrfHydrationRecord {
+                global_id: doc_a,
+                labels: vec!["Person".into()],
+                entity: serde_json::json!({"id": "Person:1", "name": "Alice"}),
+            }],
+            RrfConfig::new(60.0, 10),
+            RrfSearchPolicy {
+                allowed_labels: vec!["Person".into()],
+                denied_labels: Vec::new(),
+                denied_sources: Vec::new(),
+                require_hydration: true,
+                redact_fields: Vec::new(),
+            },
+        );
+
+        assert_eq!(
+            execution.planned_shards,
+            vec![primary.clone(), person.clone()]
+        );
+        assert_eq!(execution.responded_shards, vec![primary.clone()]);
+        assert_eq!(execution.missing_shards, vec![person]);
+        assert_eq!(execution.ignored_shards, vec![ignored]);
+        assert!(execution.responded_nodes.is_empty());
+        assert!(execution.failed_nodes.is_empty());
+        assert_eq!(execution.merged.output_hits, 1);
+        assert_eq!(execution.hydrated.output_hits, 1);
+        assert_eq!(
+            execution.hydrated.results[0].entity.as_ref().unwrap()["name"],
+            "Alice"
+        );
+    }
+
+    #[tokio::test]
+    async fn ranked_search_transport_collects_planned_batches() {
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementRecord};
+
+        let primary = PlacementKey::new("default", "copper", "primary");
+        let person = PlacementKey::new("default", "copper", "person-00");
+        let doc_a = FabricGlobalId::new(primary.clone(), "node", "Person:1");
+        let mut topology = TopologyRegistry::new();
+        for node_id in ["search-a", "search-b", "search-c"] {
+            topology
+                .register_peer(
+                    MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Search),
+                )
+                .unwrap();
+        }
+        topology
+            .register_placement(PlacementRecord {
+                key: primary.clone(),
+                primary_node: "search-a".into(),
+                replica_nodes: vec![],
+                search_nodes: vec!["search-a".into(), "search-c".into()],
+                hyperscaler_profile: None,
+                min_write_replicas: 0,
+                search_fanout: 2,
+            })
+            .unwrap();
+        topology
+            .register_placement(PlacementRecord {
+                key: person.clone(),
+                primary_node: "search-b".into(),
+                replica_nodes: vec![],
+                search_nodes: vec!["search-b".into()],
+                hyperscaler_profile: None,
+                min_write_replicas: 0,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemorySearchTransport::new());
+        transport.register_ranked_results(
+            "search-a",
+            RrfSearchBatch {
+                shard: primary.clone(),
+                source: "lexical".into(),
+                hits: vec![RrfSearchHit {
+                    global_id: doc_a.clone(),
+                    rank: 1,
+                    score: 0.8,
+                    source: "lexical".into(),
+                    shard: primary.clone(),
+                    label: "Person".into(),
+                    snippet: None,
+                }],
+            },
+        );
+        transport.register_ranked_results(
+            "search-b",
+            RrfSearchBatch {
+                shard: person.clone(),
+                source: "vector".into(),
+                hits: vec![RrfSearchHit {
+                    global_id: doc_a,
+                    rank: 1,
+                    score: 0.9,
+                    source: "vector".into(),
+                    shard: person.clone(),
+                    label: "Person".into(),
+                    snippet: Some("fresh".into()),
+                }],
+            },
+        );
+
+        let router = DistributedSearchRouter::new(topology);
+        let collector = DistributedRankedSearchExecutor::new(transport);
+        let collected = collector
+            .collect_planned(
+                vec![
+                    router.plan(&primary).unwrap(),
+                    router.plan(&person).unwrap(),
+                ],
+                SearchQuery::FullText {
+                    query: "alice".into(),
+                    fields: vec!["body".into()],
+                    limit: 10,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(collected.responded_nodes, vec!["search-a", "search-b"]);
+        assert_eq!(collected.failed_nodes, vec!["search-c"]);
+        assert_eq!(collected.batches.len(), 2);
+        assert_eq!(collected.batches[0].shard, primary);
+        assert_eq!(collected.batches[1].shard, person);
+    }
+
+    #[tokio::test]
+    async fn hydration_transport_collects_records_and_tracks_missing_ids() {
+        let primary = PlacementKey::new("default", "copper", "primary");
+        let person = PlacementKey::new("default", "copper", "person-00");
+        let doc_a = FabricGlobalId::new(primary.clone(), "node", "Person:1");
+        let doc_b = FabricGlobalId::new(person.clone(), "node", "Person:2");
+        let transport = Arc::new(InMemorySearchTransport::new());
+        transport.register_hydration_results(
+            "node-a",
+            vec![RrfHydrationRecord {
+                global_id: doc_a.clone(),
+                labels: vec!["Person".into()],
+                entity: serde_json::json!({"id": "Person:1", "name": "Alice"}),
+            }],
+        );
+
+        let collected = collect_fabric_hydration_records(
+            vec![
+                FabricHydrationRequest {
+                    node_id: "node-a".into(),
+                    placement: primary,
+                    global_ids: vec![doc_a.clone()],
+                },
+                FabricHydrationRequest {
+                    node_id: "node-b".into(),
+                    placement: person,
+                    global_ids: vec![doc_b.clone()],
+                },
+            ],
+            transport,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(collected.responded_nodes, vec!["node-a"]);
+        assert_eq!(collected.failed_nodes, vec!["node-b"]);
+        assert_eq!(collected.records.len(), 1);
+        assert_eq!(collected.records[0].global_id, doc_a);
+        assert_eq!(collected.missing_global_ids, vec![doc_b]);
     }
 
     #[tokio::test]

@@ -1,25 +1,32 @@
 use crate::CypherError;
 
-pub(crate) struct ParseContext {
-    pub(crate) tokens: Vec<String>,
+pub(crate) struct ParseContext<'a> {
+    pub(crate) tokens: Vec<&'a str>,
     pub(crate) pos: usize,
 }
 
-impl ParseContext {
-    pub(crate) fn new(tokens: Vec<String>) -> Self {
+impl<'a> ParseContext<'a> {
+    pub(crate) fn new(tokens: Vec<&'a str>) -> Self {
         ParseContext { tokens, pos: 0 }
     }
 
-    pub(crate) fn peek(&self) -> Option<&str> {
-        self.tokens.get(self.pos).map(|s| s.as_str())
+    pub(crate) fn peek(&self) -> Option<&'a str> {
+        self.tokens.get(self.pos).copied()
     }
 
-    pub(crate) fn peek_upper(&self) -> Option<String> {
-        self.peek().map(|s| s.to_uppercase())
+    pub(crate) fn peek_is(&self, expected: &str) -> bool {
+        matches!(self.peek(), Some(token) if token.eq_ignore_ascii_case(expected))
     }
 
-    pub(crate) fn advance(&mut self) -> Option<&str> {
-        let t = self.tokens.get(self.pos).map(|s| s.as_str());
+    pub(crate) fn peek_is_one_of(&self, expected: &[&str]) -> bool {
+        matches!(
+            self.peek(),
+            Some(token) if expected.iter().any(|item| token.eq_ignore_ascii_case(item))
+        )
+    }
+
+    pub(crate) fn advance(&mut self) -> Option<&'a str> {
+        let t = self.tokens.get(self.pos).copied();
         if t.is_some() {
             self.pos += 1;
         }
@@ -40,13 +47,13 @@ impl ParseContext {
         }
     }
 
+    pub(crate) fn expect_identifier(&mut self) -> Result<&'a str, CypherError> {
+        self.advance()
+            .ok_or_else(|| CypherError::ParseError("expected identifier, got end of input".into()))
+    }
+
     /// Advance and return the next token as an identifier.
     pub(crate) fn advance_identifier(&mut self) -> Result<String, CypherError> {
-        match self.advance() {
-            Some(t) => Ok(t.to_string()),
-            None => Err(CypherError::ParseError(
-                "expected identifier, got end of input".into(),
-            )),
-        }
+        self.expect_identifier().map(str::to_string)
     }
 }

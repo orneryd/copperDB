@@ -25,6 +25,7 @@ const META_ENCRYPTION_MANIFEST_KEY: &[u8] = b"encryption_manifest";
 const META_TOPOLOGY_PEER_PREFIX: &[u8] = b"topology_peer/";
 const META_TOPOLOGY_PROFILE_PREFIX: &[u8] = b"topology_profile/";
 const META_TOPOLOGY_PLACEMENT_PREFIX: &[u8] = b"topology_placement/";
+const META_FABRIC_DATABASE_PREFIX: &[u8] = b"fabric_database/";
 const META_SCHEMA_CONSTRAINT_PREFIX: &[u8] = b"schema_constraint/";
 const META_SCHEMA_INDEX_PREFIX: &[u8] = b"schema_index/";
 const META_KP_DECAY_PROFILE_PREFIX: &[u8] = b"kp_decay_profile/";
@@ -1244,6 +1245,36 @@ impl StorageEngine {
         Ok(registry)
     }
 
+    pub fn register_fabric_database(
+        &self,
+        database: &copperdb_topology::FabricDatabase,
+    ) -> Result<(), StorageError> {
+        database
+            .validate()
+            .map_err(|err| StorageError::TopologyInvalid(err.to_string()))?;
+        let stable_id = database.stable_id();
+        let key = [META_FABRIC_DATABASE_PREFIX, stable_id.as_bytes()].concat();
+        self.meta.insert(key, rmp_serde::to_vec(database)?)?;
+        Ok(())
+    }
+
+    pub fn list_fabric_databases(
+        &self,
+    ) -> Result<Vec<copperdb_topology::FabricDatabase>, StorageError> {
+        let mut databases: Vec<copperdb_topology::FabricDatabase> = Vec::new();
+        for entry in self.meta.scan_prefix(META_FABRIC_DATABASE_PREFIX) {
+            let (_, value) = entry?;
+            let database: copperdb_topology::FabricDatabase =
+                rmp_serde::from_slice(value.as_ref())?;
+            database
+                .validate()
+                .map_err(|err| StorageError::TopologyInvalid(err.to_string()))?;
+            databases.push(database);
+        }
+        databases.sort_by_key(|database| database.stable_id());
+        Ok(databases)
+    }
+
     pub fn persist_constraint(&self, constraint: &Constraint) -> Result<(), StorageError> {
         let key = [META_SCHEMA_CONSTRAINT_PREFIX, constraint.name.as_bytes()].concat();
         self.meta.insert(key, rmp_serde::to_vec(constraint)?)?;
@@ -2350,6 +2381,37 @@ mod tests {
         assert_eq!(search_plan.fanout.len(), 2);
         assert_eq!(search_plan.fanout[0].node_id, "node-a");
         assert_eq!(write_plan.required_acks, 2);
+    }
+
+    #[test]
+    fn fabric_database_metadata_round_trip_lists_shard_map() {
+        use copperdb_topology::{
+            FabricDatabase, FabricPartitionPolicy, FabricShard, FabricShardKind, PlacementKey,
+        };
+
+        let engine = StorageEngine::open_temporary().unwrap();
+        let fabric = FabricDatabase {
+            tenant: "default".into(),
+            database: "copper".into(),
+            default_shard: "primary".into(),
+            partition_policy: FabricPartitionPolicy::HashByKey { buckets: 2 },
+            shards: vec![
+                FabricShard::mixed(PlacementKey::default_for_database("copper")),
+                FabricShard {
+                    placement: PlacementKey::new("default", "copper", "person-00"),
+                    kind: FabricShardKind::Graph,
+                    labels: vec!["Person".into()],
+                    relationship_types: vec!["KNOWS".into()],
+                    collections: vec![],
+                },
+            ],
+        };
+
+        engine.register_fabric_database(&fabric).unwrap();
+        let databases = engine.list_fabric_databases().unwrap();
+
+        assert_eq!(databases, vec![fabric]);
+        assert_eq!(databases[0].placement_keys().len(), 2);
     }
 
     #[test]

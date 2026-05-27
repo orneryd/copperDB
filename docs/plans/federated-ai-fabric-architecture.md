@@ -342,9 +342,9 @@ The complete AI fabric mesh needs these packages or modules beyond the current f
 - Remote shard execution envelope in `nornicgrpc` for reads, writes, traversal expansion, search, and hydration.
 - Shard-local query execution mode in `engine` that can run a bounded subplan without re-routing recursively.
 - Cross-shard traversal frontier executor.
-- RRF search merger over lexical, vector, graph, and temporal candidates.
+- RRF search executor fanout over lexical, vector, graph, and temporal candidates.
 - Entity hydration service that fetches merged global ids from their home shards.
-- Deterministic merge operators for rows, aggregations, order/skip/limit, path sets, and ranked search hits.
+- Full server-side ranked search entry points that are exposed beyond the current embedded engine facade.
 - Control-plane APIs for shard creation, rebalancing, placement movement, and topology health.
 - Repair/rebalance workers for shard movement and cross-shard bridge consistency.
 
@@ -358,6 +358,18 @@ The complete AI fabric mesh needs these packages or modules beyond the current f
 6. Multi-shard writes: idempotent sub-writes, bridge-edge writes, repair records, and failure-mode tests.
 7. Production communication: gRPC remote envelopes for every shard operation, deadline propagation, auth context, trace context, and participant validation.
 8. Rebalancing: shard split/move/copy, dual-write or catch-up, cutover, and cleanup.
+
+Current implementation status:
+
+- Phase 1 foundation is started in code. `copperdb-topology` now owns `FabricDatabase`, `FabricShard`, `FabricPartitionPolicy`, `FabricShardKind`, and `FabricGlobalId` contracts.
+- `copperdb-storage` persists and lists durable fabric database shard maps through storage metadata.
+- `copperdb-fabric` can plan read and search subplans for every shard placement in a logical fabric database by reusing the existing topology placement planners.
+- `copperdb-engine` exposes the first embedded control-plane facade for registering, listing, loading, and planning fabric databases from durable storage plus topology metadata.
+- `copperdb-search` has the deterministic RRF merge primitive, ranked batch outcome contract, planned-shard batch collector, planned-shard composition helper, transport-backed home-shard hydration collection, and post-merge policy/hydration helper for fabric hits keyed by global ids, with touched-shard tracking, responded/failed node reporting, planned/responded/missing shard accounting, source aggregation, compliance-style redaction, and stable tie-breaking across shard placements; `copperdb-engine` exposes them through the embedded facade, including an async full transport-backed ranked search execution entry point that plans hydration reads from hit home shards, and `copperdb-nornicgrpc` now provides the concrete ranked-search and hydration gRPC request/response messages plus tonic client/server adapters for those calls.
+- `copperdb-fabric` has the first read-planning contract for targeted and scatter/gather scopes: all shards, default shard, shard name, label, relationship type, collection, and global id.
+- `copperdb-fabric` has the first deterministic row, aggregate, and path-set merge operators for scatter/gather reads and traversals, including stable shard-order merge, distinct, ordering, skip, limit, grouped count, distinct count, sum, average, min, max, path deduplication by fabric global ids, shortest-first ordering, and cost tie-breaks; `copperdb-engine` exposes them through the embedded facade.
+- `copperdb-server` exposes thin authenticated HTTP admin routes to register, list, and inspect read/search plans for fabric database shard maps through the engine facade; plan inspection accepts scope, value, consistency, and region query parameters, and `POST /admin/fabric/databases/{tenant}/{database}/ranked-search` now executes transport-backed ranked fabric search plus home-shard hydration over the gRPC ranked-search and hydration RPCs.
+- The remaining Phase 1 gap is update/rebalance semantics for existing fabric database shard maps; creation, plan inspection, and ranked search execution are now exposed.
 
 ## Completion Bar
 

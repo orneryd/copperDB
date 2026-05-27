@@ -27,6 +27,7 @@ copperdb-auth = { workspace = true }
 copperdb-encryption = { workspace = true }
 copperdb-cache = { workspace = true }
 copperdb-replication = { workspace = true }
+copperdb-search = { workspace = true }
 copperdb-temporal = { workspace = true }
 copperdb-decay = { workspace = true }
 copperdb-vectorspace = { workspace = true }
@@ -39,6 +40,7 @@ copperdb-audit = { workspace = true }
 copperdb-compliance = { workspace = true }
 copperdb-config = { workspace = true }
 copperdb-topology = { workspace = true }
+copperdb-fabric = { workspace = true }
 copperdb-util = { workspace = true }
 copperdb-kms = { workspace = true }
 

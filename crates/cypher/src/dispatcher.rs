@@ -4,287 +4,244 @@ use crate::{
     parse_context::ParseContext, parser_support::dominant_query_type, Clause, CypherError, Query,
 };
 
-impl ParseContext {
+impl<'a> ParseContext<'a> {
     pub(crate) fn parse_query(&mut self) -> Result<Query, CypherError> {
         let mut clauses: Vec<Clause> = Vec::new();
 
         while self.pos < self.tokens.len() {
-            let upper = match self.peek_upper() {
-                Some(u) => u,
+            let token = match self.peek() {
+                Some(token) => token,
                 None => break,
             };
 
-            match upper.as_str() {
-                "MATCH" => {
+            match token {
+                token if token.eq_ignore_ascii_case("CALL") => {
+                    self.advance();
+                    let clause = self.parse_call()?;
+                    clauses.push(Clause::Call(clause));
+                }
+                token if token.eq_ignore_ascii_case("MATCH") => {
                     self.advance();
                     let clause = self.parse_match(false)?;
                     clauses.push(Clause::Match(clause));
                 }
-                "OPTIONAL" => {
+                token if token.eq_ignore_ascii_case("OPTIONAL") => {
                     self.advance();
                     self.expect("MATCH")?;
                     let clause = self.parse_match(true)?;
                     clauses.push(Clause::OptionalMatch(clause));
                 }
-                "CREATE" => {
+                token if token.eq_ignore_ascii_case("CREATE") => {
                     self.advance();
-                    match self.peek_upper().as_deref() {
-                        Some("CONSTRAINT") => {
+                    if self.peek_is("CONSTRAINT") {
+                        self.advance();
+                        clauses.push(Clause::CreateConstraint(self.parse_create_constraint()?));
+                    } else if self.peek_is("INDEX") {
+                        self.advance();
+                        clauses.push(Clause::CreateIndex(self.parse_create_index()?));
+                    } else if self.peek_is("DECAY") {
+                        self.advance();
+                        clauses.push(Clause::CreateDecayProfile(
+                            self.parse_create_decay_profile()?,
+                        ));
+                    } else if self.peek_is("PROMOTION") {
+                        self.advance();
+                        if self.peek_is("PROFILE") {
                             self.advance();
-                            clauses.push(Clause::CreateConstraint(self.parse_create_constraint()?));
-                        }
-                        Some("INDEX") => {
+                            clauses.push(Clause::CreatePromotionProfile(
+                                self.parse_create_promotion_profile()?,
+                            ));
+                        } else if self.peek_is("POLICY") {
                             self.advance();
-                            clauses.push(Clause::CreateIndex(self.parse_create_index()?));
-                        }
-                        Some("DECAY") => {
-                            self.advance();
-                            clauses.push(Clause::CreateDecayProfile(
-                                self.parse_create_decay_profile()?,
+                            clauses.push(Clause::CreatePromotionPolicy(
+                                self.parse_create_promotion_policy()?,
+                            ));
+                        } else if let Some(other) = self.peek() {
+                            return Err(CypherError::ParseError(format!(
+                                "unsupported CREATE PROMOTION target '{}'",
+                                other
+                            )));
+                        } else {
+                            return Err(CypherError::ParseError(
+                                "expected CREATE PROMOTION target, got end of input".into(),
                             ));
                         }
-                        Some("PROMOTION") => {
-                            self.advance();
-                            match self.peek_upper().as_deref() {
-                                Some("PROFILE") => {
-                                    self.advance();
-                                    clauses.push(Clause::CreatePromotionProfile(
-                                        self.parse_create_promotion_profile()?,
-                                    ));
-                                }
-                                Some("POLICY") => {
-                                    self.advance();
-                                    clauses.push(Clause::CreatePromotionPolicy(
-                                        self.parse_create_promotion_policy()?,
-                                    ));
-                                }
-                                Some(other) => {
-                                    return Err(CypherError::ParseError(format!(
-                                        "unsupported CREATE PROMOTION target '{}'",
-                                        other
-                                    )));
-                                }
-                                None => {
-                                    return Err(CypherError::ParseError(
-                                        "expected CREATE PROMOTION target, got end of input".into(),
-                                    ));
-                                }
-                            }
-                        }
-                        _ => {
-                            let clause = self.parse_create()?;
-                            clauses.push(Clause::Create(clause));
-                        }
+                    } else {
+                        let clause = self.parse_create()?;
+                        clauses.push(Clause::Create(clause));
                     }
                 }
-                "MERGE" => {
+                token if token.eq_ignore_ascii_case("MERGE") => {
                     self.advance();
                     let clause = self.parse_merge()?;
                     clauses.push(Clause::Merge(clause));
                 }
-                "RETURN" => {
+                token if token.eq_ignore_ascii_case("RETURN") => {
                     self.advance();
                     let clause = self.parse_return()?;
                     clauses.push(Clause::Return(clause));
                 }
-                "WHERE" => {
+                token if token.eq_ignore_ascii_case("WHERE") => {
                     self.advance();
                     let clause = self.parse_where()?;
                     clauses.push(Clause::Where(clause));
                 }
-                "SET" => {
+                token if token.eq_ignore_ascii_case("SET") => {
                     self.advance();
                     let clause = self.parse_set()?;
                     clauses.push(Clause::Set(clause));
                 }
-                "DELETE" => {
+                token if token.eq_ignore_ascii_case("DELETE") => {
                     self.advance();
                     let clause = self.parse_delete(false)?;
                     clauses.push(Clause::Delete(clause));
                 }
-                "DETACH" => {
+                token if token.eq_ignore_ascii_case("DETACH") => {
                     self.advance();
                     self.expect("DELETE")?;
                     let clause = self.parse_delete(true)?;
                     clauses.push(Clause::Delete(clause));
                 }
-                "WITH" => {
+                token if token.eq_ignore_ascii_case("WITH") => {
                     self.advance();
                     let clause = self.parse_with()?;
                     clauses.push(Clause::With(clause));
                 }
-                "UNWIND" => {
+                token if token.eq_ignore_ascii_case("UNWIND") => {
                     self.advance();
                     let clause = self.parse_unwind()?;
                     clauses.push(Clause::Unwind(clause));
                 }
-                "DROP" => {
+                token if token.eq_ignore_ascii_case("DROP") => {
                     self.advance();
-                    match self.peek_upper().as_deref() {
-                        Some("CONSTRAINT") => {
+                    if self.peek_is("CONSTRAINT") {
+                        self.advance();
+                        clauses.push(Clause::DropConstraint(self.parse_drop_constraint()?));
+                    } else if self.peek_is("INDEX") {
+                        self.advance();
+                        clauses.push(Clause::DropIndex(self.parse_drop_index()?));
+                    } else if self.peek_is("DECAY") {
+                        self.advance();
+                        clauses.push(Clause::DropDecayProfile(self.parse_drop_decay_profile()?));
+                    } else if self.peek_is("PROMOTION") {
+                        self.advance();
+                        if self.peek_is("PROFILE") {
                             self.advance();
-                            clauses.push(Clause::DropConstraint(self.parse_drop_constraint()?));
-                        }
-                        Some("INDEX") => {
+                            clauses.push(Clause::DropPromotionProfile(
+                                self.parse_drop_promotion_profile()?,
+                            ));
+                        } else if self.peek_is("POLICY") {
                             self.advance();
-                            clauses.push(Clause::DropIndex(self.parse_drop_index()?));
-                        }
-                        Some("DECAY") => {
-                            self.advance();
-                            clauses
-                                .push(Clause::DropDecayProfile(self.parse_drop_decay_profile()?));
-                        }
-                        Some("PROMOTION") => {
-                            self.advance();
-                            match self.peek_upper().as_deref() {
-                                Some("PROFILE") => {
-                                    self.advance();
-                                    clauses.push(Clause::DropPromotionProfile(
-                                        self.parse_drop_promotion_profile()?,
-                                    ));
-                                }
-                                Some("POLICY") => {
-                                    self.advance();
-                                    clauses.push(Clause::DropPromotionPolicy(
-                                        self.parse_drop_promotion_policy()?,
-                                    ));
-                                }
-                                Some(other) => {
-                                    return Err(CypherError::ParseError(format!(
-                                        "unsupported DROP PROMOTION target '{}'",
-                                        other
-                                    )));
-                                }
-                                None => {
-                                    return Err(CypherError::ParseError(
-                                        "expected DROP PROMOTION target, got end of input".into(),
-                                    ));
-                                }
-                            }
-                        }
-                        Some(other) => {
+                            clauses.push(Clause::DropPromotionPolicy(
+                                self.parse_drop_promotion_policy()?,
+                            ));
+                        } else if let Some(other) = self.peek() {
                             return Err(CypherError::ParseError(format!(
-                                "unsupported DROP target '{}'",
+                                "unsupported DROP PROMOTION target '{}'",
                                 other
                             )));
-                        }
-                        None => {
+                        } else {
                             return Err(CypherError::ParseError(
-                                "expected DROP target, got end of input".into(),
+                                "expected DROP PROMOTION target, got end of input".into(),
                             ));
                         }
+                    } else if let Some(other) = self.peek() {
+                        return Err(CypherError::ParseError(format!(
+                            "unsupported DROP target '{}'",
+                            other
+                        )));
+                    } else {
+                        return Err(CypherError::ParseError(
+                            "expected DROP target, got end of input".into(),
+                        ));
                     }
                 }
-                "SHOW" => {
+                token if token.eq_ignore_ascii_case("SHOW") => {
                     self.advance();
-                    match self.peek_upper().as_deref() {
-                        Some("CONSTRAINTS") => {
+                    if self.peek_is("CONSTRAINTS") {
+                        self.advance();
+                        clauses.push(Clause::ShowConstraints(self.parse_show_constraints()?));
+                    } else if self.peek_is("INDEXES") {
+                        self.advance();
+                        clauses.push(Clause::ShowIndexes(self.parse_show_indexes()?));
+                    } else if self.peek_is("DECAY") {
+                        self.advance();
+                        clauses.push(Clause::ShowDecayProfiles(self.parse_show_decay_profiles()?));
+                    } else if self.peek_is("PROMOTION") {
+                        self.advance();
+                        if self.peek_is("PROFILES") {
                             self.advance();
-                            clauses.push(Clause::ShowConstraints(self.parse_show_constraints()?));
-                        }
-                        Some("INDEXES") => {
+                            clauses.push(Clause::ShowPromotionProfiles(
+                                self.parse_show_promotion_profiles()?,
+                            ));
+                        } else if self.peek_is("POLICIES") {
                             self.advance();
-                            clauses.push(Clause::ShowIndexes(self.parse_show_indexes()?));
-                        }
-                        Some("DECAY") => {
-                            self.advance();
-                            clauses
-                                .push(Clause::ShowDecayProfiles(self.parse_show_decay_profiles()?));
-                        }
-                        Some("PROMOTION") => {
-                            self.advance();
-                            match self.peek_upper().as_deref() {
-                                Some("PROFILES") => {
-                                    self.advance();
-                                    clauses.push(Clause::ShowPromotionProfiles(
-                                        self.parse_show_promotion_profiles()?,
-                                    ));
-                                }
-                                Some("POLICIES") => {
-                                    self.advance();
-                                    clauses.push(Clause::ShowPromotionPolicies(
-                                        self.parse_show_promotion_policies()?,
-                                    ));
-                                }
-                                Some(other) => {
-                                    return Err(CypherError::ParseError(format!(
-                                        "unsupported SHOW PROMOTION target '{}'",
-                                        other
-                                    )));
-                                }
-                                None => {
-                                    return Err(CypherError::ParseError(
-                                        "expected SHOW PROMOTION target, got end of input".into(),
-                                    ));
-                                }
-                            }
-                        }
-                        Some(other) => {
+                            clauses.push(Clause::ShowPromotionPolicies(
+                                self.parse_show_promotion_policies()?,
+                            ));
+                        } else if let Some(other) = self.peek() {
                             return Err(CypherError::ParseError(format!(
-                                "unsupported SHOW target '{}'",
+                                "unsupported SHOW PROMOTION target '{}'",
                                 other
                             )));
-                        }
-                        None => {
+                        } else {
                             return Err(CypherError::ParseError(
-                                "expected SHOW target, got end of input".into(),
+                                "expected SHOW PROMOTION target, got end of input".into(),
                             ));
                         }
+                    } else if let Some(other) = self.peek() {
+                        return Err(CypherError::ParseError(format!(
+                            "unsupported SHOW target '{}'",
+                            other
+                        )));
+                    } else {
+                        return Err(CypherError::ParseError(
+                            "expected SHOW target, got end of input".into(),
+                        ));
                     }
                 }
-                "ALTER" => {
+                token if token.eq_ignore_ascii_case("ALTER") => {
                     self.advance();
-                    match self.peek_upper().as_deref() {
-                        Some("DECAY") => {
+                    if self.peek_is("DECAY") {
+                        self.advance();
+                        clauses.push(Clause::AlterDecayProfile(self.parse_alter_decay_profile()?));
+                    } else if self.peek_is("PROMOTION") {
+                        self.advance();
+                        if self.peek_is("PROFILE") {
                             self.advance();
-                            clauses
-                                .push(Clause::AlterDecayProfile(self.parse_alter_decay_profile()?));
-                        }
-                        Some("PROMOTION") => {
+                            clauses.push(Clause::AlterPromotionProfile(
+                                self.parse_alter_promotion_profile()?,
+                            ));
+                        } else if self.peek_is("POLICY") {
                             self.advance();
-                            match self.peek_upper().as_deref() {
-                                Some("PROFILE") => {
-                                    self.advance();
-                                    clauses.push(Clause::AlterPromotionProfile(
-                                        self.parse_alter_promotion_profile()?,
-                                    ));
-                                }
-                                Some("POLICY") => {
-                                    self.advance();
-                                    clauses.push(Clause::AlterPromotionPolicy(
-                                        self.parse_alter_promotion_policy()?,
-                                    ));
-                                }
-                                Some(other) => {
-                                    return Err(CypherError::ParseError(format!(
-                                        "unsupported ALTER PROMOTION target '{}'",
-                                        other
-                                    )));
-                                }
-                                None => {
-                                    return Err(CypherError::ParseError(
-                                        "expected ALTER PROMOTION target, got end of input".into(),
-                                    ));
-                                }
-                            }
-                        }
-                        Some(other) => {
+                            clauses.push(Clause::AlterPromotionPolicy(
+                                self.parse_alter_promotion_policy()?,
+                            ));
+                        } else if let Some(other) = self.peek() {
                             return Err(CypherError::ParseError(format!(
-                                "unsupported ALTER target '{}'",
+                                "unsupported ALTER PROMOTION target '{}'",
                                 other
                             )));
-                        }
-                        None => {
+                        } else {
                             return Err(CypherError::ParseError(
-                                "expected ALTER target, got end of input".into(),
+                                "expected ALTER PROMOTION target, got end of input".into(),
                             ));
                         }
+                    } else if let Some(other) = self.peek() {
+                        return Err(CypherError::ParseError(format!(
+                            "unsupported ALTER target '{}'",
+                            other
+                        )));
+                    } else {
+                        return Err(CypherError::ParseError(
+                            "expected ALTER target, got end of input".into(),
+                        ));
                     }
                 }
                 _ => {
                     return Err(CypherError::ParseError(format!(
                         "unexpected token '{}'",
-                        upper
+                        token
                     )));
                 }
             }

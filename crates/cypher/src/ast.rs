@@ -25,6 +25,7 @@ pub struct Query {
 pub enum Clause {
     Match(MatchClause),
     OptionalMatch(MatchClause),
+    Call(CallClause),
     Return(ReturnClause),
     Where(WhereClause),
     Set(SetClause),
@@ -67,6 +68,12 @@ pub struct CreateClause {
 #[derive(Debug, Clone)]
 pub struct MergeClause {
     pub pattern: Pattern,
+}
+
+#[derive(Debug, Clone)]
+pub struct CallClause {
+    pub procedure: String,
+    pub args: Vec<Expression>,
 }
 
 #[derive(Debug, Clone)]
@@ -229,10 +236,16 @@ pub struct Pattern {
 }
 
 #[derive(Debug, Clone)]
+pub struct PropertyEntry {
+    pub key: String,
+    pub value: Expression,
+}
+
+#[derive(Debug, Clone)]
 pub struct NodePattern {
     pub variable: Option<String>,
     pub labels: Vec<String>,
-    pub properties: HashMap<String, Expression>,
+    pub properties: Vec<PropertyEntry>,
 }
 
 #[derive(Debug, Clone)]
@@ -240,7 +253,7 @@ pub struct EdgePattern {
     pub variable: Option<String>,
     pub rel_type: Option<String>,
     pub direction: EdgeDirection,
-    pub properties: HashMap<String, Expression>,
+    pub properties: Vec<PropertyEntry>,
     pub min_hops: Option<u32>,
     pub max_hops: Option<u32>,
 }
@@ -252,6 +265,21 @@ pub enum EdgeDirection {
     Incoming,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum LiteralValue {
+    String(String),
+    Integer(i64),
+    Float(f64),
+    Bool(bool),
+    Null,
+}
+
+#[derive(Debug, Clone)]
+pub struct BinaryExpression {
+    pub left: Expression,
+    pub right: Expression,
+}
+
 #[derive(Debug, Clone)]
 pub enum Expression {
     PropertyAccess {
@@ -259,16 +287,14 @@ pub enum Expression {
         property: String,
     },
     Comparison {
-        left: Box<Expression>,
+        operands: Box<BinaryExpression>,
         op: String,
-        right: Box<Expression>,
     },
     InList {
-        value: Box<Expression>,
-        list: Box<Expression>,
+        operands: Box<BinaryExpression>,
         negated: bool,
     },
-    Literal(Value),
+    Literal(LiteralValue),
     Parameter(String),
     FunctionCall {
         name: String,
@@ -276,10 +302,10 @@ pub enum Expression {
         distinct: bool,
     },
     ListLiteral(Vec<Expression>),
-    MapLiteral(Vec<(String, Expression)>),
+    MapLiteral(Vec<PropertyEntry>),
     Variable(String),
-    And(Box<Expression>, Box<Expression>),
-    Or(Box<Expression>, Box<Expression>),
+    And(Box<BinaryExpression>),
+    Or(Box<BinaryExpression>),
     Not(Box<Expression>),
     IsNull(Box<Expression>),
     IsNotNull(Box<Expression>),

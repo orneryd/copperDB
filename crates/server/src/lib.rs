@@ -6,29 +6,39 @@
 
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, Request, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, post_service},
     Json, Router,
 };
 use copperdb_auth::{AuthConfig, AuthError, Authenticator, Claims, DatabaseAccessMode};
 use copperdb_buildinfo::{display_version, server_announcement, version};
 use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig, QueryResult};
 use copperdb_envutil::{get as env_get, get_bool_loose};
+use copperdb_fabric::{FabricReadRequest, FabricReadScope};
 use copperdb_multidb::{DatabaseManager, DatabaseStatus, MultiDbError};
+use copperdb_nornicgrpc::{
+    NornicGrpcHydrationTransport, NornicGrpcRankedSearchTransport, TonicRemoteHydrationClient,
+    TonicRemoteRankedSearchClient,
+};
 use copperdb_otel::{classify_cypher_op_type, Telemetry};
 use copperdb_replication::{InMemoryReplicaTransport, MemoryStorage};
 use copperdb_retention::{
     ErasureRequest, LegalHold, Manager as RetentionManager, Policy, RetentionError,
     RetentionSweepConfig,
 };
+use copperdb_search::{
+    collect_fabric_hydration_records, collect_planned_fabric_ranked_batches,
+    execute_planned_fabric_ranked_search, merge_rrf_search_batches, FabricHydrationRequest,
+    HydrationTransport, RankedSearchTransport, RrfConfig, RrfSearchPolicy, SearchQuery,
+};
 use copperdb_security::{
     RequestTarget, RequestViolation, SecurityConfig, SecurityMiddleware, SecurityRequest,
 };
 use copperdb_storage::StorageEngine;
-use copperdb_topology::{ConsistencyLevel, PlacementKey};
+use copperdb_topology::{ConsistencyLevel, FabricDatabase, FabricGlobalId, PlacementKey};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -264,6 +274,28 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/db/{database}", get(database_info_handler))
         .route("/db/{database}/tx/commit", post(neo4j_tx_commit_handler))
         .route("/db/data/cypher", post(cypher_handler))
+        .route(
+            "/admin/fabric/databases",
+            get(list_fabric_databases).post(register_fabric_database),
+        )
+        .route(
+            "/admin/fabric/databases/{tenant}/{database}/plans",
+            get(plan_fabric_database),
+        )
+        .route(
+            "/admin/fabric/databases/{tenant}/{database}/ranked-search",
+            post_service(tower::service_fn({
+                let state = Arc::clone(&state);
+                move |request: Request<Body>| {
+                    let state = Arc::clone(&state);
+                    async move {
+                        Ok::<_, std::convert::Infallible>(
+                            execute_fabric_ranked_search_admin_service(state, request).await,
+                        )
+                    }
+                }
+            })),
+        )
         // ── Retention policies ──────────────────────────────────────────────
         .route(
             "/admin/retention/policies",
@@ -742,6 +774,16 @@ fn authorize_database_access(
         return Ok(None);
     }
     let claims = authenticated_user(state, headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    ensure_database_access(state, &claims, database, write)?;
+    Ok(Some(claims))
+}
+
+fn ensure_database_access(
+    state: &AppState,
+    claims: &Claims,
+    database: &str,
+    write: bool,
+) -> Result<(), StatusCode> {
     let roles = claims.roles.clone();
     let authenticator = state
         .auth
@@ -755,7 +797,7 @@ fn authorize_database_access(
     if (write && !resolved.write) || (!write && !resolved.read) {
         return Err(StatusCode::FORBIDDEN);
     }
-    Ok(Some(claims))
+    Ok(())
 }
 
 fn roles_for_claims(claims: Option<&Claims>) -> Vec<String> {
@@ -1102,6 +1144,505 @@ fn open_engine(state: &AppState, database: &str) -> Result<GraphEngine, String> 
     GraphEngine::open(config).map_err(|error| error.to_string())
 }
 
+async fn list_fabric_databases(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let claims = if state.auth.security_enabled {
+        match authenticated_user(&state, &headers) {
+            Some(claims) => Some(claims),
+            None => return StatusCode::UNAUTHORIZED.into_response(),
+        }
+    } else {
+        None
+    };
+    let mut databases = Vec::new();
+    for database in state.db_manager.list() {
+        if let Some(claims) = claims.as_ref() {
+            if let Err(status) = ensure_database_access(&state, claims, &database.name, false) {
+                if status == StatusCode::FORBIDDEN {
+                    continue;
+                }
+                return status.into_response();
+            }
+        }
+        match open_engine(&state, &database.name).and_then(|engine| {
+            engine
+                .list_fabric_databases()
+                .map_err(|error| error.to_string())
+        }) {
+            Ok(mut entries) => databases.append(&mut entries),
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": error})),
+                )
+                    .into_response();
+            }
+        }
+    }
+    Json(serde_json::json!({ "databases": databases })).into_response()
+}
+
+async fn register_fabric_database(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(database): Json<FabricDatabase>,
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &database.database, true) {
+        return status.into_response();
+    }
+    if let Err(error) = database.validate() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response();
+    }
+    if let Err(error) = create_database(&state, &database.database) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": error})),
+        )
+            .into_response();
+    }
+    match open_engine(&state, &database.database).and_then(|engine| {
+        engine
+            .register_fabric_database(&database)
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(()) => (StatusCode::CREATED, Json(serde_json::json!(database))).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": error})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct FabricPlanQuery {
+    scope: Option<String>,
+    value: Option<String>,
+    consistency: Option<String>,
+    region: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FabricRankedSearchRequest {
+    query: SearchQuery,
+    #[serde(default)]
+    config: RrfConfig,
+    #[serde(default)]
+    policy: RrfSearchPolicy,
+    hydration_consistency: Option<String>,
+}
+
+fn parse_consistency_level(
+    value: Option<&str>,
+    default: ConsistencyLevel,
+) -> Result<ConsistencyLevel, String> {
+    match value
+        .unwrap_or(match default {
+            ConsistencyLevel::One => "one",
+            ConsistencyLevel::Quorum => "quorum",
+            ConsistencyLevel::All => "all",
+            ConsistencyLevel::LocalQuorum => "localquorum",
+        })
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "one" => Ok(ConsistencyLevel::One),
+        "quorum" => Ok(ConsistencyLevel::Quorum),
+        "all" => Ok(ConsistencyLevel::All),
+        "localquorum" | "local_quorum" | "local-quorum" => Ok(ConsistencyLevel::LocalQuorum),
+        value => Err(format!("unsupported consistency level: {value}")),
+    }
+}
+
+fn parse_fabric_plan_query(query: FabricPlanQuery) -> Result<FabricReadRequest, String> {
+    let consistency =
+        parse_consistency_level(query.consistency.as_deref(), ConsistencyLevel::Quorum)?;
+    let scope_name = query.scope.as_deref().unwrap_or("all").to_ascii_lowercase();
+    let value = query.value.unwrap_or_default();
+    let scope = match scope_name.as_str() {
+        "all" | "scatter" | "scatter-gather" => FabricReadScope::AllShards,
+        "default" | "default-shard" => FabricReadScope::DefaultShard,
+        "shard" => FabricReadScope::Shard(required_scope_value(&scope_name, value)?),
+        "label" => FabricReadScope::Label(required_scope_value(&scope_name, value)?),
+        "relationship" | "relationship-type" | "relationshiptype" => {
+            FabricReadScope::RelationshipType(required_scope_value(&scope_name, value)?)
+        }
+        "collection" => FabricReadScope::Collection(required_scope_value(&scope_name, value)?),
+        "global" | "global-id" | "globalid" => FabricReadScope::GlobalId(
+            FabricGlobalId::parse(&required_scope_value(&scope_name, value)?)
+                .map_err(|error| error.to_string())?,
+        ),
+        value => return Err(format!("unsupported fabric plan scope: {value}")),
+    };
+    Ok(FabricReadRequest {
+        scope,
+        consistency,
+        request_region: query.region,
+    })
+}
+
+fn required_scope_value(scope: &str, value: String) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        Err(format!("fabric plan scope {scope} requires a value"))
+    } else {
+        Ok(trimmed.to_owned())
+    }
+}
+
+async fn plan_fabric_database(
+    State(state): State<Arc<AppState>>,
+    Path((tenant, database)): Path<(String, String)>,
+    headers: HeaderMap,
+    Query(query): Query<FabricPlanQuery>,
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &database, false) {
+        return status.into_response();
+    }
+    let read_request = match parse_fabric_plan_query(query) {
+        Ok(request) => request,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error})),
+            )
+                .into_response();
+        }
+    };
+    let engine = match open_engine(&state, &database) {
+        Ok(engine) => engine,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": error})),
+            )
+                .into_response();
+        }
+    };
+    let fabric = match engine.load_fabric_database(&tenant, &database) {
+        Ok(Some(fabric)) => fabric,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "fabric database not found"})),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+    };
+    let read_plan = match engine.plan_fabric_query_reads(&fabric, read_request) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+    };
+    let read_plans = read_plan
+        .shards
+        .iter()
+        .map(|shard| shard.read_plan.clone())
+        .collect::<Vec<_>>();
+    let search_plans = match engine.plan_fabric_searches(&fabric) {
+        Ok(plans) => plans,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+    };
+    Json(serde_json::json!({
+        "database": fabric,
+        "readPlan": read_plan,
+        "readPlans": read_plans,
+        "searchPlans": search_plans,
+    }))
+    .into_response()
+}
+
+fn build_fabric_ranked_search_context(
+    engine: &GraphEngine,
+    fabric: &FabricDatabase,
+    hydration_consistency: ConsistencyLevel,
+) -> Result<
+    (
+        Vec<copperdb_topology::DistributedSearchPlan>,
+        HashMap<String, String>,
+        Arc<dyn RankedSearchTransport>,
+        Arc<dyn HydrationTransport>,
+    ),
+    String,
+> {
+    let mut search_endpoints = HashMap::new();
+    let search_plans = engine
+        .plan_fabric_searches(fabric)
+        .map_err(|error| error.to_string())?;
+    for plan in &search_plans {
+        for peer in &plan.fanout {
+            search_endpoints.insert(peer.node_id.clone(), peer.advertise_addr.clone());
+        }
+    }
+
+    let mut hydration_endpoints = HashMap::new();
+    let mut hydration_coordinators = HashMap::new();
+    for placement in fabric.placement_keys() {
+        let plan = engine
+            .plan_distributed_read(&placement, hydration_consistency, None)
+            .map_err(|error| error.to_string())?;
+        hydration_coordinators.insert(placement.stable_id(), plan.coordinator.node_id.clone());
+        hydration_endpoints.insert(
+            plan.coordinator.node_id.clone(),
+            plan.coordinator.advertise_addr.clone(),
+        );
+        for peer in plan.replicas {
+            hydration_endpoints.insert(peer.node_id, peer.advertise_addr);
+        }
+    }
+
+    let ranked_transport: Arc<dyn RankedSearchTransport> =
+        Arc::new(NornicGrpcRankedSearchTransport::new(
+            search_endpoints,
+            Arc::new(TonicRemoteRankedSearchClient::new()),
+        ));
+    let hydration_transport: Arc<dyn HydrationTransport> =
+        Arc::new(NornicGrpcHydrationTransport::new(
+            hydration_endpoints,
+            Arc::new(TonicRemoteHydrationClient::new()),
+        ));
+    Ok((
+        search_plans,
+        hydration_coordinators,
+        ranked_transport,
+        hydration_transport,
+    ))
+}
+
+fn build_fabric_hydration_requests(
+    merged: &copperdb_search::RrfSearchOutcome,
+    hydration_coordinators: &HashMap<String, String>,
+) -> Result<Vec<FabricHydrationRequest>, String> {
+    let mut grouped: HashMap<String, (PlacementKey, Vec<FabricGlobalId>)> = HashMap::new();
+    for hit in &merged.results {
+        let stable_id = hit.global_id.placement.stable_id();
+        grouped
+            .entry(stable_id)
+            .or_insert_with(|| (hit.global_id.placement.clone(), Vec::new()))
+            .1
+            .push(hit.global_id.clone());
+    }
+
+    let mut requests = Vec::new();
+    for (stable_id, (placement, global_ids)) in grouped {
+        let node_id = hydration_coordinators
+            .get(&stable_id)
+            .cloned()
+            .ok_or_else(|| format!("missing hydration coordinator for placement {stable_id}"))?;
+        requests.push(FabricHydrationRequest {
+            node_id,
+            placement,
+            global_ids,
+        });
+    }
+    Ok(requests)
+}
+
+fn parse_fabric_ranked_search_path(path: &str) -> Result<(String, String), Response> {
+    let segments = path
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if segments.len() < 6 || segments[segments.len() - 1] != "ranked-search" {
+        return Err(StatusCode::NOT_FOUND.into_response());
+    }
+    Ok((
+        segments[segments.len() - 3].to_owned(),
+        segments[segments.len() - 2].to_owned(),
+    ))
+}
+
+async fn execute_fabric_ranked_search_admin_service(
+    state: Arc<AppState>,
+    request: Request<Body>,
+) -> Response {
+    let (tenant, database) = match parse_fabric_ranked_search_path(request.uri().path()) {
+        Ok(path) => path,
+        Err(response) => return response,
+    };
+    if let Err(status) = authorize_database_access(&state, request.headers(), &database, false) {
+        return status.into_response();
+    }
+    let body = match axum::body::to_bytes(request.into_body(), 1024 * 1024).await {
+        Ok(body) => body,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+    };
+    let request = match serde_json::from_slice::<FabricRankedSearchRequest>(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+    };
+    execute_fabric_ranked_search_admin_impl(state, tenant, database, request).await
+}
+
+async fn execute_fabric_ranked_search_admin_impl(
+    state: Arc<AppState>,
+    tenant: String,
+    database: String,
+    request: FabricRankedSearchRequest,
+) -> Response {
+    let hydration_consistency = match parse_consistency_level(
+        request.hydration_consistency.as_deref(),
+        ConsistencyLevel::One,
+    ) {
+        Ok(consistency) => consistency,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error})),
+            )
+                .into_response();
+        }
+    };
+    let (_fabric, search_plans, hydration_coordinators, ranked_transport, hydration_transport) = {
+        let engine = match open_engine(&state, &database) {
+            Ok(engine) => engine,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": error})),
+                )
+                    .into_response();
+            }
+        };
+        let fabric = match engine.load_fabric_database(&tenant, &database) {
+            Ok(Some(fabric)) => fabric,
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": "fabric database not found"})),
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": error.to_string()})),
+                )
+                    .into_response();
+            }
+        };
+        let (search_plans, hydration_coordinators, ranked_transport, hydration_transport) =
+            match build_fabric_ranked_search_context(&engine, &fabric, hydration_consistency) {
+                Ok(transports) => transports,
+                Err(error) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": error})),
+                    )
+                        .into_response();
+                }
+            };
+        (
+            fabric,
+            search_plans,
+            hydration_coordinators,
+            ranked_transport,
+            hydration_transport,
+        )
+    };
+    let collected = match collect_planned_fabric_ranked_batches(
+        search_plans.clone(),
+        request.query,
+        ranked_transport,
+    )
+    .await
+    {
+        Ok(collected) => collected,
+        Err(error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+    };
+    let merged = merge_rrf_search_batches(collected.batches.clone(), request.config);
+    let hydration_requests = match build_fabric_hydration_requests(&merged, &hydration_coordinators)
+    {
+        Ok(requests) => requests,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error})),
+            )
+                .into_response();
+        }
+    };
+    let hydration =
+        match collect_fabric_hydration_records(hydration_requests, hydration_transport).await {
+            Ok(hydration) => hydration,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({"error": error.to_string()})),
+                )
+                    .into_response();
+            }
+        };
+    let mut execution = execute_planned_fabric_ranked_search(
+        search_plans,
+        collected.batches,
+        hydration.records,
+        request.config,
+        request.policy,
+    );
+    execution.responded_nodes = collected.responded_nodes;
+    execution.failed_nodes = collected.failed_nodes;
+    for node_id in hydration.responded_nodes {
+        if !execution
+            .responded_nodes
+            .iter()
+            .any(|existing| existing == &node_id)
+        {
+            execution.responded_nodes.push(node_id);
+        }
+    }
+    for node_id in hydration.failed_nodes {
+        if !execution
+            .failed_nodes
+            .iter()
+            .any(|existing| existing == &node_id)
+        {
+            execution.failed_nodes.push(node_id);
+        }
+    }
+    Json(execution).into_response()
+}
+
 fn database_status_name(status: DatabaseStatus) -> &'static str {
     match status {
         DatabaseStatus::Online => "online",
@@ -1234,34 +1775,47 @@ fn execute_http_cypher(
 
 // ─── Retention policy handlers ────────────────────────────────────────────────
 
-async fn list_policies(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn list_policies(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, false) {
+        return status.into_response();
+    }
     let mgr = state.retention.read();
     let policies: Vec<&Policy> = mgr.list_policies();
-    Json(serde_json::json!({ "policies": policies }))
+    Json(serde_json::json!({ "policies": policies })).into_response()
 }
 
 async fn create_policy(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<Policy>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, true) {
+        return status.into_response();
+    }
     let mut mgr = state.retention.write();
     match mgr.add_policy(body) {
         Ok(()) => (
             StatusCode::CREATED,
             Json(serde_json::json!({"status": "created"})),
-        ),
+        )
+            .into_response(),
         Err(RetentionError::AlreadyExists(id)) => (
             StatusCode::CONFLICT,
             Json(serde_json::json!({"error": format!("policy already exists: {id}")})),
-        ),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        )
+            .into_response(),
     }
 }
 
-async fn load_default_policies(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn load_default_policies(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, true) {
+        return status.into_response();
+    }
     let defaults = copperdb_retention::default_policies();
     let mut mgr = state.retention.write();
     let mut loaded = 0usize;
@@ -1270,50 +1824,66 @@ async fn load_default_policies(State(state): State<Arc<AppState>>) -> impl IntoR
             loaded += 1;
         }
     }
-    Json(serde_json::json!({ "loaded": loaded }))
+    Json(serde_json::json!({ "loaded": loaded })).into_response()
 }
 
 async fn get_policy(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+    headers: HeaderMap,
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, false) {
+        return status.into_response();
+    }
     let mgr = state.retention.read();
     match mgr.get_policy(&id) {
-        Some(p) => (StatusCode::OK, Json(serde_json::json!(p))),
+        Some(p) => (StatusCode::OK, Json(serde_json::json!(p))).into_response(),
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": format!("policy not found: {id}")})),
-        ),
+        )
+            .into_response(),
     }
 }
 
 async fn update_policy(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(mut body): Json<Policy>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, true) {
+        return status.into_response();
+    }
     body.id = id;
     let mut mgr = state.retention.write();
     match mgr.update_policy(body) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "updated"})),
-        ),
+        )
+            .into_response(),
         Err(RetentionError::PolicyNotFound(id)) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": format!("policy not found: {id}")})),
-        ),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        )
+            .into_response(),
     }
 }
 
 async fn delete_policy(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+    headers: HeaderMap,
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, true) {
+        return status.into_response();
+    }
     let mut mgr = state.retention.write();
     match mgr.delete_policy(&id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -1330,30 +1900,42 @@ struct PlaceHoldRequest {
     reason: String,
 }
 
-async fn list_holds(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn list_holds(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, false) {
+        return status.into_response();
+    }
     let mgr = state.retention.read();
     let holds: Vec<&LegalHold> = mgr.list_legal_holds();
-    Json(serde_json::json!({ "holds": holds }))
+    Json(serde_json::json!({ "holds": holds })).into_response()
 }
 
 async fn place_hold(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<PlaceHoldRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, true) {
+        return status.into_response();
+    }
     let mut mgr = state.retention.write();
     match mgr.place_legal_hold(body.subject_id, body.reason) {
-        Ok(hold) => (StatusCode::CREATED, Json(serde_json::json!(hold))),
+        Ok(hold) => (StatusCode::CREATED, Json(serde_json::json!(hold))).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        )
+            .into_response(),
     }
 }
 
 async fn release_hold(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+    headers: HeaderMap,
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, true) {
+        return status.into_response();
+    }
     let mut mgr = state.retention.write();
     match mgr.release_legal_hold(&id) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -1370,36 +1952,49 @@ struct CreateErasureRequest {
     subject_email: Option<String>,
 }
 
-async fn list_erasures(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn list_erasures(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, false) {
+        return status.into_response();
+    }
     let mgr = state.retention.read();
     let erasures: Vec<&ErasureRequest> = mgr.list_erasure_requests();
-    Json(serde_json::json!({ "erasures": erasures }))
+    Json(serde_json::json!({ "erasures": erasures })).into_response()
 }
 
 async fn create_erasure(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<CreateErasureRequest>,
-) -> impl IntoResponse {
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, true) {
+        return status.into_response();
+    }
     let mut mgr = state.retention.write();
     match mgr.create_erasure_request(body.subject_id, body.subject_email) {
-        Ok(req) => (StatusCode::CREATED, Json(serde_json::json!(req))),
+        Ok(req) => (StatusCode::CREATED, Json(serde_json::json!(req))).into_response(),
         Err(RetentionError::ActiveLegalHold(sid)) => (
             StatusCode::CONFLICT,
             Json(
                 serde_json::json!({"error": format!("active legal hold prevents erasure for subject: {sid}")}),
             ),
-        ),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        )
+            .into_response(),
     }
 }
 
 async fn process_erasure(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+    headers: HeaderMap,
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, true) {
+        return status.into_response();
+    }
     let mut mgr = state.retention.write();
     match mgr.process_erasure(&id) {
         Ok(()) => Json(serde_json::json!({"status": "completed"})).into_response(),
@@ -1410,18 +2005,25 @@ async fn process_erasure(
 
 // ─── Sweep / status handlers ──────────────────────────────────────────────────
 
-async fn retention_sweep(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn retention_sweep(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, true) {
+        return status.into_response();
+    }
     let mgr = state.retention.read();
     match mgr.sweep(RetentionSweepConfig::default()) {
-        Ok(report) => (StatusCode::OK, Json(serde_json::json!(report))),
+        Ok(report) => (StatusCode::OK, Json(serde_json::json!(report))).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        )
+            .into_response(),
     }
 }
 
-async fn retention_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn retention_status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, false) {
+        return status.into_response();
+    }
     let mgr = state.retention.read();
     let policy_count = mgr.list_policies().len();
     let hold_count = mgr.list_legal_holds().len();
@@ -1431,6 +2033,7 @@ async fn retention_status(State(state): State<Arc<AppState>>) -> impl IntoRespon
         "active_holds": hold_count,
         "pending_erasures": erasure_count,
     }))
+    .into_response()
 }
 
 #[cfg(test)]
@@ -1738,6 +2341,1146 @@ mod tests {
         let decoded: CypherResponse = serde_json::from_slice(&body).unwrap();
         assert!(decoded.errors.is_empty(), "{:?}", decoded.errors);
         assert!(decoded.stats.is_some());
+    }
+
+    #[tokio::test]
+    async fn fabric_admin_api_registers_lists_and_plans_database() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use copperdb_topology::{
+            FabricPartitionPolicy, FabricShard, MeshPeer, NodeCapability, PlacementRecord,
+        };
+        use tower::ServiceExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_path = temp_dir
+            .path()
+            .join("copper")
+            .to_string_lossy()
+            .into_owned();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("copper", storage_path.clone()).unwrap();
+        let mut state = AppState {
+            db_name: "copper".into(),
+            db_manager,
+            ..Default::default()
+        };
+        state.auth.security_enabled = false;
+
+        let primary = PlacementKey::new("default", "copper", "primary");
+        let vector = PlacementKey::new("default", "copper", "vector-00");
+        {
+            let engine = GraphEngine::open(EngineConfig {
+                data_dir: storage_path,
+                default_database: "copper".into(),
+                ..Default::default()
+            })
+            .unwrap();
+            for node_id in [
+                "primary-a",
+                "primary-b",
+                "primary-search",
+                "vector-a",
+                "vector-b",
+                "vector-search",
+            ] {
+                engine
+                    .storage()
+                    .register_topology_peer(
+                        &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                            .with_capability(NodeCapability::Storage)
+                            .with_capability(NodeCapability::Coordinator)
+                            .with_capability(NodeCapability::Search),
+                    )
+                    .unwrap();
+            }
+            engine
+                .storage()
+                .register_topology_placement(&PlacementRecord {
+                    key: primary.clone(),
+                    primary_node: "primary-a".into(),
+                    replica_nodes: vec!["primary-b".into()],
+                    search_nodes: vec!["primary-search".into()],
+                    hyperscaler_profile: None,
+                    min_write_replicas: 1,
+                    search_fanout: 1,
+                })
+                .unwrap();
+            engine
+                .storage()
+                .register_topology_placement(&PlacementRecord {
+                    key: vector.clone(),
+                    primary_node: "vector-a".into(),
+                    replica_nodes: vec!["vector-b".into()],
+                    search_nodes: vec!["vector-search".into()],
+                    hyperscaler_profile: None,
+                    min_write_replicas: 1,
+                    search_fanout: 1,
+                })
+                .unwrap();
+        }
+
+        let fabric = FabricDatabase {
+            tenant: "default".into(),
+            database: "copper".into(),
+            default_shard: "primary".into(),
+            partition_policy: FabricPartitionPolicy::LabelAware,
+            shards: vec![
+                FabricShard {
+                    placement: primary,
+                    kind: copperdb_topology::FabricShardKind::Graph,
+                    labels: vec!["Person".into()],
+                    relationship_types: vec![],
+                    collections: vec![],
+                },
+                FabricShard {
+                    placement: vector,
+                    kind: copperdb_topology::FabricShardKind::Vector,
+                    labels: vec!["Memory".into()],
+                    relationship_types: vec![],
+                    collections: vec!["memories".into()],
+                },
+            ],
+        };
+        let app = build_router(Arc::new(state));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/fabric/databases")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_string(&fabric).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/fabric/databases")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let decoded: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(decoded["databases"].as_array().unwrap().len(), 1);
+        assert_eq!(decoded["databases"][0]["database"], "copper");
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/fabric/databases/default/copper/plans")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let decoded: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(decoded["readPlans"].as_array().unwrap().len(), 2);
+        assert_eq!(decoded["searchPlans"].as_array().unwrap().len(), 2);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/fabric/databases/default/copper/plans?scope=label&value=Person&consistency=one")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let decoded: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(decoded["readPlans"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            decoded["readPlan"]["shards"][0]["shard"]["placement"]["shard"],
+            "primary"
+        );
+    }
+
+    #[tokio::test]
+    async fn fabric_admin_api_executes_ranked_search_over_grpc_transports() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use copperdb_nornicgrpc::{
+            GrpcError, NornicReplicaService, RemoteHydrationClient, RemoteHydrationRequest,
+            RemoteRankedSearchClient, RemoteRankedSearchRequest, RemoteReplicaApplyRequest,
+            RemoteReplicaClient, RemoteReplicaReadRequest,
+        };
+        use copperdb_search::{
+            FabricRankedSearchExecution, RrfHydrationRecord, RrfSearchBatch, RrfSearchHit,
+        };
+        use copperdb_topology::{
+            FabricGlobalId, FabricPartitionPolicy, FabricShard, FabricShardKind, MeshPeer,
+            NodeCapability, PlacementRecord,
+        };
+        use std::sync::Arc;
+        use tonic::transport::Server;
+        use tower::ServiceExt;
+
+        struct NoopReplicaClient;
+
+        #[async_trait::async_trait]
+        impl RemoteReplicaClient for NoopReplicaClient {
+            async fn apply_replica(
+                &self,
+                _request: RemoteReplicaApplyRequest,
+            ) -> Result<(), GrpcError> {
+                Ok(())
+            }
+
+            async fn read_replica(
+                &self,
+                _request: RemoteReplicaReadRequest,
+            ) -> Result<Option<Vec<u8>>, GrpcError> {
+                Ok(None)
+            }
+        }
+
+        struct FixedRankedSearchClient;
+
+        #[async_trait::async_trait]
+        impl RemoteRankedSearchClient for FixedRankedSearchClient {
+            async fn search_ranked(
+                &self,
+                request: RemoteRankedSearchRequest,
+            ) -> Result<RrfSearchBatch, GrpcError> {
+                let primary = PlacementKey::new("default", "copper", "primary");
+                let person = PlacementKey::new("default", "copper", "person-00");
+                match request.target_node.as_str() {
+                    "search-a" => Ok(RrfSearchBatch {
+                        shard: primary.clone(),
+                        source: "lexical".into(),
+                        hits: vec![RrfSearchHit {
+                            global_id: FabricGlobalId::new(primary.clone(), "node", "a"),
+                            rank: 1,
+                            score: 0.8,
+                            source: "lexical".into(),
+                            shard: primary,
+                            label: "Person".into(),
+                            snippet: None,
+                        }],
+                    }),
+                    "search-b" => Ok(RrfSearchBatch {
+                        shard: person.clone(),
+                        source: "vector".into(),
+                        hits: vec![RrfSearchHit {
+                            global_id: FabricGlobalId::new(
+                                PlacementKey::new("default", "copper", "primary"),
+                                "node",
+                                "a",
+                            ),
+                            rank: 1,
+                            score: 0.9,
+                            source: "vector".into(),
+                            shard: person,
+                            label: "Person".into(),
+                            snippet: Some("fresh".into()),
+                        }],
+                    }),
+                    other => Err(GrpcError::Transport(format!("no ranked batch for {other}"))),
+                }
+            }
+        }
+
+        struct FixedHydrationClient;
+
+        #[async_trait::async_trait]
+        impl RemoteHydrationClient for FixedHydrationClient {
+            async fn hydrate_entities(
+                &self,
+                request: RemoteHydrationRequest,
+            ) -> Result<Vec<RrfHydrationRecord>, GrpcError> {
+                match request.target_node.as_str() {
+                    "search-a" => Ok(vec![RrfHydrationRecord {
+                        global_id: FabricGlobalId::new(
+                            PlacementKey::new("default", "copper", "primary"),
+                            "node",
+                            "a",
+                        ),
+                        labels: vec!["Person".into()],
+                        entity: serde_json::json!({"id": "a", "name": "Alice", "secret": "internal"}),
+                    }]),
+                    _ => Ok(Vec::new()),
+                }
+            }
+        }
+
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let grpc_addr = reserved.local_addr().unwrap();
+        drop(reserved);
+        let service = NornicReplicaService::new(Arc::new(NoopReplicaClient))
+            .with_ranked_search_handler(Arc::new(FixedRankedSearchClient))
+            .with_hydration_handler(Arc::new(FixedHydrationClient));
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(service.into_server())
+                .serve(grpc_addr)
+                .await
+                .unwrap();
+        });
+        tokio::task::yield_now().await;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_path = temp_dir
+            .path()
+            .join("copper")
+            .to_string_lossy()
+            .into_owned();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("copper", storage_path.clone()).unwrap();
+        let mut state = AppState {
+            db_name: "copper".into(),
+            db_manager,
+            ..Default::default()
+        };
+        state.auth.security_enabled = false;
+
+        {
+            let engine = GraphEngine::open(EngineConfig {
+                data_dir: storage_path,
+                default_database: "copper".into(),
+                ..Default::default()
+            })
+            .unwrap();
+            for node_id in ["search-a", "search-b", "search-c"] {
+                engine
+                    .storage()
+                    .register_topology_peer(
+                        &MeshPeer::new(node_id, grpc_addr.to_string())
+                            .with_capability(NodeCapability::Search)
+                            .with_capability(NodeCapability::Storage)
+                            .with_capability(NodeCapability::Coordinator),
+                    )
+                    .unwrap();
+            }
+            for (shard, nodes) in [
+                ("primary", vec!["search-a", "search-c"]),
+                ("person-00", vec!["search-b"]),
+            ] {
+                engine
+                    .storage()
+                    .register_topology_placement(&PlacementRecord {
+                        key: PlacementKey::new("default", "copper", shard),
+                        primary_node: nodes[0].into(),
+                        replica_nodes: vec![],
+                        search_nodes: nodes.into_iter().map(str::to_string).collect(),
+                        hyperscaler_profile: None,
+                        min_write_replicas: 0,
+                        search_fanout: 2,
+                    })
+                    .unwrap();
+            }
+        }
+
+        let fabric = FabricDatabase {
+            tenant: "default".into(),
+            database: "copper".into(),
+            default_shard: "primary".into(),
+            partition_policy: FabricPartitionPolicy::HashByKey { buckets: 2 },
+            shards: vec![
+                FabricShard::mixed(PlacementKey::new("default", "copper", "primary")),
+                FabricShard {
+                    placement: PlacementKey::new("default", "copper", "person-00"),
+                    kind: FabricShardKind::Graph,
+                    labels: vec!["Person".into()],
+                    relationship_types: vec![],
+                    collections: vec![],
+                },
+            ],
+        };
+
+        let app = build_router(Arc::new(state));
+        let register = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/fabric/databases")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_string(&fabric).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(register.status(), StatusCode::CREATED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/fabric/databases/default/copper/ranked-search")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": SearchQuery::FullText {
+                                query: "alice".into(),
+                                fields: vec!["body".into()],
+                                limit: 10,
+                            },
+                            "config": RrfConfig::new(60.0, 10),
+                            "policy": RrfSearchPolicy {
+                                allowed_labels: vec!["Person".into()],
+                                denied_labels: Vec::new(),
+                                denied_sources: Vec::new(),
+                                require_hydration: true,
+                                redact_fields: vec!["secret".into()],
+                            },
+                            "hydration_consistency": "one"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let decoded: FabricRankedSearchExecution = serde_json::from_slice(&body).unwrap();
+        assert_eq!(decoded.responded_nodes, vec!["search-a", "search-b"]);
+        assert_eq!(decoded.failed_nodes, vec!["search-c"]);
+        assert_eq!(decoded.hydrated.output_hits, 1);
+        assert_eq!(
+            decoded.hydrated.results[0].entity.as_ref().unwrap()["name"],
+            "Alice"
+        );
+        assert!(decoded.hydrated.results[0]
+            .entity
+            .as_ref()
+            .unwrap()
+            .get("secret")
+            .is_none());
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn fabric_admin_api_requires_auth_when_security_enabled() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let auth_path = unique_auth_path();
+        let mut state = AppState::default();
+        state.auth = AuthState::from_storage_path(
+            auth_path,
+            true,
+            true,
+            "admin".into(),
+            "password".into(),
+            "test-secret".into(),
+        )
+        .unwrap();
+        let app = build_router(Arc::new(state));
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/fabric/databases")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::UNAUTHORIZED);
+
+        let plan = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/fabric/databases/default/copper/plans")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(plan.status(), StatusCode::UNAUTHORIZED);
+
+        let ranked = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/fabric/databases/default/copper/ranked-search")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": SearchQuery::FullText {
+                                query: "alice".into(),
+                                fields: vec!["body".into()],
+                                limit: 10,
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ranked.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn fabric_admin_api_filters_by_database_access_and_blocks_writes_for_viewers() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use copperdb_topology::{
+            FabricPartitionPolicy, FabricShard, MeshPeer, NodeCapability, PlacementRecord,
+        };
+        use tower::ServiceExt;
+
+        let auth_path = unique_auth_path();
+        let mut state = AppState::default();
+        state.auth = AuthState::from_storage_path(
+            auth_path,
+            true,
+            true,
+            "admin".into(),
+            "password".into(),
+            "test-secret".into(),
+        )
+        .unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let copper_path = temp_dir
+            .path()
+            .join("copper")
+            .to_string_lossy()
+            .into_owned();
+        let secret_path = temp_dir
+            .path()
+            .join("secret")
+            .to_string_lossy()
+            .into_owned();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("copper", copper_path.clone()).unwrap();
+        db_manager.create("secret", secret_path.clone()).unwrap();
+        state.db_name = "copper".into();
+        state.db_manager = db_manager;
+
+        {
+            let auth = state.auth.open_authenticator().unwrap();
+            auth.allowlist
+                .save_role_databases(copperdb_auth::ROLE_VIEWER, vec!["copper".into()])
+                .unwrap();
+            auth.privileges
+                .save_privilege(copperdb_auth::ROLE_VIEWER, "copper", true, false)
+                .unwrap();
+            auth.privileges
+                .save_privilege(copperdb_auth::ROLE_VIEWER, "secret", false, false)
+                .unwrap();
+            auth.create_user(
+                "viewer",
+                "password",
+                vec![copperdb_auth::ROLE_VIEWER.into()],
+            )
+            .unwrap();
+        }
+
+        for (database, path) in [("copper", copper_path), ("secret", secret_path)] {
+            let engine = GraphEngine::open(EngineConfig {
+                data_dir: path,
+                default_database: database.into(),
+                ..Default::default()
+            })
+            .unwrap();
+            engine
+                .storage()
+                .register_topology_peer(
+                    &MeshPeer::new(
+                        format!("{database}-search"),
+                        format!("{database}-search.mesh.local:9000"),
+                    )
+                    .with_capability(NodeCapability::Search)
+                    .with_capability(NodeCapability::Storage)
+                    .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+            engine
+                .storage()
+                .register_topology_placement(&PlacementRecord {
+                    key: PlacementKey::new("default", database, "primary"),
+                    primary_node: format!("{database}-search"),
+                    replica_nodes: vec![],
+                    search_nodes: vec![format!("{database}-search")],
+                    hyperscaler_profile: None,
+                    min_write_replicas: 0,
+                    search_fanout: 1,
+                })
+                .unwrap();
+            engine
+                .register_fabric_database(&FabricDatabase {
+                    tenant: "default".into(),
+                    database: database.into(),
+                    default_shard: "primary".into(),
+                    partition_policy: FabricPartitionPolicy::Manual,
+                    shards: vec![FabricShard::mixed(PlacementKey::new(
+                        "default", database, "primary",
+                    ))],
+                })
+                .unwrap();
+        }
+
+        let viewer_token = state
+            .auth
+            .open_authenticator()
+            .unwrap()
+            .authenticate("viewer", "password")
+            .unwrap()
+            .0
+            .access_token;
+        let app = build_router(Arc::new(state));
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/fabric/databases")
+                    .header(header::AUTHORIZATION, format!("Bearer {viewer_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(list.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let decoded: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(decoded["databases"].as_array().unwrap().len(), 1);
+        assert_eq!(decoded["databases"][0]["database"], "copper");
+
+        let plan_ok = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/fabric/databases/default/copper/plans")
+                    .header(header::AUTHORIZATION, format!("Bearer {viewer_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(plan_ok.status(), StatusCode::OK);
+
+        let plan_denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/fabric/databases/default/secret/plans")
+                    .header(header::AUTHORIZATION, format!("Bearer {viewer_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(plan_denied.status(), StatusCode::FORBIDDEN);
+
+        let register_denied = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/fabric/databases")
+                    .header(header::AUTHORIZATION, format!("Bearer {viewer_token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&FabricDatabase {
+                            tenant: "default".into(),
+                            database: "secret".into(),
+                            default_shard: "primary".into(),
+                            partition_policy: FabricPartitionPolicy::Manual,
+                            shards: vec![FabricShard::mixed(PlacementKey::new(
+                                "default", "secret", "primary",
+                            ))],
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(register_denied.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn fabric_ranked_search_respects_per_database_viewer_access() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use copperdb_nornicgrpc::{
+            GrpcError, NornicReplicaService, RemoteHydrationClient, RemoteHydrationRequest,
+            RemoteRankedSearchClient, RemoteRankedSearchRequest, RemoteReplicaApplyRequest,
+            RemoteReplicaClient, RemoteReplicaReadRequest,
+        };
+        use copperdb_search::{
+            FabricRankedSearchExecution, RrfHydrationRecord, RrfSearchBatch, RrfSearchHit,
+        };
+        use copperdb_topology::{
+            FabricGlobalId, FabricPartitionPolicy, FabricShard, FabricShardKind, MeshPeer,
+            NodeCapability, PlacementRecord,
+        };
+        use tonic::transport::Server;
+        use tower::ServiceExt;
+
+        struct NoopReplicaClient;
+
+        #[async_trait::async_trait]
+        impl RemoteReplicaClient for NoopReplicaClient {
+            async fn apply_replica(
+                &self,
+                _request: RemoteReplicaApplyRequest,
+            ) -> Result<(), GrpcError> {
+                Ok(())
+            }
+
+            async fn read_replica(
+                &self,
+                _request: RemoteReplicaReadRequest,
+            ) -> Result<Option<Vec<u8>>, GrpcError> {
+                Ok(None)
+            }
+        }
+
+        struct FixedRankedSearchClient;
+
+        #[async_trait::async_trait]
+        impl RemoteRankedSearchClient for FixedRankedSearchClient {
+            async fn search_ranked(
+                &self,
+                request: RemoteRankedSearchRequest,
+            ) -> Result<RrfSearchBatch, GrpcError> {
+                let primary = PlacementKey::new("default", "copper", "primary");
+                let person = PlacementKey::new("default", "copper", "person-00");
+                match request.target_node.as_str() {
+                    "search-a" => Ok(RrfSearchBatch {
+                        shard: primary.clone(),
+                        source: "lexical".into(),
+                        hits: vec![RrfSearchHit {
+                            global_id: FabricGlobalId::new(primary.clone(), "node", "a"),
+                            rank: 1,
+                            score: 0.8,
+                            source: "lexical".into(),
+                            shard: primary,
+                            label: "Person".into(),
+                            snippet: None,
+                        }],
+                    }),
+                    "search-b" => Ok(RrfSearchBatch {
+                        shard: person.clone(),
+                        source: "vector".into(),
+                        hits: vec![RrfSearchHit {
+                            global_id: FabricGlobalId::new(
+                                PlacementKey::new("default", "copper", "primary"),
+                                "node",
+                                "a",
+                            ),
+                            rank: 1,
+                            score: 0.9,
+                            source: "vector".into(),
+                            shard: person,
+                            label: "Person".into(),
+                            snippet: Some("fresh".into()),
+                        }],
+                    }),
+                    other => Err(GrpcError::Transport(format!("no ranked batch for {other}"))),
+                }
+            }
+        }
+
+        struct FixedHydrationClient;
+
+        #[async_trait::async_trait]
+        impl RemoteHydrationClient for FixedHydrationClient {
+            async fn hydrate_entities(
+                &self,
+                request: RemoteHydrationRequest,
+            ) -> Result<Vec<RrfHydrationRecord>, GrpcError> {
+                match request.target_node.as_str() {
+                    "search-a" => Ok(vec![RrfHydrationRecord {
+                        global_id: FabricGlobalId::new(
+                            PlacementKey::new("default", "copper", "primary"),
+                            "node",
+                            "a",
+                        ),
+                        labels: vec!["Person".into()],
+                        entity: serde_json::json!({"id": "a", "name": "Alice", "secret": "internal"}),
+                    }]),
+                    _ => Ok(Vec::new()),
+                }
+            }
+        }
+
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let grpc_addr = reserved.local_addr().unwrap();
+        drop(reserved);
+        let service = NornicReplicaService::new(Arc::new(NoopReplicaClient))
+            .with_ranked_search_handler(Arc::new(FixedRankedSearchClient))
+            .with_hydration_handler(Arc::new(FixedHydrationClient));
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(service.into_server())
+                .serve(grpc_addr)
+                .await
+                .unwrap();
+        });
+        tokio::task::yield_now().await;
+
+        let auth_path = unique_auth_path();
+        let mut state = AppState::default();
+        state.auth = AuthState::from_storage_path(
+            auth_path,
+            true,
+            true,
+            "admin".into(),
+            "password".into(),
+            "test-secret".into(),
+        )
+        .unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let copper_path = temp_dir
+            .path()
+            .join("copper")
+            .to_string_lossy()
+            .into_owned();
+        let secret_path = temp_dir
+            .path()
+            .join("secret")
+            .to_string_lossy()
+            .into_owned();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("copper", copper_path.clone()).unwrap();
+        db_manager.create("secret", secret_path.clone()).unwrap();
+        state.db_name = "copper".into();
+        state.db_manager = db_manager;
+
+        {
+            let auth = state.auth.open_authenticator().unwrap();
+            auth.allowlist
+                .save_role_databases(copperdb_auth::ROLE_VIEWER, vec!["copper".into()])
+                .unwrap();
+            auth.privileges
+                .save_privilege(copperdb_auth::ROLE_VIEWER, "copper", true, false)
+                .unwrap();
+            auth.privileges
+                .save_privilege(copperdb_auth::ROLE_VIEWER, "secret", false, false)
+                .unwrap();
+            auth.create_user(
+                "viewer",
+                "password",
+                vec![copperdb_auth::ROLE_VIEWER.into()],
+            )
+            .unwrap();
+        }
+
+        for (database, path, shards) in [
+            (
+                "copper",
+                copper_path,
+                vec![
+                    ("primary", vec!["search-a", "search-c"]),
+                    ("person-00", vec!["search-b"]),
+                ],
+            ),
+            ("secret", secret_path, vec![("primary", vec!["search-a"])]),
+        ] {
+            let engine = GraphEngine::open(EngineConfig {
+                data_dir: path,
+                default_database: database.into(),
+                ..Default::default()
+            })
+            .unwrap();
+            for node_id in ["search-a", "search-b", "search-c"] {
+                engine
+                    .storage()
+                    .register_topology_peer(
+                        &MeshPeer::new(node_id, grpc_addr.to_string())
+                            .with_capability(NodeCapability::Search)
+                            .with_capability(NodeCapability::Storage)
+                            .with_capability(NodeCapability::Coordinator),
+                    )
+                    .unwrap();
+            }
+            for (shard, nodes) in shards {
+                engine
+                    .storage()
+                    .register_topology_placement(&PlacementRecord {
+                        key: PlacementKey::new("default", database, shard),
+                        primary_node: nodes[0].into(),
+                        replica_nodes: vec![],
+                        search_nodes: nodes.into_iter().map(str::to_string).collect(),
+                        hyperscaler_profile: None,
+                        min_write_replicas: 0,
+                        search_fanout: 2,
+                    })
+                    .unwrap();
+            }
+            let shards = if database == "copper" {
+                vec![
+                    FabricShard::mixed(PlacementKey::new("default", database, "primary")),
+                    FabricShard {
+                        placement: PlacementKey::new("default", database, "person-00"),
+                        kind: FabricShardKind::Graph,
+                        labels: vec!["Person".into()],
+                        relationship_types: vec![],
+                        collections: vec![],
+                    },
+                ]
+            } else {
+                vec![FabricShard::mixed(PlacementKey::new(
+                    "default", database, "primary",
+                ))]
+            };
+            engine
+                .register_fabric_database(&FabricDatabase {
+                    tenant: "default".into(),
+                    database: database.into(),
+                    default_shard: "primary".into(),
+                    partition_policy: FabricPartitionPolicy::HashByKey { buckets: 2 },
+                    shards,
+                })
+                .unwrap();
+        }
+
+        let viewer_token = state
+            .auth
+            .open_authenticator()
+            .unwrap()
+            .authenticate("viewer", "password")
+            .unwrap()
+            .0
+            .access_token;
+        let app = build_router(Arc::new(state));
+
+        let allowed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/fabric/databases/default/copper/ranked-search")
+                    .header(header::AUTHORIZATION, format!("Bearer {viewer_token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": SearchQuery::FullText {
+                                query: "alice".into(),
+                                fields: vec!["body".into()],
+                                limit: 10,
+                            },
+                            "config": RrfConfig::new(60.0, 10),
+                            "policy": RrfSearchPolicy {
+                                allowed_labels: vec!["Person".into()],
+                                denied_labels: Vec::new(),
+                                denied_sources: Vec::new(),
+                                require_hydration: true,
+                                redact_fields: vec!["secret".into()],
+                            },
+                            "hydration_consistency": "one"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(allowed.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let decoded: FabricRankedSearchExecution = serde_json::from_slice(&body).unwrap();
+        assert_eq!(decoded.hydrated.output_hits, 1);
+        assert_eq!(
+            decoded.hydrated.results[0].entity.as_ref().unwrap()["name"],
+            "Alice"
+        );
+
+        let denied = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/fabric/databases/default/secret/ranked-search")
+                    .header(header::AUTHORIZATION, format!("Bearer {viewer_token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": SearchQuery::FullText {
+                                query: "alice".into(),
+                                fields: vec!["body".into()],
+                                limit: 10,
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn retention_admin_routes_require_auth_when_security_enabled() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let auth_path = unique_auth_path();
+        let mut state = AppState::default();
+        state.auth = AuthState::from_storage_path(
+            auth_path,
+            true,
+            true,
+            "admin".into(),
+            "password".into(),
+            "test-secret".into(),
+        )
+        .unwrap();
+        let app = build_router(Arc::new(state));
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/retention/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::UNAUTHORIZED);
+
+        let create = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/retention/policies")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "id": "policy-1",
+                            "label": "Person",
+                            "max_age_seconds": 86400,
+                            "cascade_delete": false,
+                            "description": null,
+                            "data_category": null,
+                            "enabled": true
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn retention_admin_routes_allow_viewer_reads_and_deny_writes() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let auth_path = unique_auth_path();
+        let mut state = AppState::default();
+        state.auth = AuthState::from_storage_path(
+            auth_path,
+            true,
+            true,
+            "admin".into(),
+            "password".into(),
+            "test-secret".into(),
+        )
+        .unwrap();
+        state
+            .auth
+            .open_authenticator()
+            .unwrap()
+            .create_user(
+                "viewer",
+                "password",
+                vec![copperdb_auth::ROLE_VIEWER.into()],
+            )
+            .unwrap();
+        let token = state
+            .auth
+            .open_authenticator()
+            .unwrap()
+            .authenticate("viewer", "password")
+            .unwrap()
+            .0
+            .access_token;
+        let app = build_router(Arc::new(state));
+
+        let status = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/retention/status")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status.status(), StatusCode::OK);
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/retention/policies")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list.status(), StatusCode::OK);
+
+        let create = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/retention/policies")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "id": "policy-1",
+                            "label": "Person",
+                            "max_age_seconds": 86400,
+                            "cascade_delete": false,
+                            "description": null,
+                            "data_category": null,
+                            "enabled": true
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::FORBIDDEN);
     }
 
     #[test]

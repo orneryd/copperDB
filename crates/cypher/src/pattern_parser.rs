@@ -1,11 +1,9 @@
-use std::collections::HashMap;
-
 use crate::{
     parse_context::ParseContext, parser_support::is_keyword, CypherError, EdgeDirection,
-    EdgePattern, Expression, NodePattern, Pattern,
+    EdgePattern, NodePattern, Pattern, PropertyEntry,
 };
 
-impl ParseContext {
+impl<'a> ParseContext<'a> {
     pub(crate) fn parse_pattern(&mut self) -> Result<Pattern, CypherError> {
         let mut nodes: Vec<NodePattern> = Vec::new();
         let mut edges: Vec<EdgePattern> = Vec::new();
@@ -47,7 +45,7 @@ impl ParseContext {
     fn parse_node_inner(&mut self) -> Result<NodePattern, CypherError> {
         let mut variable: Option<String> = None;
         let mut labels: Vec<String> = Vec::new();
-        let mut properties: HashMap<String, Expression> = HashMap::new();
+        let mut properties: Vec<PropertyEntry> = Vec::new();
 
         if let Some(t) = self.peek() {
             if t != ")" && t != ":" && t != "{" && !is_keyword(t) {
@@ -128,7 +126,7 @@ impl ParseContext {
     fn parse_edge_inner(&mut self) -> Result<EdgePattern, CypherError> {
         let mut variable: Option<String> = None;
         let mut rel_type: Option<String> = None;
-        let mut properties: HashMap<String, Expression> = HashMap::new();
+        let mut properties: Vec<PropertyEntry> = Vec::new();
         let mut min_hops: Option<u32> = None;
         let mut max_hops: Option<u32> = None;
 
@@ -191,18 +189,18 @@ impl ParseContext {
         })
     }
 
-    fn parse_properties_map(&mut self) -> Result<HashMap<String, Expression>, CypherError> {
-        let mut map = HashMap::new();
+    fn parse_properties_map(&mut self) -> Result<Vec<PropertyEntry>, CypherError> {
+        let mut entries = Vec::new();
         while self.peek() != Some("}") && self.peek().is_some() {
             let key = self.advance_identifier()?;
             self.expect(":")?;
-            let val = self.parse_expression()?;
-            map.insert(key, val);
+            let val = self.parse_expression_item(&[",", "}"])?;
+            entries.push(PropertyEntry { key, value: val });
             if self.peek() == Some(",") {
                 self.advance();
             }
         }
         self.expect("}")?;
-        Ok(map)
+        Ok(entries)
     }
 }

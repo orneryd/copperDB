@@ -11,72 +11,76 @@ pub(crate) fn trim_quotes(token: &str) -> &str {
 }
 
 pub(crate) fn parse_bool_token(token: &str) -> Option<bool> {
-    match token.to_ascii_uppercase().as_str() {
-        "TRUE" => Some(true),
-        "FALSE" => Some(false),
-        _ => None,
+    if token.eq_ignore_ascii_case("TRUE") {
+        Some(true)
+    } else if token.eq_ignore_ascii_case("FALSE") {
+        Some(false)
+    } else {
+        None
     }
 }
 
 /// Returns `true` if `s` is an openCypher keyword that cannot be a bare variable name.
 pub(crate) fn is_keyword(s: &str) -> bool {
-    matches!(
-        s.to_uppercase().as_str(),
-        "MATCH"
-            | "OPTIONAL"
-            | "CREATE"
-            | "RETURN"
-            | "WHERE"
-            | "SET"
-            | "DELETE"
-            | "DETACH"
-            | "WITH"
-            | "MERGE"
-            | "UNWIND"
-            | "ORDER"
-            | "BY"
-            | "LIMIT"
-            | "SKIP"
-            | "AS"
-            | "AND"
-            | "OR"
-            | "NOT"
-            | "NULL"
-            | "TRUE"
-            | "FALSE"
-            | "IS"
-            | "IN"
-            | "DISTINCT"
-            | "ASC"
-            | "DESC"
-            | "ASCENDING"
-            | "DESCENDING"
-            | "CONTAINS"
-            | "STARTS"
-            | "ENDS"
-            | "DROP"
-            | "SHOW"
-            | "CONSTRAINT"
-            | "CONSTRAINTS"
-            | "INDEX"
-            | "INDEXES"
-            | "ALTER"
-            | "DECAY"
-            | "PROFILE"
-            | "PROFILES"
-            | "PROMOTION"
-            | "POLICY"
-            | "POLICIES"
-            | "FOR"
-            | "APPLY"
-            | "REQUIRE"
-            | "UNIQUE"
-            | "EXISTS"
-            | "ON"
-            | "OPTIONS"
-            | "ENABLED"
-            | "WHEN"
-    )
+    [
+        "MATCH",
+        "OPTIONAL",
+        "CREATE",
+        "RETURN",
+        "WHERE",
+        "SET",
+        "DELETE",
+        "DETACH",
+        "WITH",
+        "MERGE",
+        "UNWIND",
+        "CALL",
+        "ORDER",
+        "BY",
+        "LIMIT",
+        "SKIP",
+        "AS",
+        "AND",
+        "OR",
+        "NOT",
+        "NULL",
+        "TRUE",
+        "FALSE",
+        "IS",
+        "IN",
+        "DISTINCT",
+        "ASC",
+        "DESC",
+        "ASCENDING",
+        "DESCENDING",
+        "CONTAINS",
+        "STARTS",
+        "ENDS",
+        "DROP",
+        "SHOW",
+        "CONSTRAINT",
+        "CONSTRAINTS",
+        "INDEX",
+        "INDEXES",
+        "ALTER",
+        "DECAY",
+        "PROFILE",
+        "PROFILES",
+        "PROMOTION",
+        "POLICY",
+        "POLICIES",
+        "FOR",
+        "APPLY",
+        "REQUIRE",
+        "UNIQUE",
+        "EXISTS",
+        "ON",
+        "OPTIONS",
+        "ENABLED",
+        "WHEN",
+    ]
+    .iter()
+    .any(|keyword| s.eq_ignore_ascii_case(keyword))
 }
 
 /// Determine the dominant `QueryType` from all parsed clauses.
