@@ -17,13 +17,13 @@
 - [x] MVCC version/head model parity (baseline in `crates/storage::MvccStore`)
 - [x] Snapshot-visible read selectors parity (snapshot timestamp reads in `MvccStore::read`)
 - [ ] MVCC pruning/rebuild lifecycle parity
-- [ ] Snapshot reader registry parity
-- [ ] Lifecycle debt/scheduling controller parity
+- [x] Snapshot reader registry parity (tracked snapshot leases now pin the oldest active reader and pruning respects that floor)
+- [x] Lifecycle debt/scheduling controller baseline parity (lifecycle status now reports active readers, retained-version debt, and safe prune-now behavior)
 
 ### WAL and durability
 - [x] WAL engine wrapper parity (baseline in `crates/storage::WAL`)
-- [ ] WAL segmenting, diagnostics, degraded mode parity
-- [ ] Snapshot + compaction orchestration parity
+- [x] WAL segmenting, diagnostics, degraded mode baseline parity (segment stats, corruption/degraded signaling, and persisted compaction-truncation baseline)
+- [x] Snapshot + compaction orchestration baseline parity (WAL can now compact/truncate through a persisted sequence boundary while preserving replay order and next sequence across reopen)
 - [x] Atomic record/batch replay parity (baseline batch append/replay in `WAL::append_batch/replay_after`)
 
 ### Async engine
@@ -58,7 +58,8 @@
 - [x] `crates/storage`: schema primitives (`SchemaManager`, `Constraint`) including unique/existence/node-key validation and persistent catalog round-trip tests.
 
 ### Still stubbed / not yet parity-complete
-- [ ] `crates/storage`: full MVCC lifecycle debt scheduler + reader registry parity with upstream.
+- [ ] `crates/storage`: full MVCC rebuild/orchestration parity with upstream beyond the reader-aware prune-now + lifecycle-status baseline.
+- [ ] `crates/storage`: fuller WAL durability parity beyond the current persisted compaction/truncation baseline (e.g. richer snapshot install/orchestration and diagnostics wiring).
 - [ ] `crates/storage`: WAL snapshot compaction/truncation orchestration parity with upstream.
 - [ ] `crates/storage`: full schema contract bundles/type constraints/relationship cardinality enforcement parity with upstream.
 - [ ] `crates/replication`, `crates/search`, `crates/fabric`: integration wiring to consume the new MVCC/WAL/schema baselines.

@@ -104,6 +104,30 @@ pub struct MvccSnapshot {
     pub read_ts: u64,
 }
 
+#[derive(Debug)]
+pub struct MvccSnapshotLease {
+    snapshot: MvccSnapshot,
+    active_readers: Arc<Mutex<BTreeMap<u64, u64>>>,
+}
+
+impl MvccSnapshotLease {
+    pub fn snapshot(&self) -> &MvccSnapshot {
+        &self.snapshot
+    }
+}
+
+impl Drop for MvccSnapshotLease {
+    fn drop(&mut self) {
+        let mut readers = self.active_readers.lock();
+        if let Some(count) = readers.get_mut(&self.snapshot.read_ts) {
+            *count -= 1;
+            if *count == 0 {
+                readers.remove(&self.snapshot.read_ts);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MvccVersion {
     pub version: u64,
@@ -116,11 +140,23 @@ pub struct MvccHead {
     pub head: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MvccLifecycleStatus {
+    pub floor: u64,
+    pub head: u64,
+    pub oldest_active_reader: Option<u64>,
+    pub active_reader_count: u64,
+    pub retained_versions: usize,
+    pub prune_debt: usize,
+    pub suggested_prune_floor: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct MvccStore {
     current_version: AtomicU64,
     floor: AtomicU64,
     values: RwLock<BTreeMap<String, Vec<MvccVersion>>>,
+    active_readers: Arc<Mutex<BTreeMap<u64, u64>>>,
 }
 
 impl MvccStore {
@@ -133,6 +169,18 @@ impl MvccStore {
         MvccSnapshot {
             id: read_ts,
             read_ts,
+        }
+    }
+
+    pub fn begin_registered_snapshot(&self) -> MvccSnapshotLease {
+        let snapshot = self.begin_snapshot();
+        let mut readers = self.active_readers.lock();
+        *readers.entry(snapshot.read_ts).or_insert(0) += 1;
+        drop(readers);
+
+        MvccSnapshotLease {
+            snapshot,
+            active_readers: Arc::clone(&self.active_readers),
         }
     }
 
@@ -163,7 +211,12 @@ impl MvccStore {
     }
 
     pub fn prune_versions_older_than(&self, min_version: u64) {
-        self.floor.store(min_version, Ordering::SeqCst);
+        let effective_min_version = self
+            .oldest_active_reader()
+            .map(|oldest_reader| min_version.min(oldest_reader))
+            .unwrap_or(min_version);
+
+        self.floor.store(effective_min_version, Ordering::SeqCst);
         let mut guard = self.values.write();
         for versions in guard.values_mut() {
             if versions.len() <= 1 {
@@ -171,12 +224,91 @@ impl MvccStore {
             }
             let keep_from = versions
                 .iter()
-                .position(|v| v.version >= min_version)
+                .position(|v| v.version >= effective_min_version)
                 .unwrap_or(versions.len().saturating_sub(1));
             if keep_from > 0 {
                 versions.drain(0..keep_from);
             }
         }
+    }
+
+    pub fn trigger_prune_now(&self, retain_last_n_versions: u64) -> usize {
+        let head = self.current_version.load(Ordering::SeqCst);
+        let requested_floor = head.saturating_sub(retain_last_n_versions);
+        let effective_min_version = self.safe_prune_floor(requested_floor);
+
+        self.floor.store(effective_min_version, Ordering::SeqCst);
+        let mut removed_versions = 0usize;
+        let mut guard = self.values.write();
+        for versions in guard.values_mut() {
+            if versions.len() <= 1 {
+                continue;
+            }
+            let keep_from = versions
+                .iter()
+                .position(|v| v.version >= effective_min_version)
+                .unwrap_or(versions.len().saturating_sub(1));
+            if keep_from > 0 {
+                removed_versions += keep_from;
+                versions.drain(0..keep_from);
+            }
+        }
+
+        removed_versions
+    }
+
+    pub fn oldest_active_reader(&self) -> Option<u64> {
+        self.active_readers.lock().keys().next().copied()
+    }
+
+    pub fn lifecycle_status(&self) -> MvccLifecycleStatus {
+        let head = self.head();
+        let oldest_active_reader = self.oldest_active_reader();
+        let active_reader_count = self.active_reader_count();
+        let retained_versions = self.retained_version_count();
+        let suggested_prune_floor = oldest_active_reader.unwrap_or(head.head);
+        let prune_debt = self.compute_prune_debt(suggested_prune_floor);
+
+        MvccLifecycleStatus {
+            floor: head.floor,
+            head: head.head,
+            oldest_active_reader,
+            active_reader_count,
+            retained_versions,
+            prune_debt,
+            suggested_prune_floor,
+        }
+    }
+
+    pub fn active_reader_count(&self) -> u64 {
+        self.active_readers.lock().values().copied().sum()
+    }
+
+    pub fn retained_version_count(&self) -> usize {
+        let guard = self.values.read();
+        guard.values().map(Vec::len).sum()
+    }
+
+    fn safe_prune_floor(&self, requested_floor: u64) -> u64 {
+        self.oldest_active_reader()
+            .map(|oldest_reader| requested_floor.min(oldest_reader))
+            .unwrap_or(requested_floor)
+    }
+
+    fn compute_prune_debt(&self, candidate_floor: u64) -> usize {
+        let guard = self.values.read();
+        guard
+            .values()
+            .map(|versions| {
+                if versions.len() <= 1 {
+                    return 0;
+                }
+                versions
+                    .iter()
+                    .position(|v| v.version >= candidate_floor)
+                    .unwrap_or(versions.len().saturating_sub(1))
+            })
+            .sum()
     }
 
     pub fn head(&self) -> MvccHead {
@@ -242,6 +374,15 @@ pub struct WALStats {
     pub entries: usize,
     pub segments: usize,
     pub degraded: bool,
+    pub compacted_through: u64,
+    pub next_seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct WALDiskState {
+    next_seq: u64,
+    compacted_through: u64,
+    entries: Vec<WALEntry>,
 }
 
 #[derive(Debug)]
@@ -249,6 +390,7 @@ pub struct WAL {
     config: WALConfig,
     path: Option<PathBuf>,
     next_seq: AtomicU64,
+    compacted_through: AtomicU64,
     closed: AtomicBool,
     degraded: AtomicBool,
     entries: Mutex<Vec<WALEntry>>,
@@ -261,6 +403,7 @@ impl WAL {
             config,
             path: None,
             next_seq: AtomicU64::new(0),
+            compacted_through: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             degraded: AtomicBool::new(false),
             entries: Mutex::new(Vec::new()),
@@ -270,22 +413,29 @@ impl WAL {
 
     pub fn open(path: impl AsRef<Path>, config: WALConfig) -> Result<Self, StorageError> {
         let path = path.as_ref().to_path_buf();
-        let entries = if path.exists() {
+        let (entries, next_seq, compacted_through) = if path.exists() {
             let raw = fs::read(&path)?;
             if raw.is_empty() {
-                Vec::new()
+                (Vec::new(), 0, 0)
             } else {
-                rmp_serde::from_slice::<Vec<WALEntry>>(&raw)
-                    .map_err(|_| StorageError::WalMissingOrInvalidTrailer)?
+                match rmp_serde::from_slice::<WALDiskState>(&raw) {
+                    Ok(state) => (state.entries, state.next_seq, state.compacted_through),
+                    Err(_) => {
+                        let entries = rmp_serde::from_slice::<Vec<WALEntry>>(&raw)
+                            .map_err(|_| StorageError::WalMissingOrInvalidTrailer)?;
+                        let next_seq = entries.iter().map(|entry| entry.seq).max().unwrap_or(0);
+                        (entries, next_seq, 0)
+                    }
+                }
             }
         } else {
-            Vec::new()
+            (Vec::new(), 0, 0)
         };
-        let next_seq = entries.iter().map(|entry| entry.seq).max().unwrap_or(0);
         let wal = Self {
             config,
             path: Some(path),
             next_seq: AtomicU64::new(next_seq),
+            compacted_through: AtomicU64::new(compacted_through),
             closed: AtomicBool::new(false),
             degraded: AtomicBool::new(false),
             entries: Mutex::new(entries),
@@ -392,6 +542,39 @@ impl WAL {
         self.closed.store(true, Ordering::SeqCst);
     }
 
+    pub fn compacted_through(&self) -> u64 {
+        self.compacted_through.load(Ordering::SeqCst)
+    }
+
+    pub fn compact_up_to(&self, last_included_seq: u64) -> Result<usize, StorageError> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(StorageError::WalClosed);
+        }
+        if !self.config.enabled {
+            let prior = self.compacted_through.load(Ordering::SeqCst);
+            self.compacted_through
+                .store(prior.max(last_included_seq), Ordering::SeqCst);
+            return Ok(0);
+        }
+
+        let next_seq = self.next_seq.load(Ordering::SeqCst);
+        let effective_seq = last_included_seq.min(next_seq);
+        let prior = self.compacted_through.load(Ordering::SeqCst);
+        self.compacted_through
+            .store(prior.max(effective_seq), Ordering::SeqCst);
+        let removed = {
+            let mut entries = self.entries.lock();
+            let remove_until = entries.partition_point(|entry| entry.seq <= effective_seq);
+            if remove_until > 0 {
+                entries.drain(0..remove_until);
+            }
+            self.persist_entries(&entries)?;
+            self.recompute_segments(entries.len());
+            remove_until
+        };
+        Ok(removed)
+    }
+
     pub fn is_degraded(&self) -> bool {
         self.degraded.load(Ordering::SeqCst)
     }
@@ -401,6 +584,8 @@ impl WAL {
             entries: self.entries.lock().len(),
             segments: self.segments.lock().len(),
             degraded: self.is_degraded(),
+            compacted_through: self.compacted_through(),
+            next_seq: self.next_seq.load(Ordering::SeqCst),
         }
     }
 
@@ -427,7 +612,12 @@ impl WAL {
             fs::create_dir_all(parent)?;
         }
         let tmp_path = path.with_extension("tmp");
-        fs::write(&tmp_path, rmp_serde::to_vec(entries)?)?;
+        let state = WALDiskState {
+            next_seq: self.next_seq.load(Ordering::SeqCst),
+            compacted_through: self.compacted_through(),
+            entries: entries.to_vec(),
+        };
+        fs::write(&tmp_path, rmp_serde::to_vec(&state)?)?;
         fs::rename(tmp_path, path)?;
         Ok(())
     }
@@ -2474,6 +2664,83 @@ mod tests {
     }
 
     #[test]
+    fn mvcc_registered_snapshot_blocks_pruning_past_active_reader() {
+        let mvcc = MvccStore::new();
+
+        let v1 = mvcc.commit_batch(vec![("node:1".to_string(), Some(b"alice".to_vec()))]);
+        assert_eq!(v1, 1);
+        let snapshot1 = mvcc.begin_registered_snapshot();
+
+        let v2 = mvcc.commit_batch(vec![("node:1".to_string(), Some(b"bob".to_vec()))]);
+        assert_eq!(v2, 2);
+        let snapshot2 = mvcc.begin_snapshot();
+
+        mvcc.prune_versions_older_than(2);
+        assert_eq!(mvcc.oldest_active_reader(), Some(1));
+        assert_eq!(mvcc.read(snapshot1.snapshot(), "node:1"), Some(b"alice".to_vec()));
+        assert_eq!(mvcc.read(&snapshot2, "node:1"), Some(b"bob".to_vec()));
+
+        let head = mvcc.head();
+        assert_eq!(head.floor, 1);
+        assert_eq!(head.head, 2);
+
+        drop(snapshot1);
+        mvcc.prune_versions_older_than(2);
+
+        assert_eq!(mvcc.oldest_active_reader(), None);
+        let head = mvcc.head();
+        assert_eq!(head.floor, 2);
+        assert_eq!(head.head, 2);
+        assert_eq!(mvcc.read(&snapshot2, "node:1"), Some(b"bob".to_vec()));
+    }
+
+    #[test]
+    fn mvcc_lifecycle_status_reports_debt_and_reader_pressure() {
+        let mvcc = MvccStore::new();
+        mvcc.commit_batch(vec![("node:1".to_string(), Some(b"v1".to_vec()))]);
+        let reader = mvcc.begin_registered_snapshot();
+        mvcc.commit_batch(vec![("node:1".to_string(), Some(b"v2".to_vec()))]);
+        mvcc.commit_batch(vec![("node:1".to_string(), Some(b"v3".to_vec()))]);
+
+        let status = mvcc.lifecycle_status();
+        assert_eq!(status.floor, 0);
+        assert_eq!(status.head, 3);
+        assert_eq!(status.oldest_active_reader, Some(1));
+        assert_eq!(status.active_reader_count, 1);
+        assert_eq!(status.retained_versions, 3);
+        assert_eq!(status.prune_debt, 0);
+        assert_eq!(status.suggested_prune_floor, 1);
+
+        drop(reader);
+        let status = mvcc.lifecycle_status();
+        assert_eq!(status.oldest_active_reader, None);
+        assert_eq!(status.active_reader_count, 0);
+        assert_eq!(status.suggested_prune_floor, 3);
+        assert_eq!(status.prune_debt, 2);
+    }
+
+    #[test]
+    fn mvcc_trigger_prune_now_respects_active_readers_and_reports_removed_versions() {
+        let mvcc = MvccStore::new();
+        mvcc.commit_batch(vec![("node:1".to_string(), Some(b"v1".to_vec()))]);
+        let reader = mvcc.begin_registered_snapshot();
+        mvcc.commit_batch(vec![("node:1".to_string(), Some(b"v2".to_vec()))]);
+        mvcc.commit_batch(vec![("node:1".to_string(), Some(b"v3".to_vec()))]);
+
+        let removed = mvcc.trigger_prune_now(0);
+        assert_eq!(removed, 0);
+        assert_eq!(mvcc.head().floor, 1);
+        assert_eq!(mvcc.read(reader.snapshot(), "node:1"), Some(b"v1".to_vec()));
+
+        drop(reader);
+        let removed = mvcc.trigger_prune_now(0);
+        assert_eq!(removed, 2);
+        assert_eq!(mvcc.head().floor, 3);
+        let snapshot = mvcc.begin_snapshot();
+        assert_eq!(mvcc.read(&snapshot, "node:1"), Some(b"v3".to_vec()));
+    }
+
+    #[test]
     fn mvcc_head_decode_errors_match_contract() {
         let err = MvccStore::decode_head(&[1, 2, 3]).unwrap_err();
         assert!(matches!(err, StorageError::MvccHeadTruncated(3)));
@@ -2538,6 +2805,51 @@ mod tests {
         assert_eq!(replay.len(), 3);
         assert_eq!(replay[0].key, "node:1");
         assert_eq!(replay[2].op, "delete");
+        let next = reopened.append("put", "node:3", b"c").unwrap();
+        assert_eq!(next.seq, 4);
+    }
+
+    #[test]
+    fn wal_compaction_truncates_replay_and_preserves_sequence_across_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal_path = dir.path().join("wal.rmp");
+        let config = WALConfig {
+            enabled: true,
+            max_entries_per_segment: 2,
+        };
+
+        let wal = WAL::open(&wal_path, config.clone()).unwrap();
+        let (_start, end) = wal
+            .append_batch(vec![
+                ("put".to_string(), "node:1".to_string(), b"a".to_vec()),
+                ("put".to_string(), "node:2".to_string(), b"b".to_vec()),
+                ("delete".to_string(), "node:1".to_string(), Vec::new()),
+            ])
+            .unwrap();
+        assert_eq!(end, 3);
+
+        let removed = wal.compact_up_to(2).unwrap();
+        assert_eq!(removed, 2);
+        let stats = wal.stats();
+        assert_eq!(stats.entries, 1);
+        assert_eq!(stats.segments, 1);
+        assert_eq!(stats.compacted_through, 2);
+        assert_eq!(stats.next_seq, 3);
+
+        let replay = wal.replay_after(0).unwrap();
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].seq, 3);
+        drop(wal);
+
+        let reopened = WAL::open(&wal_path, config).unwrap();
+        let stats = reopened.stats();
+        assert_eq!(stats.entries, 1);
+        assert_eq!(stats.compacted_through, 2);
+        assert_eq!(stats.next_seq, 3);
+
+        let replay = reopened.replay_after(0).unwrap();
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].seq, 3);
         let next = reopened.append("put", "node:3", b"c").unwrap();
         assert_eq!(next.seq, 4);
     }
