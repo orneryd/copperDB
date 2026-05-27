@@ -1,12 +1,53 @@
-use crate::{keyword_scan::starts_with_keyword_fold, tokenize, CypherError, ParseContext, Query};
+use crate::{
+    keyword_scan::starts_with_keyword_fold, parse_syntax, syntax_ir::parse_expression_text,
+    tokenize, CypherError, Expression, ParseContext, Query, SyntaxClause, SyntaxExprRef,
+    SyntaxQuery,
+};
 
 pub struct Parser;
 
-const SHALLOW_VALID_STARTS: &[&str] = &[
-    "MATCH", "CREATE", "MERGE", "DELETE", "DETACH", "CALL", "RETURN", "WITH", "UNWIND", "OPTIONAL",
-    "DROP", "SHOW", "FOREACH", "LOAD", "EXPLAIN", "PROFILE", "ALTER", "USE", "BEGIN", "COMMIT",
-    "ROLLBACK",
-];
+const SHALLOW_A_KEYWORDS: &[&str] = &["ALTER"];
+const SHALLOW_B_KEYWORDS: &[&str] = &["BEGIN"];
+const SHALLOW_C_KEYWORDS: &[&str] = &["CREATE", "CALL", "COMMIT"];
+const SHALLOW_D_KEYWORDS: &[&str] = &["DETACH", "DELETE", "DROP"];
+const SHALLOW_E_KEYWORDS: &[&str] = &["EXPLAIN"];
+const SHALLOW_F_KEYWORDS: &[&str] = &["FOREACH"];
+const SHALLOW_L_KEYWORDS: &[&str] = &["LOAD"];
+const SHALLOW_M_KEYWORDS: &[&str] = &["MATCH", "MERGE"];
+const SHALLOW_O_KEYWORDS: &[&str] = &["OPTIONAL"];
+const SHALLOW_P_KEYWORDS: &[&str] = &["PROFILE"];
+const SHALLOW_R_KEYWORDS: &[&str] = &["RETURN", "ROLLBACK"];
+const SHALLOW_S_KEYWORDS: &[&str] = &["SHOW"];
+const SHALLOW_U_KEYWORDS: &[&str] = &["UNWIND", "USE"];
+const SHALLOW_W_KEYWORDS: &[&str] = &["WITH"];
+
+fn has_valid_shallow_start(cypher: &str) -> bool {
+    let Some(&first) = cypher.as_bytes().first() else {
+        return false;
+    };
+
+    let candidates = match first.to_ascii_uppercase() {
+        b'A' => SHALLOW_A_KEYWORDS,
+        b'B' => SHALLOW_B_KEYWORDS,
+        b'C' => SHALLOW_C_KEYWORDS,
+        b'D' => SHALLOW_D_KEYWORDS,
+        b'E' => SHALLOW_E_KEYWORDS,
+        b'F' => SHALLOW_F_KEYWORDS,
+        b'L' => SHALLOW_L_KEYWORDS,
+        b'M' => SHALLOW_M_KEYWORDS,
+        b'O' => SHALLOW_O_KEYWORDS,
+        b'P' => SHALLOW_P_KEYWORDS,
+        b'R' => SHALLOW_R_KEYWORDS,
+        b'S' => SHALLOW_S_KEYWORDS,
+        b'U' => SHALLOW_U_KEYWORDS,
+        b'W' => SHALLOW_W_KEYWORDS,
+        _ => return false,
+    };
+
+    candidates
+        .iter()
+        .any(|keyword| starts_with_keyword_fold(cypher, keyword))
+}
 
 fn validate_shallow_query(cypher: &str) -> Result<(), CypherError> {
     let cypher = cypher.trim();
@@ -14,10 +55,7 @@ fn validate_shallow_query(cypher: &str) -> Result<(), CypherError> {
         return Err(CypherError::EmptyQuery);
     }
 
-    if !SHALLOW_VALID_STARTS
-        .iter()
-        .any(|keyword| starts_with_keyword_fold(cypher, keyword))
-    {
+    if !has_valid_shallow_start(cypher) {
         return Err(CypherError::ParseError(
             "query must start with a valid clause".into(),
         ));
@@ -35,15 +73,7 @@ fn validate_shallow_query(cypher: &str) -> Result<(), CypherError> {
         let byte = bytes[idx];
 
         if in_string {
-            if byte == b'\\' && idx + 1 < bytes.len() {
-                idx += 2;
-                continue;
-            }
-            if byte == string_char {
-                if idx + 1 < bytes.len() && bytes[idx + 1] == string_char {
-                    idx += 2;
-                    continue;
-                }
+            if byte == string_char && (idx == 0 || bytes[idx - 1] != b'\\') {
                 in_string = false;
             }
             idx += 1;
@@ -136,6 +166,25 @@ impl Parser {
 
     pub fn validate_shallow(&self, cypher: &str) -> Result<(), CypherError> {
         validate_shallow_query(cypher)
+    }
+
+    pub fn parse_syntax<'a>(&self, cypher: &'a str) -> Result<SyntaxQuery<'a>, CypherError> {
+        parse_syntax(cypher)
+    }
+
+    pub fn promote_syntax_query(&self, syntax: &SyntaxQuery<'_>) -> Result<Query, CypherError> {
+        self.parse(syntax.raw_query)
+    }
+
+    pub fn promote_syntax_clause(&self, clause: &SyntaxClause<'_>) -> Result<Query, CypherError> {
+        self.parse(clause.raw_text)
+    }
+
+    pub fn promote_syntax_expression(
+        &self,
+        expression: &SyntaxExprRef<'_>,
+    ) -> Result<Expression, CypherError> {
+        parse_expression_text(expression.raw_text)
     }
 
     pub fn parse(&self, cypher: &str) -> Result<Query, CypherError> {

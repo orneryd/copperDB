@@ -30,6 +30,7 @@ pub mod pipeline_probe;
 pub mod query_patterns;
 pub mod shape_matcher;
 pub mod string_patterns;
+pub mod syntax_ir;
 pub mod tokenizer;
 mod validator;
 
@@ -50,6 +51,11 @@ pub use query_patterns::{detect_query_pattern, PatternInfo, QueryPattern};
 use serde_json::Value;
 pub use shape_matcher::{
     pending_shape_execution_todo, ShapeCaptures, ShapeKind, ShapeMatch, ShapeProbe, ShapeValue,
+};
+pub use syntax_ir::{
+    parse_syntax, SyntaxClause, SyntaxClauseContent, SyntaxClauseKind, SyntaxExprKind,
+    SyntaxExprRef, SyntaxNode, SyntaxOrderItem, SyntaxPattern, SyntaxQuery, SyntaxRelationship,
+    SyntaxReturnItem, SyntaxSetItem,
 };
 use thiserror::Error;
 pub use tokenizer::tokenize;

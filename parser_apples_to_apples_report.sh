@@ -11,28 +11,28 @@ trap 'rm -rf "$tmp_dir"' EXIT
 echo "Running CopperDB validation report..."
 (
   cd "$copper_dir"
-  cargo test -p copperdb-cypher parser_validation_benchmark_report -- --ignored --nocapture
+  cargo test --release -p copperdb-cypher parser_validation_benchmark_report -- --ignored --nocapture
 ) | tee "$tmp_dir/copper_validate.txt"
 
 echo
 echo "Running CopperDB shallow validation report..."
 (
   cd "$copper_dir"
-  cargo test -p copperdb-cypher parser_validation_shallow_benchmark_report -- --ignored --nocapture
+  cargo test --release -p copperdb-cypher parser_validation_shallow_benchmark_report -- --ignored --nocapture
 ) | tee "$tmp_dir/copper_validate_shallow.txt"
 
 echo
 echo "Running CopperDB parse report..."
 (
   cd "$copper_dir"
-  cargo test -p copperdb-cypher parser_benchmark_report -- --ignored --nocapture
+  cargo test --release -p copperdb-cypher parser_benchmark_report -- --ignored --nocapture
 ) | tee "$tmp_dir/copper_parse.txt"
 
 echo
 echo "Running CopperDB stage split report..."
 (
   cd "$copper_dir"
-  cargo test -p copperdb-cypher parser_stage_benchmark_report -- --ignored --nocapture
+  cargo test --release -p copperdb-cypher parser_stage_benchmark_report -- --ignored --nocapture
 ) | tee "$tmp_dir/copper_stages.txt"
 
 echo

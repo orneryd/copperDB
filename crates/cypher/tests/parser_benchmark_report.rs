@@ -412,6 +412,25 @@ fn measure_median_parse_time(
     Ok(durations[durations.len() / 2])
 }
 
+fn measure_median_parse_syntax_time(
+    parser: &Parser,
+    query: &str,
+    samples: usize,
+) -> Result<Duration, String> {
+    let sample_count = samples.max(1);
+    let mut durations = Vec::with_capacity(sample_count);
+
+    for _ in 0..sample_count {
+        let start = Instant::now();
+        let parsed = parser.parse_syntax(query).map_err(|error| error.to_string())?;
+        std::hint::black_box(parsed.clauses.len());
+        durations.push(start.elapsed());
+    }
+
+    durations.sort_unstable();
+    Ok(durations[durations.len() / 2])
+}
+
 fn measure_median_validation_time(
     parser: &Parser,
     query: &str,
@@ -632,6 +651,73 @@ fn parser_benchmark_report() {
     assert!(
         success_count > 0,
         "expected at least one query class to parse"
+    );
+}
+
+#[test]
+#[ignore = "benchmark-style syntax IR timing report; run explicitly"]
+fn parser_syntax_benchmark_report() {
+    const SAMPLES_PER_QUERY: usize = 5;
+
+    let parser = Parser::new();
+    let mut results = Vec::with_capacity(PARSER_BENCHMARK_CASES.len());
+    let mut total = Duration::default();
+    let mut success_count = 0usize;
+
+    for case in PARSER_BENCHMARK_CASES {
+        let result = match measure_median_parse_syntax_time(&parser, case.query, SAMPLES_PER_QUERY)
+        {
+            Ok(time) => {
+                total += time;
+                success_count += 1;
+                ParserBenchmarkResult {
+                    name: case.name,
+                    time,
+                    status: "ok".into(),
+                }
+            }
+            Err(error) => ParserBenchmarkResult {
+                name: case.name,
+                time: Duration::default(),
+                status: format!("failed: {error}"),
+            },
+        };
+        results.push(result);
+    }
+
+    println!("\n{}", "=".repeat(80));
+    println!("CYPHER SYNTAX IR BENCHMARK REPORT");
+    println!("{}", "=".repeat(80));
+    println!("\n{:<30} | {:>12} | {}", "Query", "CopperDB", "Status");
+    println!("{}", "-".repeat(80));
+
+    for result in &results {
+        let mut name = result.name.to_string();
+        if name.len() > 30 {
+            name.truncate(27);
+            name.push_str("...");
+        }
+        println!("{:<30} | {:>12?} | {}", name, result.time, result.status);
+    }
+
+    println!("{}", "-".repeat(80));
+    println!("{:<30} | {:>12?} |", "TOTAL", total);
+    println!("{}", "=".repeat(80));
+    println!(
+        "\nSummary: syntax-parsed {} / {} query classes successfully\n",
+        success_count,
+        results.len()
+    );
+    println!(
+        "PARSER_REPORT_SUMMARY mode=parse_syntax parser=CopperDB total_ns={} success={} total_cases={}",
+        total.as_nanos(),
+        success_count,
+        results.len()
+    );
+
+    assert!(
+        success_count > 0,
+        "expected at least one query class to syntax-parse"
     );
 }
 
