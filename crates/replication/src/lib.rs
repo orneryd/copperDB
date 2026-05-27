@@ -7,7 +7,7 @@
 //! - a transport abstraction with an in-memory implementation for tests
 
 use async_trait::async_trait;
-use copperdb_storage::{StorageEngine, StorageError};
+use copperdb_storage::{EdgeRecord, StorageEngine, StorageError};
 use copperdb_topology::{
     ConsistencyLevel, DistributedReadPlan, DistributedWriteMode, DistributedWritePlan,
     LogicalTransactionId, PlacementKey, TopologyError, TopologyRegistry,
@@ -215,6 +215,39 @@ pub trait ReplicationStorage: Send + Sync {
         let _ = key;
         Ok(None)
     }
+    fn graph_node(&self, node_id: &str) -> Result<Option<Vec<u8>>, ReplicationError> {
+        let _ = node_id;
+        Ok(None)
+    }
+    fn graph_edges_from_node(
+        &self,
+        node_id: &str,
+        rel_type: Option<&str>,
+    ) -> Result<Vec<EdgeRecord>, ReplicationError> {
+        let _ = (node_id, rel_type);
+        Ok(Vec::new())
+    }
+    fn graph_edges_to_node(
+        &self,
+        node_id: &str,
+        rel_type: Option<&str>,
+    ) -> Result<Vec<EdgeRecord>, ReplicationError> {
+        let _ = (node_id, rel_type);
+        Ok(Vec::new())
+    }
+    fn graph_nodes_by_label(&self, label: &str) -> Result<Vec<Vec<u8>>, ReplicationError> {
+        let _ = label;
+        Ok(Vec::new())
+    }
+    fn graph_nodes_by_property(
+        &self,
+        label: &str,
+        property: &str,
+        value: &Value,
+    ) -> Result<Vec<Vec<u8>>, ReplicationError> {
+        let _ = (label, property, value);
+        Ok(Vec::new())
+    }
     fn write_snapshot(&self) -> Result<Vec<u8>, ReplicationError>;
     fn restore_snapshot(&self, snapshot: &[u8]) -> Result<(), ReplicationError>;
 }
@@ -321,6 +354,16 @@ impl StorageEngineAdapter {
         params.to_string().hash(&mut hasher);
         format!("replication:cypher:{:x}", hasher.finish())
     }
+
+    fn node_record_bytes(record: &copperdb_storage::NodeRecord) -> Result<Vec<u8>, ReplicationError> {
+        let mut props = record.properties.clone();
+        props.insert("_id".to_string(), Value::String(record.id.clone()));
+        props.insert(
+            "_labels".to_string(),
+            Value::Array(record.labels.iter().cloned().map(Value::String).collect()),
+        );
+        rmp_serde::to_vec_named(&props).map_err(|error| ReplicationError::Storage(error.to_string()))
+    }
 }
 
 #[async_trait]
@@ -350,6 +393,62 @@ impl ReplicationStorage for StorageEngineAdapter {
     fn read_key(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ReplicationError> {
         let engine = self.engine.lock().unwrap();
         engine.get_node(&Self::data_key(key)).map_err(Into::into)
+    }
+
+    fn graph_node(&self, node_id: &str) -> Result<Option<Vec<u8>>, ReplicationError> {
+        let engine = self.engine.lock().unwrap();
+        match engine.get_node_record(node_id) {
+            Ok(Some(record)) => Ok(Some(Self::node_record_bytes(&record)?)),
+            Ok(None) => engine.get_node(node_id).map_err(Into::into),
+            Err(_) => engine.get_node(node_id).map_err(Into::into),
+        }
+    }
+
+    fn graph_edges_from_node(
+        &self,
+        node_id: &str,
+        rel_type: Option<&str>,
+    ) -> Result<Vec<EdgeRecord>, ReplicationError> {
+        let engine = self.engine.lock().unwrap();
+        match rel_type {
+            Some(rel_type) => engine.get_edges_from_node_by_type(node_id, rel_type).map_err(Into::into),
+            None => engine.get_edges_from_node(node_id).map_err(Into::into),
+        }
+    }
+
+    fn graph_edges_to_node(
+        &self,
+        node_id: &str,
+        rel_type: Option<&str>,
+    ) -> Result<Vec<EdgeRecord>, ReplicationError> {
+        let engine = self.engine.lock().unwrap();
+        match rel_type {
+            Some(rel_type) => engine.get_edges_to_node_by_type(node_id, rel_type).map_err(Into::into),
+            None => engine.get_edges_to_node(node_id).map_err(Into::into),
+        }
+    }
+
+    fn graph_nodes_by_label(&self, label: &str) -> Result<Vec<Vec<u8>>, ReplicationError> {
+        let engine = self.engine.lock().unwrap();
+        engine
+            .get_nodes_by_label(label)?
+            .iter()
+            .map(Self::node_record_bytes)
+            .collect()
+    }
+
+    fn graph_nodes_by_property(
+        &self,
+        label: &str,
+        property: &str,
+        value: &Value,
+    ) -> Result<Vec<Vec<u8>>, ReplicationError> {
+        let engine = self.engine.lock().unwrap();
+        engine
+            .get_nodes_by_property(label, property, value)?
+            .iter()
+            .map(Self::node_record_bytes)
+            .collect()
     }
 
     fn write_snapshot(&self) -> Result<Vec<u8>, ReplicationError> {
@@ -396,6 +495,35 @@ pub trait ReplicaTransport: Send + Sync {
         target: &str,
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, ReplicationError>;
+    async fn graph_node(
+        &self,
+        target: &str,
+        node_id: &str,
+    ) -> Result<Option<Vec<u8>>, ReplicationError>;
+    async fn graph_edges_from_node(
+        &self,
+        target: &str,
+        node_id: &str,
+        rel_type: Option<&str>,
+    ) -> Result<Vec<EdgeRecord>, ReplicationError>;
+    async fn graph_edges_to_node(
+        &self,
+        target: &str,
+        node_id: &str,
+        rel_type: Option<&str>,
+    ) -> Result<Vec<EdgeRecord>, ReplicationError>;
+    async fn graph_nodes_by_label(
+        &self,
+        target: &str,
+        label: &str,
+    ) -> Result<Vec<Vec<u8>>, ReplicationError>;
+    async fn graph_nodes_by_property(
+        &self,
+        target: &str,
+        label: &str,
+        property: &str,
+        value: &Value,
+    ) -> Result<Vec<Vec<u8>>, ReplicationError>;
 }
 
 #[derive(Default)]
@@ -437,6 +565,50 @@ impl ReplicaTransport for InMemoryReplicaTransport {
         key: &[u8],
     ) -> Result<Option<Vec<u8>>, ReplicationError> {
         self.lookup(target)?.read_key(key)
+    }
+
+    async fn graph_node(
+        &self,
+        target: &str,
+        node_id: &str,
+    ) -> Result<Option<Vec<u8>>, ReplicationError> {
+        self.lookup(target)?.graph_node(node_id)
+    }
+
+    async fn graph_edges_from_node(
+        &self,
+        target: &str,
+        node_id: &str,
+        rel_type: Option<&str>,
+    ) -> Result<Vec<EdgeRecord>, ReplicationError> {
+        self.lookup(target)?.graph_edges_from_node(node_id, rel_type)
+    }
+
+    async fn graph_edges_to_node(
+        &self,
+        target: &str,
+        node_id: &str,
+        rel_type: Option<&str>,
+    ) -> Result<Vec<EdgeRecord>, ReplicationError> {
+        self.lookup(target)?.graph_edges_to_node(node_id, rel_type)
+    }
+
+    async fn graph_nodes_by_label(
+        &self,
+        target: &str,
+        label: &str,
+    ) -> Result<Vec<Vec<u8>>, ReplicationError> {
+        self.lookup(target)?.graph_nodes_by_label(label)
+    }
+
+    async fn graph_nodes_by_property(
+        &self,
+        target: &str,
+        label: &str,
+        property: &str,
+        value: &Value,
+    ) -> Result<Vec<Vec<u8>>, ReplicationError> {
+        self.lookup(target)?.graph_nodes_by_property(label, property, value)
     }
 }
 

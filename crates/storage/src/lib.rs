@@ -32,6 +32,8 @@ const META_KP_PROMOTION_PROFILE_PREFIX: &[u8] = b"kp_promotion_profile/";
 const META_KP_PROMOTION_POLICY_PREFIX: &[u8] = b"kp_promotion_policy/";
 const IDX_LABEL_PREFIX: &str = "label_nodes";
 const IDX_EDGE_TYPE_PREFIX: &str = "edge_type";
+const IDX_EDGE_START_PREFIX: &str = "edge_start";
+const IDX_EDGE_END_PREFIX: &str = "edge_end";
 const IDX_NODE_PROPERTY_PREFIX: &str = "node_property";
 
 #[derive(Debug, Error)]
@@ -1048,13 +1050,13 @@ impl StorageEngine {
 
     pub fn put_edge_record(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
         if let Some(old) = self.get_edge_record(&edge.id)? {
-            self.unindex_edge_type(&old)?;
+            self.unindex_edge(&old)?;
         }
         self.edges.insert(
             edge.id.as_bytes(),
             self.encode_record_bytes(rmp_serde::to_vec(edge)?)?,
         )?;
-        self.index_edge_type(edge)?;
+        self.index_edge(edge)?;
         Ok(())
     }
 
@@ -1069,7 +1071,7 @@ impl StorageEngine {
 
     pub fn delete_edge_record(&self, id: &str) -> Result<(), StorageError> {
         if let Some(existing) = self.get_edge_record(id)? {
-            self.unindex_edge_type(&existing)?;
+            self.unindex_edge(&existing)?;
             self.edges.remove(id.as_bytes())?;
         }
         Ok(())
@@ -1092,6 +1094,43 @@ impl StorageEngine {
 
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)
+    }
+
+    pub fn all_edges(&self) -> Result<Vec<EdgeRecord>, StorageError> {
+        let mut out = Vec::new();
+        for entry in self.edges.iter() {
+            let (key, _) = entry?;
+            let key_str = std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            if let Some(edge) = self.get_edge_record(key_str)? {
+                out.push(edge);
+            }
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
+    }
+
+    pub fn get_edges_from_node(&self, node_id: &str) -> Result<Vec<EdgeRecord>, StorageError> {
+        self.get_edges_by_adjacency_prefix(&edge_start_index_prefix(node_id))
+    }
+
+    pub fn get_edges_to_node(&self, node_id: &str) -> Result<Vec<EdgeRecord>, StorageError> {
+        self.get_edges_by_adjacency_prefix(&edge_end_index_prefix(node_id))
+    }
+
+    pub fn get_edges_from_node_by_type(
+        &self,
+        node_id: &str,
+        edge_type: &str,
+    ) -> Result<Vec<EdgeRecord>, StorageError> {
+        self.get_edges_by_adjacency_prefix(&edge_start_type_index_prefix(node_id, edge_type))
+    }
+
+    pub fn get_edges_to_node_by_type(
+        &self,
+        node_id: &str,
+        edge_type: &str,
+    ) -> Result<Vec<EdgeRecord>, StorageError> {
+        self.get_edges_by_adjacency_prefix(&edge_end_type_index_prefix(node_id, edge_type))
     }
 
     pub fn edge_count_by_prefix(&self, prefix: &str) -> Result<u64, StorageError> {
@@ -1643,17 +1682,45 @@ impl StorageEngine {
         Ok(())
     }
 
-    fn index_edge_type(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
+    fn get_edges_by_adjacency_prefix(&self, prefix: &str) -> Result<Vec<EdgeRecord>, StorageError> {
+        let mut out = Vec::new();
+        for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
+            let (key, _) = entry?;
+            let key_str =
+                std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            if let Some(edge_id) = key_str.rsplit('/').next() {
+                if let Some(edge) = self.get_edge_record(edge_id)? {
+                    out.push(edge);
+                }
+            }
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
+    }
+
+    fn index_edge(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
         self.indexes.insert(
             edge_type_index_key(&edge.edge_type, &edge.id).as_bytes(),
+            &[],
+        )?;
+        self.indexes.insert(
+            edge_start_index_key(&edge.start_node, &edge.edge_type, &edge.id).as_bytes(),
+            &[],
+        )?;
+        self.indexes.insert(
+            edge_end_index_key(&edge.end_node, &edge.edge_type, &edge.id).as_bytes(),
             &[],
         )?;
         Ok(())
     }
 
-    fn unindex_edge_type(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
+    fn unindex_edge(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
         self.indexes
             .remove(edge_type_index_key(&edge.edge_type, &edge.id).as_bytes())?;
+        self.indexes
+            .remove(edge_start_index_key(&edge.start_node, &edge.edge_type, &edge.id).as_bytes())?;
+        self.indexes
+            .remove(edge_end_index_key(&edge.end_node, &edge.edge_type, &edge.id).as_bytes())?;
         Ok(())
     }
 }
@@ -1681,6 +1748,49 @@ fn edge_type_index_prefix(edge_type: &str) -> String {
 
 fn edge_type_index_key(edge_type: &str, edge_id: &str) -> String {
     format!("{}{}", edge_type_index_prefix(edge_type), edge_id)
+}
+
+fn edge_start_index_prefix(node_id: &str) -> String {
+    format!(
+        "{IDX_EDGE_START_PREFIX}/{}/",
+        escape_index_component(node_id)
+    )
+}
+
+fn edge_start_type_index_prefix(node_id: &str, edge_type: &str) -> String {
+    format!(
+        "{}{}/",
+        edge_start_index_prefix(node_id),
+        escape_index_component(edge_type)
+    )
+}
+
+fn edge_start_index_key(node_id: &str, edge_type: &str, edge_id: &str) -> String {
+    format!(
+        "{}{}",
+        edge_start_type_index_prefix(node_id, edge_type),
+        edge_id
+    )
+}
+
+fn edge_end_index_prefix(node_id: &str) -> String {
+    format!("{IDX_EDGE_END_PREFIX}/{}/", escape_index_component(node_id))
+}
+
+fn edge_end_type_index_prefix(node_id: &str, edge_type: &str) -> String {
+    format!(
+        "{}{}/",
+        edge_end_index_prefix(node_id),
+        escape_index_component(edge_type)
+    )
+}
+
+fn edge_end_index_key(node_id: &str, edge_type: &str, edge_id: &str) -> String {
+    format!(
+        "{}{}",
+        edge_end_type_index_prefix(node_id, edge_type),
+        edge_id
+    )
 }
 
 fn is_single_property_node_index(index: &IndexDefinition) -> bool {
@@ -2109,19 +2219,49 @@ mod tests {
         let knows = engine.get_edges_by_type("KNOWS").unwrap();
         assert_eq!(knows.len(), 1);
         assert_eq!(knows[0], edge);
+        assert_eq!(
+            engine.get_edges_from_node("db1:n1").unwrap(),
+            vec![edge.clone()]
+        );
+        assert_eq!(
+            engine.get_edges_to_node("db1:n2").unwrap(),
+            vec![edge.clone()]
+        );
+        assert_eq!(
+            engine
+                .get_edges_from_node_by_type("db1:n1", "KNOWS")
+                .unwrap(),
+            vec![edge.clone()]
+        );
+        assert!(engine
+            .get_edges_from_node_by_type("db1:n1", "MENTORS")
+            .unwrap()
+            .is_empty());
 
         edge.edge_type = "MENTORS".to_string();
         edge.properties.insert("years".to_string(), json!(5));
         engine.put_edge_record(&edge).unwrap();
 
         assert!(engine.get_edges_by_type("KNOWS").unwrap().is_empty());
+        assert!(engine
+            .get_edges_from_node_by_type("db1:n1", "KNOWS")
+            .unwrap()
+            .is_empty());
         let mentors = engine.get_edges_by_type("MENTORS").unwrap();
         assert_eq!(mentors.len(), 1);
         assert_eq!(mentors[0].properties.get("years"), Some(&json!(5)));
+        assert_eq!(
+            engine
+                .get_edges_to_node_by_type("db1:n2", "MENTORS")
+                .unwrap(),
+            mentors
+        );
 
         engine.delete_edge_record("db1:e1").unwrap();
         assert!(engine.get_edge_record("db1:e1").unwrap().is_none());
         assert!(engine.get_edges_by_type("MENTORS").unwrap().is_empty());
+        assert!(engine.get_edges_from_node("db1:n1").unwrap().is_empty());
+        assert!(engine.get_edges_to_node("db1:n2").unwrap().is_empty());
     }
 
     #[test]

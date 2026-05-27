@@ -1,0 +1,305 @@
+use std::collections::HashMap;
+
+use serde_json::Value;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueryType {
+    Match,
+    Create,
+    Merge,
+    Delete,
+    Set,
+    Return,
+    With,
+    Ddl,
+}
+
+#[derive(Debug, Clone)]
+pub struct Query {
+    pub query_type: QueryType,
+    pub clauses: Vec<Clause>,
+    pub parameters: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Clause {
+    Match(MatchClause),
+    OptionalMatch(MatchClause),
+    Return(ReturnClause),
+    Where(WhereClause),
+    Set(SetClause),
+    Delete(DeleteClause),
+    Merge(MergeClause),
+    With(WithClause),
+    Unwind(UnwindClause),
+    Create(CreateClause),
+    CreateConstraint(CreateConstraintClause),
+    DropConstraint(DropConstraintClause),
+    ShowConstraints(ShowConstraintsClause),
+    CreateIndex(CreateIndexClause),
+    DropIndex(DropIndexClause),
+    ShowIndexes(ShowIndexesClause),
+    CreateDecayProfile(CreateDecayProfileClause),
+    AlterDecayProfile(AlterDecayProfileClause),
+    DropDecayProfile(DropDecayProfileClause),
+    ShowDecayProfiles(ShowDecayProfilesClause),
+    CreatePromotionProfile(CreatePromotionProfileClause),
+    AlterPromotionProfile(AlterPromotionProfileClause),
+    DropPromotionProfile(DropPromotionProfileClause),
+    ShowPromotionProfiles(ShowPromotionProfilesClause),
+    CreatePromotionPolicy(CreatePromotionPolicyClause),
+    AlterPromotionPolicy(AlterPromotionPolicyClause),
+    DropPromotionPolicy(DropPromotionPolicyClause),
+    ShowPromotionPolicies(ShowPromotionPoliciesClause),
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchClause {
+    pub pattern: Pattern,
+    pub optional: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateClause {
+    pub pattern: Pattern,
+}
+
+#[derive(Debug, Clone)]
+pub struct MergeClause {
+    pub pattern: Pattern,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReturnClause {
+    pub items: Vec<ReturnItem>,
+    pub order_by: Vec<OrderItem>,
+    pub skip: Option<i64>,
+    pub limit: Option<i64>,
+    pub distinct: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct WhereClause {
+    pub expression: Expression,
+}
+
+#[derive(Debug, Clone)]
+pub struct SetClause {
+    pub items: Vec<SetItem>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeleteClause {
+    pub variables: Vec<String>,
+    pub detach: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct WithClause {
+    pub items: Vec<ReturnItem>,
+    pub where_clause: Option<WhereClause>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UnwindClause {
+    pub expression: Expression,
+    pub variable: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConstraintKind {
+    Unique,
+    Exists,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateConstraintClause {
+    pub name: String,
+    pub if_not_exists: bool,
+    pub label: String,
+    pub property: String,
+    pub kind: ConstraintKind,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropConstraintClause {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShowConstraintsClause;
+
+#[derive(Debug, Clone)]
+pub struct CreateIndexClause {
+    pub name: String,
+    pub if_not_exists: bool,
+    pub label: String,
+    pub properties: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropIndexClause {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShowIndexesClause;
+
+#[derive(Debug, Clone)]
+pub struct CreateDecayProfileClause {
+    pub name: String,
+    pub options: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AlterDecayProfileClause {
+    pub name: String,
+    pub options: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropDecayProfileClause {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShowDecayProfilesClause;
+
+#[derive(Debug, Clone)]
+pub struct CreatePromotionProfileClause {
+    pub name: String,
+    pub options: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AlterPromotionProfileClause {
+    pub name: String,
+    pub options: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropPromotionProfileClause {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShowPromotionProfilesClause;
+
+#[derive(Debug, Clone)]
+pub struct PromotionWhenClause {
+    pub profile_ref: String,
+    pub predicate: String,
+    pub order: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreatePromotionPolicyClause {
+    pub name: String,
+    pub target_labels: Vec<String>,
+    pub enabled: bool,
+    pub when_clauses: Vec<PromotionWhenClause>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AlterPromotionPolicyClause {
+    pub name: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropPromotionPolicyClause {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShowPromotionPoliciesClause;
+
+#[derive(Debug, Clone)]
+pub struct Pattern {
+    pub path_variable: Option<String>,
+    pub shortest_path: bool,
+    pub nodes: Vec<NodePattern>,
+    pub edges: Vec<EdgePattern>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NodePattern {
+    pub variable: Option<String>,
+    pub labels: Vec<String>,
+    pub properties: HashMap<String, Expression>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EdgePattern {
+    pub variable: Option<String>,
+    pub rel_type: Option<String>,
+    pub direction: EdgeDirection,
+    pub properties: HashMap<String, Expression>,
+    pub min_hops: Option<u32>,
+    pub max_hops: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EdgeDirection {
+    Both,
+    Outgoing,
+    Incoming,
+}
+
+#[derive(Debug, Clone)]
+pub enum Expression {
+    PropertyAccess {
+        variable: String,
+        property: String,
+    },
+    Comparison {
+        left: Box<Expression>,
+        op: String,
+        right: Box<Expression>,
+    },
+    InList {
+        value: Box<Expression>,
+        list: Box<Expression>,
+        negated: bool,
+    },
+    Literal(Value),
+    Parameter(String),
+    FunctionCall {
+        name: String,
+        args: Vec<Expression>,
+        distinct: bool,
+    },
+    ListLiteral(Vec<Expression>),
+    MapLiteral(Vec<(String, Expression)>),
+    Variable(String),
+    And(Box<Expression>, Box<Expression>),
+    Or(Box<Expression>, Box<Expression>),
+    Not(Box<Expression>),
+    IsNull(Box<Expression>),
+    IsNotNull(Box<Expression>),
+}
+
+#[derive(Debug, Clone)]
+pub struct ReturnItem {
+    pub expression: Expression,
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OrderItem {
+    pub expression: Expression,
+    pub descending: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SetItem {
+    pub variable: String,
+    pub property: String,
+    pub value: Expression,
+}

@@ -13,7 +13,7 @@ copperDB has a broad crate skeleton that mirrors most NornicDB packages, and sev
 Highest risk gaps:
 
 1. Bolt is only a TCP listener plus handshake and metric counters. It does not dispatch Bolt messages into auth, transactions, Cypher execution, or result streaming.
-2. Cypher/eval supports a useful subset, but relationship MATCH/OPTIONAL MATCH is explicitly unsupported and the upstream grammar/evaluator surface is far larger.
+2. Cypher/eval supports a useful subset, including recent ports for list/map literals, `IN`, `NOT IN`, regex `=~` predicates, and single-hop plus variable-length relationship `MATCH` over durable edge adjacency indexes. Relationship `OPTIONAL MATCH`, path materialization/functions, and `shortestPath`/`allShortestPaths` are still incomplete, and the upstream grammar/evaluator surface is far larger.
 3. Storage has baseline sled, MVCC, WAL, schema, and catalog primitives, but is missing the upstream lifecycle, async write-behind, reader registry, pruning/rebuild controller, full index maintenance, and namespace transaction semantics.
 4. `knowledgepolicy`, `lifecycle`, and `errors` have no Rust crate equivalents yet. `observability` appears intentionally renamed to `otel`, but only part of the observability implementation has been ported.
 5. Several crates are present but effectively stubs or local-only models: `graphql`, `mcp`, `qdrantgrpc`, `nornicgrpc`, `inference`, `localllm`, and parts of `gpu`.
@@ -151,6 +151,23 @@ Not wired:
 - Retention enforcement during query execution.
 - Knowledge policy scoring/access mutation runtime.
 - Observability spans/metrics beyond HTTP-level callers.
+
+### Recent NornicDB Cypher/BFS Parity Pull
+
+Current upstream reviewed: local `~/src/NornicDB` `main` at `v1.1.2`, including recent Cypher commits for Lucene wildcard parity, parser `NOT IN`, typed property round-trip, and shortest-path/BFS performance.
+
+Pulled into copperDB in this pass:
+
+- Cypher expression grammar now parses list literals, map literals, `IN`, `NOT IN`, and regex `=~` predicates.
+- `filter` evaluates list/map literals, `IN`/`NOT IN`, and regex predicates through the shared expression path.
+- `engine` compliance/property collection descends through list/map/`IN` expressions so policies still see nested property access.
+- `storage` maintains durable edge adjacency indexes by start node and end node, with type-filtered lookup helpers. This mirrors the NornicDB BFS optimization direction by avoiding whole type scans for neighbor expansion.
+- `eval` stores created relationships as typed `EdgeRecord` values and executes single-hop plus variable-length outgoing, incoming, and undirected relationship `MATCH` through adjacency-backed BFS. Variable-length relationship variables bind to arrays of relationship values.
+
+Still not parity-complete:
+
+- Full `shortestPath`/`allShortestPaths` execution is not enabled because Rust `eval` does not yet implement named path binding, path materialization, path functions, shortest-path planning, or relationship `OPTIONAL MATCH`.
+- The new adjacency indexes and variable-length relationship execution are the required foundation for shortest-path traversal, but path-returning traversal remains a Layer 4 follow-up.
 
 ## Crate Findings
 

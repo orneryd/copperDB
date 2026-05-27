@@ -15,18 +15,43 @@
 //! - [`query_patterns`] — pre-execution pattern detection for optimised routing
 //! - [`hot_path_trace`] — per-query hot-path execution tracing
 
-// ─── Sub-modules (NornicDB v1.0.40 additions) ─────────────────────────────────
+pub mod ast;
+mod compound_query_shape_matcher;
+mod dispatcher;
+pub mod executor;
+mod expression_parser;
 pub mod hot_path_trace;
 pub mod keyword_scan;
+mod parse_context;
+pub mod parser;
+mod parser_support;
+mod pattern_parser;
+pub mod pipeline_probe;
 pub mod query_patterns;
+pub mod shape_matcher;
 pub mod string_patterns;
+pub mod tokenizer;
 
 use std::collections::HashMap;
 
+pub use ast::*;
+pub use compound_query_shape_matcher::{
+    match_compound_prop_create_delete_return_count_rel_shape, match_compound_query_shape,
+};
+pub use executor::{Executor, QueryResult};
+use parse_context::ParseContext;
+pub use parser::Parser;
+pub use pipeline_probe::{
+    can_execute_as_pipeline, pending_pipeline_execution_todo, PipelineClause, PipelineClauseKind,
+};
+pub use query_patterns::{detect_query_pattern, PatternInfo, QueryPattern};
+use parser_support::{parse_bool_token, trim_quotes};
 use serde_json::Value;
+pub use shape_matcher::{
+    pending_shape_execution_todo, ShapeCaptures, ShapeKind, ShapeMatch, ShapeProbe, ShapeValue,
+};
 use thiserror::Error;
-
-// ─── Errors ───────────────────────────────────────────────────────────────────
+pub use tokenizer::tokenize;
 
 #[derive(Debug, Error)]
 pub enum CypherError {
@@ -38,792 +63,37 @@ pub enum CypherError {
     UnterminatedString,
 }
 
-// ─── Query types ──────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum QueryType {
-    Match,
-    Create,
-    Merge,
-    Delete,
-    Set,
-    Return,
-    With,
-    Ddl,
-}
-
-#[derive(Debug, Clone)]
-pub struct Query {
-    pub query_type: QueryType,
-    pub clauses: Vec<Clause>,
-    pub parameters: HashMap<String, Value>,
-}
-
-// ─── Clauses ──────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub enum Clause {
-    Match(MatchClause),
-    OptionalMatch(MatchClause),
-    Return(ReturnClause),
-    Where(WhereClause),
-    Set(SetClause),
-    Delete(DeleteClause),
-    Merge(MergeClause),
-    With(WithClause),
-    Unwind(UnwindClause),
-    Create(CreateClause),
-    CreateConstraint(CreateConstraintClause),
-    DropConstraint(DropConstraintClause),
-    ShowConstraints(ShowConstraintsClause),
-    CreateIndex(CreateIndexClause),
-    DropIndex(DropIndexClause),
-    ShowIndexes(ShowIndexesClause),
-    CreateDecayProfile(CreateDecayProfileClause),
-    AlterDecayProfile(AlterDecayProfileClause),
-    DropDecayProfile(DropDecayProfileClause),
-    ShowDecayProfiles(ShowDecayProfilesClause),
-    CreatePromotionProfile(CreatePromotionProfileClause),
-    AlterPromotionProfile(AlterPromotionProfileClause),
-    DropPromotionProfile(DropPromotionProfileClause),
-    ShowPromotionProfiles(ShowPromotionProfilesClause),
-    CreatePromotionPolicy(CreatePromotionPolicyClause),
-    AlterPromotionPolicy(AlterPromotionPolicyClause),
-    DropPromotionPolicy(DropPromotionPolicyClause),
-    ShowPromotionPolicies(ShowPromotionPoliciesClause),
-}
-
-#[derive(Debug, Clone)]
-pub struct MatchClause {
-    pub pattern: Pattern,
-    pub optional: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct CreateClause {
-    pub pattern: Pattern,
-}
-
-#[derive(Debug, Clone)]
-pub struct MergeClause {
-    pub pattern: Pattern,
-}
-
-#[derive(Debug, Clone)]
-pub struct ReturnClause {
-    pub items: Vec<ReturnItem>,
-    pub order_by: Vec<OrderItem>,
-    pub skip: Option<i64>,
-    pub limit: Option<i64>,
-    pub distinct: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct WhereClause {
-    pub expression: Expression,
-}
-
-#[derive(Debug, Clone)]
-pub struct SetClause {
-    pub items: Vec<SetItem>,
-}
-
-#[derive(Debug, Clone)]
-pub struct DeleteClause {
-    pub variables: Vec<String>,
-    pub detach: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct WithClause {
-    pub items: Vec<ReturnItem>,
-    pub where_clause: Option<WhereClause>,
-}
-
-#[derive(Debug, Clone)]
-pub struct UnwindClause {
-    pub expression: Expression,
-    pub variable: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConstraintKind {
-    Unique,
-    Exists,
-}
-
-#[derive(Debug, Clone)]
-pub struct CreateConstraintClause {
-    pub name: String,
-    pub if_not_exists: bool,
-    pub label: String,
-    pub property: String,
-    pub kind: ConstraintKind,
-}
-
-#[derive(Debug, Clone)]
-pub struct DropConstraintClause {
-    pub name: String,
-    pub if_exists: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct ShowConstraintsClause;
-
-#[derive(Debug, Clone)]
-pub struct CreateIndexClause {
-    pub name: String,
-    pub if_not_exists: bool,
-    pub label: String,
-    pub properties: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct DropIndexClause {
-    pub name: String,
-    pub if_exists: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct ShowIndexesClause;
-
-#[derive(Debug, Clone)]
-pub struct CreateDecayProfileClause {
-    pub name: String,
-    pub options: HashMap<String, Value>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AlterDecayProfileClause {
-    pub name: String,
-    pub options: HashMap<String, Value>,
-}
-
-#[derive(Debug, Clone)]
-pub struct DropDecayProfileClause {
-    pub name: String,
-    pub if_exists: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct ShowDecayProfilesClause;
-
-#[derive(Debug, Clone)]
-pub struct CreatePromotionProfileClause {
-    pub name: String,
-    pub options: HashMap<String, Value>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AlterPromotionProfileClause {
-    pub name: String,
-    pub options: HashMap<String, Value>,
-}
-
-#[derive(Debug, Clone)]
-pub struct DropPromotionProfileClause {
-    pub name: String,
-    pub if_exists: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct ShowPromotionProfilesClause;
-
-#[derive(Debug, Clone)]
-pub struct PromotionWhenClause {
-    pub profile_ref: String,
-    pub predicate: String,
-    pub order: i64,
-}
-
-#[derive(Debug, Clone)]
-pub struct CreatePromotionPolicyClause {
-    pub name: String,
-    pub target_labels: Vec<String>,
-    pub enabled: bool,
-    pub when_clauses: Vec<PromotionWhenClause>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AlterPromotionPolicyClause {
-    pub name: String,
-    pub enabled: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct DropPromotionPolicyClause {
-    pub name: String,
-    pub if_exists: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct ShowPromotionPoliciesClause;
-
-// ─── Patterns ─────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub struct Pattern {
-    pub nodes: Vec<NodePattern>,
-    pub edges: Vec<EdgePattern>,
-}
-
-#[derive(Debug, Clone)]
-pub struct NodePattern {
-    pub variable: Option<String>,
-    pub labels: Vec<String>,
-    pub properties: HashMap<String, Value>,
-}
-
-#[derive(Debug, Clone)]
-pub struct EdgePattern {
-    pub variable: Option<String>,
-    pub rel_type: Option<String>,
-    pub direction: EdgeDirection,
-    pub properties: HashMap<String, Value>,
-    pub min_hops: Option<u32>,
-    pub max_hops: Option<u32>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum EdgeDirection {
-    Both,
-    Outgoing,
-    Incoming,
-}
-
-// ─── Expressions ──────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub enum Expression {
-    PropertyAccess {
-        variable: String,
-        property: String,
-    },
-    Comparison {
-        left: Box<Expression>,
-        op: String,
-        right: Box<Expression>,
-    },
-    Literal(Value),
-    Parameter(String),
-    FunctionCall {
-        name: String,
-        args: Vec<Expression>,
-        distinct: bool,
-    },
-    Variable(String),
-    And(Box<Expression>, Box<Expression>),
-    Or(Box<Expression>, Box<Expression>),
-    Not(Box<Expression>),
-    IsNull(Box<Expression>),
-    IsNotNull(Box<Expression>),
-}
-
-// ─── Return / Order / Set items ───────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub struct ReturnItem {
-    pub expression: Expression,
-    pub alias: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct OrderItem {
-    pub expression: Expression,
-    pub descending: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct SetItem {
-    pub variable: String,
-    pub property: String,
-    pub value: Expression,
-}
-
-// ─── Tokenizer ────────────────────────────────────────────────────────────────
-
-const SINGLE_CHAR_TOKENS: &[char] = &[
-    '(', ')', '[', ']', '{', '}', ':', ',', '.', '=', '<', '>', '-', '+', '*', '/',
-];
-
-/// Tokenize a Cypher string.
-///
-/// Rules:
-/// - Split on whitespace.
-/// - Split on single-char tokens (see `SINGLE_CHAR_TOKENS`), each becomes its own token.
-/// - Quoted strings (`'…'` or `"…"`) are kept as a single token including the quotes.
-///   String scanning uses the same escape-aware logic as [`keyword_scan`] so that
-///   keywords inside quoted values are never mistaken for clause delimiters.
-/// - `<>`, `<=`, `>=` are kept as two-character tokens.
-pub fn tokenize(input: &str) -> Result<Vec<String>, CypherError> {
-    use crate::keyword_scan::is_ascii_space;
-
-    let sb = input.as_bytes();
-    let len = sb.len();
-    let mut tokens: Vec<String> = Vec::new();
-    let mut i = 0;
-
-    while i < len {
-        let b = sb[i];
-
-        // Skip whitespace (using scanner helper for consistency)
-        if is_ascii_space(b) {
-            i += 1;
-            continue;
-        }
-
-        // Quoted string — use escape-aware scanning (same as keyword_scan)
-        if b == b'\'' || b == b'"' {
-            let quote = b;
-            let mut s = String::new();
-            s.push(b as char);
-            i += 1;
-            loop {
-                if i >= len {
-                    return Err(CypherError::UnterminatedString);
-                }
-                let c = sb[i];
-                if c == b'\\' && i + 1 < len {
-                    s.push(c as char);
-                    s.push(sb[i + 1] as char);
-                    i += 2;
-                    continue;
-                }
-                if c == quote {
-                    // SQL-style doubled quote ('Alice''s')
-                    if i + 1 < len && sb[i + 1] == quote {
-                        s.push(c as char);
-                        s.push(c as char);
-                        i += 2;
-                        continue;
-                    }
-                    s.push(c as char);
-                    i += 1;
-                    break;
-                }
-                s.push(c as char);
-                i += 1;
-            }
-            tokens.push(s);
-            continue;
-        }
-
-        // Two-character comparison operators
-        if i + 1 < len {
-            let pair = (b, sb[i + 1]);
-            if matches!(
-                pair,
-                (b'<', b'>') | (b'<', b'=') | (b'>', b'=') | (b'!', b'=')
-            ) {
-                tokens.push(format!("{}{}", b as char, sb[i + 1] as char));
-                i += 2;
-                continue;
-            }
-        }
-
-        // Single-char tokens (ASCII fast path)
-        if b.is_ascii() && SINGLE_CHAR_TOKENS.contains(&(b as char)) {
-            tokens.push((b as char).to_string());
-            i += 1;
-            continue;
-        }
-
-        // Word / identifier / number — accumulate until whitespace or single-char token.
-        let start = i;
-        while i < len {
-            let c = sb[i];
-            if is_ascii_space(c) {
-                break;
-            }
-            if c.is_ascii() && SINGLE_CHAR_TOKENS.contains(&(c as char)) {
-                break;
-            }
-            i += 1;
-        }
-        if i > start {
-            tokens.push(input[start..i].to_owned());
-        }
-    }
-
-    Ok(tokens)
-}
-
-// ─── Parser ───────────────────────────────────────────────────────────────────
-
-pub struct Parser;
-
-impl Parser {
-    pub fn new() -> Self {
-        Parser
-    }
-
-    pub fn parse(&self, cypher: &str) -> Result<Query, CypherError> {
-        if cypher.trim().is_empty() {
-            return Err(CypherError::EmptyQuery);
-        }
-
-        let tokens = tokenize(cypher)?;
-        if tokens.is_empty() {
-            return Err(CypherError::EmptyQuery);
-        }
-
-        let mut ctx = ParseContext::new(tokens);
-        ctx.parse_query()
-    }
-}
-
-impl Default for Parser {
-    fn default() -> Self {
-        Parser::new()
-    }
-}
-
-// ─── Parse context ────────────────────────────────────────────────────────────
-
-struct ParseContext {
-    tokens: Vec<String>,
-    pos: usize,
-}
-
 impl ParseContext {
-    fn new(tokens: Vec<String>) -> Self {
-        ParseContext { tokens, pos: 0 }
+    fn parse_pattern_with_optional_path_variable(
+        &mut self,
+        allow_shortest_path: bool,
+    ) -> Result<Pattern, CypherError> {
+        let path_variable = if self.tokens.get(self.pos + 1).map(String::as_str) == Some("=") {
+            let variable = self.advance_identifier()?;
+            self.expect("=")?;
+            Some(variable)
+        } else {
+            None
+        };
+
+        let mut pattern = if allow_shortest_path
+            && matches!(self.peek_upper().as_deref(), Some("SHORTESTPATH"))
+        {
+            self.advance();
+            self.expect("(")?;
+            let mut pattern = self.parse_pattern()?;
+            self.expect(")")?;
+            pattern.shortest_path = true;
+            pattern
+        } else {
+            self.parse_pattern()?
+        };
+        pattern.path_variable = path_variable;
+        Ok(pattern)
     }
-
-    fn peek(&self) -> Option<&str> {
-        self.tokens.get(self.pos).map(|s| s.as_str())
-    }
-
-    fn peek_upper(&self) -> Option<String> {
-        self.peek().map(|s| s.to_uppercase())
-    }
-
-    fn advance(&mut self) -> Option<&str> {
-        let t = self.tokens.get(self.pos).map(|s| s.as_str());
-        if t.is_some() {
-            self.pos += 1;
-        }
-        t
-    }
-
-    fn expect(&mut self, expected: &str) -> Result<(), CypherError> {
-        match self.advance() {
-            Some(t) if t.eq_ignore_ascii_case(expected) => Ok(()),
-            Some(t) => Err(CypherError::ParseError(format!(
-                "expected '{}', got '{}'",
-                expected, t
-            ))),
-            None => Err(CypherError::ParseError(format!(
-                "expected '{}', got end of input",
-                expected
-            ))),
-        }
-    }
-
-    // ── Top-level dispatcher ─────────────────────────────────────────────────
-
-    fn parse_query(&mut self) -> Result<Query, CypherError> {
-        let mut clauses: Vec<Clause> = Vec::new();
-
-        while self.pos < self.tokens.len() {
-            let upper = match self.peek_upper() {
-                Some(u) => u,
-                None => break,
-            };
-
-            match upper.as_str() {
-                "MATCH" => {
-                    self.advance();
-                    let clause = self.parse_match(false)?;
-                    clauses.push(Clause::Match(clause));
-                }
-                "OPTIONAL" => {
-                    self.advance();
-                    self.expect("MATCH")?;
-                    let clause = self.parse_match(true)?;
-                    clauses.push(Clause::OptionalMatch(clause));
-                }
-                "CREATE" => {
-                    self.advance();
-                    match self.peek_upper().as_deref() {
-                        Some("CONSTRAINT") => {
-                            self.advance();
-                            clauses.push(Clause::CreateConstraint(self.parse_create_constraint()?));
-                        }
-                        Some("INDEX") => {
-                            self.advance();
-                            clauses.push(Clause::CreateIndex(self.parse_create_index()?));
-                        }
-                        Some("DECAY") => {
-                            self.advance();
-                            clauses.push(Clause::CreateDecayProfile(
-                                self.parse_create_decay_profile()?,
-                            ));
-                        }
-                        Some("PROMOTION") => {
-                            self.advance();
-                            match self.peek_upper().as_deref() {
-                                Some("PROFILE") => {
-                                    self.advance();
-                                    clauses.push(Clause::CreatePromotionProfile(
-                                        self.parse_create_promotion_profile()?,
-                                    ));
-                                }
-                                Some("POLICY") => {
-                                    self.advance();
-                                    clauses.push(Clause::CreatePromotionPolicy(
-                                        self.parse_create_promotion_policy()?,
-                                    ));
-                                }
-                                Some(other) => {
-                                    return Err(CypherError::ParseError(format!(
-                                        "unsupported CREATE PROMOTION target '{}'",
-                                        other
-                                    )));
-                                }
-                                None => {
-                                    return Err(CypherError::ParseError(
-                                        "expected CREATE PROMOTION target, got end of input".into(),
-                                    ));
-                                }
-                            }
-                        }
-                        _ => {
-                            let clause = self.parse_create()?;
-                            clauses.push(Clause::Create(clause));
-                        }
-                    }
-                }
-                "MERGE" => {
-                    self.advance();
-                    let clause = self.parse_merge()?;
-                    clauses.push(Clause::Merge(clause));
-                }
-                "RETURN" => {
-                    self.advance();
-                    let clause = self.parse_return()?;
-                    clauses.push(Clause::Return(clause));
-                }
-                "WHERE" => {
-                    self.advance();
-                    let clause = self.parse_where()?;
-                    clauses.push(Clause::Where(clause));
-                }
-                "SET" => {
-                    self.advance();
-                    let clause = self.parse_set()?;
-                    clauses.push(Clause::Set(clause));
-                }
-                "DELETE" => {
-                    self.advance();
-                    let clause = self.parse_delete(false)?;
-                    clauses.push(Clause::Delete(clause));
-                }
-                "DETACH" => {
-                    self.advance();
-                    self.expect("DELETE")?;
-                    let clause = self.parse_delete(true)?;
-                    clauses.push(Clause::Delete(clause));
-                }
-                "WITH" => {
-                    self.advance();
-                    let clause = self.parse_with()?;
-                    clauses.push(Clause::With(clause));
-                }
-                "UNWIND" => {
-                    self.advance();
-                    let clause = self.parse_unwind()?;
-                    clauses.push(Clause::Unwind(clause));
-                }
-                "DROP" => {
-                    self.advance();
-                    match self.peek_upper().as_deref() {
-                        Some("CONSTRAINT") => {
-                            self.advance();
-                            clauses.push(Clause::DropConstraint(self.parse_drop_constraint()?));
-                        }
-                        Some("INDEX") => {
-                            self.advance();
-                            clauses.push(Clause::DropIndex(self.parse_drop_index()?));
-                        }
-                        Some("DECAY") => {
-                            self.advance();
-                            clauses
-                                .push(Clause::DropDecayProfile(self.parse_drop_decay_profile()?));
-                        }
-                        Some("PROMOTION") => {
-                            self.advance();
-                            match self.peek_upper().as_deref() {
-                                Some("PROFILE") => {
-                                    self.advance();
-                                    clauses.push(Clause::DropPromotionProfile(
-                                        self.parse_drop_promotion_profile()?,
-                                    ));
-                                }
-                                Some("POLICY") => {
-                                    self.advance();
-                                    clauses.push(Clause::DropPromotionPolicy(
-                                        self.parse_drop_promotion_policy()?,
-                                    ));
-                                }
-                                Some(other) => {
-                                    return Err(CypherError::ParseError(format!(
-                                        "unsupported DROP PROMOTION target '{}'",
-                                        other
-                                    )));
-                                }
-                                None => {
-                                    return Err(CypherError::ParseError(
-                                        "expected DROP PROMOTION target, got end of input".into(),
-                                    ));
-                                }
-                            }
-                        }
-                        Some(other) => {
-                            return Err(CypherError::ParseError(format!(
-                                "unsupported DROP target '{}'",
-                                other
-                            )));
-                        }
-                        None => {
-                            return Err(CypherError::ParseError(
-                                "expected DROP target, got end of input".into(),
-                            ));
-                        }
-                    }
-                }
-                "SHOW" => {
-                    self.advance();
-                    match self.peek_upper().as_deref() {
-                        Some("CONSTRAINTS") => {
-                            self.advance();
-                            clauses.push(Clause::ShowConstraints(self.parse_show_constraints()?));
-                        }
-                        Some("INDEXES") => {
-                            self.advance();
-                            clauses.push(Clause::ShowIndexes(self.parse_show_indexes()?));
-                        }
-                        Some("DECAY") => {
-                            self.advance();
-                            clauses
-                                .push(Clause::ShowDecayProfiles(self.parse_show_decay_profiles()?));
-                        }
-                        Some("PROMOTION") => {
-                            self.advance();
-                            match self.peek_upper().as_deref() {
-                                Some("PROFILES") => {
-                                    self.advance();
-                                    clauses.push(Clause::ShowPromotionProfiles(
-                                        self.parse_show_promotion_profiles()?,
-                                    ));
-                                }
-                                Some("POLICIES") => {
-                                    self.advance();
-                                    clauses.push(Clause::ShowPromotionPolicies(
-                                        self.parse_show_promotion_policies()?,
-                                    ));
-                                }
-                                Some(other) => {
-                                    return Err(CypherError::ParseError(format!(
-                                        "unsupported SHOW PROMOTION target '{}'",
-                                        other
-                                    )));
-                                }
-                                None => {
-                                    return Err(CypherError::ParseError(
-                                        "expected SHOW PROMOTION target, got end of input".into(),
-                                    ));
-                                }
-                            }
-                        }
-                        Some(other) => {
-                            return Err(CypherError::ParseError(format!(
-                                "unsupported SHOW target '{}'",
-                                other
-                            )));
-                        }
-                        None => {
-                            return Err(CypherError::ParseError(
-                                "expected SHOW target, got end of input".into(),
-                            ));
-                        }
-                    }
-                }
-                "ALTER" => {
-                    self.advance();
-                    match self.peek_upper().as_deref() {
-                        Some("DECAY") => {
-                            self.advance();
-                            clauses
-                                .push(Clause::AlterDecayProfile(self.parse_alter_decay_profile()?));
-                        }
-                        Some("PROMOTION") => {
-                            self.advance();
-                            match self.peek_upper().as_deref() {
-                                Some("PROFILE") => {
-                                    self.advance();
-                                    clauses.push(Clause::AlterPromotionProfile(
-                                        self.parse_alter_promotion_profile()?,
-                                    ));
-                                }
-                                Some("POLICY") => {
-                                    self.advance();
-                                    clauses.push(Clause::AlterPromotionPolicy(
-                                        self.parse_alter_promotion_policy()?,
-                                    ));
-                                }
-                                Some(other) => {
-                                    return Err(CypherError::ParseError(format!(
-                                        "unsupported ALTER PROMOTION target '{}'",
-                                        other
-                                    )));
-                                }
-                                None => {
-                                    return Err(CypherError::ParseError(
-                                        "expected ALTER PROMOTION target, got end of input".into(),
-                                    ));
-                                }
-                            }
-                        }
-                        Some(other) => {
-                            return Err(CypherError::ParseError(format!(
-                                "unsupported ALTER target '{}'",
-                                other
-                            )));
-                        }
-                        None => {
-                            return Err(CypherError::ParseError(
-                                "expected ALTER target, got end of input".into(),
-                            ));
-                        }
-                    }
-                }
-                _ => {
-                    return Err(CypherError::ParseError(format!(
-                        "unexpected token '{}'",
-                        upper
-                    )));
-                }
-            }
-        }
-
-        if clauses.is_empty() {
-            return Err(CypherError::ParseError("no recognisable clause".into()));
-        }
-
-        let query_type = dominant_query_type(&clauses);
-
-        Ok(Query {
-            query_type,
-            clauses,
-            parameters: HashMap::new(),
-        })
-    }
-
-    // ── MATCH ────────────────────────────────────────────────────────────────
 
     fn parse_match(&mut self, optional: bool) -> Result<MatchClause, CypherError> {
-        let pattern = self.parse_pattern()?;
+        let pattern = self.parse_pattern_with_optional_path_variable(true)?;
         // WHERE is handled at the top-level dispatcher as a standalone Clause::Where
         Ok(MatchClause { pattern, optional })
     }
@@ -831,14 +101,14 @@ impl ParseContext {
     // ── CREATE ───────────────────────────────────────────────────────────────
 
     fn parse_create(&mut self) -> Result<CreateClause, CypherError> {
-        let pattern = self.parse_pattern()?;
+        let pattern = self.parse_pattern_with_optional_path_variable(false)?;
         Ok(CreateClause { pattern })
     }
 
     // ── MERGE ────────────────────────────────────────────────────────────────
 
     fn parse_merge(&mut self) -> Result<MergeClause, CypherError> {
-        let pattern = self.parse_pattern()?;
+        let pattern = self.parse_pattern_with_optional_path_variable(false)?;
         Ok(MergeClause { pattern })
     }
 
@@ -1000,9 +270,17 @@ impl ParseContext {
             None
         };
 
+        let limit = if self.peek_upper().as_deref() == Some("LIMIT") {
+            self.advance();
+            Some(self.parse_i64()?)
+        } else {
+            None
+        };
+
         Ok(WithClause {
             items,
             where_clause,
+            limit,
         })
     }
 
@@ -1379,713 +657,7 @@ impl ParseContext {
         let property = self.advance_identifier()?;
         Ok((variable, property))
     }
-
-    // ── Pattern ──────────────────────────────────────────────────────────────
-
-    fn parse_pattern(&mut self) -> Result<Pattern, CypherError> {
-        let mut nodes: Vec<NodePattern> = Vec::new();
-        let mut edges: Vec<EdgePattern> = Vec::new();
-
-        // Parse one or more comma-separated path segments: `(a), (b)-[r]->(c), …`
-        loop {
-            // Expect at least one node
-            self.expect("(")?;
-            nodes.push(self.parse_node_inner()?);
-
-            // Try to parse edges: `-[…]->` / `<-[…]-` / `-[…]-`
-            loop {
-                // Check for relationship arrow start: `-` or `<`
-                let next = self.peek();
-                if next == Some("-") || next == Some("<") {
-                    if let Some(edge) = self.try_parse_edge()? {
-                        edges.push(edge);
-                        // Next must be a node
-                        self.expect("(")?;
-                        nodes.push(self.parse_node_inner()?);
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            // Comma separates additional path segments: `MATCH (a), (b)`
-            if self.peek() == Some(",") {
-                self.advance(); // consume ','
-            } else {
-                break;
-            }
-        }
-
-        Ok(Pattern { nodes, edges })
-    }
-
-    /// Parse the interior of a `(…)` – variable, labels, properties.
-    fn parse_node_inner(&mut self) -> Result<NodePattern, CypherError> {
-        let mut variable: Option<String> = None;
-        let mut labels: Vec<String> = Vec::new();
-        let mut properties: HashMap<String, Value> = HashMap::new();
-
-        // Variable name (optional – not a keyword, not `:` or `)`)
-        if let Some(t) = self.peek() {
-            if t != ")" && t != ":" && t != "{" && !is_keyword(t) {
-                variable = Some(self.advance().unwrap().to_string());
-            }
-        }
-
-        // Labels: `:Label` (may repeat)
-        while self.peek() == Some(":") {
-            self.advance(); // consume `:`
-            let label = self.advance_identifier()?;
-            labels.push(label);
-        }
-
-        // Properties: `{key: value, …}`
-        if self.peek() == Some("{") {
-            self.advance(); // consume `{`
-            properties = self.parse_properties_map()?;
-        }
-
-        self.expect(")")?;
-
-        Ok(NodePattern {
-            variable,
-            labels,
-            properties,
-        })
-    }
-
-    /// Try to parse an edge pattern. Returns `None` if it isn't a valid edge start.
-    fn try_parse_edge(&mut self) -> Result<Option<EdgePattern>, CypherError> {
-        let saved_pos = self.pos;
-
-        // Determine direction prefix: `<-` (incoming) or `-` (out/both)
-        let prefix_incoming = if self.peek() == Some("<") {
-            self.advance(); // consume `<`
-            if self.peek() != Some("-") {
-                self.pos = saved_pos;
-                return Ok(None);
-            }
-            self.advance(); // consume `-`
-            true
-        } else {
-            self.advance(); // consume `-`
-            false
-        };
-
-        // If next is not `[`, this isn't a proper edge – e.g. just stray `-`
-        if self.peek() != Some("[") {
-            self.pos = saved_pos;
-            return Ok(None);
-        }
-        self.advance(); // consume `[`
-
-        let edge = self.parse_edge_inner(prefix_incoming)?;
-
-        self.expect("]")?;
-
-        // Direction suffix: `->` (outgoing) or `-` (both/incoming)
-        let suffix_arrow = if self.peek() == Some("-") {
-            self.advance(); // consume `-`
-            if self.peek() == Some(">") {
-                self.advance(); // consume `>`
-                true
-            } else {
-                false
-            }
-        } else {
-            self.pos = saved_pos;
-            return Ok(None);
-        };
-
-        let direction = if prefix_incoming && !suffix_arrow {
-            EdgeDirection::Incoming
-        } else if !prefix_incoming && suffix_arrow {
-            EdgeDirection::Outgoing
-        } else {
-            EdgeDirection::Both
-        };
-
-        Ok(Some(EdgePattern { direction, ..edge }))
-    }
-
-    /// Parse the interior of `[…]` for a relationship.
-    fn parse_edge_inner(&mut self, _prefix_incoming: bool) -> Result<EdgePattern, CypherError> {
-        let mut variable: Option<String> = None;
-        let mut rel_type: Option<String> = None;
-        let mut properties: HashMap<String, Value> = HashMap::new();
-        let mut min_hops: Option<u32> = None;
-        let mut max_hops: Option<u32> = None;
-
-        // Variable (optional)
-        if let Some(t) = self.peek() {
-            if t != "]" && t != ":" && t != "*" && t != "{" {
-                variable = Some(self.advance().unwrap().to_string());
-            }
-        }
-
-        // Relationship type: `:TYPE`
-        if self.peek() == Some(":") {
-            self.advance();
-            rel_type = Some(self.advance_identifier()?);
-        }
-
-        // Variable-length: `*min..max` or `*n` or `*`
-        // The tokenizer splits `1..3` into `1`, `.`, `.`, `3`
-        if self.peek() == Some("*") {
-            self.advance(); // consume `*`
-                            // Try to read optional min value
-            if let Some(t) = self.peek() {
-                if t != "]" && t != "{" {
-                    if let Ok(min) = t.parse::<u32>() {
-                        self.advance(); // consume min
-                        min_hops = Some(min);
-                        // Check for `..` (two separate `.` tokens from tokenizer)
-                        if self.peek() == Some(".") {
-                            self.advance(); // consume first `.`
-                            if self.peek() == Some(".") {
-                                self.advance(); // consume second `.`
-                                if let Some(max_t) = self.peek() {
-                                    if let Ok(max) = max_t.parse::<u32>() {
-                                        self.advance();
-                                        max_hops = Some(max);
-                                    }
-                                }
-                            }
-                        } else {
-                            max_hops = Some(min);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Properties map
-        if self.peek() == Some("{") {
-            self.advance();
-            properties = self.parse_properties_map()?;
-        }
-
-        Ok(EdgePattern {
-            variable,
-            rel_type,
-            direction: EdgeDirection::Both, // overwritten by caller
-            properties,
-            min_hops,
-            max_hops,
-        })
-    }
-
-    /// Parse `key: value, …` until `}`.
-    fn parse_properties_map(&mut self) -> Result<HashMap<String, Value>, CypherError> {
-        let mut map = HashMap::new();
-        while self.peek() != Some("}") && self.peek().is_some() {
-            let key = self.advance_identifier()?;
-            self.expect(":")?;
-            let val = self.parse_json_value()?;
-            map.insert(key, val);
-            if self.peek() == Some(",") {
-                self.advance();
-            }
-        }
-        self.expect("}")?;
-        Ok(map)
-    }
-
-    /// Parse a literal JSON-compatible value from tokens.
-    fn parse_json_value(&mut self) -> Result<Value, CypherError> {
-        match self.peek() {
-            Some(t) if t.starts_with('\'') || t.starts_with('"') => {
-                let raw = self.advance().unwrap().to_string();
-                if raw.len() < 2 {
-                    return Err(CypherError::UnterminatedString);
-                }
-                let s = raw[1..raw.len() - 1].to_string();
-                Ok(Value::String(s))
-            }
-            Some(t) if t.eq_ignore_ascii_case("true") => {
-                self.advance();
-                Ok(Value::Bool(true))
-            }
-            Some(t) if t.eq_ignore_ascii_case("false") => {
-                self.advance();
-                Ok(Value::Bool(false))
-            }
-            Some(t) if t.eq_ignore_ascii_case("null") => {
-                self.advance();
-                Ok(Value::Null)
-            }
-            Some(t) => {
-                let t = t.to_string();
-                self.advance();
-                if let Ok(i) = t.parse::<i64>() {
-                    if self.peek() == Some(".") {
-                        self.advance();
-                        let frac = self.advance().ok_or_else(|| {
-                            CypherError::ParseError("expected fractional digits after '.'".into())
-                        })?;
-                        let composed = format!("{}.{}", i, frac);
-                        let f: f64 = composed.parse().map_err(|_| {
-                            CypherError::ParseError(format!("invalid float '{}'", composed))
-                        })?;
-                        let n = serde_json::Number::from_f64(f).ok_or_else(|| {
-                            CypherError::ParseError(format!("invalid float value '{}'", composed))
-                        })?;
-                        Ok(Value::Number(n))
-                    } else {
-                        Ok(Value::Number(i.into()))
-                    }
-                } else if let Ok(f) = t.parse::<f64>() {
-                    let n = serde_json::Number::from_f64(f).ok_or_else(|| {
-                        CypherError::ParseError(format!("invalid float value '{}'", t))
-                    })?;
-                    Ok(Value::Number(n))
-                } else {
-                    Err(CypherError::ParseError(format!(
-                        "unexpected value token '{}'",
-                        t
-                    )))
-                }
-            }
-            None => Err(CypherError::ParseError(
-                "expected value, got end of input".into(),
-            )),
-        }
-    }
-
-    // ── Expressions ──────────────────────────────────────────────────────────
-
-    /// Entry: parse `OR` level.
-    fn parse_expression(&mut self) -> Result<Expression, CypherError> {
-        self.parse_or()
-    }
-
-    fn parse_or(&mut self) -> Result<Expression, CypherError> {
-        let mut left = self.parse_and()?;
-        while self.peek_upper().as_deref() == Some("OR") {
-            self.advance();
-            let right = self.parse_and()?;
-            left = Expression::Or(Box::new(left), Box::new(right));
-        }
-        Ok(left)
-    }
-
-    fn parse_and(&mut self) -> Result<Expression, CypherError> {
-        let mut left = self.parse_not()?;
-        while self.peek_upper().as_deref() == Some("AND") {
-            self.advance();
-            let right = self.parse_not()?;
-            left = Expression::And(Box::new(left), Box::new(right));
-        }
-        Ok(left)
-    }
-
-    fn parse_not(&mut self) -> Result<Expression, CypherError> {
-        if self.peek_upper().as_deref() == Some("NOT") {
-            self.advance();
-            let expr = self.parse_not()?;
-            return Ok(Expression::Not(Box::new(expr)));
-        }
-        self.parse_comparison()
-    }
-
-    fn parse_comparison(&mut self) -> Result<Expression, CypherError> {
-        let left = self.parse_primary()?;
-
-        // IS NULL / IS NOT NULL
-        if self.peek_upper().as_deref() == Some("IS") {
-            self.advance();
-            if self.peek_upper().as_deref() == Some("NOT") {
-                self.advance();
-                self.expect("NULL")?;
-                return Ok(Expression::IsNotNull(Box::new(left)));
-            }
-            self.expect("NULL")?;
-            return Ok(Expression::IsNull(Box::new(left)));
-        }
-
-        // Keyword comparison operators: CONTAINS, STARTS WITH, ENDS WITH
-        if let Some(kw) = self.peek_upper() {
-            match kw.as_str() {
-                "CONTAINS" => {
-                    self.advance();
-                    let right = self.parse_primary()?;
-                    return Ok(Expression::Comparison {
-                        left: Box::new(left),
-                        op: "CONTAINS".to_string(),
-                        right: Box::new(right),
-                    });
-                }
-                "STARTS" => {
-                    self.advance();
-                    self.expect("WITH")?;
-                    let right = self.parse_primary()?;
-                    return Ok(Expression::Comparison {
-                        left: Box::new(left),
-                        op: "STARTS WITH".to_string(),
-                        right: Box::new(right),
-                    });
-                }
-                "ENDS" => {
-                    self.advance();
-                    self.expect("WITH")?;
-                    let right = self.parse_primary()?;
-                    return Ok(Expression::Comparison {
-                        left: Box::new(left),
-                        op: "ENDS WITH".to_string(),
-                        right: Box::new(right),
-                    });
-                }
-                _ => {}
-            }
-        }
-
-        // Symbolic comparison operators
-        let op = match self.peek() {
-            Some("=") | Some("<") | Some(">") | Some("<=") | Some(">=") | Some("<>") => {
-                self.advance().unwrap().to_string()
-            }
-            // != is an alias for <> — tokenizer emits it as a single token if present
-            Some("!=") => {
-                self.advance();
-                "<>".to_string()
-            }
-            _ => return Ok(left),
-        };
-
-        let right = self.parse_primary()?;
-        Ok(Expression::Comparison {
-            left: Box::new(left),
-            op,
-            right: Box::new(right),
-        })
-    }
-
-    fn parse_primary(&mut self) -> Result<Expression, CypherError> {
-        match self.peek() {
-            // Quoted string literal – tokenizer guarantees at least opening+closing quote
-            Some(t) if t.starts_with('\'') || t.starts_with('"') => {
-                let raw = self.advance().unwrap().to_string();
-                if raw.len() < 2 {
-                    return Err(CypherError::UnterminatedString);
-                }
-                let s = raw[1..raw.len() - 1].to_string();
-                Ok(Expression::Literal(Value::String(s)))
-            }
-            // Parameter: `$name`
-            Some(t) if t.starts_with('$') => {
-                let raw = self.advance().unwrap().to_string();
-                Ok(Expression::Parameter(raw[1..].to_string()))
-            }
-            // Parenthesised expression
-            Some("(") => {
-                self.advance();
-                let expr = self.parse_expression()?;
-                self.expect(")")?;
-                Ok(expr)
-            }
-            // Keyword literals
-            Some(t) if t.eq_ignore_ascii_case("true") => {
-                self.advance();
-                Ok(Expression::Literal(Value::Bool(true)))
-            }
-            Some(t) if t.eq_ignore_ascii_case("false") => {
-                self.advance();
-                Ok(Expression::Literal(Value::Bool(false)))
-            }
-            Some(t) if t.eq_ignore_ascii_case("null") => {
-                self.advance();
-                Ok(Expression::Literal(Value::Null))
-            }
-            // Number: integer or float
-            Some(t)
-                if t.chars()
-                    .next()
-                    .map(|c| c.is_ascii_digit())
-                    .unwrap_or(false) =>
-            {
-                let t = self.advance().unwrap().to_string();
-                if let Ok(i) = t.parse::<i64>() {
-                    if self.peek() == Some(".") {
-                        self.advance();
-                        let frac = self.advance().ok_or_else(|| {
-                            CypherError::ParseError("expected fractional digits after '.'".into())
-                        })?;
-                        let composed = format!("{}.{}", i, frac);
-                        let f: f64 = composed.parse().map_err(|_| {
-                            CypherError::ParseError(format!("invalid float '{}'", composed))
-                        })?;
-                        let n = serde_json::Number::from_f64(f).ok_or_else(|| {
-                            CypherError::ParseError(format!("invalid float value '{}'", composed))
-                        })?;
-                        Ok(Expression::Literal(Value::Number(n)))
-                    } else {
-                        Ok(Expression::Literal(Value::Number(i.into())))
-                    }
-                } else {
-                    let f: f64 = t
-                        .parse()
-                        .map_err(|_| CypherError::ParseError(format!("invalid number '{}'", t)))?;
-                    let n = serde_json::Number::from_f64(f).ok_or_else(|| {
-                        CypherError::ParseError(format!("invalid float value '{}'", t))
-                    })?;
-                    Ok(Expression::Literal(Value::Number(n)))
-                }
-            }
-            // Identifier: variable, property access, or function call
-            Some(_) => {
-                let name = self.advance().unwrap().to_string();
-
-                // Function call: `name(`
-                if self.peek() == Some("(") {
-                    self.advance(); // consume `(`
-                    let distinct = if self.peek_upper().as_deref() == Some("DISTINCT") {
-                        self.advance();
-                        true
-                    } else {
-                        false
-                    };
-                    let mut args: Vec<Expression> = Vec::new();
-                    if self.peek() != Some(")") {
-                        args.push(self.parse_expression()?);
-                        while self.peek() == Some(",") {
-                            self.advance();
-                            args.push(self.parse_expression()?);
-                        }
-                    }
-                    self.expect(")")?;
-                    return Ok(Expression::FunctionCall {
-                        name,
-                        args,
-                        distinct,
-                    });
-                }
-
-                // Property access: `var.prop`
-                if self.peek() == Some(".") {
-                    self.advance(); // consume `.`
-                    let property = self.advance_identifier()?;
-                    return Ok(Expression::PropertyAccess {
-                        variable: name,
-                        property,
-                    });
-                }
-
-                Ok(Expression::Variable(name))
-            }
-            None => Err(CypherError::ParseError(
-                "unexpected end of expression".into(),
-            )),
-        }
-    }
-
-    // ── Helpers ──────────────────────────────────────────────────────────────
-
-    /// Advance and return the next token as an identifier (not a keyword).
-    fn advance_identifier(&mut self) -> Result<String, CypherError> {
-        match self.advance() {
-            Some(t) => Ok(t.to_string()),
-            None => Err(CypherError::ParseError(
-                "expected identifier, got end of input".into(),
-            )),
-        }
-    }
 }
-
-/// Returns `true` if `s` is an openCypher keyword that cannot be a bare variable name.
-fn trim_quotes(token: &str) -> &str {
-    if (token.starts_with('\'') && token.ends_with('\''))
-        || (token.starts_with('"') && token.ends_with('"'))
-    {
-        &token[1..token.len().saturating_sub(1)]
-    } else {
-        token
-    }
-}
-
-fn parse_bool_token(token: &str) -> Option<bool> {
-    match token.to_ascii_uppercase().as_str() {
-        "TRUE" => Some(true),
-        "FALSE" => Some(false),
-        _ => None,
-    }
-}
-
-/// Returns `true` if `s` is an openCypher keyword that cannot be a bare variable name.
-fn is_keyword(s: &str) -> bool {
-    matches!(
-        s.to_uppercase().as_str(),
-        "MATCH"
-            | "OPTIONAL"
-            | "CREATE"
-            | "RETURN"
-            | "WHERE"
-            | "SET"
-            | "DELETE"
-            | "DETACH"
-            | "WITH"
-            | "MERGE"
-            | "UNWIND"
-            | "ORDER"
-            | "BY"
-            | "LIMIT"
-            | "SKIP"
-            | "AS"
-            | "AND"
-            | "OR"
-            | "NOT"
-            | "NULL"
-            | "TRUE"
-            | "FALSE"
-            | "IS"
-            | "IN"
-            | "DISTINCT"
-            | "ASC"
-            | "DESC"
-            | "ASCENDING"
-            | "DESCENDING"
-            | "CONTAINS"
-            | "STARTS"
-            | "ENDS"
-            | "DROP"
-            | "SHOW"
-            | "CONSTRAINT"
-            | "CONSTRAINTS"
-            | "INDEX"
-            | "INDEXES"
-            | "ALTER"
-            | "DECAY"
-            | "PROFILE"
-            | "PROFILES"
-            | "PROMOTION"
-            | "POLICY"
-            | "POLICIES"
-            | "FOR"
-            | "APPLY"
-            | "REQUIRE"
-            | "UNIQUE"
-            | "EXISTS"
-            | "ON"
-            | "OPTIONS"
-            | "ENABLED"
-            | "WHEN"
-    )
-}
-
-/// Determine the dominant `QueryType` from all parsed clauses.
-///
-/// Priority (highest wins): Delete > Set > Merge > Create > Match > With > Return
-fn dominant_query_type(clauses: &[Clause]) -> QueryType {
-    fn priority(c: &Clause) -> u8 {
-        match c {
-            Clause::CreateConstraint(_)
-            | Clause::DropConstraint(_)
-            | Clause::ShowConstraints(_)
-            | Clause::CreateIndex(_)
-            | Clause::DropIndex(_)
-            | Clause::ShowIndexes(_)
-            | Clause::CreateDecayProfile(_)
-            | Clause::AlterDecayProfile(_)
-            | Clause::DropDecayProfile(_)
-            | Clause::ShowDecayProfiles(_)
-            | Clause::CreatePromotionProfile(_)
-            | Clause::AlterPromotionProfile(_)
-            | Clause::DropPromotionProfile(_)
-            | Clause::ShowPromotionProfiles(_)
-            | Clause::CreatePromotionPolicy(_)
-            | Clause::AlterPromotionPolicy(_)
-            | Clause::DropPromotionPolicy(_)
-            | Clause::ShowPromotionPolicies(_) => 7,
-            Clause::Delete(_) => 6,
-            Clause::Set(_) => 5,
-            Clause::Merge(_) => 4,
-            Clause::Create(_) => 3,
-            Clause::Match(_) | Clause::OptionalMatch(_) => 2,
-            Clause::With(_) => 1,
-            _ => 0,
-        }
-    }
-
-    let best = clauses.iter().max_by_key(|c| priority(c));
-    match best {
-        Some(Clause::CreateConstraint(_))
-        | Some(Clause::DropConstraint(_))
-        | Some(Clause::ShowConstraints(_))
-        | Some(Clause::CreateIndex(_))
-        | Some(Clause::DropIndex(_))
-        | Some(Clause::ShowIndexes(_))
-        | Some(Clause::CreateDecayProfile(_))
-        | Some(Clause::AlterDecayProfile(_))
-        | Some(Clause::DropDecayProfile(_))
-        | Some(Clause::ShowDecayProfiles(_))
-        | Some(Clause::CreatePromotionProfile(_))
-        | Some(Clause::AlterPromotionProfile(_))
-        | Some(Clause::DropPromotionProfile(_))
-        | Some(Clause::ShowPromotionProfiles(_))
-        | Some(Clause::CreatePromotionPolicy(_))
-        | Some(Clause::AlterPromotionPolicy(_))
-        | Some(Clause::DropPromotionPolicy(_))
-        | Some(Clause::ShowPromotionPolicies(_)) => QueryType::Ddl,
-        Some(Clause::Delete(_)) => QueryType::Delete,
-        Some(Clause::Set(_)) => QueryType::Set,
-        Some(Clause::Merge(_)) => QueryType::Merge,
-        Some(Clause::Create(_)) => QueryType::Create,
-        Some(Clause::Match(_) | Clause::OptionalMatch(_)) => QueryType::Match,
-        Some(Clause::With(_)) => QueryType::With,
-        _ => QueryType::Return,
-    }
-}
-
-// ─── Executor ─────────────────────────────────────────────────────────────────
-
-pub struct QueryResult {
-    pub columns: Vec<String>,
-    pub rows: Vec<HashMap<String, Value>>,
-}
-
-impl QueryResult {
-    pub fn row_count(&self) -> usize {
-        self.rows.len()
-    }
-}
-
-pub struct Executor {
-    parser: Parser,
-}
-
-impl Executor {
-    pub fn new() -> Self {
-        Executor {
-            parser: Parser::new(),
-        }
-    }
-
-    /// Parse `cypher`, apply optional `params`, and return an (empty) result set.
-    pub fn execute(
-        &self,
-        _ctx: &(),
-        cypher: &str,
-        params: Option<HashMap<String, Value>>,
-    ) -> Result<QueryResult, CypherError> {
-        let mut query = self.parser.parse(cypher)?;
-        if let Some(p) = params {
-            query.parameters = p;
-        }
-        Ok(QueryResult {
-            columns: vec![],
-            rows: vec![],
-        })
-    }
-}
-
-impl Default for Executor {
-    fn default() -> Self {
-        Executor::new()
-    }
-}
-
-// ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -2363,6 +935,45 @@ mod tests {
             let edge = &m.pattern.edges[0];
             assert_eq!(edge.min_hops, Some(1));
             assert_eq!(edge.max_hops, Some(3));
+        } else {
+            panic!("expected Match clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_match_with_path_variable() {
+        let p = Parser::new();
+        let q = p.parse("MATCH p = (a)-[:LINK]->(b) RETURN p").unwrap();
+        assert!(matches!(q.query_type, QueryType::Match));
+        if let Some(Clause::Match(m)) = q.clauses.first() {
+            assert_eq!(m.pattern.path_variable.as_deref(), Some("p"));
+        } else {
+            panic!("expected Match clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_with_path_variable() {
+        let p = Parser::new();
+        let q = p.parse("CREATE p = (a)-[:LINK]->(b)").unwrap();
+        assert!(matches!(q.query_type, QueryType::Create));
+        if let Some(Clause::Create(c)) = q.clauses.first() {
+            assert_eq!(c.pattern.path_variable.as_deref(), Some("p"));
+        } else {
+            panic!("expected Create clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_match_with_shortest_path_variable() {
+        let p = Parser::new();
+        let q = p
+            .parse("MATCH p = shortestPath((a)-[:LINK*]->(b)) RETURN p")
+            .unwrap();
+        assert!(matches!(q.query_type, QueryType::Match));
+        if let Some(Clause::Match(m)) = q.clauses.first() {
+            assert_eq!(m.pattern.path_variable.as_deref(), Some("p"));
+            assert!(m.pattern.shortest_path);
         } else {
             panic!("expected Match clause");
         }

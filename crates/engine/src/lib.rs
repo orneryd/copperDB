@@ -41,8 +41,12 @@
 use copperdb_audit::{AuditConfig, AuditLog, Event, EventType};
 use copperdb_cache::QueryCache;
 use copperdb_compliance::{ComplianceManager, ComplianceReporter};
-use copperdb_cypher::{Clause, Expression, Parser, Pattern, QueryType};
+use copperdb_cypher::{
+    can_execute_as_pipeline, detect_query_pattern, match_compound_query_shape, Clause,
+    EdgeDirection, Expression, Parser, Pattern, QueryType, ReturnItem, WhereClause,
+};
 use copperdb_eval::{EvalEngine, QueryStats};
+use copperdb_filter::eval_predicate;
 use copperdb_kms::{new_provider, ProviderFactoryConfig};
 use copperdb_replication::{
     CassandraCoordinator, Command, DistributedReadOutcome, DistributedWriteOutcome,
@@ -56,7 +60,7 @@ use copperdb_topology::{
 };
 use copperdb_txsession::TransactionManager;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -175,6 +179,20 @@ pub struct DistributedQueryResult {
     pub result: QueryResult,
     pub write_outcome: Option<DistributedWriteOutcome>,
     pub read_outcome: Option<DistributedReadOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistributedPath {
+    pub node_ids: Vec<String>,
+    pub edge_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DistributedBfsResult {
+    pub plan: DistributedReadPlan,
+    pub responded_by: Vec<String>,
+    pub failed_replicas: Vec<String>,
+    pub path: Option<DistributedPath>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -306,7 +324,16 @@ impl CopperDb {
             return Err(err.into());
         }
 
-        let eval_result = match self.eval.execute(&parsed, &params) {
+        let pattern_info = detect_query_pattern(cypher);
+        let (compound_shape, compound_ok) = match_compound_query_shape(cypher);
+        let (pipeline_clauses, pipeline_ok) = can_execute_as_pipeline(cypher);
+        let eval_result = match self.eval.execute_with_routes(
+            &parsed,
+            &params,
+            &pattern_info,
+            compound_ok.then_some(&compound_shape),
+            pipeline_ok.then_some(pipeline_clauses.as_slice()),
+        ) {
             Ok(result) => result,
             Err(err) => {
                 self.record_query_audit(
@@ -353,6 +380,63 @@ impl CopperDb {
         let parsed = Parser::new().parse(cypher)?;
         self.enforce_compliance(&parsed, roles)?;
 
+        if !is_mutating_query(&parsed.query_type) {
+            if let Some(shape) = distributed_shortest_path_query_shape(&parsed) {
+                let (result, bfs) = self
+                    .execute_distributed_shortest_path_query(
+                        &shape,
+                        placement,
+                        consistency,
+                        request_region,
+                        transport,
+                    )
+                    .await?;
+                return Ok(DistributedQueryResult {
+                    result,
+                    write_outcome: None,
+                    read_outcome: Some(DistributedReadOutcome {
+                        plan: bfs.plan,
+                        responded_by: bfs.responded_by,
+                        failed_replicas: bfs.failed_replicas,
+                        value: None,
+                    }),
+                });
+            }
+            if let Some(shape) = distributed_direct_path_query_shape(&parsed) {
+                let (result, read_outcome) = self
+                    .execute_distributed_direct_path_query(
+                        &shape,
+                        placement,
+                        consistency,
+                        request_region,
+                        transport,
+                    )
+                    .await?;
+                return Ok(DistributedQueryResult {
+                    result,
+                    write_outcome: None,
+                    read_outcome: Some(read_outcome),
+                });
+            }
+            if let Some(shape) = distributed_leading_match_optional_path_query_shape(&parsed) {
+                let (result, read_outcome) = self
+                    .execute_distributed_leading_match_optional_path_query(
+                        &shape,
+                        &params,
+                        placement,
+                        consistency,
+                        request_region,
+                        transport,
+                    )
+                    .await?;
+                return Ok(DistributedQueryResult {
+                    result,
+                    write_outcome: None,
+                    read_outcome: Some(read_outcome),
+                });
+            }
+        }
+
         let coordinator = self.build_cassandra_coordinator(transport)?;
         let mut write_outcome = None;
         let mut read_outcome = None;
@@ -386,6 +470,1165 @@ impl CopperDb {
             write_outcome,
             read_outcome,
         })
+    }
+
+    pub async fn distributed_bfs_path_as(
+        &self,
+        start_node_id: &str,
+        end_node_id: &str,
+        rel_type: Option<&str>,
+        direction: EdgeDirection,
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+        transport: Arc<dyn ReplicaTransport>,
+    ) -> Result<DistributedBfsResult, CopperDbError> {
+        let plan = self.plan_distributed_read(placement, consistency, request_region)?;
+        let mut responded_by = BTreeSet::new();
+        let mut failed_replicas = BTreeSet::new();
+
+        let start_exists = self
+            .distributed_graph_node_exists(
+                &plan,
+                transport.as_ref(),
+                start_node_id,
+                &mut responded_by,
+                &mut failed_replicas,
+            )
+            .await?;
+        let end_exists = self
+            .distributed_graph_node_exists(
+                &plan,
+                transport.as_ref(),
+                end_node_id,
+                &mut responded_by,
+                &mut failed_replicas,
+            )
+            .await?;
+
+        if responded_by.len() < plan.required_responses {
+            return Err(ReplicationError::NoQuorum {
+                required: plan.required_responses,
+                received: responded_by.len(),
+            }
+            .into());
+        }
+
+        let path = if start_exists && end_exists {
+            self.distributed_bfs_path(
+                &plan,
+                transport.as_ref(),
+                start_node_id,
+                end_node_id,
+                rel_type,
+                &direction,
+                &mut responded_by,
+                &mut failed_replicas,
+            )
+            .await?
+        } else {
+            None
+        };
+
+        if responded_by.len() < plan.required_responses {
+            return Err(ReplicationError::NoQuorum {
+                required: plan.required_responses,
+                received: responded_by.len(),
+            }
+            .into());
+        }
+
+        Ok(DistributedBfsResult {
+            plan,
+            responded_by: responded_by.into_iter().collect(),
+            failed_replicas: failed_replicas.into_iter().collect(),
+            path,
+        })
+    }
+
+    pub async fn distributed_bfs_query_as(
+        &self,
+        start_node_id: &str,
+        end_node_id: &str,
+        rel_type: Option<&str>,
+        direction: EdgeDirection,
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+        transport: Arc<dyn ReplicaTransport>,
+    ) -> Result<(QueryResult, DistributedBfsResult), CopperDbError> {
+        let bfs = self
+            .distributed_bfs_path_as(
+                start_node_id,
+                end_node_id,
+                rel_type,
+                direction.clone(),
+                placement,
+                consistency,
+                request_region,
+                transport.clone(),
+            )
+            .await?;
+
+        let path_value = if let Some(path) = &bfs.path {
+            Some(
+                self.materialize_distributed_path_value(
+                    &bfs.plan,
+                    transport.as_ref(),
+                    path,
+                    &direction,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
+        Ok((distributed_bfs_query_result(path_value.as_ref()), bfs))
+    }
+
+    async fn execute_distributed_shortest_path_query(
+        &self,
+        shape: &DistributedShortestPathQueryShape,
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+        transport: Arc<dyn ReplicaTransport>,
+    ) -> Result<(QueryResult, DistributedBfsResult), CopperDbError> {
+        let plan = self.plan_distributed_read(placement, consistency, request_region)?;
+        let mut responded_by = BTreeSet::new();
+        let mut failed_replicas = BTreeSet::new();
+
+        let start_candidates = self
+            .distributed_resolve_node_candidates(
+                &plan,
+                transport.as_ref(),
+                &shape.start_selector,
+                &mut responded_by,
+                &mut failed_replicas,
+            )
+            .await?;
+        let end_candidates = self
+            .distributed_resolve_node_candidates(
+                &plan,
+                transport.as_ref(),
+                &shape.end_selector,
+                &mut responded_by,
+                &mut failed_replicas,
+            )
+            .await?;
+
+        if responded_by.len() < plan.required_responses {
+            return Err(ReplicationError::NoQuorum {
+                required: plan.required_responses,
+                received: responded_by.len(),
+            }
+            .into());
+        }
+
+        let start_ids = distributed_node_ids(&start_candidates);
+        let end_ids = distributed_node_ids(&end_candidates);
+        let mut best_path: Option<DistributedPath> = None;
+
+        for start_node_id in &start_ids {
+            for end_node_id in &end_ids {
+                let candidate = self
+                    .distributed_bfs_path(
+                        &plan,
+                        transport.as_ref(),
+                        start_node_id,
+                        end_node_id,
+                        shape.rel_type.as_deref(),
+                        &shape.direction,
+                        &mut responded_by,
+                        &mut failed_replicas,
+                    )
+                    .await?;
+                if let Some(candidate) = candidate {
+                    let replace = best_path
+                        .as_ref()
+                        .map(|current| candidate.edge_ids.len() < current.edge_ids.len())
+                        .unwrap_or(true);
+                    if replace {
+                        best_path = Some(candidate);
+                    }
+                }
+            }
+        }
+
+        if responded_by.len() < plan.required_responses {
+            return Err(ReplicationError::NoQuorum {
+                required: plan.required_responses,
+                received: responded_by.len(),
+            }
+            .into());
+        }
+
+        let bfs = DistributedBfsResult {
+            plan,
+            responded_by: responded_by.into_iter().collect(),
+            failed_replicas: failed_replicas.into_iter().collect(),
+            path: best_path,
+        };
+
+        let path_value = if let Some(path) = &bfs.path {
+            Some(
+                self.materialize_distributed_path_value(
+                    &bfs.plan,
+                    transport.as_ref(),
+                    path,
+                    &shape.direction,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+
+        Ok((
+            distributed_shortest_path_result(shape, path_value.as_ref())?,
+            bfs,
+        ))
+    }
+
+    async fn execute_distributed_direct_path_query(
+        &self,
+        shape: &DistributedDirectPathQueryShape,
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+        transport: Arc<dyn ReplicaTransport>,
+    ) -> Result<(QueryResult, DistributedReadOutcome), CopperDbError> {
+        let plan = self.plan_distributed_read(placement, consistency, request_region)?;
+        let mut responded_by = BTreeSet::new();
+        let mut failed_replicas = BTreeSet::new();
+        let mut path_values = self
+            .distributed_direct_path_values(
+                &plan,
+                transport.as_ref(),
+                &shape.pattern,
+                &mut responded_by,
+                &mut failed_replicas,
+            )
+            .await?;
+
+        if shape.optional && path_values.is_empty() {
+            path_values.push(Value::Null);
+        }
+
+        Ok((
+            distributed_path_query_result(&shape.return_items, &shape.path_variable, &path_values)?,
+            DistributedReadOutcome {
+                plan,
+                responded_by: responded_by.into_iter().collect(),
+                failed_replicas: failed_replicas.into_iter().collect(),
+                value: None,
+            },
+        ))
+    }
+
+    async fn execute_distributed_leading_match_optional_path_query(
+        &self,
+        shape: &DistributedLeadingMatchOptionalPathQueryShape,
+        params: &HashMap<String, Value>,
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+        transport: Arc<dyn ReplicaTransport>,
+    ) -> Result<(QueryResult, DistributedReadOutcome), CopperDbError> {
+        let plan = self.plan_distributed_read(placement, consistency, request_region)?;
+        let mut responded_by = BTreeSet::new();
+        let mut failed_replicas = BTreeSet::new();
+
+        let mut base_rows = vec![HashMap::new()];
+        for leading_step in &shape.leading_steps {
+            match leading_step {
+                DistributedLeadingStep::Match(leading_match) => {
+                    let mut next_rows = Vec::new();
+                    for base_row in &base_rows {
+                        match leading_match {
+                            DistributedLeadingMatch::Node { selector, variable } => {
+                                let matched_nodes = self
+                                    .distributed_resolve_node_candidates_for_row(
+                                        &plan,
+                                        transport.as_ref(),
+                                        selector,
+                                        base_row,
+                                        &mut responded_by,
+                                        &mut failed_replicas,
+                                    )
+                                    .await?;
+                                if responded_by.len() < plan.required_responses {
+                                    return Err(ReplicationError::NoQuorum {
+                                        required: plan.required_responses,
+                                        received: responded_by.len(),
+                                    }
+                                    .into());
+                                }
+                                for matched_node in matched_nodes {
+                                    let mut row = base_row.clone();
+                                    if let Some(variable) = variable {
+                                        row.insert(variable.clone(), matched_node);
+                                    }
+                                    next_rows.push(row);
+                                }
+                            }
+                            DistributedLeadingMatch::Relationship {
+                                pattern,
+                                start_variable,
+                                end_variable,
+                                edge_variable,
+                            } => {
+                                let matched_paths = self
+                                    .distributed_direct_path_values_for_row(
+                                        &plan,
+                                        transport.as_ref(),
+                                        pattern,
+                                        base_row,
+                                        &mut responded_by,
+                                        &mut failed_replicas,
+                                    )
+                                    .await?;
+                                for matched_path in matched_paths {
+                                    let Some(nodes) = distributed_path_nodes(&matched_path) else {
+                                        continue;
+                                    };
+                                    let Some(relationships) = distributed_path_relationships(&matched_path) else {
+                                        continue;
+                                    };
+                                    if nodes.len() < 2 || relationships.is_empty() {
+                                        continue;
+                                    }
+
+                                    let mut row = base_row.clone();
+                                    if let Some(variable) = start_variable {
+                                        row.insert(variable.clone(), nodes[0].clone());
+                                    }
+                                    if let Some(variable) = end_variable {
+                                        row.insert(variable.clone(), nodes[nodes.len() - 1].clone());
+                                    }
+                                    if let Some(variable) = edge_variable {
+                                        if relationships.len() != 1 {
+                                            continue;
+                                        }
+                                        row.insert(variable.clone(), relationships[0].clone());
+                                    }
+                                    next_rows.push(row);
+                                }
+                            }
+                        }
+                    }
+                    base_rows = next_rows;
+                }
+                DistributedLeadingStep::Where(where_clause) => {
+                    let mut filtered_rows = Vec::new();
+                    for row in base_rows {
+                        let keep = eval_predicate(&where_clause.expression, &row, params)
+                            .map_err(|err| CopperDbError::Eval(err.to_string()))?;
+                        if keep {
+                            filtered_rows.push(row);
+                        }
+                    }
+                    base_rows = filtered_rows;
+                }
+            }
+            if base_rows.is_empty() {
+                break;
+            }
+        }
+
+        let mut path_values = Vec::new();
+        for base_row in base_rows {
+            let row_path_values = self
+                .distributed_direct_path_values_for_row(
+                    &plan,
+                    transport.as_ref(),
+                    &shape.path_shape.pattern,
+                    &base_row,
+                    &mut responded_by,
+                    &mut failed_replicas,
+                )
+                .await?;
+            if row_path_values.is_empty() {
+                path_values.push(Value::Null);
+            } else {
+                path_values.extend(row_path_values);
+            }
+        }
+
+        Ok((
+            distributed_path_query_result(
+                &shape.path_shape.return_items,
+                &shape.path_shape.path_variable,
+                &path_values,
+            )?,
+            DistributedReadOutcome {
+                plan,
+                responded_by: responded_by.into_iter().collect(),
+                failed_replicas: failed_replicas.into_iter().collect(),
+                value: None,
+            },
+        ))
+    }
+
+    async fn distributed_direct_path_values(
+        &self,
+        plan: &DistributedReadPlan,
+        transport: &dyn ReplicaTransport,
+        pattern: &DistributedDirectPathPattern,
+        responded_by: &mut BTreeSet<String>,
+        failed_replicas: &mut BTreeSet<String>,
+    ) -> Result<Vec<Value>, CopperDbError> {
+        let mut path_values = Vec::new();
+
+        match pattern {
+            DistributedDirectPathPattern::SingleNode { selector } => {
+                let nodes = self
+                    .distributed_resolve_node_candidates(
+                        plan,
+                        transport,
+                        selector,
+                        responded_by,
+                        failed_replicas,
+                    )
+                    .await?;
+                if responded_by.len() < plan.required_responses {
+                    return Err(ReplicationError::NoQuorum {
+                        required: plan.required_responses,
+                        received: responded_by.len(),
+                    }
+                    .into());
+                }
+                path_values.extend(nodes.into_iter().map(|node| {
+                    Value::Object(
+                        [
+                            ("nodes".to_string(), Value::Array(vec![node])),
+                            ("relationships".to_string(), Value::Array(Vec::new())),
+                            ("length".to_string(), Value::from(0)),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    )
+                }));
+            }
+            DistributedDirectPathPattern::RelationshipPath {
+                start_selector,
+                end_selector,
+                rel_type,
+                direction,
+                edge_properties,
+                min_hops,
+                max_hops,
+            } => {
+                let start_nodes = self
+                    .distributed_resolve_node_candidates(
+                        plan,
+                        transport,
+                        start_selector,
+                        responded_by,
+                        failed_replicas,
+                    )
+                    .await?;
+                let end_nodes = self
+                    .distributed_resolve_node_candidates(
+                        plan,
+                        transport,
+                        end_selector,
+                        responded_by,
+                        failed_replicas,
+                    )
+                    .await?;
+                if responded_by.len() < plan.required_responses {
+                    return Err(ReplicationError::NoQuorum {
+                        required: plan.required_responses,
+                        received: responded_by.len(),
+                    }
+                    .into());
+                }
+
+                let end_ids = distributed_node_ids(&end_nodes).into_iter().collect::<HashSet<_>>();
+                for start_node_id in distributed_node_ids(&start_nodes) {
+                    for path in self
+                        .distributed_relationship_paths(
+                            plan,
+                            transport,
+                            &start_node_id,
+                            &end_ids,
+                            rel_type.as_deref(),
+                            direction,
+                            edge_properties,
+                            *min_hops,
+                            *max_hops,
+                            responded_by,
+                            failed_replicas,
+                        )
+                        .await?
+                    {
+                        path_values.push(
+                            self.materialize_distributed_path_value(plan, transport, &path, direction)
+                                .await?,
+                        );
+                    }
+                }
+
+                if responded_by.len() < plan.required_responses {
+                    return Err(ReplicationError::NoQuorum {
+                        required: plan.required_responses,
+                        received: responded_by.len(),
+                    }
+                    .into());
+                }
+            }
+        }
+
+        Ok(path_values)
+    }
+
+    async fn distributed_direct_path_values_for_row(
+        &self,
+        plan: &DistributedReadPlan,
+        transport: &dyn ReplicaTransport,
+        pattern: &DistributedDirectPathPattern,
+        base_row: &HashMap<String, Value>,
+        responded_by: &mut BTreeSet<String>,
+        failed_replicas: &mut BTreeSet<String>,
+    ) -> Result<Vec<Value>, CopperDbError> {
+        let mut path_values = Vec::new();
+
+        match pattern {
+            DistributedDirectPathPattern::SingleNode { selector } => {
+                let nodes = self
+                    .distributed_resolve_node_candidates_for_row(
+                        plan,
+                        transport,
+                        selector,
+                        base_row,
+                        responded_by,
+                        failed_replicas,
+                    )
+                    .await?;
+                if responded_by.len() < plan.required_responses {
+                    return Err(ReplicationError::NoQuorum {
+                        required: plan.required_responses,
+                        received: responded_by.len(),
+                    }
+                    .into());
+                }
+                path_values.extend(nodes.into_iter().map(|node| {
+                    Value::Object(
+                        [
+                            ("nodes".to_string(), Value::Array(vec![node])),
+                            ("relationships".to_string(), Value::Array(Vec::new())),
+                            ("length".to_string(), Value::from(0)),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    )
+                }));
+            }
+            DistributedDirectPathPattern::RelationshipPath {
+                start_selector,
+                end_selector,
+                rel_type,
+                direction,
+                edge_properties,
+                min_hops,
+                max_hops,
+            } => {
+                let start_nodes = self
+                    .distributed_resolve_node_candidates_for_row(
+                        plan,
+                        transport,
+                        start_selector,
+                        base_row,
+                        responded_by,
+                        failed_replicas,
+                    )
+                    .await?;
+                let end_nodes = self
+                    .distributed_resolve_node_candidates_for_row(
+                        plan,
+                        transport,
+                        end_selector,
+                        base_row,
+                        responded_by,
+                        failed_replicas,
+                    )
+                    .await?;
+                if responded_by.len() < plan.required_responses {
+                    return Err(ReplicationError::NoQuorum {
+                        required: plan.required_responses,
+                        received: responded_by.len(),
+                    }
+                    .into());
+                }
+
+                let end_ids = distributed_node_ids(&end_nodes).into_iter().collect::<HashSet<_>>();
+                for start_node_id in distributed_node_ids(&start_nodes) {
+                    for path in self
+                        .distributed_relationship_paths(
+                            plan,
+                            transport,
+                            &start_node_id,
+                            &end_ids,
+                            rel_type.as_deref(),
+                            direction,
+                            edge_properties,
+                            *min_hops,
+                            *max_hops,
+                            responded_by,
+                            failed_replicas,
+                        )
+                        .await?
+                    {
+                        path_values.push(
+                            self.materialize_distributed_path_value(plan, transport, &path, direction)
+                                .await?,
+                        );
+                    }
+                }
+
+                if responded_by.len() < plan.required_responses {
+                    return Err(ReplicationError::NoQuorum {
+                        required: plan.required_responses,
+                        received: responded_by.len(),
+                    }
+                    .into());
+                }
+            }
+        }
+
+        Ok(path_values)
+    }
+
+    async fn distributed_resolve_node_candidates_for_row(
+        &self,
+        plan: &DistributedReadPlan,
+        transport: &dyn ReplicaTransport,
+        selector: &DistributedNodeSelector,
+        base_row: &HashMap<String, Value>,
+        responded_by: &mut BTreeSet<String>,
+        failed_replicas: &mut BTreeSet<String>,
+    ) -> Result<Vec<Value>, CopperDbError> {
+        match selector {
+            DistributedNodeSelector::Bound {
+                variable,
+                labels,
+                properties,
+            } => Ok(base_row
+                .get(variable)
+                .filter(|value| distributed_node_matches(value, labels, properties))
+                .cloned()
+                .into_iter()
+                .collect()),
+            _ => {
+                self.distributed_resolve_node_candidates(
+                    plan,
+                    transport,
+                    selector,
+                    responded_by,
+                    failed_replicas,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn distributed_relationship_paths(
+        &self,
+        plan: &DistributedReadPlan,
+        transport: &dyn ReplicaTransport,
+        start_node_id: &str,
+        end_ids: &HashSet<String>,
+        rel_type: Option<&str>,
+        direction: &EdgeDirection,
+        edge_properties: &BTreeMap<String, Value>,
+        min_hops: u32,
+        max_hops: u32,
+        responded_by: &mut BTreeSet<String>,
+        failed_replicas: &mut BTreeSet<String>,
+    ) -> Result<Vec<DistributedPath>, CopperDbError> {
+        let mut frontier = VecDeque::from([(
+            start_node_id.to_string(),
+            0_u32,
+            vec![start_node_id.to_string()],
+            Vec::<String>::new(),
+        )]);
+        let mut visited = HashSet::from([(start_node_id.to_string(), 0_u32)]);
+        let mut paths = Vec::new();
+
+        while let Some((current_node_id, depth, path_node_ids, path_edge_ids)) = frontier.pop_front() {
+            if depth >= min_hops && end_ids.contains(&current_node_id) {
+                paths.push(DistributedPath {
+                    node_ids: path_node_ids.clone(),
+                    edge_ids: path_edge_ids.clone(),
+                });
+            }
+
+            if depth >= max_hops {
+                continue;
+            }
+
+            let mut edges = self
+                .distributed_graph_edges_from_node(
+                    plan,
+                    transport,
+                    &current_node_id,
+                    rel_type,
+                    direction,
+                    responded_by,
+                    failed_replicas,
+                )
+                .await?;
+            edges.sort_by(|left, right| left.id.cmp(&right.id));
+
+            for edge in edges {
+                if !distributed_edge_matches(&edge, edge_properties) {
+                    continue;
+                }
+                let Some(next_node_id) = distributed_related_node_id(&current_node_id, &edge, direction)
+                else {
+                    continue;
+                };
+                let next_depth = depth + 1;
+                if !visited.insert((next_node_id.clone(), next_depth)) {
+                    continue;
+                }
+                let mut next_node_ids = path_node_ids.clone();
+                next_node_ids.push(next_node_id.clone());
+                let mut next_edge_ids = path_edge_ids.clone();
+                next_edge_ids.push(edge.id.clone());
+                frontier.push_back((next_node_id, next_depth, next_node_ids, next_edge_ids));
+            }
+        }
+
+        Ok(paths)
+    }
+
+    async fn distributed_resolve_node_candidates(
+        &self,
+        plan: &DistributedReadPlan,
+        transport: &dyn ReplicaTransport,
+        selector: &DistributedNodeSelector,
+        responded_by: &mut BTreeSet<String>,
+        failed_replicas: &mut BTreeSet<String>,
+    ) -> Result<Vec<Value>, CopperDbError> {
+        match selector {
+            DistributedNodeSelector::LiteralId(node_id) => Ok(self
+                .distributed_graph_node_value(
+                    plan,
+                    transport,
+                    node_id,
+                    responded_by,
+                    failed_replicas,
+                )
+                .await?
+                .into_iter()
+                .collect()),
+            DistributedNodeSelector::Pattern { labels, properties } => {
+                let primary_label = labels.first().expect("selector labels are non-empty");
+                if let Some(Value::String(node_id)) = properties.get("_id") {
+                    let node = self
+                        .distributed_graph_node_value(
+                            plan,
+                            transport,
+                            node_id,
+                            responded_by,
+                            failed_replicas,
+                        )
+                        .await?;
+                    return Ok(node
+                        .into_iter()
+                        .filter(|node| distributed_node_matches(node, labels, properties))
+                        .collect());
+                }
+
+                let mut candidates = if let Some((property, value)) = properties.iter().next() {
+                    self.distributed_graph_nodes_by_property(
+                        plan,
+                        transport,
+                        primary_label,
+                        property,
+                        value,
+                        responded_by,
+                        failed_replicas,
+                    )
+                    .await?
+                } else {
+                    self.distributed_graph_nodes_by_label(
+                        plan,
+                        transport,
+                        primary_label,
+                        responded_by,
+                        failed_replicas,
+                    )
+                    .await?
+                };
+
+                if candidates.is_empty() && !properties.is_empty() {
+                    candidates = self
+                        .distributed_graph_nodes_by_label(
+                            plan,
+                            transport,
+                            primary_label,
+                            responded_by,
+                            failed_replicas,
+                        )
+                        .await?;
+                }
+
+                Ok(candidates
+                    .into_iter()
+                    .filter(|node| distributed_node_matches(node, labels, properties))
+                    .collect())
+            }
+            DistributedNodeSelector::Bound { .. } => Ok(Vec::new()),
+        }
+    }
+
+    async fn materialize_distributed_path_value(
+        &self,
+        plan: &DistributedReadPlan,
+        transport: &dyn ReplicaTransport,
+        path: &DistributedPath,
+        direction: &EdgeDirection,
+    ) -> Result<Value, CopperDbError> {
+        let mut responded_by = BTreeSet::new();
+        let mut failed_replicas = BTreeSet::new();
+
+        let mut node_values = Vec::with_capacity(path.node_ids.len());
+        for node_id in &path.node_ids {
+            node_values.push(
+                self.distributed_graph_node_value(
+                    plan,
+                    transport,
+                    node_id,
+                    &mut responded_by,
+                    &mut failed_replicas,
+                )
+                .await?
+                .unwrap_or(Value::Null),
+            );
+        }
+
+        let mut edge_values = Vec::with_capacity(path.edge_ids.len());
+        for (index, edge_id) in path.edge_ids.iter().enumerate() {
+            let Some(node_id) = path.node_ids.get(index) else {
+                break;
+            };
+            let edge = self
+                .distributed_graph_edge_value(
+                    plan,
+                    transport,
+                    node_id,
+                    edge_id,
+                    direction,
+                    &mut responded_by,
+                    &mut failed_replicas,
+                )
+                .await?
+                .unwrap_or(Value::Null);
+            edge_values.push(edge);
+        }
+
+        Ok(Value::Object(
+            [
+                ("nodes".to_string(), Value::Array(node_values)),
+                ("relationships".to_string(), Value::Array(edge_values.clone())),
+                ("length".to_string(), Value::from(edge_values.len() as i64)),
+            ]
+            .into_iter()
+            .collect(),
+        ))
+    }
+
+    async fn distributed_graph_node_exists(
+        &self,
+        plan: &DistributedReadPlan,
+        transport: &dyn ReplicaTransport,
+        node_id: &str,
+        responded_by: &mut BTreeSet<String>,
+        failed_replicas: &mut BTreeSet<String>,
+    ) -> Result<bool, CopperDbError> {
+        for replica in &plan.replicas {
+            match transport.graph_node(&replica.node_id, node_id).await {
+                Ok(Some(_)) => {
+                    responded_by.insert(replica.node_id.clone());
+                    return Ok(true);
+                }
+                Ok(None) => {
+                    responded_by.insert(replica.node_id.clone());
+                }
+                Err(_) => {
+                    failed_replicas.insert(replica.node_id.clone());
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    async fn distributed_graph_node_value(
+        &self,
+        plan: &DistributedReadPlan,
+        transport: &dyn ReplicaTransport,
+        node_id: &str,
+        responded_by: &mut BTreeSet<String>,
+        failed_replicas: &mut BTreeSet<String>,
+    ) -> Result<Option<Value>, CopperDbError> {
+        for replica in &plan.replicas {
+            match transport.graph_node(&replica.node_id, node_id).await {
+                Ok(Some(bytes)) => {
+                    responded_by.insert(replica.node_id.clone());
+                    let props: BTreeMap<String, Value> = rmp_serde::from_slice(&bytes)
+                        .map_err(|error| CopperDbError::Storage(error.to_string()))?;
+                    return Ok(Some(Value::Object(props.into_iter().collect())));
+                }
+                Ok(None) => {
+                    responded_by.insert(replica.node_id.clone());
+                }
+                Err(_) => {
+                    failed_replicas.insert(replica.node_id.clone());
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    async fn distributed_graph_nodes_by_label(
+        &self,
+        plan: &DistributedReadPlan,
+        transport: &dyn ReplicaTransport,
+        label: &str,
+        responded_by: &mut BTreeSet<String>,
+        failed_replicas: &mut BTreeSet<String>,
+    ) -> Result<Vec<Value>, CopperDbError> {
+        let mut nodes = BTreeMap::new();
+        for replica in &plan.replicas {
+            match transport.graph_nodes_by_label(&replica.node_id, label).await {
+                Ok(raw_nodes) => {
+                    responded_by.insert(replica.node_id.clone());
+                    for raw in raw_nodes {
+                        let props: BTreeMap<String, Value> = rmp_serde::from_slice(&raw)
+                            .map_err(|error| CopperDbError::Storage(error.to_string()))?;
+                        let value = Value::Object(props.into_iter().collect());
+                        if let Some(node_id) = distributed_node_id(&value) {
+                            nodes.insert(node_id, value);
+                        }
+                    }
+                }
+                Err(_) => {
+                    failed_replicas.insert(replica.node_id.clone());
+                }
+            }
+        }
+        Ok(nodes.into_values().collect())
+    }
+
+    async fn distributed_graph_nodes_by_property(
+        &self,
+        plan: &DistributedReadPlan,
+        transport: &dyn ReplicaTransport,
+        label: &str,
+        property: &str,
+        value: &Value,
+        responded_by: &mut BTreeSet<String>,
+        failed_replicas: &mut BTreeSet<String>,
+    ) -> Result<Vec<Value>, CopperDbError> {
+        let mut nodes = BTreeMap::new();
+        for replica in &plan.replicas {
+            match transport
+                .graph_nodes_by_property(&replica.node_id, label, property, value)
+                .await
+            {
+                Ok(raw_nodes) => {
+                    responded_by.insert(replica.node_id.clone());
+                    for raw in raw_nodes {
+                        let props: BTreeMap<String, Value> = rmp_serde::from_slice(&raw)
+                            .map_err(|error| CopperDbError::Storage(error.to_string()))?;
+                        let value = Value::Object(props.into_iter().collect());
+                        if let Some(node_id) = distributed_node_id(&value) {
+                            nodes.insert(node_id, value);
+                        }
+                    }
+                }
+                Err(_) => {
+                    failed_replicas.insert(replica.node_id.clone());
+                }
+            }
+        }
+        Ok(nodes.into_values().collect())
+    }
+
+    async fn distributed_graph_edge_value(
+        &self,
+        plan: &DistributedReadPlan,
+        transport: &dyn ReplicaTransport,
+        node_id: &str,
+        edge_id: &str,
+        direction: &EdgeDirection,
+        responded_by: &mut BTreeSet<String>,
+        failed_replicas: &mut BTreeSet<String>,
+    ) -> Result<Option<Value>, CopperDbError> {
+        let edges = self
+            .distributed_graph_edges_from_node(
+                plan,
+                transport,
+                node_id,
+                None,
+                &EdgeDirection::Both,
+                responded_by,
+                failed_replicas,
+            )
+            .await?;
+        let edge = edges.into_iter().find(|edge| {
+            edge.id == edge_id
+                && match direction {
+                    EdgeDirection::Outgoing | EdgeDirection::Both => true,
+                    EdgeDirection::Incoming => true,
+                }
+        });
+        Ok(edge.map(|edge| distributed_edge_to_value(&edge)))
+    }
+
+    async fn distributed_graph_edges_from_node(
+        &self,
+        plan: &DistributedReadPlan,
+        transport: &dyn ReplicaTransport,
+        node_id: &str,
+        rel_type: Option<&str>,
+        direction: &EdgeDirection,
+        responded_by: &mut BTreeSet<String>,
+        failed_replicas: &mut BTreeSet<String>,
+    ) -> Result<Vec<copperdb_storage::EdgeRecord>, CopperDbError> {
+        let mut edges = BTreeMap::new();
+        for replica in &plan.replicas {
+            match direction {
+                EdgeDirection::Outgoing => match transport
+                    .graph_edges_from_node(&replica.node_id, node_id, rel_type)
+                    .await
+                {
+                    Ok(replica_edges) => {
+                        responded_by.insert(replica.node_id.clone());
+                        for edge in replica_edges {
+                            edges.insert(edge.id.clone(), edge);
+                        }
+                    }
+                    Err(_) => {
+                        failed_replicas.insert(replica.node_id.clone());
+                    }
+                },
+                EdgeDirection::Incoming => match transport
+                    .graph_edges_to_node(&replica.node_id, node_id, rel_type)
+                    .await
+                {
+                    Ok(replica_edges) => {
+                        responded_by.insert(replica.node_id.clone());
+                        for edge in replica_edges {
+                            edges.insert(edge.id.clone(), edge);
+                        }
+                    }
+                    Err(_) => {
+                        failed_replicas.insert(replica.node_id.clone());
+                    }
+                },
+                EdgeDirection::Both => {
+                    let outgoing = transport
+                        .graph_edges_from_node(&replica.node_id, node_id, rel_type)
+                        .await;
+                    let incoming = transport
+                        .graph_edges_to_node(&replica.node_id, node_id, rel_type)
+                        .await;
+                    match (outgoing, incoming) {
+                        (Ok(mut outgoing), Ok(incoming)) => {
+                            responded_by.insert(replica.node_id.clone());
+                            outgoing.extend(incoming);
+                            for edge in outgoing {
+                                edges.insert(edge.id.clone(), edge);
+                            }
+                        }
+                        (Ok(replica_edges), Err(_)) | (Err(_), Ok(replica_edges)) => {
+                            responded_by.insert(replica.node_id.clone());
+                            failed_replicas.insert(replica.node_id.clone());
+                            for edge in replica_edges {
+                                edges.insert(edge.id.clone(), edge);
+                            }
+                        }
+                        (Err(_), Err(_)) => {
+                            failed_replicas.insert(replica.node_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(edges.into_values().collect())
+    }
+
+    async fn distributed_bfs_path(
+        &self,
+        plan: &DistributedReadPlan,
+        transport: &dyn ReplicaTransport,
+        start_node_id: &str,
+        end_node_id: &str,
+        rel_type: Option<&str>,
+        direction: &EdgeDirection,
+        responded_by: &mut BTreeSet<String>,
+        failed_replicas: &mut BTreeSet<String>,
+    ) -> Result<Option<DistributedPath>, CopperDbError> {
+        if start_node_id == end_node_id {
+            return Ok(Some(DistributedPath {
+                node_ids: vec![start_node_id.to_string()],
+                edge_ids: Vec::new(),
+            }));
+        }
+
+        let mut frontier = VecDeque::from([start_node_id.to_string()]);
+        let mut visited = HashSet::from([start_node_id.to_string()]);
+        let mut predecessors: HashMap<String, (String, String)> = HashMap::new();
+
+        while let Some(current_node_id) = frontier.pop_front() {
+            let mut edges = self
+                .distributed_graph_edges_from_node(
+                    plan,
+                    transport,
+                    &current_node_id,
+                    rel_type,
+                    direction,
+                    responded_by,
+                    failed_replicas,
+                )
+                .await?;
+            edges.sort_by(|left, right| left.id.cmp(&right.id));
+
+            for edge in edges {
+                let next_node_id = match direction {
+                    EdgeDirection::Outgoing => edge.end_node.clone(),
+                    EdgeDirection::Incoming => edge.start_node.clone(),
+                    EdgeDirection::Both if edge.start_node == current_node_id => edge.end_node.clone(),
+                    EdgeDirection::Both if edge.end_node == current_node_id => edge.start_node.clone(),
+                    EdgeDirection::Both => continue,
+                };
+                if !visited.insert(next_node_id.clone()) {
+                    continue;
+                }
+                predecessors.insert(next_node_id.clone(), (current_node_id.clone(), edge.id.clone()));
+                if next_node_id == end_node_id {
+                    let mut node_ids = vec![end_node_id.to_string()];
+                    let mut edge_ids = Vec::new();
+                    let mut cursor = end_node_id.to_string();
+                    while let Some((previous_node_id, edge_id)) = predecessors.get(&cursor) {
+                        edge_ids.push(edge_id.clone());
+                        node_ids.push(previous_node_id.clone());
+                        cursor = previous_node_id.clone();
+                    }
+                    node_ids.reverse();
+                    edge_ids.reverse();
+                    return Ok(Some(DistributedPath { node_ids, edge_ids }));
+                }
+                frontier.push_back(next_node_id);
+            }
+        }
+
+        Ok(None)
     }
 
     /// Flush all pending writes to disk.
@@ -609,6 +1852,619 @@ fn audit_event_type(action: &str) -> EventType {
     }
 }
 
+#[derive(Debug, Clone)]
+struct DistributedShortestPathQueryShape {
+    path_variable: String,
+    start_selector: DistributedNodeSelector,
+    end_selector: DistributedNodeSelector,
+    rel_type: Option<String>,
+    direction: EdgeDirection,
+    return_items: Vec<ReturnItem>,
+}
+
+#[derive(Debug, Clone)]
+struct DistributedDirectPathQueryShape {
+    optional: bool,
+    path_variable: String,
+    pattern: DistributedDirectPathPattern,
+    return_items: Vec<ReturnItem>,
+}
+
+#[derive(Debug, Clone)]
+struct DistributedLeadingMatchOptionalPathQueryShape {
+    leading_steps: Vec<DistributedLeadingStep>,
+    path_shape: DistributedDirectPathQueryShape,
+}
+
+#[derive(Debug, Clone)]
+enum DistributedLeadingStep {
+    Match(DistributedLeadingMatch),
+    Where(WhereClause),
+}
+
+#[derive(Debug, Clone)]
+enum DistributedLeadingMatch {
+    Node {
+        selector: DistributedNodeSelector,
+        variable: Option<String>,
+    },
+    Relationship {
+        pattern: DistributedDirectPathPattern,
+        start_variable: Option<String>,
+        end_variable: Option<String>,
+        edge_variable: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum DistributedDirectPathPattern {
+    SingleNode {
+        selector: DistributedNodeSelector,
+    },
+    RelationshipPath {
+        start_selector: DistributedNodeSelector,
+        end_selector: DistributedNodeSelector,
+        rel_type: Option<String>,
+        direction: EdgeDirection,
+        edge_properties: BTreeMap<String, Value>,
+        min_hops: u32,
+        max_hops: u32,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum DistributedNodeSelector {
+    LiteralId(String),
+    Pattern {
+        labels: Vec<String>,
+        properties: BTreeMap<String, Value>,
+    },
+    Bound {
+        variable: String,
+        labels: Vec<String>,
+        properties: BTreeMap<String, Value>,
+    },
+}
+
+fn distributed_shortest_path_query_shape(
+    query: &copperdb_cypher::Query,
+) -> Option<DistributedShortestPathQueryShape> {
+    if query.clauses.len() != 2 {
+        return None;
+    }
+    let Clause::Match(match_clause) = &query.clauses[0] else {
+        return None;
+    };
+    let Clause::Return(return_clause) = &query.clauses[1] else {
+        return None;
+    };
+    if !match_clause.pattern.shortest_path
+        || match_clause.pattern.nodes.len() != 2
+        || match_clause.pattern.edges.len() != 1
+        || return_clause.distinct
+        || return_clause.skip.is_some()
+        || return_clause.limit.is_some()
+        || !return_clause.order_by.is_empty()
+    {
+        return None;
+    }
+
+    let path_variable = match_clause.pattern.path_variable.clone()?;
+    let start_selector = distributed_node_selector(&match_clause.pattern.nodes[0], &[])?;
+    let end_selector = distributed_node_selector(&match_clause.pattern.nodes[1], &[])?;
+    let edge = &match_clause.pattern.edges[0];
+
+    if !return_clause.items.iter().all(|item| {
+        supported_distributed_path_return_expression(&item.expression, &path_variable)
+    }) {
+        return None;
+    }
+
+    Some(DistributedShortestPathQueryShape {
+        path_variable,
+        start_selector,
+        end_selector,
+        rel_type: edge.rel_type.clone(),
+        direction: edge.direction.clone(),
+        return_items: return_clause.items.clone(),
+    })
+}
+
+fn distributed_direct_path_query_shape(
+    query: &copperdb_cypher::Query,
+) -> Option<DistributedDirectPathQueryShape> {
+    distributed_direct_path_query_shape_with_bound_nodes(query, &[])
+}
+
+fn distributed_direct_path_query_shape_with_bound_nodes(
+    query: &copperdb_cypher::Query,
+    bound_variables: &[String],
+) -> Option<DistributedDirectPathQueryShape> {
+    if query.clauses.len() != 2 {
+        return None;
+    }
+    let (match_clause, optional) = match &query.clauses[0] {
+        Clause::Match(match_clause) => (match_clause, false),
+        Clause::OptionalMatch(match_clause) => (match_clause, true),
+        _ => return None,
+    };
+    let Clause::Return(return_clause) = &query.clauses[1] else {
+        return None;
+    };
+    if match_clause.pattern.shortest_path
+        || return_clause.distinct
+        || return_clause.skip.is_some()
+        || return_clause.limit.is_some()
+        || !return_clause.order_by.is_empty()
+    {
+        return None;
+    }
+
+    let path_variable = match_clause.pattern.path_variable.clone()?;
+    if !return_clause.items.iter().all(|item| {
+        supported_distributed_path_return_expression(&item.expression, &path_variable)
+    }) {
+        return None;
+    }
+
+    let pattern = match (&match_clause.pattern.nodes[..], &match_clause.pattern.edges[..]) {
+        ([node], []) => DistributedDirectPathPattern::SingleNode {
+            selector: distributed_node_selector(node, bound_variables)?,
+        },
+        ([start, end], [edge]) => {
+            let min_hops = edge.min_hops.unwrap_or(1);
+            let max_hops = edge.max_hops.unwrap_or(1).max(min_hops);
+            DistributedDirectPathPattern::RelationshipPath {
+                start_selector: distributed_node_selector(start, bound_variables)?,
+                end_selector: distributed_node_selector(end, bound_variables)?,
+                rel_type: edge.rel_type.clone(),
+                direction: edge.direction.clone(),
+                edge_properties: distributed_literal_properties(&edge.properties)?,
+                min_hops,
+                max_hops,
+            }
+        }
+        _ => return None,
+    };
+
+    Some(DistributedDirectPathQueryShape {
+        optional,
+        path_variable,
+        pattern,
+        return_items: return_clause.items.clone(),
+    })
+}
+
+fn distributed_leading_match_optional_path_query_shape(
+    query: &copperdb_cypher::Query,
+) -> Option<DistributedLeadingMatchOptionalPathQueryShape> {
+    if query.clauses.len() < 3 {
+        return None;
+    }
+    let Clause::Return(return_clause) = query.clauses.last()? else {
+        return None;
+    };
+    let Clause::OptionalMatch(optional_match_clause) = &query.clauses[query.clauses.len() - 2] else {
+        return None;
+    };
+    if return_clause.distinct
+        || return_clause.skip.is_some()
+        || return_clause.limit.is_some()
+        || !return_clause.order_by.is_empty()
+    {
+        return None;
+    }
+
+    let mut bound_variables = Vec::new();
+    let mut leading_steps = Vec::new();
+    for clause in &query.clauses[..query.clauses.len() - 2] {
+        match clause {
+            Clause::Where(where_clause) => {
+                if leading_steps.is_empty() {
+                    return None;
+                }
+                leading_steps.push(DistributedLeadingStep::Where(where_clause.clone()));
+            }
+            Clause::Match(leading_match_clause) => {
+                if leading_match_clause.pattern.shortest_path
+                    || leading_match_clause.pattern.path_variable.is_some()
+                {
+                    return None;
+                }
+
+                match (
+                    &leading_match_clause.pattern.nodes[..],
+                    &leading_match_clause.pattern.edges[..],
+                ) {
+                    ([node], []) => {
+                        leading_steps.push(DistributedLeadingStep::Match(DistributedLeadingMatch::Node {
+                            selector: distributed_node_selector(node, &bound_variables)?,
+                            variable: node.variable.clone(),
+                        }));
+                        if let Some(variable) = &node.variable {
+                            bound_variables.push(variable.clone());
+                        }
+                    }
+                    ([start, end], [edge]) => {
+                        let min_hops = edge.min_hops.unwrap_or(1);
+                        let max_hops = edge.max_hops.unwrap_or(1).max(min_hops);
+                        if max_hops > 1 && edge.variable.is_some() {
+                            return None;
+                        }
+                        leading_steps.push(DistributedLeadingStep::Match(
+                            DistributedLeadingMatch::Relationship {
+                                pattern: DistributedDirectPathPattern::RelationshipPath {
+                                    start_selector: distributed_node_selector(start, &bound_variables)?,
+                                    end_selector: distributed_node_selector(end, &bound_variables)?,
+                                    rel_type: edge.rel_type.clone(),
+                                    direction: edge.direction.clone(),
+                                    edge_properties: distributed_literal_properties(&edge.properties)?,
+                                    min_hops,
+                                    max_hops,
+                                },
+                                start_variable: start.variable.clone(),
+                                end_variable: end.variable.clone(),
+                                edge_variable: edge.variable.clone(),
+                            },
+                        ));
+                        if let Some(variable) = &start.variable {
+                            if !bound_variables.iter().any(|bound| bound == variable) {
+                                bound_variables.push(variable.clone());
+                            }
+                        }
+                        if let Some(variable) = &end.variable {
+                            if !bound_variables.iter().any(|bound| bound == variable) {
+                                bound_variables.push(variable.clone());
+                            }
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    let optional_query = copperdb_cypher::Query {
+        query_type: QueryType::Match,
+        clauses: vec![
+            Clause::OptionalMatch(optional_match_clause.clone()),
+            Clause::Return(return_clause.clone()),
+        ],
+        parameters: HashMap::new(),
+    };
+
+    Some(DistributedLeadingMatchOptionalPathQueryShape {
+        leading_steps,
+        path_shape: distributed_direct_path_query_shape_with_bound_nodes(
+            &optional_query,
+            &bound_variables,
+        )?,
+    })
+}
+
+fn distributed_literal_properties(
+    properties: &std::collections::HashMap<String, Expression>,
+) -> Option<BTreeMap<String, Value>> {
+    properties
+        .iter()
+        .map(|(key, expression)| match expression {
+            Expression::Literal(value) => Some((key.clone(), value.clone())),
+            _ => None,
+        })
+        .collect::<Option<BTreeMap<_, _>>>()
+}
+
+fn distributed_node_selector(
+    node: &copperdb_cypher::NodePattern,
+    bound_variables: &[String],
+) -> Option<DistributedNodeSelector> {
+    let literal_properties = distributed_literal_properties(&node.properties)?;
+
+    if let Some(variable) = &node.variable {
+        if bound_variables.iter().any(|bound| bound == variable) {
+            return Some(DistributedNodeSelector::Bound {
+                variable: variable.clone(),
+                labels: node.labels.clone(),
+                properties: literal_properties,
+            });
+        }
+    }
+
+    if node.labels.is_empty() {
+        return match literal_properties.get("_id") {
+            Some(Value::String(node_id)) => Some(DistributedNodeSelector::LiteralId(node_id.clone())),
+            _ => None,
+        };
+    }
+
+    Some(DistributedNodeSelector::Pattern {
+        labels: node.labels.clone(),
+        properties: literal_properties,
+    })
+}
+
+fn supported_distributed_path_return_expression(
+    expression: &Expression,
+    path_variable: &str,
+) -> bool {
+    match expression {
+        Expression::Variable(variable) => variable == path_variable,
+        Expression::FunctionCall { name, args, .. }
+            if args.len() == 1
+                && matches!(&args[0], Expression::Variable(variable) if variable == path_variable) =>
+        {
+            matches!(name.to_ascii_lowercase().as_str(), "nodes" | "relationships" | "length")
+        }
+        _ => false,
+    }
+}
+
+fn distributed_shortest_path_result(
+    shape: &DistributedShortestPathQueryShape,
+    path_value: Option<&Value>,
+) -> Result<QueryResult, CopperDbError> {
+    let path_values = path_value.cloned().into_iter().collect::<Vec<_>>();
+    distributed_path_query_result(&shape.return_items, &shape.path_variable, &path_values)
+}
+
+fn distributed_path_query_result(
+    return_items: &[ReturnItem],
+    path_variable: &str,
+    path_values: &[Value],
+) -> Result<QueryResult, CopperDbError> {
+    let columns = return_items
+        .iter()
+        .map(distributed_return_column_name)
+        .collect::<Vec<_>>();
+    let rows = path_values
+        .iter()
+        .map(|path_value| {
+            return_items
+                .iter()
+                .map(|item| {
+                    Ok((
+                        distributed_return_column_name(item),
+                        distributed_return_value(&item.expression, path_variable, path_value)?,
+                    ))
+                })
+                .collect::<Result<HashMap<_, _>, CopperDbError>>()
+        })
+        .collect::<Result<Vec<_>, CopperDbError>>()?;
+
+    Ok(QueryResult {
+        columns,
+        rows,
+        stats: ResultStats::default(),
+    })
+}
+
+fn distributed_bfs_query_result(path_value: Option<&Value>) -> QueryResult {
+    let columns = vec![
+        "path".into(),
+        "nodes(path)".into(),
+        "relationships(path)".into(),
+        "length(path)".into(),
+    ];
+    let Some(path_value) = path_value else {
+        return QueryResult {
+            columns,
+            rows: Vec::new(),
+            stats: ResultStats::default(),
+        };
+    };
+
+    let row = HashMap::from([
+        ("path".into(), path_value.clone()),
+        (
+            "nodes(path)".into(),
+            distributed_return_value(
+                &Expression::FunctionCall {
+                    name: "nodes".into(),
+                    args: vec![Expression::Variable("path".into())],
+                    distinct: false,
+                },
+                "path",
+                path_value,
+            )
+            .unwrap_or(Value::Array(Vec::new())),
+        ),
+        (
+            "relationships(path)".into(),
+            distributed_return_value(
+                &Expression::FunctionCall {
+                    name: "relationships".into(),
+                    args: vec![Expression::Variable("path".into())],
+                    distinct: false,
+                },
+                "path",
+                path_value,
+            )
+            .unwrap_or(Value::Array(Vec::new())),
+        ),
+        (
+            "length(path)".into(),
+            distributed_return_value(
+                &Expression::FunctionCall {
+                    name: "length".into(),
+                    args: vec![Expression::Variable("path".into())],
+                    distinct: false,
+                },
+                "path",
+                path_value,
+            )
+            .unwrap_or(Value::Null),
+        ),
+    ]);
+
+    QueryResult {
+        columns,
+        rows: vec![row],
+        stats: ResultStats::default(),
+    }
+}
+
+fn distributed_return_column_name(item: &ReturnItem) -> String {
+    if let Some(alias) = &item.alias {
+        return alias.clone();
+    }
+    match &item.expression {
+        Expression::Variable(variable) => variable.clone(),
+        Expression::FunctionCall { name, args, .. } if !args.is_empty() => {
+            format!("{name}({})", distributed_expression_name(&args[0]))
+        }
+        _ => distributed_expression_name(&item.expression),
+    }
+}
+
+fn distributed_expression_name(expression: &Expression) -> String {
+    match expression {
+        Expression::Variable(variable) => variable.clone(),
+        Expression::FunctionCall { name, .. } => name.clone(),
+        _ => "expr".to_string(),
+    }
+}
+
+fn distributed_return_value(
+    expression: &Expression,
+    path_variable: &str,
+    path_value: &Value,
+) -> Result<Value, CopperDbError> {
+    match expression {
+        Expression::Variable(variable) if variable == path_variable => Ok(path_value.clone()),
+        Expression::FunctionCall { name, args, .. }
+            if args.len() == 1
+                && matches!(&args[0], Expression::Variable(variable) if variable == path_variable) =>
+        {
+            match name.to_ascii_lowercase().as_str() {
+                "nodes" => Ok(match path_value {
+                    Value::Object(path_map) => path_map
+                        .get("nodes")
+                        .cloned()
+                        .unwrap_or_else(|| Value::Array(Vec::new())),
+                    _ => Value::Array(Vec::new()),
+                }),
+                "relationships" => Ok(match path_value {
+                    Value::Object(path_map) => path_map
+                        .get("relationships")
+                        .cloned()
+                        .unwrap_or_else(|| Value::Array(Vec::new())),
+                    _ => Value::Array(Vec::new()),
+                }),
+                "length" => Ok(match path_value {
+                    Value::Object(path_map) => path_map.get("length").cloned().unwrap_or(Value::Null),
+                    _ => Value::Null,
+                }),
+                other => Err(CopperDbError::Eval(format!(
+                    "unsupported distributed path return function: {other}"
+                ))),
+            }
+        }
+        _ => Err(CopperDbError::Eval(
+            "unsupported distributed shortestPath return expression".to_string(),
+        )),
+    }
+}
+
+fn distributed_edge_to_value(edge: &copperdb_storage::EdgeRecord) -> Value {
+    Value::Object(
+        edge.properties
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .chain([
+                ("_id".to_string(), Value::String(edge.id.clone())),
+                ("_type".to_string(), Value::String(edge.edge_type.clone())),
+                ("_start".to_string(), Value::String(edge.start_node.clone())),
+                ("_end".to_string(), Value::String(edge.end_node.clone())),
+            ])
+            .collect(),
+    )
+}
+
+fn distributed_node_id(node: &Value) -> Option<String> {
+    let Value::Object(map) = node else {
+        return None;
+    };
+    match map.get("_id") {
+        Some(Value::String(node_id)) => Some(node_id.clone()),
+        _ => None,
+    }
+}
+
+fn distributed_node_ids(nodes: &[Value]) -> Vec<String> {
+    let mut ids = nodes
+        .iter()
+        .filter_map(distributed_node_id)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn distributed_path_nodes(path_value: &Value) -> Option<&[Value]> {
+    let Value::Object(map) = path_value else {
+        return None;
+    };
+    map.get("nodes").and_then(Value::as_array).map(Vec::as_slice)
+}
+
+fn distributed_path_relationships(path_value: &Value) -> Option<&[Value]> {
+    let Value::Object(map) = path_value else {
+        return None;
+    };
+    map.get("relationships")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+}
+
+fn distributed_node_matches(
+    node: &Value,
+    labels: &[String],
+    properties: &BTreeMap<String, Value>,
+) -> bool {
+    let Value::Object(map) = node else {
+        return false;
+    };
+
+    let label_match = labels.iter().all(|label| {
+        map.get("_labels")
+            .and_then(Value::as_array)
+            .map(|values| values.iter().any(|value| value.as_str() == Some(label.as_str())))
+            .unwrap_or(false)
+    });
+    let prop_match = properties
+        .iter()
+        .all(|(key, value)| map.get(key).map(|candidate| candidate == value).unwrap_or(false));
+
+    label_match && prop_match
+}
+
+fn distributed_edge_matches(
+    edge: &copperdb_storage::EdgeRecord,
+    properties: &BTreeMap<String, Value>,
+) -> bool {
+    properties.iter().all(|(key, value)| {
+        edge.properties
+            .get(key)
+            .map(|candidate| candidate == value)
+            .unwrap_or(false)
+    })
+}
+
+fn distributed_related_node_id(
+    current_node_id: &str,
+    edge: &copperdb_storage::EdgeRecord,
+    direction: &EdgeDirection,
+) -> Option<String> {
+    match direction {
+        EdgeDirection::Outgoing if edge.start_node == current_node_id => Some(edge.end_node.clone()),
+        EdgeDirection::Incoming if edge.end_node == current_node_id => Some(edge.start_node.clone()),
+        EdgeDirection::Both if edge.start_node == current_node_id => Some(edge.end_node.clone()),
+        EdgeDirection::Both if edge.end_node == current_node_id => Some(edge.start_node.clone()),
+        _ => None,
+    }
+}
+
 // ─── Legacy copperdb (full-server async variant) ──────────────────────────────
 
 /// Full-server async variant that integrates all subsystems.
@@ -688,6 +2544,11 @@ fn collect_expression_properties(expression: &Expression, properties: &mut Vec<S
     match expression {
         Expression::PropertyAccess { property, .. } => properties.push(property.clone()),
         Expression::Comparison { left, right, .. }
+        | Expression::InList {
+            value: left,
+            list: right,
+            ..
+        }
         | Expression::And(left, right)
         | Expression::Or(left, right) => {
             collect_expression_properties(left, properties);
@@ -696,6 +2557,16 @@ fn collect_expression_properties(expression: &Expression, properties: &mut Vec<S
         Expression::FunctionCall { args, .. } => {
             for arg in args {
                 collect_expression_properties(arg, properties);
+            }
+        }
+        Expression::ListLiteral(items) => {
+            for item in items {
+                collect_expression_properties(item, properties);
+            }
+        }
+        Expression::MapLiteral(entries) => {
+            for (_, value) in entries {
+                collect_expression_properties(value, properties);
             }
         }
         Expression::Not(inner) | Expression::IsNull(inner) | Expression::IsNotNull(inner) => {
@@ -708,6 +2579,8 @@ fn collect_expression_properties(expression: &Expression, properties: &mut Vec<S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use copperdb_storage::EdgeRecord;
+    use std::collections::BTreeMap;
 
     // ── Legacy tests ──────────────────────────────────────────────────────────
 
@@ -773,6 +2646,54 @@ mod tests {
     }
 
     #[test]
+    fn test_optional_match_relationship_pattern_preserves_row_with_nulls() {
+        let db = CopperDb::open_temporary().unwrap();
+        db.execute(
+            "CREATE (p:Person {id: 1, name: 'Alice'})",
+            Default::default(),
+        )
+        .unwrap();
+
+        let result = db
+            .execute(
+                "MATCH (p:Person {id: 1}) OPTIONAL MATCH (p)-[r:FOLLOWS]->(friend:Person) RETURN p.name AS person, friend AS friend, r AS rel",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["person", "friend", "rel"]);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("person"), Some(&Value::String("Alice".into())));
+        assert_eq!(result.rows[0].get("friend"), Some(&Value::Null));
+        assert_eq!(result.rows[0].get("rel"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn test_optional_match_relationship_pattern_returns_bound_values_on_match() {
+        let db = CopperDb::open_temporary().unwrap();
+        for cypher in [
+            "CREATE (p:Person {id: 1, name: 'Alice'})",
+            "CREATE (p:Person {id: 2, name: 'Bob'})",
+            "MATCH (a:Person {id: 1}), (b:Person {id: 2}) CREATE (a)-[:FOLLOWS]->(b)",
+        ] {
+            db.execute(cypher, Default::default()).unwrap();
+        }
+
+        let result = db
+            .execute(
+                "MATCH (p:Person {id: 1}) OPTIONAL MATCH (p)-[r:FOLLOWS]->(friend:Person) RETURN p.name AS person, friend.name AS friendName, r._type AS relType",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["person", "friendName", "relType"]);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("person"), Some(&Value::String("Alice".into())));
+        assert_eq!(result.rows[0].get("friendName"), Some(&Value::String("Bob".into())));
+        assert_eq!(result.rows[0].get("relType"), Some(&Value::String("FOLLOWS".into())));
+    }
+
+    #[test]
     fn test_flush_and_size() {
         let db = CopperDb::open_temporary().unwrap();
         db.execute("CREATE (n:Test {x: 1})", Default::default())
@@ -795,6 +2716,712 @@ mod tests {
             .execute("MATCH (n:Cached) RETURN n", Default::default())
             .unwrap();
         assert_eq!(r1.rows.len(), r2.rows.len());
+    }
+
+    #[test]
+    fn test_execute_routes_simple_edge_property_aggregation_through_fast_path() {
+        let db = CopperDb::open_temporary().unwrap();
+        for (id, props) in [
+            (
+                "customer:1",
+                BTreeMap::from([("name".to_string(), Value::String("Alice".into()))]),
+            ),
+            (
+                "customer:2",
+                BTreeMap::from([("name".to_string(), Value::String("Bob".into()))]),
+            ),
+            (
+                "customer:3",
+                BTreeMap::from([("name".to_string(), Value::String("Carol".into()))]),
+            ),
+            (
+                "product:1",
+                BTreeMap::from([("name".to_string(), Value::String("Widget".into()))]),
+            ),
+            (
+                "product:2",
+                BTreeMap::from([("name".to_string(), Value::String("Thing".into()))]),
+            ),
+        ] {
+            db.storage().put_node(id, &rmp_serde::to_vec(&props).unwrap()).unwrap();
+        }
+        for edge in [
+            EdgeRecord {
+                id: "review:1".into(),
+                start_node: "customer:1".into(),
+                end_node: "product:1".into(),
+                edge_type: "REVIEWED".into(),
+                properties: BTreeMap::from([("rating".into(), Value::from(4))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "review:2".into(),
+                start_node: "customer:2".into(),
+                end_node: "product:1".into(),
+                edge_type: "REVIEWED".into(),
+                properties: BTreeMap::from([("rating".into(), Value::from(5))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "review:3".into(),
+                start_node: "customer:3".into(),
+                end_node: "product:2".into(),
+                edge_type: "REVIEWED".into(),
+                properties: BTreeMap::from([("rating".into(), Value::from(5))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+        ] {
+            db.storage().put_edge_record(&edge).unwrap();
+        }
+
+        let result = db
+            .execute(
+                "MATCH (c:Customer)-[r:REVIEWED]->(p:Product) RETURN p.name AS product, avg(r.rating) AS avgRating, count(r) AS reviewCount ORDER BY avgRating DESC LIMIT 2",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["product", "avgRating", "reviewCount"]);
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0].get("product"), Some(&Value::String("Thing".into())));
+        assert_eq!(result.rows[0].get("reviewCount"), Some(&Value::from(1)));
+        assert_eq!(result.rows[1].get("product"), Some(&Value::String("Widget".into())));
+        assert_eq!(result.rows[1].get("reviewCount"), Some(&Value::from(2)));
+    }
+
+    #[test]
+    fn test_execute_routes_edge_property_aggregation_branch_coverage() {
+        let db = CopperDb::open_temporary().unwrap();
+        for (id, props) in [
+            (
+                "customer:1",
+                BTreeMap::from([("name".to_string(), Value::String("C1".into()))]),
+            ),
+            (
+                "product:1",
+                BTreeMap::from([("name".to_string(), Value::String("P1".into()))]),
+            ),
+            (
+                "product:2",
+                BTreeMap::from([("name".to_string(), Value::String("P2".into()))]),
+            ),
+        ] {
+            db.storage()
+                .put_node(id, &rmp_serde::to_vec(&props).unwrap())
+                .unwrap();
+        }
+        for edge in [
+            EdgeRecord {
+                id: "review:1".into(),
+                start_node: "customer:1".into(),
+                end_node: "product:1".into(),
+                edge_type: "REVIEWED".into(),
+                properties: BTreeMap::from([("rating".into(), Value::from(4.5))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "review:2".into(),
+                start_node: "customer:1".into(),
+                end_node: "product:1".into(),
+                edge_type: "REVIEWED".into(),
+                properties: BTreeMap::from([("rating".into(), Value::from(5))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "review:3".into(),
+                start_node: "customer:1".into(),
+                end_node: "product:2".into(),
+                edge_type: "REVIEWED".into(),
+                properties: BTreeMap::from([("other".into(), Value::from(9))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "review:4".into(),
+                start_node: "customer:1".into(),
+                end_node: "product:2".into(),
+                edge_type: "REVIEWED".into(),
+                properties: BTreeMap::from([("rating".into(), Value::String("bad".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "review:5".into(),
+                start_node: "customer:1".into(),
+                end_node: "product:missing".into(),
+                edge_type: "REVIEWED".into(),
+                properties: BTreeMap::from([("rating".into(), Value::from(2))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+        ] {
+            db.storage().put_edge_record(&edge).unwrap();
+        }
+
+        let result = db
+            .execute(
+                "MATCH (c)-[r:REVIEWED]->(p) RETURN p.name AS product, avg(r.rating) AS avgRating, count(r) AS reviewCount, min(r.rating) AS minRating, max(r.rating) AS maxRating, sum(r.rating) AS totalRating",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["product", "avgRating", "reviewCount", "minRating", "maxRating", "totalRating"]);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("product"), Some(&Value::String("P1".into())));
+        assert_eq!(result.rows[0].get("avgRating"), Some(&Value::from(4.75)));
+        assert_eq!(result.rows[0].get("reviewCount"), Some(&Value::from(2)));
+        assert_eq!(result.rows[0].get("minRating"), Some(&Value::from(4.5)));
+        assert_eq!(result.rows[0].get("maxRating"), Some(&Value::from(5.0)));
+        assert_eq!(result.rows[0].get("totalRating"), Some(&Value::from(9.5)));
+    }
+
+    #[test]
+    fn test_execute_routes_incoming_count_star_through_fast_path() {
+        let db = CopperDb::open_temporary().unwrap();
+        for (id, props) in [
+            (
+                "person:1",
+                BTreeMap::from([("name".to_string(), Value::String("Alice".into()))]),
+            ),
+            (
+                "person:2",
+                BTreeMap::from([("name".to_string(), Value::String("Bob".into()))]),
+            ),
+            (
+                "person:3",
+                BTreeMap::from([("name".to_string(), Value::String("Carol".into()))]),
+            ),
+            (
+                "person:4",
+                BTreeMap::from([("name".to_string(), Value::String("Dana".into()))]),
+            ),
+            (
+                "person:5",
+                BTreeMap::from([("name".to_string(), Value::String("Eve".into()))]),
+            ),
+        ] {
+            db.storage().put_node(id, &rmp_serde::to_vec(&props).unwrap()).unwrap();
+        }
+        for edge in [
+            EdgeRecord {
+                id: "follows:1".into(),
+                start_node: "person:2".into(),
+                end_node: "person:1".into(),
+                edge_type: "FOLLOWS".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "follows:2".into(),
+                start_node: "person:3".into(),
+                end_node: "person:1".into(),
+                edge_type: "FOLLOWS".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "follows:3".into(),
+                start_node: "person:4".into(),
+                end_node: "person:1".into(),
+                edge_type: "FOLLOWS".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "follows:4".into(),
+                start_node: "person:5".into(),
+                end_node: "person:2".into(),
+                edge_type: "FOLLOWS".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+        ] {
+            db.storage().put_edge_record(&edge).unwrap();
+        }
+
+        let result = db
+            .execute(
+                "MATCH (p:Person)<-[:FOLLOWS]-(f:Person) RETURN p.name AS person, count(*) AS followers LIMIT 2",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0].get("person"), Some(&Value::String("Alice".into())));
+        assert_eq!(result.rows[0].get("followers"), Some(&Value::from(3)));
+    }
+
+    #[test]
+    fn test_execute_routes_incoming_count_limit_zero_returns_empty() {
+        let db = CopperDb::open_temporary().unwrap();
+        for (id, props) in [
+            (
+                "person:1",
+                BTreeMap::from([("name".to_string(), Value::String("Alice".into()))]),
+            ),
+            (
+                "person:2",
+                BTreeMap::from([("name".to_string(), Value::String("Bob".into()))]),
+            ),
+        ] {
+            db.storage().put_node(id, &rmp_serde::to_vec(&props).unwrap()).unwrap();
+        }
+        db.storage()
+            .put_edge_record(&EdgeRecord {
+                id: "follows:1".into(),
+                start_node: "person:2".into(),
+                end_node: "person:1".into(),
+                edge_type: "FOLLOWS".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let result = db
+            .execute(
+                "MATCH (p:Person)<-[:FOLLOWS]-(f:Person) RETURN p.name AS person, count(f) AS followers LIMIT 0",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert!(result.rows.is_empty());
+    }
+
+    #[test]
+    fn test_execute_routes_with_limit_compound_query_through_fast_path() {
+        let db = CopperDb::open_temporary().unwrap();
+        db.execute("CREATE (a:Actor {name: 'Alice'})", Default::default())
+            .unwrap();
+        db.execute("CREATE (m:Movie {title: 'Matrix'})", Default::default())
+            .unwrap();
+
+        let result = db
+            .execute(
+                "MATCH (a:Actor), (m:Movie) WITH a, m LIMIT 1 CREATE (a)-[r:TEMP_REL]->(m) DELETE r",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert_eq!(result.stats.relationships_created, 1);
+        assert_eq!(result.stats.relationships_deleted, 1);
+        assert!(db.storage().get_edges_by_type("TEMP_REL").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_execute_routes_with_limit_zero_compound_query_is_noop() {
+        let db = CopperDb::open_temporary().unwrap();
+        db.execute("CREATE (a:Actor {name: 'Alice'})", Default::default())
+            .unwrap();
+        db.execute("CREATE (m:Movie {title: 'Matrix'})", Default::default())
+            .unwrap();
+
+        let result = db
+            .execute(
+                "MATCH (a:Actor), (m:Movie) WITH a, m LIMIT 0 CREATE (a)-[r:TEMP_REL]->(m) DELETE r",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert_eq!(result.stats.relationships_created, 0);
+        assert_eq!(result.stats.relationships_deleted, 0);
+        assert!(db.storage().get_edges_by_type("TEMP_REL").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_execute_routes_property_match_compound_miss_is_clean() {
+        let db = CopperDb::open_temporary().unwrap();
+        db.execute("CREATE (p1:Person {id: 1})", Default::default())
+            .unwrap();
+
+        let result = db
+            .execute(
+                "MATCH (p1:Person {id: 1}), (p2:Person {id: 999}) CREATE (p1)-[r:TEMP_KNOWS]->(p2) DELETE r",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert_eq!(result.stats.relationships_created, 0);
+        assert_eq!(result.stats.relationships_deleted, 0);
+        assert!(db.storage().get_edges_by_type("TEMP_KNOWS").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_execute_routes_property_match_compound_fast_path() {
+        let db = CopperDb::open_temporary().unwrap();
+        db.execute("CREATE (p1:Person {id: 1, name: 'Alice'})", Default::default())
+            .unwrap();
+        db.execute("CREATE (p2:Person {id: 2, name: 'Bob'})", Default::default())
+            .unwrap();
+
+        let result = db
+            .execute(
+                "MATCH (p1:Person {id: 1}), (p2:Person {id: 2}) CREATE (p1)-[r:TEMP_KNOWS]->(p2) DELETE r",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert_eq!(result.stats.relationships_created, 1);
+        assert_eq!(result.stats.relationships_deleted, 1);
+        assert!(db.storage().get_edges_by_type("TEMP_KNOWS").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_execute_routes_property_match_compound_return_count_fast_path() {
+        let db = CopperDb::open_temporary().unwrap();
+        db.execute("CREATE (p1:Person {id: 1})", Default::default())
+            .unwrap();
+        db.execute("CREATE (p2:Person {id: 2})", Default::default())
+            .unwrap();
+
+        let result = db
+            .execute(
+                "MATCH (p1:Person {id: 1}), (p2:Person {id: 2}) CREATE (p1)-[r:TEMP_KNOWS]->(p2) WITH r DELETE r RETURN count(r)",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["count(r)"]);
+        assert_eq!(result.rows, vec![HashMap::from([("count(r)".into(), Value::from(1))])]);
+        assert_eq!(result.stats.relationships_created, 1);
+        assert_eq!(result.stats.relationships_deleted, 1);
+        assert!(db.storage().get_edges_by_type("TEMP_KNOWS").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_execute_routes_pipeline_query_through_route_hook() {
+        let db = CopperDb::open_temporary().unwrap();
+        let result = db
+            .execute(
+                "WITH [1, 2] AS values UNWIND values AS value RETURN value",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0].get("value"), Some(&Value::from(1)));
+        assert_eq!(result.rows[1].get("value"), Some(&Value::from(2)));
+    }
+
+    #[test]
+    fn test_execute_routes_pipeline_create_reuses_bound_nodes() {
+        let db = CopperDb::open_temporary().unwrap();
+        db.execute(
+            "CREATE (c:Customer {customerID: 1, name: 'Ada'})",
+            Default::default(),
+        )
+        .unwrap();
+
+        let result = db
+            .execute(
+                "MATCH (c:Customer {customerID: 1}) CREATE (o:Order {orderID: 9001}) CREATE (c)-[:PURCHASED]->(o) WITH c, o RETURN c.customerID AS customerID, o.orderID AS orderID",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("customerID"), Some(&Value::from(1)));
+        assert_eq!(result.rows[0].get("orderID"), Some(&Value::from(9001)));
+        assert_eq!(result.stats.nodes_created, 1);
+        assert_eq!(result.stats.relationships_created, 1);
+
+        let edges = db.storage().get_edges_by_type("PURCHASED").unwrap();
+        assert_eq!(edges.len(), 1);
+
+        let customer_raw = db
+            .storage()
+            .get_node(&edges[0].start_node)
+            .unwrap()
+            .expect("customer node should exist");
+        let customer_props: HashMap<String, Value> = rmp_serde::from_slice(&customer_raw).unwrap();
+        assert_eq!(customer_props.get("customerID"), Some(&Value::from(1)));
+
+        let order_raw = db
+            .storage()
+            .get_node(&edges[0].end_node)
+            .unwrap()
+            .expect("order node should exist");
+        let order_props: HashMap<String, Value> = rmp_serde::from_slice(&order_raw).unwrap();
+        assert_eq!(order_props.get("orderID"), Some(&Value::from(9001)));
+    }
+
+    #[test]
+    fn test_execute_routes_pipeline_match_respects_bound_relationship_endpoints() {
+        let db = CopperDb::open_temporary().unwrap();
+        for cypher in [
+            "CREATE (c:Customer {customerID: 1, name: 'Ada'})",
+            "CREATE (c:Customer {customerID: 2, name: 'Bob'})",
+            "CREATE (o:Order {orderID: 100})",
+            "CREATE (o:Order {orderID: 200})",
+        ] {
+            db.execute(cypher, Default::default()).unwrap();
+        }
+
+        let node_id_for = |label: &str, property: &str, expected: i64| {
+            db.storage()
+                .scan_nodes_with_prefix(&format!("{label}:"))
+                .find_map(|entry| {
+                    let (_, raw) = entry.ok()?;
+                    let props: HashMap<String, Value> = rmp_serde::from_slice(&raw).ok()?;
+                    (props.get(property) == Some(&Value::from(expected)))
+                        .then(|| props.get("_id").and_then(Value::as_str).map(str::to_string))
+                        .flatten()
+                })
+                .expect("expected seeded node")
+        };
+
+        db.storage()
+            .put_edge_record(&EdgeRecord {
+                id: "purchased:1".into(),
+                start_node: node_id_for("Customer", "customerID", 1),
+                end_node: node_id_for("Order", "orderID", 100),
+                edge_type: "PURCHASED".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        db.storage()
+            .put_edge_record(&EdgeRecord {
+                id: "purchased:2".into(),
+                start_node: node_id_for("Customer", "customerID", 2),
+                end_node: node_id_for("Order", "orderID", 200),
+                edge_type: "PURCHASED".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let result = db
+            .execute(
+                "MATCH (c:Customer {customerID: 1}) WITH c MATCH (c)-[:PURCHASED]->(o:Order) RETURN o.orderID AS orderID",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("orderID"), Some(&Value::from(100)));
+    }
+
+    #[test]
+    fn test_execute_routes_mutual_relationship_on_empty_db_returns_no_rows() {
+        let db = CopperDb::open_temporary().unwrap();
+
+        let result = db
+            .execute(
+                "MATCH (a)-[:FOLLOWS]->(b)-[:FOLLOWS]->(a) RETURN a, b",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert!(result.rows.is_empty());
+    }
+
+    #[test]
+    fn test_execute_routes_mutual_relationship_with_missing_rel_type_returns_no_rows() {
+        let db = CopperDb::open_temporary().unwrap();
+        db.execute("CREATE (a:Person {name: 'Alice'})", Default::default())
+            .unwrap();
+        db.execute("CREATE (b:Person {name: 'Bob'})", Default::default())
+            .unwrap();
+        db.execute(
+            "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) CREATE (a)-[:FOLLOWS]->(b) CREATE (b)-[:FOLLOWS]->(a)",
+            Default::default(),
+        )
+        .unwrap();
+
+        let result = db
+            .execute(
+                "MATCH (a)-[:NONEXISTENT]->(b)-[:NONEXISTENT]->(a) RETURN a, b",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert!(result.rows.is_empty());
+    }
+
+    #[test]
+    fn test_execute_routes_pipeline_seeder_shape_with_expression_pattern_properties() {
+        let db = CopperDb::open_temporary().unwrap();
+        db.execute(
+            "CREATE (c:Customer {customerID: 1, name: 'Ada'})",
+            Default::default(),
+        )
+        .unwrap();
+        db.execute(
+            "CREATE (p:Product {productID: 1, name: 'Widget'})",
+            Default::default(),
+        )
+        .unwrap();
+
+        let result = db
+            .execute(
+                "MATCH (c:Customer {customerID: 1}) CREATE (o:Order {orderID: 9001}) CREATE (c)-[:PURCHASED]->(o) WITH o, {} UNWIND [{productID: 1}] AS prodRef MATCH (p:Product {productID: prodRef.productID}) CREATE (o)-[:ORDERS]->(p)",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert_eq!(result.stats.nodes_created, 1);
+        assert_eq!(result.stats.relationships_created, 2);
+
+        let orders = db.storage().get_edges_by_type("ORDERS").unwrap();
+        assert_eq!(orders.len(), 1);
+        let purchased = db.storage().get_edges_by_type("PURCHASED").unwrap();
+        assert_eq!(purchased.len(), 1);
+        assert_eq!(purchased[0].end_node, orders[0].start_node);
+
+        let order_raw = db
+            .storage()
+            .get_node(&orders[0].start_node)
+            .unwrap()
+            .expect("order node should exist");
+        let order_props: HashMap<String, Value> = rmp_serde::from_slice(&order_raw).unwrap();
+        assert_eq!(order_props.get("orderID"), Some(&Value::from(9001)));
+
+        let product_raw = db
+            .storage()
+            .get_node(&orders[0].end_node)
+            .unwrap()
+            .expect("product node should exist");
+        let product_props: HashMap<String, Value> = rmp_serde::from_slice(&product_raw).unwrap();
+        assert_eq!(product_props.get("productID"), Some(&Value::from(1)));
+    }
+
+    #[test]
+    fn test_execute_large_variable_length_chain_traversal_consistency() {
+        let db = CopperDb::open_temporary().unwrap();
+
+        for index in 0..25 {
+            let props = BTreeMap::from([
+                ("_id".to_string(), Value::String(format!("Node:{index}"))),
+                (
+                    "_labels".to_string(),
+                    Value::Array(vec![Value::String("Node".into())]),
+                ),
+                (
+                    "name".to_string(),
+                    Value::String(format!("n{index:02}")),
+                ),
+            ]);
+            db.storage()
+                .put_node(&format!("Node:{index}"), &rmp_serde::to_vec(&props).unwrap())
+                .unwrap();
+        }
+
+        for index in 0..24 {
+            db.storage()
+                .put_edge_record(&EdgeRecord {
+                    id: format!("link:{index}"),
+                    start_node: format!("Node:{index}"),
+                    end_node: format!("Node:{}", index + 1),
+                    edge_type: "LINK".into(),
+                    properties: BTreeMap::new(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+
+        let result = db
+            .execute(
+                "MATCH (a:Node {name: 'n00'})-[:LINK*1..24]->(n:Node) RETURN n.name AS name",
+                Default::default(),
+            )
+            .unwrap();
+
+        let mut names = result
+            .rows
+            .iter()
+            .filter_map(|row| row.get("name").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        names.sort();
+
+        let expected = (1..25)
+            .map(|index| format!("n{index:02}"))
+            .collect::<Vec<_>>();
+        assert_eq!(names, expected);
+    }
+
+    #[test]
+    fn test_execute_routes_pipeline_seeder_shape_supports_multiple_rows_and_edge_properties() {
+        let db = CopperDb::open_temporary().unwrap();
+        db.execute(
+            "CREATE (c:Customer {customerID: 1, companyName: 'C1'})",
+            Default::default(),
+        )
+        .unwrap();
+        db.execute(
+            "CREATE (p:Product {productID: 1, productName: 'P1'})",
+            Default::default(),
+        )
+        .unwrap();
+        db.execute(
+            "CREATE (p:Product {productID: 2, productName: 'P2'})",
+            Default::default(),
+        )
+        .unwrap();
+
+        let result = db
+            .execute(
+                "MATCH (c:Customer {customerID: 1}) CREATE (o:Order {orderID: 9001}) CREATE (c)-[:PURCHASED]->(o) WITH o, {} UNWIND [{productID: 1, quantity: 3}, {productID: 2, quantity: 5}] AS prodRef MATCH (p:Product {productID: prodRef.productID}) CREATE (o)-[:ORDERS {quantity: prodRef.quantity}]->(p)",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert_eq!(result.stats.nodes_created, 1);
+        assert_eq!(result.stats.relationships_created, 3);
+
+        let purchased = db.storage().get_edges_by_type("PURCHASED").unwrap();
+        assert_eq!(purchased.len(), 1);
+        let orders = db.storage().get_edges_by_type("ORDERS").unwrap();
+        assert_eq!(orders.len(), 2);
+
+        let mut quantities: Vec<i64> = orders
+            .iter()
+            .filter_map(|edge| edge.properties.get("quantity").and_then(Value::as_i64))
+            .collect();
+        quantities.sort_unstable();
+        assert_eq!(quantities, vec![3, 5]);
+
+        let order_ids: std::collections::HashSet<String> =
+            orders.iter().map(|edge| edge.start_node.clone()).collect();
+        assert_eq!(order_ids.len(), 1);
+        assert!(order_ids.contains(&purchased[0].end_node));
+    }
+
+    #[test]
+    fn test_execute_merge_uses_current_row_expression_properties() {
+        let db = CopperDb::open_temporary().unwrap();
+
+        let first = db
+            .execute(
+                "UNWIND [1, 2] AS customerID MERGE (c:Customer {customerID: customerID}) RETURN c.customerID AS customerID",
+                Default::default(),
+            )
+            .unwrap();
+        let second = db
+            .execute(
+                "UNWIND [1, 2] AS customerID MERGE (c:Customer {customerID: customerID}) RETURN c.customerID AS customerID",
+                Default::default(),
+            )
+            .unwrap();
+
+        assert_eq!(first.rows.len(), 2);
+        assert_eq!(first.rows[0].get("customerID"), Some(&Value::from(1)));
+        assert_eq!(first.rows[1].get("customerID"), Some(&Value::from(2)));
+        assert_eq!(first.stats.nodes_created, 2);
+        assert_eq!(second.stats.nodes_created, 0);
     }
 
     #[test]
@@ -1300,6 +3927,2862 @@ mod tests {
         assert_eq!(read.plan.required_responses, 2);
         assert_eq!(read.plan.replicas.len(), 3);
         assert_eq!(outcome.result.rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn engine_routes_distributed_shortest_path_query_through_mesh_bfs() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        fn graph_node(id: &str, name: &str) -> Vec<u8> {
+            rmp_serde::to_vec(&BTreeMap::from([
+                ("_id".to_string(), Value::String(id.to_string())),
+                (
+                    "_labels".to_string(),
+                    Value::Array(vec![Value::String("Node".into())]),
+                ),
+                ("name".to_string(), Value::String(name.to_string())),
+            ]))
+            .unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        peer_one
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "node_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_one
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Node:A".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_one
+            .put_edge_record(&EdgeRecord {
+                id: "edge:a-b".into(),
+                start_node: "Node:A".into(),
+                end_node: "Node:B".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::from([("rank".into(), Value::from(1))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_two = StorageEngine::open_temporary().unwrap();
+        peer_two
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "node_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_two
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Node:B".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("b".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_two
+            .put_edge_record(&EdgeRecord {
+                id: "edge:b-d".into(),
+                start_node: "Node:B".into(),
+                end_node: "Node:D".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::from([("rank".into(), Value::from(2))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_two.put_node("Node:C", &graph_node("Node:C", "c")).unwrap();
+        peer_two
+            .put_edge_record(&EdgeRecord {
+                id: "edge:a-c".into(),
+                start_node: "Node:A".into(),
+                end_node: "Node:C".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::from([("rank".into(), Value::from(5))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_three = StorageEngine::open_temporary().unwrap();
+        peer_three
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "node_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_three
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Node:D".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("d".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_three
+            .put_edge_record(&EdgeRecord {
+                id: "edge:c-d".into(),
+                start_node: "Node:C".into(),
+                end_node: "Node:D".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::from([("rank".into(), Value::from(6))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+        transport.register("node-2", Arc::new(StorageEngineAdapter::new(peer_two)));
+        transport.register("node-3", Arc::new(StorageEngineAdapter::new(peer_three)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH p = shortestPath((a:Node {_id: 'Node:A'})-[:LINK*]->(d:Node {_id: 'Node:D'})) RETURN p AS path, nodes(p) AS nodes, relationships(p) AS rels, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::Quorum,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert!(outcome.write_outcome.is_none());
+        let read = outcome.read_outcome.expect("expected distributed read outcome");
+        assert_eq!(read.plan.required_responses, 2);
+        assert_eq!(outcome.result.rows.len(), 1);
+        assert_eq!(outcome.result.rows[0].get("hops"), Some(&Value::from(2)));
+
+        let nodes = outcome.result.rows[0]
+            .get("nodes")
+            .and_then(Value::as_array)
+            .expect("expected nodes(path)");
+        let names = nodes
+            .iter()
+            .map(|node| node.get("name").and_then(Value::as_str).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["a", "b", "d"]);
+
+        let rels = outcome.result.rows[0]
+            .get("rels")
+            .and_then(Value::as_array)
+            .expect("expected relationships(path)");
+        assert_eq!(rels.len(), 2);
+        assert_eq!(rels[0].get("rank"), Some(&Value::from(1)));
+
+        let path = outcome.result.rows[0]
+            .get("path")
+            .and_then(Value::as_object)
+            .expect("expected path object");
+        assert_eq!(path.get("length"), Some(&Value::from(2)));
+    }
+
+    #[tokio::test]
+    async fn engine_routes_distributed_shortest_path_query_with_property_endpoints() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        peer_one
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "node_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_one
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Node:A".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_one
+            .put_edge_record(&EdgeRecord {
+                id: "edge:a-b".into(),
+                start_node: "Node:A".into(),
+                end_node: "Node:B".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_two = StorageEngine::open_temporary().unwrap();
+        peer_two
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "node_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_two
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Node:B".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("b".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_two
+            .put_edge_record(&EdgeRecord {
+                id: "edge:b-d".into(),
+                start_node: "Node:B".into(),
+                end_node: "Node:D".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_three = StorageEngine::open_temporary().unwrap();
+        peer_three
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "node_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_three
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Node:D".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("d".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+        transport.register("node-2", Arc::new(StorageEngineAdapter::new(peer_two)));
+        transport.register("node-3", Arc::new(StorageEngineAdapter::new(peer_three)));
+
+        let parsed = Parser::new()
+            .parse(
+                "MATCH p = shortestPath((a:Node {name: 'a'})-[:LINK*]->(d:Node {name: 'd'})) RETURN length(p) AS hops, p AS shortest",
+            )
+            .unwrap();
+        assert!(distributed_shortest_path_query_shape(&parsed).is_some());
+        assert_eq!(
+            transport
+                .graph_nodes_by_property("node-1", "Node", "name", &Value::String("a".into()))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            transport
+                .graph_nodes_by_property("node-3", "Node", "name", &Value::String("d".into()))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH p = shortestPath((a:Node {name: 'a'})-[:LINK*]->(d:Node {name: 'd'})) RETURN length(p) AS hops, p AS shortest",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::Quorum,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result.columns, vec!["hops", "shortest"]);
+        assert_eq!(outcome.result.rows.len(), 1);
+        assert_eq!(outcome.result.rows[0].get("hops"), Some(&Value::from(2)));
+        let path = outcome.result.rows[0]
+            .get("shortest")
+            .and_then(Value::as_object)
+            .expect("expected shortest path object");
+        let nodes = path
+            .get("nodes")
+            .and_then(Value::as_array)
+            .expect("expected shortest path nodes");
+        let names = nodes
+            .iter()
+            .map(|node| node.get("name").and_then(Value::as_str).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["a", "b", "d"]);
+    }
+
+    #[tokio::test]
+    async fn engine_routes_distributed_single_node_path_query() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        peer_one
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "node_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_one
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Node:A".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH p = (a:Node {name: 'a'}) RETURN length(p) AS hops, nodes(p) AS nodes, p AS path",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result.columns, vec!["hops", "nodes", "path"]);
+        assert_eq!(outcome.result.rows.len(), 1);
+        assert_eq!(outcome.result.rows[0].get("hops"), Some(&Value::from(0)));
+        let nodes = outcome.result.rows[0]
+            .get("nodes")
+            .and_then(Value::as_array)
+            .expect("expected node list");
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].get("name"), Some(&Value::String("a".into())));
+        let path = outcome.result.rows[0]
+            .get("path")
+            .and_then(Value::as_object)
+            .expect("expected path object");
+        assert_eq!(path.get("length"), Some(&Value::from(0)));
+    }
+
+    #[tokio::test]
+    async fn engine_routes_distributed_single_hop_path_query_with_edge_properties() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        peer_one
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "node_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_one
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Node:A".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_one
+            .put_edge_record(&EdgeRecord {
+                id: "edge:a-b".into(),
+                start_node: "Node:A".into(),
+                end_node: "Node:B".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::from([("rank".into(), Value::from(1))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_two = StorageEngine::open_temporary().unwrap();
+        peer_two
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "node_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_two
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Node:B".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("b".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+        transport.register("node-2", Arc::new(StorageEngineAdapter::new(peer_two)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH p = (a:Node {name: 'a'})-[:LINK {rank: 1}]->(b:Node {name: 'b'}) RETURN length(p) AS hops, relationships(p) AS rels, nodes(p) AS nodes, p AS path",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result.columns, vec!["hops", "rels", "nodes", "path"]);
+        assert_eq!(outcome.result.rows.len(), 1);
+        assert_eq!(outcome.result.rows[0].get("hops"), Some(&Value::from(1)));
+        let rels = outcome.result.rows[0]
+            .get("rels")
+            .and_then(Value::as_array)
+            .expect("expected relationship list");
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].get("rank"), Some(&Value::from(1)));
+        let nodes = outcome.result.rows[0]
+            .get("nodes")
+            .and_then(Value::as_array)
+            .expect("expected node list");
+        let names = nodes
+            .iter()
+            .map(|node| node.get("name").and_then(Value::as_str).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn engine_routes_distributed_variable_length_exact_path_query() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        peer_one
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "node_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_one
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Node:A".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_one
+            .put_edge_record(&EdgeRecord {
+                id: "edge:a-b".into(),
+                start_node: "Node:A".into(),
+                end_node: "Node:B".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::from([("rank".into(), Value::from(1))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_two = StorageEngine::open_temporary().unwrap();
+        peer_two
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "node_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_two
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Node:B".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("b".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_two
+            .put_edge_record(&EdgeRecord {
+                id: "edge:b-c".into(),
+                start_node: "Node:B".into(),
+                end_node: "Node:C".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::from([("rank".into(), Value::from(2))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_three = StorageEngine::open_temporary().unwrap();
+        peer_three
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "node_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_three
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Node:C".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("c".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+        transport.register("node-2", Arc::new(StorageEngineAdapter::new(peer_two)));
+        transport.register("node-3", Arc::new(StorageEngineAdapter::new(peer_three)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH p = (a:Node {name: 'a'})-[r:LINK*2]->(n:Node {name: 'c'}) RETURN length(p) AS hops, relationships(p) AS rels, p AS path",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::Quorum,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result.rows.len(), 1);
+        assert_eq!(outcome.result.rows[0].get("hops"), Some(&Value::from(2)));
+        let rels = outcome.result.rows[0]
+            .get("rels")
+            .and_then(Value::as_array)
+            .expect("expected relationship list");
+        assert_eq!(rels.len(), 2);
+        assert_eq!(rels[0].get("rank"), Some(&Value::from(1)));
+        assert_eq!(rels[1].get("rank"), Some(&Value::from(2)));
+    }
+
+    #[tokio::test]
+    async fn engine_routes_distributed_variable_length_range_path_query() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        peer_one
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "node_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_one
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Node:A".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_one
+            .put_edge_record(&EdgeRecord {
+                id: "edge:a-b".into(),
+                start_node: "Node:A".into(),
+                end_node: "Node:B".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_two = StorageEngine::open_temporary().unwrap();
+        peer_two
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "node_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_two
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Node:B".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("b".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_two
+            .put_edge_record(&EdgeRecord {
+                id: "edge:b-c".into(),
+                start_node: "Node:B".into(),
+                end_node: "Node:C".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_three = StorageEngine::open_temporary().unwrap();
+        peer_three
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "node_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_three
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Node:C".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("c".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+        transport.register("node-2", Arc::new(StorageEngineAdapter::new(peer_two)));
+        transport.register("node-3", Arc::new(StorageEngineAdapter::new(peer_three)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH p = (a:Node {name: 'a'})-[:LINK*1..2]->(n:Node) RETURN length(p) AS hops, nodes(p) AS nodes",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::Quorum,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result.rows.len(), 2);
+        let mut rows = outcome
+            .result
+            .rows
+            .iter()
+            .map(|row| {
+                let hops = row.get("hops").and_then(Value::as_i64).unwrap();
+                let names = row
+                    .get("nodes")
+                    .and_then(Value::as_array)
+                    .unwrap()
+                    .iter()
+                    .map(|node| node.get("name").and_then(Value::as_str).unwrap().to_string())
+                    .collect::<Vec<_>>();
+                (hops, names)
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|(hops, _)| *hops);
+        assert_eq!(rows[0], (1, vec!["a".into(), "b".into()]));
+        assert_eq!(rows[1], (2, vec!["a".into(), "b".into(), "c".into()]));
+    }
+
+    #[tokio::test]
+    async fn engine_routes_distributed_optional_single_node_path_query_hit_and_miss() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        peer_one
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "person_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Person".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_one
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Person:Alice".into(),
+                labels: vec!["Person".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("Alice".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+
+        let hit = db
+            .execute_distributed_as(
+                "OPTIONAL MATCH p = (n:Person {name: 'Alice'}) RETURN p AS path, nodes(p) AS nodes, relationships(p) AS rels, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport.clone(),
+            )
+            .await
+            .unwrap();
+        let miss = db
+            .execute_distributed_as(
+                "OPTIONAL MATCH p = (n:Person {name: 'Bob'}) RETURN p AS path, nodes(p) AS nodes, relationships(p) AS rels, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(hit.result.rows.len(), 1);
+        assert_eq!(hit.result.rows[0].get("hops"), Some(&Value::from(0)));
+        let hit_nodes = hit.result.rows[0]
+            .get("nodes")
+            .and_then(Value::as_array)
+            .expect("expected optional hit nodes");
+        assert_eq!(hit_nodes.len(), 1);
+        assert_eq!(hit.result.rows[0].get("rels"), Some(&Value::Array(Vec::new())));
+
+        assert_eq!(miss.result.rows.len(), 1);
+        assert_eq!(miss.result.rows[0].get("path"), Some(&Value::Null));
+        assert_eq!(miss.result.rows[0].get("hops"), Some(&Value::Null));
+        assert_eq!(miss.result.rows[0].get("nodes"), Some(&Value::Array(Vec::new())));
+        assert_eq!(miss.result.rows[0].get("rels"), Some(&Value::Array(Vec::new())));
+    }
+
+    #[tokio::test]
+    async fn engine_routes_distributed_leading_match_optional_path_with_row_preservation() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        peer_one
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "seed_id".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Seed".into(),
+                properties: vec!["id".into()],
+            })
+            .unwrap();
+        peer_one
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Seed:1".into(),
+                labels: vec!["Seed".into()],
+                properties: BTreeMap::from([("id".into(), Value::from(1))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_one
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Seed:2".into(),
+                labels: vec!["Seed".into()],
+                properties: BTreeMap::from([("id".into(), Value::from(2))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_one
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "person_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Person".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_one
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Person:Alice".into(),
+                labels: vec!["Person".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("Alice".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+
+        let hit = db
+            .execute_distributed_as(
+                "MATCH (s:Seed) OPTIONAL MATCH p = (n:Person {name: 'Alice'}) RETURN p AS path, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport.clone(),
+            )
+            .await
+            .unwrap();
+        let miss = db
+            .execute_distributed_as(
+                "MATCH (s:Seed) OPTIONAL MATCH p = (n:Person {name: 'Bob'}) RETURN p AS path, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(hit.result.rows.len(), 2);
+        assert!(hit
+            .result
+            .rows
+            .iter()
+            .all(|row| row.get("hops") == Some(&Value::from(0))));
+        assert!(hit
+            .result
+            .rows
+            .iter()
+            .all(|row| row.get("path").and_then(Value::as_object).is_some()));
+
+        assert_eq!(miss.result.rows.len(), 2);
+        assert!(miss
+            .result
+            .rows
+            .iter()
+            .all(|row| row.get("path") == Some(&Value::Null)));
+        assert!(miss
+            .result
+            .rows
+            .iter()
+            .all(|row| row.get("hops") == Some(&Value::Null)));
+    }
+
+    #[tokio::test]
+    async fn engine_routes_distributed_leading_match_optional_path_using_bound_node() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        peer_one
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "seed_id".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Seed".into(),
+                properties: vec!["id".into()],
+            })
+            .unwrap();
+        peer_one
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "person_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Person".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_one
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Seed:1".into(),
+                labels: vec!["Seed".into()],
+                properties: BTreeMap::from([("id".into(), Value::from(1))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_one
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Seed:2".into(),
+                labels: vec!["Seed".into()],
+                properties: BTreeMap::from([("id".into(), Value::from(2))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_one
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "Person:Alice".into(),
+                labels: vec!["Person".into()],
+                properties: BTreeMap::from([("name".into(), Value::String("Alice".into()))]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_one
+            .put_edge_record(&EdgeRecord {
+                id: "edge:seed1-alice".into(),
+                start_node: "Seed:1".into(),
+                end_node: "Person:Alice".into(),
+                edge_type: "KNOWS".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH (s:Seed) OPTIONAL MATCH p = (s)-[:KNOWS]->(n:Person) RETURN p AS path, nodes(p) AS nodes, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result.rows.len(), 2);
+        assert_eq!(
+            outcome
+                .result
+                .rows
+                .iter()
+                .filter(|row| row.get("path") == Some(&Value::Null))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcome
+                .result
+                .rows
+                .iter()
+                .filter(|row| row.get("hops") == Some(&Value::from(1)))
+                .count(),
+            1
+        );
+        let hit_nodes = outcome
+            .result
+            .rows
+            .iter()
+            .find(|row| row.get("hops") == Some(&Value::from(1)))
+            .and_then(|row| row.get("nodes"))
+            .and_then(Value::as_array)
+            .expect("expected bound-path hit nodes");
+        assert_eq!(hit_nodes.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn engine_routes_distributed_multi_match_optional_path_with_bound_node() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        peer_one
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "seed_id".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Seed".into(),
+                properties: vec!["id".into()],
+            })
+            .unwrap();
+        peer_one
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "tag_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Tag".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_one
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "person_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Person".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        for (id, label, properties) in [
+            (
+                "Seed:1",
+                "Seed",
+                BTreeMap::from([("id".into(), Value::from(1))]),
+            ),
+            (
+                "Seed:2",
+                "Seed",
+                BTreeMap::from([("id".into(), Value::from(2))]),
+            ),
+            (
+                "Tag:blue",
+                "Tag",
+                BTreeMap::from([("name".into(), Value::String("blue".into()))]),
+            ),
+            (
+                "Tag:red",
+                "Tag",
+                BTreeMap::from([("name".into(), Value::String("red".into()))]),
+            ),
+            (
+                "Person:Alice",
+                "Person",
+                BTreeMap::from([("name".into(), Value::String("Alice".into()))]),
+            ),
+        ] {
+            peer_one
+                .put_node_record(&copperdb_storage::NodeRecord {
+                    id: id.into(),
+                    labels: vec![label.into()],
+                    properties,
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+        peer_one
+            .put_edge_record(&EdgeRecord {
+                id: "edge:seed1-alice".into(),
+                start_node: "Seed:1".into(),
+                end_node: "Person:Alice".into(),
+                edge_type: "KNOWS".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH (s:Seed) MATCH (t:Tag) OPTIONAL MATCH p = (s)-[:KNOWS]->(n:Person) RETURN p AS path, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result.rows.len(), 4);
+        assert_eq!(
+            outcome
+                .result
+                .rows
+                .iter()
+                .filter(|row| row.get("hops") == Some(&Value::from(1)))
+                .count(),
+            2
+        );
+        assert_eq!(
+            outcome
+                .result
+                .rows
+                .iter()
+                .filter(|row| row.get("path") == Some(&Value::Null))
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_routes_distributed_relationship_match_optional_path_with_bound_node() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        for definition in [
+            copperdb_storage::IndexDefinition {
+                name: "seed_id".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Seed".into(),
+                properties: vec!["id".into()],
+            },
+            copperdb_storage::IndexDefinition {
+                name: "tag_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Tag".into(),
+                properties: vec!["name".into()],
+            },
+            copperdb_storage::IndexDefinition {
+                name: "person_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Person".into(),
+                properties: vec!["name".into()],
+            },
+        ] {
+            peer_one.persist_index_definition(&definition).unwrap();
+        }
+        for (id, label, properties) in [
+            (
+                "Seed:1",
+                "Seed",
+                BTreeMap::from([("id".into(), Value::from(1))]),
+            ),
+            (
+                "Seed:2",
+                "Seed",
+                BTreeMap::from([("id".into(), Value::from(2))]),
+            ),
+            (
+                "Tag:blue",
+                "Tag",
+                BTreeMap::from([("name".into(), Value::String("blue".into()))]),
+            ),
+            (
+                "Tag:red",
+                "Tag",
+                BTreeMap::from([("name".into(), Value::String("red".into()))]),
+            ),
+            (
+                "Person:Alice",
+                "Person",
+                BTreeMap::from([("name".into(), Value::String("Alice".into()))]),
+            ),
+        ] {
+            peer_one
+                .put_node_record(&copperdb_storage::NodeRecord {
+                    id: id.into(),
+                    labels: vec![label.into()],
+                    properties,
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+        for edge in [
+            EdgeRecord {
+                id: "edge:seed1-blue".into(),
+                start_node: "Seed:1".into(),
+                end_node: "Tag:blue".into(),
+                edge_type: "TAGGED".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "edge:seed2-red".into(),
+                start_node: "Seed:2".into(),
+                end_node: "Tag:red".into(),
+                edge_type: "TAGGED".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "edge:seed1-alice".into(),
+                start_node: "Seed:1".into(),
+                end_node: "Person:Alice".into(),
+                edge_type: "KNOWS".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+        ] {
+            peer_one.put_edge_record(&edge).unwrap();
+        }
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH (s:Seed)-[:TAGGED]->(t:Tag) OPTIONAL MATCH p = (s)-[:KNOWS]->(n:Person) RETURN p AS path, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result.rows.len(), 2);
+        assert_eq!(
+            outcome
+                .result
+                .rows
+                .iter()
+                .filter(|row| row.get("hops") == Some(&Value::from(1)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcome
+                .result
+                .rows
+                .iter()
+                .filter(|row| row.get("path") == Some(&Value::Null))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_routes_distributed_mixed_prefix_optional_path_with_bound_node() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        for definition in [
+            copperdb_storage::IndexDefinition {
+                name: "seed_id".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Seed".into(),
+                properties: vec!["id".into()],
+            },
+            copperdb_storage::IndexDefinition {
+                name: "tag_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Tag".into(),
+                properties: vec!["name".into()],
+            },
+            copperdb_storage::IndexDefinition {
+                name: "person_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Person".into(),
+                properties: vec!["name".into()],
+            },
+        ] {
+            peer_one.persist_index_definition(&definition).unwrap();
+        }
+        for (id, label, properties) in [
+            (
+                "Seed:1",
+                "Seed",
+                BTreeMap::from([("id".into(), Value::from(1))]),
+            ),
+            (
+                "Seed:2",
+                "Seed",
+                BTreeMap::from([("id".into(), Value::from(2))]),
+            ),
+            (
+                "Tag:blue",
+                "Tag",
+                BTreeMap::from([("name".into(), Value::String("blue".into()))]),
+            ),
+            (
+                "Tag:red",
+                "Tag",
+                BTreeMap::from([("name".into(), Value::String("red".into()))]),
+            ),
+            (
+                "Person:Alice",
+                "Person",
+                BTreeMap::from([("name".into(), Value::String("Alice".into()))]),
+            ),
+        ] {
+            peer_one
+                .put_node_record(&copperdb_storage::NodeRecord {
+                    id: id.into(),
+                    labels: vec![label.into()],
+                    properties,
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+        for edge in [
+            EdgeRecord {
+                id: "edge:seed1-blue".into(),
+                start_node: "Seed:1".into(),
+                end_node: "Tag:blue".into(),
+                edge_type: "TAGGED".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "edge:seed2-red".into(),
+                start_node: "Seed:2".into(),
+                end_node: "Tag:red".into(),
+                edge_type: "TAGGED".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "edge:seed1-alice".into(),
+                start_node: "Seed:1".into(),
+                end_node: "Person:Alice".into(),
+                edge_type: "KNOWS".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+        ] {
+            peer_one.put_edge_record(&edge).unwrap();
+        }
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH (s:Seed) MATCH (s)-[:TAGGED]->(t:Tag) OPTIONAL MATCH p = (s)-[:KNOWS]->(n:Person) RETURN p AS path, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result.rows.len(), 2);
+        assert_eq!(
+            outcome
+                .result
+                .rows
+                .iter()
+                .filter(|row| row.get("hops") == Some(&Value::from(1)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcome
+                .result
+                .rows
+                .iter()
+                .filter(|row| row.get("path") == Some(&Value::Null))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_routes_distributed_variable_length_relationship_prefix_optional_path() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        for definition in [
+            copperdb_storage::IndexDefinition {
+                name: "seed_id".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Seed".into(),
+                properties: vec!["id".into()],
+            },
+            copperdb_storage::IndexDefinition {
+                name: "tag_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Tag".into(),
+                properties: vec!["name".into()],
+            },
+            copperdb_storage::IndexDefinition {
+                name: "person_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Person".into(),
+                properties: vec!["name".into()],
+            },
+        ] {
+            peer_one.persist_index_definition(&definition).unwrap();
+        }
+        for (id, labels, properties) in [
+            (
+                "Seed:1",
+                vec!["Seed"],
+                BTreeMap::from([("id".into(), Value::from(1))]),
+            ),
+            (
+                "Seed:2",
+                vec!["Seed"],
+                BTreeMap::from([("id".into(), Value::from(2))]),
+            ),
+            (
+                "Hop:mid",
+                vec!["Hop"],
+                BTreeMap::from([("name".into(), Value::String("mid".into()))]),
+            ),
+            (
+                "Tag:blue",
+                vec!["Tag"],
+                BTreeMap::from([("name".into(), Value::String("blue".into()))]),
+            ),
+            (
+                "Tag:red",
+                vec!["Tag"],
+                BTreeMap::from([("name".into(), Value::String("red".into()))]),
+            ),
+            (
+                "Person:Alice",
+                vec!["Person"],
+                BTreeMap::from([("name".into(), Value::String("Alice".into()))]),
+            ),
+        ] {
+            peer_one
+                .put_node_record(&copperdb_storage::NodeRecord {
+                    id: id.into(),
+                    labels: labels.into_iter().map(String::from).collect(),
+                    properties,
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+        for edge in [
+            EdgeRecord {
+                id: "edge:seed1-mid".into(),
+                start_node: "Seed:1".into(),
+                end_node: "Hop:mid".into(),
+                edge_type: "TAGGED".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "edge:mid-blue".into(),
+                start_node: "Hop:mid".into(),
+                end_node: "Tag:blue".into(),
+                edge_type: "TAGGED".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "edge:seed2-red".into(),
+                start_node: "Seed:2".into(),
+                end_node: "Tag:red".into(),
+                edge_type: "TAGGED".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "edge:seed1-alice".into(),
+                start_node: "Seed:1".into(),
+                end_node: "Person:Alice".into(),
+                edge_type: "KNOWS".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+        ] {
+            peer_one.put_edge_record(&edge).unwrap();
+        }
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH (s:Seed)-[:TAGGED*1..2]->(t:Tag) OPTIONAL MATCH p = (s)-[:KNOWS]->(n:Person) RETURN p AS path, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result.rows.len(), 2);
+        assert_eq!(outcome.result.rows.iter().filter(|row| row.get("hops") == Some(&Value::from(1))).count(), 1);
+        assert_eq!(outcome.result.rows.iter().filter(|row| row.get("path") == Some(&Value::Null)).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn engine_routes_distributed_where_filtered_prefix_optional_path() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        for definition in [
+            copperdb_storage::IndexDefinition {
+                name: "seed_id".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Seed".into(),
+                properties: vec!["id".into()],
+            },
+            copperdb_storage::IndexDefinition {
+                name: "tag_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Tag".into(),
+                properties: vec!["name".into()],
+            },
+            copperdb_storage::IndexDefinition {
+                name: "person_name".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Person".into(),
+                properties: vec!["name".into()],
+            },
+        ] {
+            peer_one.persist_index_definition(&definition).unwrap();
+        }
+        for (id, label, properties) in [
+            (
+                "Seed:1",
+                "Seed",
+                BTreeMap::from([("id".into(), Value::from(1))]),
+            ),
+            (
+                "Seed:2",
+                "Seed",
+                BTreeMap::from([("id".into(), Value::from(2))]),
+            ),
+            (
+                "Tag:blue",
+                "Tag",
+                BTreeMap::from([("name".into(), Value::String("blue".into()))]),
+            ),
+            (
+                "Tag:red",
+                "Tag",
+                BTreeMap::from([("name".into(), Value::String("red".into()))]),
+            ),
+            (
+                "Person:Alice",
+                "Person",
+                BTreeMap::from([("name".into(), Value::String("Alice".into()))]),
+            ),
+        ] {
+            peer_one
+                .put_node_record(&copperdb_storage::NodeRecord {
+                    id: id.into(),
+                    labels: vec![label.into()],
+                    properties,
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+        for edge in [
+            EdgeRecord {
+                id: "edge:seed1-blue".into(),
+                start_node: "Seed:1".into(),
+                end_node: "Tag:blue".into(),
+                edge_type: "TAGGED".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "edge:seed2-red".into(),
+                start_node: "Seed:2".into(),
+                end_node: "Tag:red".into(),
+                edge_type: "TAGGED".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "edge:seed1-alice".into(),
+                start_node: "Seed:1".into(),
+                end_node: "Person:Alice".into(),
+                edge_type: "KNOWS".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+        ] {
+            peer_one.put_edge_record(&edge).unwrap();
+        }
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH (s:Seed) WHERE s.id = 1 MATCH (s)-[:TAGGED]->(t:Tag) WHERE t.name = 'blue' OPTIONAL MATCH p = (s)-[:KNOWS]->(n:Person) RETURN p AS path, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result.rows.len(), 1);
+        assert_eq!(outcome.result.rows[0].get("hops"), Some(&Value::from(1)));
+    }
+
+    #[tokio::test]
+    async fn engine_distributed_bfs_traverses_mesh_peers_and_returns_path() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        fn graph_node(id: &str, name: &str) -> Vec<u8> {
+            rmp_serde::to_vec(&BTreeMap::from([
+                ("_id".to_string(), Value::String(id.to_string())),
+                (
+                    "_labels".to_string(),
+                    Value::Array(vec![Value::String("Node".into())]),
+                ),
+                ("name".to_string(), Value::String(name.to_string())),
+            ]))
+            .unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        peer_one.put_node("Node:A", &graph_node("Node:A", "A")).unwrap();
+        peer_one
+            .put_edge_record(&EdgeRecord {
+                id: "edge:a-b".into(),
+                start_node: "Node:A".into(),
+                end_node: "Node:B".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_two = StorageEngine::open_temporary().unwrap();
+        peer_two.put_node("Node:B", &graph_node("Node:B", "B")).unwrap();
+        peer_two
+            .put_edge_record(&EdgeRecord {
+                id: "edge:b-c".into(),
+                start_node: "Node:B".into(),
+                end_node: "Node:C".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_three = StorageEngine::open_temporary().unwrap();
+        peer_three.put_node("Node:C", &graph_node("Node:C", "C")).unwrap();
+        peer_three.put_node("Node:D", &graph_node("Node:D", "D")).unwrap();
+        peer_three
+            .put_edge_record(&EdgeRecord {
+                id: "edge:c-d".into(),
+                start_node: "Node:C".into(),
+                end_node: "Node:D".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+        transport.register("node-2", Arc::new(StorageEngineAdapter::new(peer_two)));
+        transport.register("node-3", Arc::new(StorageEngineAdapter::new(peer_three)));
+
+        let outcome = db
+            .distributed_bfs_path_as(
+                "Node:A",
+                "Node:D",
+                Some("LINK"),
+                EdgeDirection::Outgoing,
+                &placement,
+                ConsistencyLevel::Quorum,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.plan.required_responses, 2);
+        assert_eq!(outcome.responded_by.len(), 3);
+        assert!(outcome.failed_replicas.is_empty());
+        assert_eq!(
+            outcome.path,
+            Some(DistributedPath {
+                node_ids: vec!["Node:A".into(), "Node:B".into(), "Node:C".into(), "Node:D".into()],
+                edge_ids: vec!["edge:a-b".into(), "edge:b-c".into(), "edge:c-d".into()],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_distributed_bfs_prefers_shortest_path_across_mesh_peers() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        fn graph_node(id: &str) -> Vec<u8> {
+            rmp_serde::to_vec(&BTreeMap::from([
+                ("_id".to_string(), Value::String(id.to_string())),
+                (
+                    "_labels".to_string(),
+                    Value::Array(vec![Value::String("Node".into())]),
+                ),
+            ]))
+            .unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        for node_id in ["Node:A", "Node:B"] {
+            peer_one.put_node(node_id, &graph_node(node_id)).unwrap();
+        }
+        for edge in [EdgeRecord {
+            id: "edge:a-b".into(),
+            start_node: "Node:A".into(),
+            end_node: "Node:B".into(),
+            edge_type: "LINK".into(),
+            properties: BTreeMap::new(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        }] {
+            peer_one.put_edge_record(&edge).unwrap();
+        }
+
+        let peer_two = StorageEngine::open_temporary().unwrap();
+        for node_id in ["Node:C", "Node:D"] {
+            peer_two.put_node(node_id, &graph_node(node_id)).unwrap();
+        }
+        for edge in [
+            EdgeRecord {
+                id: "edge:b-d".into(),
+                start_node: "Node:B".into(),
+                end_node: "Node:D".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "edge:a-c".into(),
+                start_node: "Node:A".into(),
+                end_node: "Node:C".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+        ] {
+            peer_two.put_edge_record(&edge).unwrap();
+        }
+
+        let peer_three = StorageEngine::open_temporary().unwrap();
+        for node_id in ["Node:E"] {
+            peer_three.put_node(node_id, &graph_node(node_id)).unwrap();
+        }
+        for edge in [
+            EdgeRecord {
+                id: "edge:c-e".into(),
+                start_node: "Node:C".into(),
+                end_node: "Node:E".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "edge:e-d".into(),
+                start_node: "Node:E".into(),
+                end_node: "Node:D".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+        ] {
+            peer_three.put_edge_record(&edge).unwrap();
+        }
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+        transport.register("node-2", Arc::new(StorageEngineAdapter::new(peer_two)));
+        transport.register("node-3", Arc::new(StorageEngineAdapter::new(peer_three)));
+
+        let outcome = db
+            .distributed_bfs_path_as(
+                "Node:A",
+                "Node:D",
+                Some("LINK"),
+                EdgeDirection::Outgoing,
+                &placement,
+                ConsistencyLevel::Quorum,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.path,
+            Some(DistributedPath {
+                node_ids: vec!["Node:A".into(), "Node:B".into(), "Node:D".into()],
+                edge_ids: vec!["edge:a-b".into(), "edge:b-d".into()],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_distributed_bfs_returns_none_when_mesh_has_no_path() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        fn graph_node(id: &str) -> Vec<u8> {
+            rmp_serde::to_vec(&BTreeMap::from([
+                ("_id".to_string(), Value::String(id.to_string())),
+                (
+                    "_labels".to_string(),
+                    Value::Array(vec![Value::String("Node".into())]),
+                ),
+            ]))
+            .unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        peer_one.put_node("Node:A", &graph_node("Node:A")).unwrap();
+        peer_one.put_node("Node:B", &graph_node("Node:B")).unwrap();
+        peer_one
+            .put_edge_record(&EdgeRecord {
+                id: "edge:a-b".into(),
+                start_node: "Node:A".into(),
+                end_node: "Node:B".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_two = StorageEngine::open_temporary().unwrap();
+        peer_two.put_node("Node:C", &graph_node("Node:C")).unwrap();
+
+        let peer_three = StorageEngine::open_temporary().unwrap();
+        peer_three.put_node("Node:D", &graph_node("Node:D")).unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+        transport.register("node-2", Arc::new(StorageEngineAdapter::new(peer_two)));
+        transport.register("node-3", Arc::new(StorageEngineAdapter::new(peer_three)));
+
+        let outcome = db
+            .distributed_bfs_path_as(
+                "Node:A",
+                "Node:D",
+                Some("LINK"),
+                EdgeDirection::Outgoing,
+                &placement,
+                ConsistencyLevel::Quorum,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.plan.required_responses, 2);
+        assert_eq!(outcome.responded_by.len(), 3);
+        assert!(outcome.failed_replicas.is_empty());
+        assert!(outcome.path.is_none());
+    }
+
+    #[tokio::test]
+    async fn engine_distributed_bfs_requires_mesh_read_quorum() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        fn graph_node(id: &str) -> Vec<u8> {
+            rmp_serde::to_vec(&BTreeMap::from([
+                ("_id".to_string(), Value::String(id.to_string())),
+                (
+                    "_labels".to_string(),
+                    Value::Array(vec![Value::String("Node".into())]),
+                ),
+            ]))
+            .unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        peer_one.put_node("Node:A", &graph_node("Node:A")).unwrap();
+        peer_one.put_node("Node:D", &graph_node("Node:D")).unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+
+        let err = db
+            .distributed_bfs_path_as(
+                "Node:A",
+                "Node:D",
+                Some("LINK"),
+                EdgeDirection::Outgoing,
+                &placement,
+                ConsistencyLevel::Quorum,
+                None,
+                transport,
+            )
+            .await
+            .unwrap_err();
+
+        match err {
+            CopperDbError::Replication(message) => {
+                assert!(message.contains("quorum not reached"));
+                assert!(message.contains("required 2"));
+            }
+            other => panic!("expected replication quorum error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_distributed_bfs_traverses_incoming_edges_across_mesh_peers() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        fn graph_node(id: &str) -> Vec<u8> {
+            rmp_serde::to_vec(&BTreeMap::from([
+                ("_id".to_string(), Value::String(id.to_string())),
+                (
+                    "_labels".to_string(),
+                    Value::Array(vec![Value::String("Node".into())]),
+                ),
+            ]))
+            .unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        peer_one.put_node("Node:A", &graph_node("Node:A")).unwrap();
+        peer_one.put_node("Node:B", &graph_node("Node:B")).unwrap();
+        peer_one
+            .put_edge_record(&EdgeRecord {
+                id: "edge:a-b".into(),
+                start_node: "Node:A".into(),
+                end_node: "Node:B".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_two = StorageEngine::open_temporary().unwrap();
+        peer_two.put_node("Node:C", &graph_node("Node:C")).unwrap();
+        peer_two
+            .put_edge_record(&EdgeRecord {
+                id: "edge:b-c".into(),
+                start_node: "Node:B".into(),
+                end_node: "Node:C".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_three = StorageEngine::open_temporary().unwrap();
+        peer_three.put_node("Node:D", &graph_node("Node:D")).unwrap();
+        peer_three
+            .put_edge_record(&EdgeRecord {
+                id: "edge:c-d".into(),
+                start_node: "Node:C".into(),
+                end_node: "Node:D".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+        transport.register("node-2", Arc::new(StorageEngineAdapter::new(peer_two)));
+        transport.register("node-3", Arc::new(StorageEngineAdapter::new(peer_three)));
+
+        let outcome = db
+            .distributed_bfs_path_as(
+                "Node:D",
+                "Node:A",
+                Some("LINK"),
+                EdgeDirection::Incoming,
+                &placement,
+                ConsistencyLevel::Quorum,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.path,
+            Some(DistributedPath {
+                node_ids: vec!["Node:D".into(), "Node:C".into(), "Node:B".into(), "Node:A".into()],
+                edge_ids: vec!["edge:c-d".into(), "edge:b-c".into(), "edge:a-b".into()],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_distributed_bfs_traverses_undirected_edges_across_mesh_peers() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        fn graph_node(id: &str) -> Vec<u8> {
+            rmp_serde::to_vec(&BTreeMap::from([
+                ("_id".to_string(), Value::String(id.to_string())),
+                (
+                    "_labels".to_string(),
+                    Value::Array(vec![Value::String("Node".into())]),
+                ),
+            ]))
+            .unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        peer_one.put_node("Node:A", &graph_node("Node:A")).unwrap();
+        peer_one.put_node("Node:B", &graph_node("Node:B")).unwrap();
+        peer_one
+            .put_edge_record(&EdgeRecord {
+                id: "edge:a-b".into(),
+                start_node: "Node:A".into(),
+                end_node: "Node:B".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_two = StorageEngine::open_temporary().unwrap();
+        peer_two.put_node("Node:C", &graph_node("Node:C")).unwrap();
+        peer_two
+            .put_edge_record(&EdgeRecord {
+                id: "edge:b-c".into(),
+                start_node: "Node:B".into(),
+                end_node: "Node:C".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_three = StorageEngine::open_temporary().unwrap();
+        peer_three.put_node("Node:D", &graph_node("Node:D")).unwrap();
+        peer_three
+            .put_edge_record(&EdgeRecord {
+                id: "edge:c-d".into(),
+                start_node: "Node:C".into(),
+                end_node: "Node:D".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+        transport.register("node-2", Arc::new(StorageEngineAdapter::new(peer_two)));
+        transport.register("node-3", Arc::new(StorageEngineAdapter::new(peer_three)));
+
+        let outcome = db
+            .distributed_bfs_path_as(
+                "Node:D",
+                "Node:A",
+                Some("LINK"),
+                EdgeDirection::Both,
+                &placement,
+                ConsistencyLevel::Quorum,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.path,
+            Some(DistributedPath {
+                node_ids: vec!["Node:D".into(), "Node:C".into(), "Node:B".into(), "Node:A".into()],
+                edge_ids: vec!["edge:c-d".into(), "edge:b-c".into(), "edge:a-b".into()],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_distributed_bfs_query_materializes_path_row() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        fn graph_node(id: &str) -> Vec<u8> {
+            rmp_serde::to_vec(&BTreeMap::from([
+                ("_id".to_string(), Value::String(id.to_string())),
+                (
+                    "_labels".to_string(),
+                    Value::Array(vec![Value::String("Node".into())]),
+                ),
+            ]))
+            .unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        peer_one.put_node("Node:A", &graph_node("Node:A")).unwrap();
+        peer_one
+            .put_edge_record(&EdgeRecord {
+                id: "edge:a-b".into(),
+                start_node: "Node:A".into(),
+                end_node: "Node:B".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_two = StorageEngine::open_temporary().unwrap();
+        peer_two.put_node("Node:B", &graph_node("Node:B")).unwrap();
+        peer_two
+            .put_edge_record(&EdgeRecord {
+                id: "edge:b-c".into(),
+                start_node: "Node:B".into(),
+                end_node: "Node:C".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_three = StorageEngine::open_temporary().unwrap();
+        peer_three.put_node("Node:C", &graph_node("Node:C")).unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+        transport.register("node-2", Arc::new(StorageEngineAdapter::new(peer_two)));
+        transport.register("node-3", Arc::new(StorageEngineAdapter::new(peer_three)));
+
+        let (result, bfs) = db
+            .distributed_bfs_query_as(
+                "Node:A",
+                "Node:C",
+                Some("LINK"),
+                EdgeDirection::Outgoing,
+                &placement,
+                ConsistencyLevel::Quorum,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.columns,
+            vec!["path", "nodes(path)", "relationships(path)", "length(path)"]
+        );
+        assert_eq!(result.rows.len(), 1);
+        let nodes = result.rows[0]
+            .get("nodes(path)")
+            .and_then(Value::as_array)
+            .expect("expected materialized path nodes");
+        assert_eq!(nodes.len(), 3);
+        assert_eq!(nodes[0].get("_id"), Some(&Value::String("Node:A".into())));
+        assert_eq!(nodes[1].get("_id"), Some(&Value::String("Node:B".into())));
+        assert_eq!(nodes[2].get("_id"), Some(&Value::String("Node:C".into())));
+        let rels = result.rows[0]
+            .get("relationships(path)")
+            .and_then(Value::as_array)
+            .expect("expected materialized path relationships");
+        assert_eq!(rels.len(), 2);
+        assert_eq!(rels[0].get("_id"), Some(&Value::String("edge:a-b".into())));
+        assert_eq!(rels[1].get("_id"), Some(&Value::String("edge:b-c".into())));
+        assert_eq!(result.rows[0].get("length(path)"), Some(&Value::from(2)));
+        let path = result.rows[0]
+            .get("path")
+            .and_then(Value::as_object)
+            .expect("expected path object");
+        assert_eq!(path.get("length"), Some(&Value::from(2)));
+        assert!(bfs.path.is_some());
+    }
+
+    #[tokio::test]
+    async fn engine_distributed_bfs_query_returns_empty_rows_when_no_path_exists() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        fn graph_node(id: &str) -> Vec<u8> {
+            rmp_serde::to_vec(&BTreeMap::from([
+                ("_id".to_string(), Value::String(id.to_string())),
+                (
+                    "_labels".to_string(),
+                    Value::Array(vec![Value::String("Node".into())]),
+                ),
+            ]))
+            .unwrap()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("neo4j");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            db.storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let peer_one = StorageEngine::open_temporary().unwrap();
+        peer_one.put_node("Node:A", &graph_node("Node:A")).unwrap();
+        let peer_two = StorageEngine::open_temporary().unwrap();
+        peer_two.put_node("Node:C", &graph_node("Node:C")).unwrap();
+        let peer_three = StorageEngine::open_temporary().unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer_one)));
+        transport.register("node-2", Arc::new(StorageEngineAdapter::new(peer_two)));
+        transport.register("node-3", Arc::new(StorageEngineAdapter::new(peer_three)));
+
+        let (result, bfs) = db
+            .distributed_bfs_query_as(
+                "Node:A",
+                "Node:C",
+                Some("LINK"),
+                EdgeDirection::Outgoing,
+                &placement,
+                ConsistencyLevel::Quorum,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert!(bfs.path.is_none());
+        assert_eq!(
+            result.columns,
+            vec!["path", "nodes(path)", "relationships(path)", "length(path)"]
+        );
+        assert!(result.rows.is_empty());
     }
 
     #[test]

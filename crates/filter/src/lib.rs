@@ -4,7 +4,7 @@
 //! Applies WHERE clause predicates and result projections to query output rows.
 
 use copperdb_cypher::Expression;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -65,6 +65,20 @@ pub fn eval_expression(
             Ok(Value::Bool(compare_values(&lv, op, &rv)?))
         }
 
+        Expression::InList {
+            value,
+            list,
+            negated,
+        } => {
+            let needle = eval_expression(value, row, params)?;
+            let haystack = eval_expression(list, row, params)?;
+            let contains = match haystack {
+                Value::Array(items) => items.iter().any(|item| values_equal(item, &needle)),
+                _ => return Err(FilterError::TypeError("IN requires a list value".into())),
+            };
+            Ok(Value::Bool(if *negated { !contains } else { contains }))
+        }
+
         Expression::And(a, b) => {
             // Short-circuit
             if !eval_predicate(a, row, params)? {
@@ -97,6 +111,20 @@ pub fn eval_expression(
             args,
             distinct: _,
         } => eval_function(name, args, row, params),
+
+        Expression::ListLiteral(items) => items
+            .iter()
+            .map(|item| eval_expression(item, row, params))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+
+        Expression::MapLiteral(entries) => {
+            let mut map = Map::new();
+            for (key, value) in entries {
+                map.insert(key.clone(), eval_expression(value, row, params)?);
+            }
+            Ok(Value::Object(map))
+        }
     }
 }
 
@@ -135,6 +163,13 @@ fn compare_values(left: &Value, op: &str, right: &Value) -> Result<bool, FilterE
             let s = coerce_string(left)?;
             let pat = coerce_string(right)?;
             Ok(s.ends_with(pat.as_str()))
+        }
+        "=~" => {
+            let s = coerce_string(left)?;
+            let pat = coerce_string(right)?;
+            let re = regex::Regex::new(&pat)
+                .map_err(|e| FilterError::TypeError(format!("invalid regex: {e}")))?;
+            Ok(re.is_match(&s))
         }
         _ => Err(FilterError::TypeError(format!("unknown operator: {op}"))),
     }
@@ -252,6 +287,18 @@ fn eval_function(
             } else {
                 Ok(Value::Array(vec![]))
             }
+        }
+        "nodes" => {
+            let v = eval_arg(0)?;
+            Ok(path_component(&v, "nodes").unwrap_or(Value::Array(vec![])))
+        }
+        "relationships" => {
+            let v = eval_arg(0)?;
+            Ok(path_component(&v, "relationships").unwrap_or(Value::Array(vec![])))
+        }
+        "length" => {
+            let v = eval_arg(0)?;
+            Ok(path_component(&v, "length").unwrap_or(Value::Null))
         }
         "id" => {
             let v = eval_arg(0)?;
@@ -455,6 +502,13 @@ fn eval_function(
     }
 }
 
+fn path_component(value: &Value, key: &str) -> Option<Value> {
+    let Value::Object(map) = value else {
+        return None;
+    };
+    map.get(key).cloned()
+}
+
 // ─── Legacy predicate trait ──────────────────────────────────────────────────
 
 /// Represents a predicate that can be applied to a result row.
@@ -514,6 +568,44 @@ mod tests {
         let row = HashMap::new();
         let params = HashMap::new();
         assert_eq!(eval_expression(&expr, &row, &params).unwrap(), json!(42));
+    }
+
+    #[test]
+    fn test_list_literal_evaluates_items() {
+        let expr = Expression::ListLiteral(vec![
+            Expression::Literal(json!(1)),
+            Expression::Parameter("second".into()),
+            Expression::Variable("third".into()),
+        ]);
+        let mut row = HashMap::new();
+        row.insert("third".into(), json!(3));
+        let mut params = HashMap::new();
+        params.insert("second".into(), json!(2));
+
+        assert_eq!(
+            eval_expression(&expr, &row, &params).unwrap(),
+            json!([1, 2, 3])
+        );
+    }
+
+    #[test]
+    fn test_map_literal_evaluates_values() {
+        let expr = Expression::MapLiteral(vec![
+            ("name".into(), Expression::Parameter("name".into())),
+            (
+                "tags".into(),
+                Expression::ListLiteral(vec![Expression::Variable("tag".into())]),
+            ),
+        ]);
+        let mut row = HashMap::new();
+        row.insert("tag".into(), json!("engineer"));
+        let mut params = HashMap::new();
+        params.insert("name".into(), json!("Ada"));
+
+        assert_eq!(
+            eval_expression(&expr, &row, &params).unwrap(),
+            json!({"name": "Ada", "tags": ["engineer"]})
+        );
     }
 
     #[test]
@@ -589,6 +681,49 @@ mod tests {
         };
         assert_eq!(
             eval_expression(&expr, &HashMap::new(), &HashMap::new()).unwrap(),
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn test_comparison_regex_match() {
+        let expr = Expression::Comparison {
+            left: Box::new(Expression::Literal(json!("Alice"))),
+            op: "=~".to_string(),
+            right: Box::new(Expression::Literal(json!("A.*"))),
+        };
+        assert_eq!(
+            eval_expression(&expr, &HashMap::new(), &HashMap::new()).unwrap(),
+            json!(true)
+        );
+    }
+
+    #[test]
+    fn test_in_and_not_in_list() {
+        let expr = Expression::InList {
+            value: Box::new(Expression::Variable("status".into())),
+            list: Box::new(Expression::ListLiteral(vec![
+                Expression::Literal(json!("active")),
+                Expression::Literal(json!("pending")),
+            ])),
+            negated: false,
+        };
+        let negated = Expression::InList {
+            value: Box::new(Expression::Variable("status".into())),
+            list: Box::new(Expression::ListLiteral(vec![Expression::Literal(json!(
+                "deleted"
+            ))])),
+            negated: true,
+        };
+        let mut row = HashMap::new();
+        row.insert("status".into(), json!("active"));
+
+        assert_eq!(
+            eval_expression(&expr, &row, &HashMap::new()).unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            eval_expression(&negated, &row, &HashMap::new()).unwrap(),
             json!(true)
         );
     }

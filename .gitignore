@@ -3,3 +3,4 @@
 Cargo.lock
 crates/**/data/**/*
 data/**/*
+.DS_Store

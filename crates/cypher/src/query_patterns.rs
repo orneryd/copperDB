@@ -167,6 +167,17 @@ pub fn detect_query_pattern(query: &str) -> PatternInfo {
         }
     }
 
+    if info.pattern == QueryPattern::Generic {
+        if let Some(detected) = detect_edge_property_agg(query) {
+            info.pattern = QueryPattern::EdgePropertyAgg;
+            info.rel_type = detected.rel_type;
+            info.rel_var = detected.rel_var;
+            info.agg_functions = detected.agg_functions;
+            info.agg_property = detected.agg_property;
+            return info;
+        }
+    }
+
     // Large result set (LIMIT > 100)
     if let Some(limit) = info.limit {
         if limit > 100 && upper.contains("MATCH") {
@@ -191,6 +202,13 @@ struct MutualDetected {
     start_var: String,
     end_var: String,
     rel_type: String,
+}
+
+struct EdgePropertyAggDetected {
+    rel_type: String,
+    rel_var: String,
+    agg_functions: Vec<String>,
+    agg_property: String,
 }
 
 /// Detect `(a)-[:T]->(b)-[:T]->(a)` pattern using the scanner.
@@ -336,6 +354,183 @@ fn strip_alias(s: &str) -> &str {
     } else {
         s
     }
+}
+
+fn detect_edge_property_agg(query: &str) -> Option<EdgePropertyAggDetected> {
+    let match_clause = extract_match_clause(query)?;
+    let body = match_clause.trim();
+    let body = if body.to_ascii_uppercase().starts_with("MATCH") {
+        body[5..].trim()
+    } else {
+        body
+    };
+
+    let chain = parse_pattern_chain(body)?;
+    let edge = chain.edges.first()?;
+    if edge.rel_var.is_empty() {
+        return None;
+    }
+
+    let return_idx = find_keyword_index(query, "RETURN")?;
+    let return_part = strip_return_suffixes(&query[return_idx + 6..]);
+    let items = split_top_level_commas(return_part);
+    if items.len() < 2 {
+        return None;
+    }
+
+    let mut agg_functions = Vec::new();
+    let mut agg_property: Option<String> = None;
+    for item in items.iter().skip(1) {
+        let expr = strip_alias(item.trim());
+        let compact = expr.replace(' ', "");
+        let upper = compact.to_ascii_uppercase();
+        let open = upper.find('(')?;
+        let close = upper.rfind(')')?;
+        if close <= open + 1 {
+            return None;
+        }
+
+        let func = upper[..open].to_ascii_lowercase();
+        let inner = &upper[open + 1..close];
+        if func == "count" {
+            if inner == "*" || inner.eq_ignore_ascii_case(&edge.rel_var) {
+                continue;
+            }
+            return None;
+        }
+        if !matches!(func.as_str(), "sum" | "avg" | "min" | "max") {
+            return None;
+        }
+
+        let want_prefix = format!("{}.", edge.rel_var.to_ascii_uppercase());
+        if !inner.starts_with(&want_prefix) {
+            return None;
+        }
+        let prop_name = inner[want_prefix.len()..].trim();
+        if prop_name.is_empty() {
+            return None;
+        }
+
+        match &agg_property {
+            Some(existing) if !existing.eq_ignore_ascii_case(prop_name) => return None,
+            None => agg_property = Some(prop_name.to_ascii_lowercase()),
+            _ => {}
+        }
+        agg_functions.push(func);
+    }
+
+    let agg_property = agg_property?;
+    if !is_return_edge_property_agg_name_shape(query, &edge.rel_var, &agg_property) {
+        return None;
+    }
+
+    Some(EdgePropertyAggDetected {
+        rel_type: edge.rel_type.clone(),
+        rel_var: edge.rel_var.clone(),
+        agg_functions,
+        agg_property,
+    })
+}
+
+fn is_return_edge_property_agg_name_shape(query: &str, rel_var: &str, prop_name: &str) -> bool {
+    let return_idx = match find_keyword_index(query, "RETURN") {
+        Some(index) => index,
+        None => return false,
+    };
+    let return_part = strip_return_suffixes(&query[return_idx + 6..]);
+    let items = split_top_level_commas(return_part);
+    if items.len() < 2 {
+        return false;
+    }
+
+    let first = strip_alias(items[0].trim());
+    let dot = match first.rfind('.') {
+        Some(index) => index,
+        None => return false,
+    };
+    if !first[dot + 1..].eq_ignore_ascii_case("name") {
+        return false;
+    }
+
+    let want_prefix = format!("{}.", rel_var.to_ascii_uppercase());
+    let want_prop = prop_name.to_ascii_uppercase();
+    for item in items.iter().skip(1) {
+        let expr = strip_alias(item.trim());
+        let upper = expr.replace(' ', "").to_ascii_uppercase();
+        if upper.starts_with("COUNT(") && upper.ends_with(')') {
+            let inner = &upper[6..upper.len() - 1];
+            if inner == "*" || inner.eq_ignore_ascii_case(rel_var) {
+                continue;
+            }
+            return false;
+        }
+
+        let open = match upper.find('(') {
+            Some(index) => index,
+            None => return false,
+        };
+        let close = match upper.rfind(')') {
+            Some(index) => index,
+            None => return false,
+        };
+        if close <= open + 1 {
+            return false;
+        }
+
+        let func = &upper[..open];
+        if !matches!(func, "SUM" | "AVG" | "MIN" | "MAX") {
+            return false;
+        }
+        let inner = &upper[open + 1..close];
+        if !inner.starts_with(&want_prefix) {
+            return false;
+        }
+        if !inner[want_prefix.len()..].eq_ignore_ascii_case(&want_prop) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn strip_return_suffixes(return_part: &str) -> &str {
+    let end = ["ORDER BY", "SKIP", "LIMIT"]
+        .iter()
+        .filter_map(|kw| find_keyword_index(return_part, kw))
+        .min()
+        .unwrap_or(return_part.len());
+    return_part[..end].trim()
+}
+
+fn split_top_level_commas(input: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth_paren = 0;
+    let mut depth_bracket = 0;
+    let mut depth_brace = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '(' if !in_single && !in_double => depth_paren += 1,
+            ')' if !in_single && !in_double => depth_paren -= 1,
+            '[' if !in_single && !in_double => depth_bracket += 1,
+            ']' if !in_single && !in_double => depth_bracket -= 1,
+            '{' if !in_single && !in_double => depth_brace += 1,
+            '}' if !in_single && !in_double => depth_brace -= 1,
+            ',' if !in_single && !in_double && depth_paren == 0 && depth_bracket == 0 && depth_brace == 0 => {
+                parts.push(input[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+
+    parts.push(input[start..].trim());
+    parts
 }
 
 // ─── Pattern chain parser ─────────────────────────────────────────────────────
@@ -630,6 +825,56 @@ mod tests {
         let info = detect_query_pattern(q);
         assert_eq!(info.pattern, QueryPattern::MutualRelationship);
         assert_eq!(info.rel_type, "KNOWS");
+    }
+
+    #[test]
+    fn test_edge_property_agg_pattern() {
+        let query =
+            "MATCH (c:Customer)-[r:REVIEWED]->(p:Product) RETURN p.name, avg(r.rating) AS avg_rating";
+        let info = detect_query_pattern(query);
+        assert_eq!(info.pattern, QueryPattern::EdgePropertyAgg);
+        assert_eq!(info.rel_type, "REVIEWED");
+        assert_eq!(info.rel_var, "r");
+        assert_eq!(info.agg_property, "rating");
+        assert_eq!(info.agg_functions, vec!["avg"]);
+    }
+
+    #[test]
+    fn test_edge_property_agg_requires_name_projection_shape() {
+        let query = "MATCH (c)-[r:REVIEWED]->(p) RETURN p.id, avg(r.rating)";
+        let info = detect_query_pattern(query);
+        assert_eq!(info.pattern, QueryPattern::Generic);
+    }
+
+    #[test]
+    fn test_edge_property_agg_rejects_mixed_properties() {
+        let query = "MATCH (c)-[r:REVIEWED]->(p) RETURN p.name, avg(r.rating), sum(r.score)";
+        let info = detect_query_pattern(query);
+        assert_eq!(info.pattern, QueryPattern::Generic);
+    }
+
+    #[test]
+    fn test_return_edge_property_agg_name_shape_strictness() {
+        assert!(is_return_edge_property_agg_name_shape(
+            "MATCH (c)-[r:REVIEWED]->(p) RETURN p.name AS name, avg(r.rating) AS score, count(r) AS cnt",
+            "r",
+            "rating",
+        ));
+        assert!(!is_return_edge_property_agg_name_shape(
+            "MATCH (c)-[r:REVIEWED]->(p) RETURN p.id AS id, avg(r.rating) AS score",
+            "r",
+            "rating",
+        ));
+        assert!(!is_return_edge_property_agg_name_shape(
+            "MATCH (c)-[r:REVIEWED]->(p) RETURN p.name AS name, avg(r.other) AS score",
+            "r",
+            "rating",
+        ));
+        assert!(!is_return_edge_property_agg_name_shape(
+            "RETURN p.name",
+            "r",
+            "rating",
+        ));
     }
 
     #[test]
