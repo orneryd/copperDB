@@ -65,6 +65,13 @@
 - [x] `crates/engine` + `crates/eval`: routed distributed path queries now reuse the shared knowledge-policy scorer for remote node candidate resolution and edge traversal, with deterministic stale-node and stale-edge regressions.
 - [x] `crates/replication`: replica commands now include a dedicated knowledge-policy access-metadata upsert primitive, validated through the storage-backed replica adapter.
 - [x] `crates/engine` + `crates/replication`: distributed reads now flush remote `ON ACCESS` metadata updates through the replicated access-metadata command, with deterministic engine regressions for node and edge metadata persistence.
+- [x] `crates/eval`: generic relationship `MATCH` execution now supports fixed-length linear multi-hop chains with deterministic path-variable assertions for `nodes(p)`, `relationships(p)`, and `length(p)`.
+- [x] `crates/cypher` + `crates/eval`: comma-separated pattern segments now retain AST boundaries so disconnected relationship `MATCH` groups and comma-separated relationship `CREATE` groups execute without cross-segment misbinding.
+- [x] `crates/eval`: the generalized linear relationship matcher now also covers mixed fixed/variable-length chains and multi-edge `shortestPath(...)` execution with deterministic path assertions.
+- [x] `crates/cypher` + `crates/eval`: routed pipeline execution now accepts `OPTIONAL MATCH` after `WITH` and preserves null bindings instead of falling back out of the pipeline route.
+- [x] `crates/cypher` + `crates/eval`: routed pipeline execution now accepts `DELETE` after `WITH`, and eval’s shared delete path correctly distinguishes node vs relationship bindings when applying deletions.
+- [x] `crates/cypher` + `crates/eval`: routed pipeline execution now accepts `SET` after `WITH`, and eval’s shared set path correctly persists relationship property updates instead of only rewriting node bindings.
+- [x] `crates/cypher` + `crates/eval`: full `REMOVE` support now exists across parser, eval, and routed pipeline execution for relationship property removal and node label removal.
 
 ### Still stubbed / not yet parity-complete
 - [ ] `crates/storage`: full MVCC rebuild/orchestration parity with upstream beyond the reader-aware prune-now + lifecycle-status baseline.

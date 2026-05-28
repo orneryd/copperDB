@@ -1084,6 +1084,7 @@ fn determine_query_type(clauses: &[SyntaxClause<'_>]) -> QueryType {
             SyntaxClauseKind::Delete | SyntaxClauseKind::DetachDelete => {
                 return QueryType::Delete;
             }
+            SyntaxClauseKind::Remove => return QueryType::Remove,
             SyntaxClauseKind::Set => return QueryType::Set,
             SyntaxClauseKind::Return => return QueryType::Return,
             SyntaxClauseKind::With => return QueryType::With,

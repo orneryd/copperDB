@@ -325,6 +325,7 @@ fn profile_query_shape(query: &Query) -> QueryShapeStats {
                 }
             }
             Clause::Delete(_)
+            | Clause::Remove(_)
             | Clause::CreateConstraint(_)
             | Clause::DropConstraint(_)
             | Clause::ShowConstraints(_)

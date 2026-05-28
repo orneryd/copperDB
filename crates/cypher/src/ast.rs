@@ -8,6 +8,7 @@ pub enum QueryType {
     Create,
     Merge,
     Delete,
+    Remove,
     Set,
     Return,
     With,
@@ -29,6 +30,7 @@ pub enum Clause {
     Return(ReturnClause),
     Where(WhereClause),
     Set(SetClause),
+    Remove(RemoveClause),
     Delete(DeleteClause),
     Merge(MergeClause),
     With(WithClause),
@@ -93,6 +95,11 @@ pub struct WhereClause {
 #[derive(Debug, Clone)]
 pub struct SetClause {
     pub items: Vec<SetItem>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoveClause {
+    pub items: Vec<RemoveItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -254,6 +261,69 @@ pub struct Pattern {
     pub shortest_path: bool,
     pub nodes: Vec<NodePattern>,
     pub edges: Vec<EdgePattern>,
+    pub segment_edge_counts: Vec<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatternSegment {
+    pub node_start: usize,
+    pub node_len: usize,
+    pub edge_start: usize,
+    pub edge_len: usize,
+}
+
+impl Pattern {
+    pub fn segments(&self) -> Vec<PatternSegment> {
+        if self.nodes.is_empty() {
+            return Vec::new();
+        }
+
+        let segment_edge_counts = if self.segment_edge_counts.is_empty() {
+            vec![self.edges.len()]
+        } else {
+            self.segment_edge_counts.clone()
+        };
+
+        let mut segments = Vec::with_capacity(segment_edge_counts.len());
+        let mut node_start = 0;
+        let mut edge_start = 0;
+
+        for edge_len in segment_edge_counts {
+            let node_len = edge_len + 1;
+            segments.push(PatternSegment {
+                node_start,
+                node_len,
+                edge_start,
+                edge_len,
+            });
+            node_start += node_len;
+            edge_start += edge_len;
+        }
+
+        segments
+    }
+
+    pub fn split_segments(&self) -> Vec<Pattern> {
+        let segments = self.segments();
+        let preserve_path_variable = segments.len() == 1;
+
+        segments
+            .into_iter()
+            .map(|segment| Pattern {
+                path_variable: preserve_path_variable
+                    .then(|| self.path_variable.clone())
+                    .flatten(),
+                shortest_path: self.shortest_path,
+                nodes: self.nodes
+                    [segment.node_start..segment.node_start + segment.node_len]
+                    .to_vec(),
+                edges: self.edges
+                    [segment.edge_start..segment.edge_start + segment.edge_len]
+                    .to_vec(),
+                segment_edge_counts: vec![segment.edge_len],
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -349,4 +419,10 @@ pub struct SetItem {
     pub variable: String,
     pub property: String,
     pub value: Expression,
+}
+
+#[derive(Debug, Clone)]
+pub enum RemoveItem {
+    Property { variable: String, property: String },
+    Label { variable: String, label: String },
 }

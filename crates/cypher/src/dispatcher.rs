@@ -91,6 +91,11 @@ impl<'a> ParseContext<'a> {
                     let clause = self.parse_set()?;
                     clauses.push(Clause::Set(clause));
                 }
+                token if token.eq_ignore_ascii_case("REMOVE") => {
+                    self.advance();
+                    let clause = self.parse_remove()?;
+                    clauses.push(Clause::Remove(clause));
+                }
                 token if token.eq_ignore_ascii_case("DELETE") => {
                     self.advance();
                     let clause = self.parse_delete(false)?;

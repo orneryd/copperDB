@@ -104,6 +104,16 @@ impl<'a> ParseContext<'a> {
         } else {
             self.parse_pattern()?
         };
+        if pattern.shortest_path && pattern.segment_edge_counts.len() != 1 {
+            return Err(CypherError::ParseError(
+                "shortestPath requires a single connected pattern".to_string(),
+            ));
+        }
+        if path_variable.is_some() && pattern.segment_edge_counts.len() != 1 {
+            return Err(CypherError::ParseError(
+                "path variables require a single connected pattern".to_string(),
+            ));
+        }
         pattern.path_variable = path_variable;
         Ok(pattern)
     }
@@ -274,7 +284,7 @@ impl<'a> ParseContext<'a> {
         let property = self.advance_identifier()?;
         self.expect("=")?;
         let value = self.parse_expression_item(&[
-            ",", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "RETURN", "WITH", "UNWIND",
+            ",", "MATCH", "CREATE", "MERGE", "SET", "REMOVE", "DELETE", "DETACH", "RETURN", "WITH", "UNWIND",
             "CALL",
         ])?;
         Ok(SetItem {
@@ -282,6 +292,35 @@ impl<'a> ParseContext<'a> {
             property,
             value,
         })
+    }
+
+    // ── REMOVE ─────────────────────────────────────────────────────────────
+
+    fn parse_remove(&mut self) -> Result<RemoveClause, CypherError> {
+        let mut items: Vec<RemoveItem> = Vec::new();
+        items.push(self.parse_remove_item()?);
+        while self.peek() == Some(",") {
+            self.advance();
+            items.push(self.parse_remove_item()?);
+        }
+        Ok(RemoveClause { items })
+    }
+
+    fn parse_remove_item(&mut self) -> Result<RemoveItem, CypherError> {
+        let variable = self.advance_identifier()?;
+        if self.peek() == Some(".") {
+            self.advance();
+            let property = self.advance_identifier()?;
+            Ok(RemoveItem::Property { variable, property })
+        } else if self.peek() == Some(":") {
+            self.advance();
+            let label = self.advance_identifier()?;
+            Ok(RemoveItem::Label { variable, label })
+        } else {
+            Err(CypherError::ParseError(
+                "REMOVE items must target a property or label".to_string(),
+            ))
+        }
     }
 
     // ── DELETE ───────────────────────────────────────────────────────────────
@@ -1067,6 +1106,17 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_remove() {
+        let p = Parser::new();
+        let q = p
+            .parse("MATCH (n:Person)-[r:FOLLOWS]->() REMOVE n:Person, r.weight RETURN n, r")
+            .unwrap();
+        assert!(matches!(q.query_type, QueryType::Remove));
+        let has_remove = q.clauses.iter().any(|c| matches!(c, Clause::Remove(_)));
+        assert!(has_remove);
+    }
+
+    #[test]
     fn test_parse_delete() {
         let p = Parser::new();
         let q = p.parse("MATCH (n) DELETE n").unwrap();
@@ -1295,6 +1345,20 @@ mod tests {
         if let Some(Clause::Match(m)) = q.clauses.first() {
             assert_eq!(m.pattern.path_variable.as_deref(), Some("p"));
             assert!(m.pattern.shortest_path);
+        } else {
+            panic!("expected Match clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_match_tracks_pattern_segments() {
+        let p = Parser::new();
+        let q = p
+            .parse("MATCH (a)-[:LINK]->(b), (c)-[:LINK]->(d), (e) RETURN a, b, c, d, e")
+            .unwrap();
+        if let Some(Clause::Match(m)) = q.clauses.first() {
+            assert_eq!(m.pattern.segment_edge_counts, vec![1, 1, 0]);
+            assert_eq!(m.pattern.segments().len(), 3);
         } else {
             panic!("expected Match clause");
         }

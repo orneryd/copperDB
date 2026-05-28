@@ -4,9 +4,13 @@ use crate::string_patterns::find_keyword_index;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineClauseKind {
     Match,
+    OptionalMatch,
     Create,
     With,
     Unwind,
+    Delete,
+    Set,
+    Remove,
     Return,
 }
 
@@ -41,15 +45,7 @@ pub fn pending_pipeline_execution_todo() -> &'static str {
 
 fn split_pipeline_clauses(cypher: &str) -> Option<Vec<PipelineClause>> {
     let upper = cypher.to_ascii_uppercase();
-    for unsupported in [
-        "OPTIONAL MATCH",
-        "MERGE",
-        "FOREACH",
-        "CALL",
-        "DELETE",
-        "REMOVE",
-        "SET",
-    ] {
+    for unsupported in ["MERGE", "FOREACH", "CALL"] {
         if find_keyword_index(&upper, unsupported).is_some() {
             return None;
         }
@@ -57,14 +53,21 @@ fn split_pipeline_clauses(cypher: &str) -> Option<Vec<PipelineClause>> {
 
     let mut boundaries = Vec::new();
     for (keyword, kind) in [
+        ("OPTIONAL MATCH", PipelineClauseKind::OptionalMatch),
         ("MATCH", PipelineClauseKind::Match),
         ("CREATE", PipelineClauseKind::Create),
         ("WITH", PipelineClauseKind::With),
         ("UNWIND", PipelineClauseKind::Unwind),
+        ("DELETE", PipelineClauseKind::Delete),
+        ("SET", PipelineClauseKind::Set),
+        ("REMOVE", PipelineClauseKind::Remove),
         ("RETURN", PipelineClauseKind::Return),
     ] {
         for pos in find_all_keyword_positions(cypher, keyword) {
             if keyword == "WITH" && with_is_operator_suffix(cypher.as_bytes(), pos) {
+                continue;
+            }
+            if keyword == "MATCH" && match_is_optional_suffix(cypher.as_bytes(), pos) {
                 continue;
             }
             boundaries.push((pos, kind));
@@ -133,6 +136,25 @@ fn with_is_operator_suffix(bytes: &[u8], with_pos: usize) -> bool {
     equals_ci(b"STARTS") || equals_ci(b"ENDS")
 }
 
+fn match_is_optional_suffix(bytes: &[u8], match_pos: usize) -> bool {
+    use crate::keyword_scan::{ascii_upper, is_ident_byte};
+
+    let mut pos = match_pos;
+    while pos > 0 && bytes[pos - 1].is_ascii_whitespace() {
+        pos -= 1;
+    }
+    let token_end = pos;
+    while pos > 0 && is_ident_byte(bytes[pos - 1]) {
+        pos -= 1;
+    }
+    let token = &bytes[pos..token_end];
+    token.len() == b"OPTIONAL".len()
+        && token
+            .iter()
+            .zip(b"OPTIONAL".iter())
+            .all(|(&left, &right)| ascii_upper(left) == right)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +183,53 @@ mod tests {
         assert!(
             pending_pipeline_execution_todo().contains("dedicated eval/engine pipeline executor")
         );
+    }
+
+    #[test]
+    fn test_pipeline_accepts_optional_match_after_with() {
+        let query = "MATCH (p:Person {id: 1}) WITH p OPTIONAL MATCH (p)-[:FOLLOWS]->(friend:Person) RETURN p, friend";
+        let (clauses, ok) = can_execute_as_pipeline(query);
+        assert!(ok);
+        assert_eq!(clauses.len(), 4);
+        assert_eq!(clauses[0].kind, PipelineClauseKind::Match);
+        assert_eq!(clauses[1].kind, PipelineClauseKind::With);
+        assert_eq!(clauses[2].kind, PipelineClauseKind::OptionalMatch);
+        assert_eq!(clauses[3].kind, PipelineClauseKind::Return);
+    }
+
+    #[test]
+    fn test_pipeline_accepts_delete_after_with() {
+        let query = "MATCH (p:Person {id: 1}) WITH p DELETE p RETURN p";
+        let (clauses, ok) = can_execute_as_pipeline(query);
+        assert!(ok);
+        assert_eq!(clauses.len(), 4);
+        assert_eq!(clauses[0].kind, PipelineClauseKind::Match);
+        assert_eq!(clauses[1].kind, PipelineClauseKind::With);
+        assert_eq!(clauses[2].kind, PipelineClauseKind::Delete);
+        assert_eq!(clauses[3].kind, PipelineClauseKind::Return);
+    }
+
+    #[test]
+    fn test_pipeline_accepts_set_after_with() {
+        let query = "MATCH (p:Person {id: 1}) WITH p SET p.name = 'Bob' RETURN p.name";
+        let (clauses, ok) = can_execute_as_pipeline(query);
+        assert!(ok);
+        assert_eq!(clauses.len(), 4);
+        assert_eq!(clauses[0].kind, PipelineClauseKind::Match);
+        assert_eq!(clauses[1].kind, PipelineClauseKind::With);
+        assert_eq!(clauses[2].kind, PipelineClauseKind::Set);
+        assert_eq!(clauses[3].kind, PipelineClauseKind::Return);
+    }
+
+    #[test]
+    fn test_pipeline_accepts_remove_after_with() {
+        let query = "MATCH (p:Person {id: 1}) WITH p REMOVE p:Person RETURN p";
+        let (clauses, ok) = can_execute_as_pipeline(query);
+        assert!(ok);
+        assert_eq!(clauses.len(), 4);
+        assert_eq!(clauses[0].kind, PipelineClauseKind::Match);
+        assert_eq!(clauses[1].kind, PipelineClauseKind::With);
+        assert_eq!(clauses[2].kind, PipelineClauseKind::Remove);
+        assert_eq!(clauses[3].kind, PipelineClauseKind::Return);
     }
 }

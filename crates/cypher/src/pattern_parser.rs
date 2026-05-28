@@ -7,16 +7,19 @@ impl<'a> ParseContext<'a> {
     pub(crate) fn parse_pattern(&mut self) -> Result<Pattern, CypherError> {
         let mut nodes: Vec<NodePattern> = Vec::new();
         let mut edges: Vec<EdgePattern> = Vec::new();
+        let mut segment_edge_counts = Vec::new();
 
         loop {
             self.expect("(")?;
             nodes.push(self.parse_node_inner()?);
+            let mut segment_edge_count = 0_usize;
 
             loop {
                 let next = self.peek();
                 if next == Some("-") || next == Some("<") {
                     if let Some(edge) = self.try_parse_edge()? {
                         edges.push(edge);
+                        segment_edge_count += 1;
                         self.expect("(")?;
                         nodes.push(self.parse_node_inner()?);
                     } else {
@@ -26,6 +29,8 @@ impl<'a> ParseContext<'a> {
                     break;
                 }
             }
+
+            segment_edge_counts.push(segment_edge_count);
 
             if self.peek() == Some(",") {
                 self.advance();
@@ -39,6 +44,7 @@ impl<'a> ParseContext<'a> {
             shortest_path: false,
             nodes,
             edges,
+            segment_edge_counts,
         })
     }
 

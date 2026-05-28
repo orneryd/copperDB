@@ -249,26 +249,42 @@ impl<'a> ParseContext<'a> {
         &mut self,
         allow_shortest_path: bool,
     ) -> Result<(), CypherError> {
-        if self.tokens.get(self.pos + 1).copied() == Some("=") {
+        let has_path_variable = self.tokens.get(self.pos + 1).copied() == Some("=");
+        if has_path_variable {
             self.expect_identifier()?;
             self.expect("=")?;
         }
 
-        if allow_shortest_path && self.peek_is("SHORTESTPATH") {
+        let segment_count = if allow_shortest_path && self.peek_is("SHORTESTPATH") {
             self.advance();
             self.expect("(")?;
-            self.validate_pattern()?;
+            let segment_count = self.validate_pattern()?;
             self.expect(")")?;
-            Ok(())
+            if segment_count != 1 {
+                return Err(CypherError::ParseError(
+                    "shortestPath requires a single connected pattern".to_string(),
+                ));
+            }
+            segment_count
         } else {
-            self.validate_pattern()
+            self.validate_pattern()?
+        };
+
+        if has_path_variable && segment_count != 1 {
+            return Err(CypherError::ParseError(
+                "path variables require a single connected pattern".to_string(),
+            ));
         }
+
+        Ok(())
     }
 
-    fn validate_pattern(&mut self) -> Result<(), CypherError> {
+    fn validate_pattern(&mut self) -> Result<usize, CypherError> {
+        let mut segment_count = 0_usize;
         loop {
             self.expect("(")?;
             self.validate_node_inner()?;
+            segment_count += 1;
 
             loop {
                 let next = self.peek();
@@ -290,7 +306,7 @@ impl<'a> ParseContext<'a> {
             }
         }
 
-        Ok(())
+        Ok(segment_count)
     }
 
     fn validate_node_inner(&mut self) -> Result<(), CypherError> {
