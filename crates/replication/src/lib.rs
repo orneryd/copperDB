@@ -7,7 +7,9 @@
 //! - a transport abstraction with an in-memory implementation for tests
 
 use async_trait::async_trait;
-use copperdb_storage::{EdgeRecord, StorageEngine, StorageError};
+use copperdb_storage::{
+    EdgeRecord, KnowledgePolicyAccessMetadata, StorageEngine, StorageError,
+};
 use copperdb_topology::{
     ConsistencyLevel, DistributedReadPlan, DistributedWriteMode, DistributedWritePlan,
     LogicalTransactionId, PlacementKey, TopologyError, TopologyRegistry,
@@ -123,6 +125,10 @@ pub enum Command {
         database: String,
         query: String,
         params: Value,
+    },
+    PutKnowledgePolicyAccessMetadata {
+        entity_id: String,
+        metadata: KnowledgePolicyAccessMetadata,
     },
 }
 
@@ -248,6 +254,13 @@ pub trait ReplicationStorage: Send + Sync {
         let _ = (label, property, value);
         Ok(Vec::new())
     }
+    fn graph_access_metadata(
+        &self,
+        entity_id: &str,
+    ) -> Result<Option<KnowledgePolicyAccessMetadata>, ReplicationError> {
+        let _ = entity_id;
+        Ok(None)
+    }
     fn write_snapshot(&self) -> Result<Vec<u8>, ReplicationError>;
     fn restore_snapshot(&self, snapshot: &[u8]) -> Result<(), ReplicationError>;
 }
@@ -304,6 +317,7 @@ impl ReplicationStorage for MemoryStorage {
                     .cypher
                     .push((database.clone(), query.clone(), params.clone()));
             }
+            Command::PutKnowledgePolicyAccessMetadata { .. } => {}
         }
         Ok(())
     }
@@ -364,6 +378,14 @@ impl StorageEngineAdapter {
             "_labels".to_string(),
             Value::Array(record.labels.iter().cloned().map(Value::String).collect()),
         );
+        props.insert(
+            "_created_at_unix_ms".to_string(),
+            Value::from(record.created_at_unix_ms),
+        );
+        props.insert(
+            "_updated_at_unix_ms".to_string(),
+            Value::from(record.updated_at_unix_ms),
+        );
         rmp_serde::to_vec_named(&props)
             .map_err(|error| ReplicationError::Storage(error.to_string()))
     }
@@ -390,6 +412,9 @@ impl ReplicationStorage for StorageEngineAdapter {
                     .put_node(&Self::cypher_key(database, query, params), &payload)
                     .map_err(Into::into)
             }
+            Command::PutKnowledgePolicyAccessMetadata { entity_id, metadata } => engine
+                .put_knowledge_policy_access_metadata(entity_id, metadata)
+                .map_err(Into::into),
         }
     }
 
@@ -456,6 +481,16 @@ impl ReplicationStorage for StorageEngineAdapter {
             .iter()
             .map(Self::node_record_bytes)
             .collect()
+    }
+
+    fn graph_access_metadata(
+        &self,
+        entity_id: &str,
+    ) -> Result<Option<KnowledgePolicyAccessMetadata>, ReplicationError> {
+        let engine = self.engine.lock().unwrap();
+        engine
+            .get_knowledge_policy_access_metadata(entity_id)
+            .map_err(Into::into)
     }
 
     fn write_snapshot(&self) -> Result<Vec<u8>, ReplicationError> {
@@ -531,6 +566,11 @@ pub trait ReplicaTransport: Send + Sync {
         property: &str,
         value: &Value,
     ) -> Result<Vec<Vec<u8>>, ReplicationError>;
+    async fn graph_access_metadata(
+        &self,
+        target: &str,
+        entity_id: &str,
+    ) -> Result<Option<KnowledgePolicyAccessMetadata>, ReplicationError>;
 }
 
 #[derive(Default)]
@@ -618,6 +658,14 @@ impl ReplicaTransport for InMemoryReplicaTransport {
     ) -> Result<Vec<Vec<u8>>, ReplicationError> {
         self.lookup(target)?
             .graph_nodes_by_property(label, property, value)
+    }
+
+    async fn graph_access_metadata(
+        &self,
+        target: &str,
+        entity_id: &str,
+    ) -> Result<Option<KnowledgePolicyAccessMetadata>, ReplicationError> {
+        self.lookup(target)?.graph_access_metadata(entity_id)
     }
 }
 
@@ -2540,6 +2588,56 @@ mod tests {
         assert_eq!(
             adapter.read_key(b"durable").unwrap(),
             Some(b"replica".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_engine_adapter_exposes_graph_access_metadata() {
+        let storage = StorageEngine::open_temporary().unwrap();
+        storage
+            .put_knowledge_policy_access_metadata(
+                "memory:replica-1",
+                &KnowledgePolicyAccessMetadata {
+                    last_accessed_at_unix_ms: Some(123),
+                    access_count: 4,
+                },
+            )
+            .unwrap();
+
+        let adapter = StorageEngineAdapter::new(storage);
+        let metadata = adapter.graph_access_metadata("memory:replica-1").unwrap();
+
+        assert_eq!(
+            metadata,
+            Some(KnowledgePolicyAccessMetadata {
+                last_accessed_at_unix_ms: Some(123),
+                access_count: 4,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_engine_adapter_applies_access_metadata_command() {
+        let storage = StorageEngine::open_temporary().unwrap();
+        let adapter = StorageEngineAdapter::new(storage);
+
+        adapter
+            .apply_command(&Command::PutKnowledgePolicyAccessMetadata {
+                entity_id: "memory:replica-2".into(),
+                metadata: KnowledgePolicyAccessMetadata {
+                    last_accessed_at_unix_ms: Some(456),
+                    access_count: 7,
+                },
+            })
+            .unwrap();
+
+        let metadata = adapter.graph_access_metadata("memory:replica-2").unwrap();
+        assert_eq!(
+            metadata,
+            Some(KnowledgePolicyAccessMetadata {
+                last_accessed_at_unix_ms: Some(456),
+                access_count: 7,
+            })
         );
     }
 

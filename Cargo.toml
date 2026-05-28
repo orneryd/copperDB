@@ -23,6 +23,7 @@ members = [
     "crates/graphql",
     "crates/heimdall",
     "crates/indexing",
+    "crates/knowledgepolicy",
     "crates/inference",
     "crates/kms",
     "crates/lifecycle",
@@ -180,6 +181,7 @@ copperdb-vectorspace = { path = "crates/vectorspace" }
 copperdb-decay = { path = "crates/decay" }
 copperdb-temporal = { path = "crates/temporal" }
 copperdb-indexing = { path = "crates/indexing" }
+copperdb-knowledgepolicy = { path = "crates/knowledgepolicy" }
 copperdb-replication = { path = "crates/replication" }
 copperdb-bolt = { path = "crates/bolt" }
 copperdb-embed = { path = "crates/embed" }
@@ -217,3 +219,6 @@ copperdb-nornicgrpc = { path = "crates/nornicgrpc" }
 copperdb-qdrantgrpc = { path = "crates/qdrantgrpc" }
 copperdb-otel = { path = "crates/otel" }
 copperdb = { path = "crates/copperdb" }
+
+[patch.crates-io]
+sled = { path = "../sled" }

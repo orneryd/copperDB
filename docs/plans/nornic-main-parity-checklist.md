@@ -36,7 +36,7 @@
 - [x] Constraint contracts (unique/existence/node-key/type/relationship) parity (baseline types in `ConstraintType`)
 - [x] Constraint validation and namespaced validation parity (baseline unique/exists/node-key checks in `SchemaManager`)
 - [x] Schema persistence/index catalog parity (baseline persistence in `StorageEngine::persist_constraint/load_constraints`)
-- [ ] Knowledge policy schema hooks parity
+- [x] Knowledge policy schema hooks parity (storage now persists decay bindings, promotion-policy targets, typed `ON ACCESS` mutations, and per-entity access metadata)
 
 ### Indexing and query support
 - [ ] Label/edge/property/range/temporal index parity
@@ -56,6 +56,15 @@
 - [x] `crates/storage`: MVCC snapshot isolation primitives (`MvccStore`, `MvccSnapshot`, head encode/decode) with pruning + error-path tests.
 - [x] `crates/storage`: WAL primitives (`WAL`, `WALEntry`, `WALSegment`) including batch append/replay, checksum verification, degraded-mode signaling, and close/error-path tests.
 - [x] `crates/storage`: schema primitives (`SchemaManager`, `Constraint`) including unique/existence/node-key validation and persistent catalog round-trip tests.
+- [x] `crates/storage`: knowledge policy metadata hooks for decay bindings, promotion-policy target catalogs, typed `ON ACCESS` metadata mutations, and separate per-entity access metadata persistence with deterministic target guards.
+- [x] `crates/knowledgepolicy` + `crates/eval`: shared access-flusher buffering/flush-on-success semantics, compiled promotion `WHEN` predicates, and score-time promotion multiplier/floor/cap application against persisted plus buffered access metadata for node and edge visibility.
+- [x] `crates/eval`: `CALL nornicdb.knowledgepolicy.resolve(...)` now exposes local target resolution, matched promotion profile/predicate inspection, score inputs, final score, and suppression state with focused deterministic regressions for entity-backed and dry-run label-backed resolution.
+- [x] `crates/replication`: replica storage/transport now exposes a read-only graph access-metadata seam so routed score parity can consume remote access counters/timestamps from storage instead of guessing from payload bytes.
+- [x] `crates/replication` + `crates/engine`: distributed graph node materialization now carries `_created_at_unix_ms` and `_updated_at_unix_ms` through replica payloads, with a focused engine regression proving those anchors survive routed path materialization.
+- [x] `crates/nornicgrpc`: build-time protobuf generation no longer depends on a machine-level `protoc`; the crate now uses a vendored compiler so Windows compile checks can run in-place.
+- [x] `crates/engine` + `crates/eval`: routed distributed path queries now reuse the shared knowledge-policy scorer for remote node candidate resolution and edge traversal, with deterministic stale-node and stale-edge regressions.
+- [x] `crates/replication`: replica commands now include a dedicated knowledge-policy access-metadata upsert primitive, validated through the storage-backed replica adapter.
+- [x] `crates/engine` + `crates/replication`: distributed reads now flush remote `ON ACCESS` metadata updates through the replicated access-metadata command, with deterministic engine regressions for node and edge metadata persistence.
 
 ### Still stubbed / not yet parity-complete
 - [ ] `crates/storage`: full MVCC rebuild/orchestration parity with upstream beyond the reader-aware prune-now + lifecycle-status baseline.
@@ -63,6 +72,7 @@
 - [ ] `crates/storage`: WAL snapshot compaction/truncation orchestration parity with upstream.
 - [ ] `crates/storage`: full schema contract bundles/type constraints/relationship cardinality enforcement parity with upstream.
 - [ ] `crates/replication`, `crates/search`, `crates/fabric`: integration wiring to consume the new MVCC/WAL/schema baselines.
+- [x] `crates/engine` + `crates/replication`: distributed knowledge-policy parity for routed/special-path reads now includes shared scorer reuse plus honest remote `ON ACCESS` persistence through coordinator writes.
 
 ### Data model and serialization
 - [ ] Node/Edge model parity (metadata, embeddings, named embeddings)

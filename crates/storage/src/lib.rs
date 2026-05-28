@@ -29,8 +29,10 @@ const META_FABRIC_DATABASE_PREFIX: &[u8] = b"fabric_database/";
 const META_SCHEMA_CONSTRAINT_PREFIX: &[u8] = b"schema_constraint/";
 const META_SCHEMA_INDEX_PREFIX: &[u8] = b"schema_index/";
 const META_KP_DECAY_PROFILE_PREFIX: &[u8] = b"kp_decay_profile/";
+const META_KP_DECAY_BINDING_PREFIX: &[u8] = b"kp_decay_binding/";
 const META_KP_PROMOTION_PROFILE_PREFIX: &[u8] = b"kp_promotion_profile/";
 const META_KP_PROMOTION_POLICY_PREFIX: &[u8] = b"kp_promotion_policy/";
+const META_KP_ACCESS_METADATA_PREFIX: &[u8] = b"kp_access_metadata/";
 const IDX_LABEL_PREFIX: &str = "label_nodes";
 const IDX_EDGE_TYPE_PREFIX: &str = "edge_type";
 const IDX_EDGE_START_PREFIX: &str = "edge_start";
@@ -710,6 +712,19 @@ pub struct DecayProfileSchema {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DecayProfileBindingSchema {
+    pub name: String,
+    pub target_labels: Vec<String>,
+    pub target_edge_type: Option<String>,
+    pub is_wildcard: bool,
+    pub is_edge: bool,
+    pub profile_ref: Option<String>,
+    pub no_decay: bool,
+    pub visibility_threshold: Option<f64>,
+    pub order: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PromotionProfileSchema {
     pub name: String,
     pub scope: String,
@@ -727,11 +742,32 @@ pub struct PromotionWhenClauseSchema {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PromotionOnAccessMutationKindSchema {
+    SetLastAccessedNow,
+    IncrementAccessCount,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromotionOnAccessMutationSchema {
+    pub kind: PromotionOnAccessMutationKindSchema,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromotionPolicySchema {
     pub name: String,
     pub target_labels: Vec<String>,
+    pub target_edge_type: Option<String>,
+    pub is_wildcard: bool,
+    pub is_edge: bool,
     pub enabled: bool,
+    pub on_access_mutations: Vec<PromotionOnAccessMutationSchema>,
     pub when_clauses: Vec<PromotionWhenClauseSchema>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct KnowledgePolicyAccessMetadata {
+    pub last_accessed_at_unix_ms: Option<i64>,
+    pub access_count: u64,
 }
 
 #[derive(Debug, Default)]
@@ -1100,6 +1136,10 @@ impl StorageEngine {
 
     /// Store a node's serialized properties.
     pub fn put_node(&self, id: &str, value: &[u8]) -> Result<(), StorageError> {
+        if let Some(node) = compat_node_record_from_bytes(id, value)? {
+            return self.put_node_record(&node);
+        }
+
         self.nodes
             .insert(id.as_bytes(), self.encode_record_bytes(value.to_vec())?)?;
         Ok(())
@@ -1107,10 +1147,16 @@ impl StorageEngine {
 
     /// Retrieve a node's serialized properties.
     pub fn get_node(&self, id: &str) -> Result<Option<Vec<u8>>, StorageError> {
-        self.nodes
-            .get(id.as_bytes())?
-            .map(|v| self.decode_record_bytes(v.as_ref()))
-            .transpose()
+        match self.nodes.get(id.as_bytes())? {
+            Some(v) => {
+                let raw = self.decode_record_bytes(v.as_ref())?;
+                if let Some(node) = compat_node_record_from_bytes(id, &raw)? {
+                    return Ok(Some(rmp_serde::to_vec(&node_record_to_legacy_props(&node))?));
+                }
+                Ok(Some(raw))
+            }
+            None => Ok(None),
+        }
     }
 
     /// Delete a node.
@@ -1126,9 +1172,16 @@ impl StorageEngine {
     ) -> impl Iterator<Item = Result<(Bytes, Bytes), StorageError>> + '_ {
         self.nodes.scan_prefix(prefix.as_bytes()).map(|res| {
             let (k, v) = res.map_err(StorageError::from)?;
+            let key = std::str::from_utf8(k.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            let raw = self.decode_record_bytes(v.as_ref())?;
+            let value = if let Some(node) = compat_node_record_from_bytes(key, &raw)? {
+                rmp_serde::to_vec(&node_record_to_legacy_props(&node))?
+            } else {
+                raw
+            };
             Ok((
                 Bytes::from(k.to_vec()),
-                Bytes::from(self.decode_record_bytes(v.as_ref())?),
+                Bytes::from(value),
             ))
         })
     }
@@ -1174,9 +1227,7 @@ impl StorageEngine {
 
     pub fn get_node_record(&self, id: &str) -> Result<Option<NodeRecord>, StorageError> {
         match self.nodes.get(id.as_bytes())? {
-            Some(v) => Ok(Some(rmp_serde::from_slice(
-                self.decode_record_bytes(v.as_ref())?.as_slice(),
-            )?)),
+            Some(v) => compat_node_record_from_bytes(id, self.decode_record_bytes(v.as_ref())?.as_slice()),
             None => Ok(None),
         }
     }
@@ -1205,6 +1256,35 @@ impl StorageEngine {
             }
         }
 
+        if out.is_empty() {
+            for entry in self.nodes.iter() {
+                let (key, value) = entry?;
+                let key_str = std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+                let raw = self.decode_record_bytes(value.as_ref())?;
+                let Some(node) = compat_node_record_from_bytes(key_str, &raw)? else {
+                    continue;
+                };
+                if node.labels.iter().any(|node_label| node_label == label) {
+                    out.push(node);
+                }
+            }
+        }
+
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out.dedup_by(|a, b| a.id == b.id);
+        Ok(out)
+    }
+
+    pub fn all_node_records(&self) -> Result<Vec<NodeRecord>, StorageError> {
+        let mut out: Vec<NodeRecord> = Vec::new();
+        for entry in self.nodes.iter() {
+            let (key, value) = entry?;
+            let key_str = std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            let raw = self.decode_record_bytes(value.as_ref())?;
+            if let Some(node) = compat_node_record_from_bytes(key_str, &raw)? {
+                out.push(node);
+            }
+        }
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)
     }
@@ -1526,13 +1606,44 @@ impl StorageEngine {
     ) -> Result<(), StorageError> {
         validate_decay_profile(profile)?;
         let key = [META_KP_DECAY_PROFILE_PREFIX, profile.name.as_bytes()].concat();
-        if self.meta.get(&key)?.is_some() {
+        let binding_key = [META_KP_DECAY_BINDING_PREFIX, profile.name.as_bytes()].concat();
+        if self.meta.get(&key)?.is_some() || self.meta.get(binding_key)?.is_some() {
             return Err(StorageError::KnowledgePolicyAlreadyExists(format!(
                 "decay profile {}",
                 profile.name
             )));
         }
         self.meta.insert(key, rmp_serde::to_vec(profile)?)?;
+        Ok(())
+    }
+
+    pub fn persist_decay_profile_binding_schema(
+        &self,
+        binding: &DecayProfileBindingSchema,
+    ) -> Result<(), StorageError> {
+        validate_decay_profile_binding(binding)?;
+        if let Some(profile_ref) = &binding.profile_ref {
+            let profile_key = [META_KP_DECAY_PROFILE_PREFIX, profile_ref.as_bytes()].concat();
+            if self.meta.get(profile_key)?.is_none() {
+                return Err(StorageError::KnowledgePolicyNotFound(format!(
+                    "decay profile {}",
+                    profile_ref
+                )));
+            }
+        }
+
+        let key = [META_KP_DECAY_BINDING_PREFIX, binding.name.as_bytes()].concat();
+        let profile_key = [META_KP_DECAY_PROFILE_PREFIX, binding.name.as_bytes()].concat();
+        if self.meta.get(&key)?.is_some() || self.meta.get(profile_key)?.is_some() {
+            return Err(StorageError::KnowledgePolicyAlreadyExists(format!(
+                "decay profile {}",
+                binding.name
+            )));
+        }
+
+        let mut persisted = binding.clone();
+        persisted.target_labels.sort();
+        self.meta.insert(key, rmp_serde::to_vec(&persisted)?)?;
         Ok(())
     }
 
@@ -1544,6 +1655,18 @@ impl StorageEngine {
         }
         profiles.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(profiles)
+    }
+
+    pub fn load_decay_profile_binding_schemas(
+        &self,
+    ) -> Result<Vec<DecayProfileBindingSchema>, StorageError> {
+        let mut bindings: Vec<DecayProfileBindingSchema> = Vec::new();
+        for entry in self.meta.scan_prefix(META_KP_DECAY_BINDING_PREFIX) {
+            let (_, value) = entry?;
+            bindings.push(rmp_serde::from_slice(value.as_ref())?);
+        }
+        bindings.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(bindings)
     }
 
     pub fn alter_decay_profile_schema(
@@ -1603,14 +1726,12 @@ impl StorageEngine {
         name: &str,
         if_exists: bool,
     ) -> Result<(), StorageError> {
-        for policy in self.load_promotion_policy_schemas()? {
-            for clause in policy.when_clauses {
-                if clause.profile_ref == name {
-                    return Err(StorageError::KnowledgePolicyInUse(format!(
-                        "decay profile {} referenced by promotion policy {}",
-                        name, policy.name
-                    )));
-                }
+        for binding in self.load_decay_profile_binding_schemas()? {
+            if binding.profile_ref.as_deref() == Some(name) {
+                return Err(StorageError::KnowledgePolicyInUse(format!(
+                    "decay profile {} referenced by decay binding {}",
+                    name, binding.name
+                )));
             }
         }
         let key = [META_KP_DECAY_PROFILE_PREFIX, name.as_bytes()].concat();
@@ -1621,6 +1742,53 @@ impl StorageEngine {
                 name
             )));
         }
+        Ok(())
+    }
+
+    pub fn delete_decay_profile_binding_schema(
+        &self,
+        name: &str,
+        if_exists: bool,
+    ) -> Result<(), StorageError> {
+        let key = [META_KP_DECAY_BINDING_PREFIX, name.as_bytes()].concat();
+        let deleted = self.meta.remove(key)?.is_some();
+        if !deleted && !if_exists {
+            return Err(StorageError::KnowledgePolicyNotFound(format!(
+                "decay profile {}",
+                name
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn put_knowledge_policy_access_metadata(
+        &self,
+        entity_id: &str,
+        metadata: &KnowledgePolicyAccessMetadata,
+    ) -> Result<(), StorageError> {
+        let key = [META_KP_ACCESS_METADATA_PREFIX, entity_id.as_bytes()].concat();
+        self.meta.insert(key, rmp_serde::to_vec(metadata)?)?;
+        Ok(())
+    }
+
+    pub fn get_knowledge_policy_access_metadata(
+        &self,
+        entity_id: &str,
+    ) -> Result<Option<KnowledgePolicyAccessMetadata>, StorageError> {
+        let key = [META_KP_ACCESS_METADATA_PREFIX, entity_id.as_bytes()].concat();
+        self.meta
+            .get(key)?
+            .map(|raw| rmp_serde::from_slice(raw.as_ref()))
+            .transpose()
+            .map_err(StorageError::from)
+    }
+
+    pub fn delete_knowledge_policy_access_metadata(
+        &self,
+        entity_id: &str,
+    ) -> Result<(), StorageError> {
+        let key = [META_KP_ACCESS_METADATA_PREFIX, entity_id.as_bytes()].concat();
+        self.meta.remove(key)?;
         Ok(())
     }
 
@@ -1712,7 +1880,9 @@ impl StorageEngine {
         &self,
         policy: &PromotionPolicySchema,
     ) -> Result<(), StorageError> {
-        validate_promotion_policy(policy, &self.load_promotion_profile_schemas()?)?;
+        let profiles = self.load_promotion_profile_schemas()?;
+        let existing_policies = self.load_promotion_policy_schemas()?;
+        validate_promotion_policy(policy, &profiles, &existing_policies)?;
         let key = [META_KP_PROMOTION_POLICY_PREFIX, policy.name.as_bytes()].concat();
         if self.meta.get(&key)?.is_some() {
             return Err(StorageError::KnowledgePolicyAlreadyExists(format!(
@@ -1757,7 +1927,13 @@ impl StorageEngine {
                 }
             }
         }
-        validate_promotion_policy(&policy, &self.load_promotion_profile_schemas()?)?;
+        let profiles = self.load_promotion_profile_schemas()?;
+        let existing_policies = self
+            .load_promotion_policy_schemas()?
+            .into_iter()
+            .filter(|existing| existing.name != name)
+            .collect::<Vec<_>>();
+        validate_promotion_policy(&policy, &profiles, &existing_policies)?;
         self.meta.insert(key, rmp_serde::to_vec(&policy)?)?;
         Ok(())
     }
@@ -2152,6 +2328,61 @@ fn validate_decay_profile(profile: &DecayProfileSchema) -> Result<(), StorageErr
     Ok(())
 }
 
+fn validate_decay_profile_binding(binding: &DecayProfileBindingSchema) -> Result<(), StorageError> {
+    if binding.name.trim().is_empty() {
+        return Err(StorageError::KnowledgePolicyInvalid(
+            "decay binding name is required".into(),
+        ));
+    }
+    if binding.is_wildcard {
+        if binding.is_edge
+            || binding.target_edge_type.is_some()
+            || !binding.target_labels.is_empty()
+        {
+            return Err(StorageError::KnowledgePolicyInvalid(
+                "wildcard decay binding cannot target labels or edge types".into(),
+            ));
+        }
+    } else if binding.is_edge {
+        if binding.target_edge_type.as_deref().unwrap_or("").trim().is_empty() {
+            return Err(StorageError::KnowledgePolicyInvalid(
+                "edge decay binding requires a target edge type".into(),
+            ));
+        }
+        if !binding.target_labels.is_empty() {
+            return Err(StorageError::KnowledgePolicyInvalid(
+                "edge decay binding cannot target node labels".into(),
+            ));
+        }
+    } else if binding.target_labels.is_empty() {
+        return Err(StorageError::KnowledgePolicyInvalid(
+            "node decay binding requires at least one target label".into(),
+        ));
+    }
+
+    if !binding.no_decay
+        && binding
+            .profile_ref
+            .as_ref()
+            .map(|profile| profile.trim().is_empty())
+            .unwrap_or(true)
+    {
+        return Err(StorageError::KnowledgePolicyInvalid(
+            "decay binding requires profileRef or noDecay=true".into(),
+        ));
+    }
+
+    if let Some(threshold) = binding.visibility_threshold {
+        if !(0.0..=1.0).contains(&threshold) {
+            return Err(StorageError::KnowledgePolicyInvalid(
+                "visibilityThreshold must be between 0 and 1".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_promotion_profile(profile: &PromotionProfileSchema) -> Result<(), StorageError> {
     if profile.name.trim().is_empty() {
         return Err(StorageError::KnowledgePolicyInvalid(
@@ -2185,16 +2416,50 @@ fn validate_promotion_profile(profile: &PromotionProfileSchema) -> Result<(), St
 fn validate_promotion_policy(
     policy: &PromotionPolicySchema,
     profiles: &[PromotionProfileSchema],
+    existing_policies: &[PromotionPolicySchema],
 ) -> Result<(), StorageError> {
     if policy.name.trim().is_empty() {
         return Err(StorageError::KnowledgePolicyInvalid(
             "promotion policy name is required".into(),
         ));
     }
-    if policy.target_labels.is_empty() {
+    if policy.is_edge {
+        if policy.target_edge_type.as_deref().unwrap_or_default().trim().is_empty() {
+            return Err(StorageError::KnowledgePolicyInvalid(
+                "promotion policy edge targets require an edge type".into(),
+            ));
+        }
+        if !policy.target_labels.is_empty() || policy.is_wildcard {
+            return Err(StorageError::KnowledgePolicyInvalid(
+                "promotion policy edge targets cannot also declare node labels or wildcard"
+                    .into(),
+            ));
+        }
+    } else if policy.is_wildcard {
+        if !policy.target_labels.is_empty() || policy.target_edge_type.is_some() {
+            return Err(StorageError::KnowledgePolicyInvalid(
+                "promotion policy wildcard targets cannot declare labels or edge type".into(),
+            ));
+        }
+    } else if policy.target_labels.is_empty() {
         return Err(StorageError::KnowledgePolicyInvalid(
             "promotion policy target labels are required".into(),
         ));
+    }
+    if policy.on_access_mutations.is_empty() && policy.when_clauses.is_empty() {
+        return Err(StorageError::KnowledgePolicyInvalid(
+            "promotion policy requires ON ACCESS mutations or WHEN clauses".into(),
+        ));
+    }
+    let target_key = promotion_policy_target_key(policy);
+    if existing_policies
+        .iter()
+        .any(|existing| promotion_policy_target_key(existing) == target_key)
+    {
+        return Err(StorageError::KnowledgePolicyInvalid(format!(
+            "promotion policy target '{}' already has a policy",
+            target_key
+        )));
     }
     let profile_names: BTreeSet<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
     for clause in &policy.when_clauses {
@@ -2211,6 +2476,89 @@ fn validate_promotion_policy(
         }
     }
     Ok(())
+}
+
+fn promotion_policy_target_key(policy: &PromotionPolicySchema) -> String {
+    if policy.is_edge {
+        return format!("edge:{}", policy.target_edge_type.clone().unwrap_or_default());
+    }
+    if policy.is_wildcard {
+        return "wild:node".to_string();
+    }
+    let mut sorted = policy.target_labels.clone();
+    sorted.sort();
+    format!("node:{}", sorted.join("\0"))
+}
+
+fn compat_node_record_from_bytes(id: &str, raw: &[u8]) -> Result<Option<NodeRecord>, StorageError> {
+    if let Ok(record) = rmp_serde::from_slice::<NodeRecord>(raw) {
+        return Ok(Some(record));
+    }
+
+    let mut props = match rmp_serde::from_slice::<BTreeMap<String, serde_json::Value>>(raw) {
+        Ok(props) => props,
+        Err(_) => return Ok(None),
+    };
+
+    let labels = legacy_node_labels(id, props.get("_labels"));
+    props.remove("_labels");
+    props.remove("_id");
+
+    Ok(Some(NodeRecord {
+        id: id.to_string(),
+        labels,
+        properties: props,
+        created_at_unix_ms: 0,
+        updated_at_unix_ms: 0,
+    }))
+}
+
+fn node_record_to_legacy_props(node: &NodeRecord) -> BTreeMap<String, serde_json::Value> {
+    let mut props = node.properties.clone();
+    props.insert("_id".to_string(), serde_json::Value::String(node.id.clone()));
+    props.insert(
+        "_labels".to_string(),
+        serde_json::Value::Array(
+            node.labels
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        ),
+    );
+    props
+}
+
+fn legacy_node_labels(
+    id: &str,
+    stored_labels: Option<&serde_json::Value>,
+) -> Vec<String> {
+    if let Some(serde_json::Value::Array(labels)) = stored_labels {
+        let parsed = labels
+            .iter()
+            .filter_map(|label| label.as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+
+    if let Some(serde_json::Value::String(label)) = stored_labels {
+        if !label.is_empty() {
+            return vec![label.clone()];
+        }
+    }
+
+    derived_label_from_id(id).into_iter().collect()
+}
+
+fn derived_label_from_id(id: &str) -> Option<String> {
+    let namespace = id.split_once(':').map(|(namespace, _)| namespace).unwrap_or(id);
+    let mut chars = namespace.chars();
+    let first = chars.next()?;
+    let mut label = first.to_uppercase().collect::<String>();
+    label.push_str(chars.as_str());
+    Some(label)
 }
 
 fn namespace_from_id(id: &[u8]) -> Option<String> {
@@ -3071,7 +3419,13 @@ mod tests {
             .persist_promotion_policy_schema(&PromotionPolicySchema {
                 name: "fact_policy".to_string(),
                 target_labels: vec!["KnowledgeFact".to_string()],
+                target_edge_type: None,
+                is_wildcard: false,
+                is_edge: false,
                 enabled: true,
+                on_access_mutations: vec![PromotionOnAccessMutationSchema {
+                    kind: PromotionOnAccessMutationKindSchema::SetLastAccessedNow,
+                }],
                 when_clauses: vec![PromotionWhenClauseSchema {
                     profile_ref: "boost_profile".to_string(),
                     predicate: "n.evidence >= 3".to_string(),
@@ -3092,6 +3446,10 @@ mod tests {
             .unwrap();
         let policies = engine.load_promotion_policy_schemas().unwrap();
         assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].target_labels, vec!["KnowledgeFact".to_string()]);
+        assert_eq!(policies[0].target_edge_type, None);
+        assert!(!policies[0].is_edge);
+        assert_eq!(policies[0].on_access_mutations.len(), 1);
         assert!(!policies[0].enabled);
 
         engine
@@ -3102,5 +3460,136 @@ mod tests {
             .unwrap();
         assert!(engine.load_promotion_policy_schemas().unwrap().is_empty());
         assert!(engine.load_promotion_profile_schemas().unwrap().is_empty());
+    }
+
+    #[test]
+    fn knowledge_policy_promotion_schema_rejects_duplicate_targets() {
+        let engine = StorageEngine::open_temporary().unwrap();
+        engine
+            .persist_promotion_profile_schema(&PromotionProfileSchema {
+                name: "boost_profile".to_string(),
+                scope: "NODE".to_string(),
+                multiplier: 1.5,
+                score_floor: 0.0,
+                score_cap: 1.0,
+                enabled: true,
+            })
+            .unwrap();
+
+        engine
+            .persist_promotion_policy_schema(&PromotionPolicySchema {
+                name: "fact_policy_a".to_string(),
+                target_labels: vec!["KnowledgeFact".to_string()],
+                target_edge_type: None,
+                is_wildcard: false,
+                is_edge: false,
+                enabled: true,
+                on_access_mutations: vec![PromotionOnAccessMutationSchema {
+                    kind: PromotionOnAccessMutationKindSchema::SetLastAccessedNow,
+                }],
+                when_clauses: vec![PromotionWhenClauseSchema {
+                    profile_ref: "boost_profile".to_string(),
+                    predicate: "true".to_string(),
+                    order: 1,
+                }],
+            })
+            .unwrap();
+
+        let err = engine
+            .persist_promotion_policy_schema(&PromotionPolicySchema {
+                name: "fact_policy_b".to_string(),
+                target_labels: vec!["KnowledgeFact".to_string()],
+                target_edge_type: None,
+                is_wildcard: false,
+                is_edge: false,
+                enabled: true,
+                on_access_mutations: vec![PromotionOnAccessMutationSchema {
+                    kind: PromotionOnAccessMutationKindSchema::IncrementAccessCount,
+                }],
+                when_clauses: vec![],
+            })
+            .unwrap_err();
+        assert!(matches!(err, StorageError::KnowledgePolicyInvalid(_)));
+    }
+
+    #[test]
+    fn knowledge_policy_decay_binding_schema_roundtrip_and_reference_guards() {
+        let engine = StorageEngine::open_temporary().unwrap();
+        engine
+            .persist_decay_profile_schema(&DecayProfileSchema {
+                name: "slow_decay".to_string(),
+                half_life_seconds: 604_800,
+                visibility_threshold: 0.1,
+                score_floor: 0.0,
+                function: "exponential".to_string(),
+                scope: "NODE".to_string(),
+                decay_enabled: true,
+                score_from: "CREATED".to_string(),
+                score_from_property: None,
+                enabled: true,
+            })
+            .unwrap();
+
+        engine
+            .persist_decay_profile_binding_schema(&DecayProfileBindingSchema {
+                name: "memory_binding".to_string(),
+                target_labels: vec!["MemoryEpisode".to_string()],
+                target_edge_type: None,
+                is_wildcard: false,
+                is_edge: false,
+                profile_ref: Some("slow_decay".to_string()),
+                no_decay: false,
+                visibility_threshold: Some(0.2),
+                order: 10,
+            })
+            .unwrap();
+
+        let bindings = engine.load_decay_profile_binding_schemas().unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].name, "memory_binding");
+        assert_eq!(bindings[0].target_labels, vec!["MemoryEpisode".to_string()]);
+        assert_eq!(bindings[0].profile_ref.as_deref(), Some("slow_decay"));
+
+        let err = engine
+            .delete_decay_profile_schema("slow_decay", false)
+            .unwrap_err();
+        assert!(matches!(err, StorageError::KnowledgePolicyInUse(_)));
+
+        engine
+            .delete_decay_profile_binding_schema("memory_binding", false)
+            .unwrap();
+        engine
+            .delete_decay_profile_schema("slow_decay", false)
+            .unwrap();
+
+        assert!(engine.load_decay_profile_binding_schemas().unwrap().is_empty());
+        assert!(engine.load_decay_profile_schemas().unwrap().is_empty());
+    }
+
+    #[test]
+    fn knowledge_policy_access_metadata_roundtrip() {
+        let engine = StorageEngine::open_temporary().unwrap();
+        let metadata = KnowledgePolicyAccessMetadata {
+            last_accessed_at_unix_ms: Some(1_717_171_717_000),
+            access_count: 3,
+        };
+
+        engine
+            .put_knowledge_policy_access_metadata("memory:1", &metadata)
+            .unwrap();
+
+        let loaded = engine
+            .get_knowledge_policy_access_metadata("memory:1")
+            .unwrap()
+            .expect("metadata missing");
+        assert_eq!(loaded, metadata);
+
+        engine
+            .delete_knowledge_policy_access_metadata("memory:1")
+            .unwrap();
+        assert!(engine
+            .get_knowledge_policy_access_metadata("memory:1")
+            .unwrap()
+            .is_none());
     }
 }

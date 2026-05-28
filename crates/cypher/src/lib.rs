@@ -520,9 +520,30 @@ impl<'a> ParseContext<'a> {
     fn parse_create_decay_profile(&mut self) -> Result<CreateDecayProfileClause, CypherError> {
         self.expect("PROFILE")?;
         let name = self.advance_identifier()?;
-        self.expect("OPTIONS")?;
-        let options = self.parse_options_map()?;
-        Ok(CreateDecayProfileClause { name, options })
+        if self.peek_is("OPTIONS") {
+            self.advance();
+            let options = self.parse_options_map()?;
+            return Ok(CreateDecayProfileClause {
+                name,
+                options,
+                target: None,
+            });
+        }
+        if self.peek_is("FOR") {
+            self.advance();
+            let target = self.parse_knowledge_policy_target()?;
+            self.expect("APPLY")?;
+            let options = self.parse_decay_apply_map()?;
+            return Ok(CreateDecayProfileClause {
+                name,
+                options,
+                target: Some(target),
+            });
+        }
+        Err(CypherError::ParseError(format!(
+            "expected OPTIONS or FOR after decay profile name '{}'",
+            name
+        )))
     }
 
     fn parse_alter_decay_profile(&mut self) -> Result<AlterDecayProfileClause, CypherError> {
@@ -594,41 +615,161 @@ impl<'a> ParseContext<'a> {
     ) -> Result<CreatePromotionPolicyClause, CypherError> {
         let name = self.advance_identifier()?;
         self.expect("FOR")?;
-        self.expect("(")?;
-        self.advance_identifier()?;
-        let mut target_labels = Vec::new();
-        while self.peek() == Some(":") {
-            self.advance();
-            target_labels.push(self.advance_identifier()?);
-        }
-        self.expect(")")?;
-        if target_labels.is_empty() {
-            return Err(CypherError::ParseError(
-                "promotion policy target labels are required".into(),
-            ));
-        }
+        let target = self.parse_knowledge_policy_target()?;
         self.expect("APPLY")?;
-        self.expect("PROFILE")?;
-        let profile_ref = self.advance_identifier()?;
-        let mut predicate = "true".to_string();
-        if self.peek_is("WHEN") {
-            self.advance();
-            let token = self
-                .advance()
-                .ok_or_else(|| CypherError::ParseError("expected predicate after WHEN".into()))?;
-            predicate = trim_quotes(token).to_string();
-        }
-        let when_clauses = vec![PromotionWhenClause {
-            profile_ref,
-            predicate,
-            order: 1,
-        }];
+        let (on_access_mutations, when_clauses) = if self.peek() == Some("{") {
+            self.parse_promotion_apply_block()?
+        } else {
+            (Vec::new(), vec![self.parse_promotion_profile_clause_after_apply(1)?])
+        };
         Ok(CreatePromotionPolicyClause {
             name,
-            target_labels,
+            target,
             enabled: true,
+            on_access_mutations,
             when_clauses,
         })
+    }
+
+    fn parse_promotion_apply_block(
+        &mut self,
+    ) -> Result<(Vec<PromotionOnAccessMutation>, Vec<PromotionWhenClause>), CypherError> {
+        self.expect("{")?;
+        let mut on_access_mutations = Vec::new();
+        let mut when_clauses = Vec::new();
+        let mut next_order = 1_i64;
+
+        while self.peek() != Some("}") {
+            if self.peek_is("ON") {
+                self.advance();
+                self.expect("ACCESS")?;
+                on_access_mutations.extend(self.parse_on_access_mutations()?);
+                continue;
+            }
+            if self.peek_is("APPLY") {
+                when_clauses.push(self.parse_promotion_apply_profile_clause(next_order)?);
+                next_order += 1;
+                continue;
+            }
+            if self.peek_is("WHEN") {
+                let predicate = self.parse_when_predicate()?;
+                self.expect("APPLY")?;
+                self.expect("PROFILE")?;
+                let profile_ref = self.advance_identifier()?;
+                when_clauses.push(PromotionWhenClause {
+                    profile_ref,
+                    predicate,
+                    order: next_order,
+                });
+                next_order += 1;
+                continue;
+            }
+            return Err(CypherError::ParseError(format!(
+                "unexpected token '{}' in promotion APPLY block",
+                self.peek().unwrap_or_default()
+            )));
+        }
+
+        self.expect("}")?;
+        Ok((on_access_mutations, when_clauses))
+    }
+
+    fn parse_promotion_apply_profile_clause(
+        &mut self,
+        order: i64,
+    ) -> Result<PromotionWhenClause, CypherError> {
+        self.expect("APPLY")?;
+        self.parse_promotion_profile_clause_after_apply(order)
+    }
+
+    fn parse_promotion_profile_clause_after_apply(
+        &mut self,
+        order: i64,
+    ) -> Result<PromotionWhenClause, CypherError> {
+        self.expect("PROFILE")?;
+        let profile_ref = self.advance_identifier()?;
+        let predicate = if self.peek_is("WHEN") {
+            self.parse_when_predicate()?
+        } else {
+            "true".to_string()
+        };
+        Ok(PromotionWhenClause {
+            profile_ref,
+            predicate,
+            order,
+        })
+    }
+
+    fn parse_when_predicate(&mut self) -> Result<String, CypherError> {
+        self.expect("WHEN")?;
+        let token = self
+            .advance()
+            .ok_or_else(|| CypherError::ParseError("expected predicate after WHEN".into()))?;
+        Ok(trim_quotes(token).to_string())
+    }
+
+    fn parse_on_access_mutations(
+        &mut self,
+    ) -> Result<Vec<PromotionOnAccessMutation>, CypherError> {
+        self.expect("{")?;
+        let mut mutations = Vec::new();
+        while self.peek() != Some("}") {
+            self.expect("SET")?;
+            self.advance_identifier()?;
+            self.expect(".")?;
+            let field = self.advance_identifier()?;
+            self.expect("=")?;
+            let kind = match field.as_str() {
+                "lastAccessedAt" => {
+                    self.expect("timestamp")?;
+                    self.expect("(")?;
+                    self.expect(")")?;
+                    PromotionOnAccessMutationKind::SetLastAccessedNow
+                }
+                "accessCount" => {
+                    self.expect("coalesce")?;
+                    self.expect("(")?;
+                    self.advance_identifier()?;
+                    self.expect(".")?;
+                    let coalesced_field = self.advance_identifier()?;
+                    if coalesced_field != "accessCount" {
+                        return Err(CypherError::ParseError(
+                            "ON ACCESS accessCount mutation must coalesce accessCount".into(),
+                        ));
+                    }
+                    self.expect(",")?;
+                    match self.advance() {
+                        Some("0") => {}
+                        _ => {
+                            return Err(CypherError::ParseError(
+                                "ON ACCESS accessCount mutation must use coalesce(..., 0)"
+                                    .into(),
+                            ));
+                        }
+                    }
+                    self.expect(")")?;
+                    self.expect("+")?;
+                    match self.advance() {
+                        Some("1") => {}
+                        _ => {
+                            return Err(CypherError::ParseError(
+                                "ON ACCESS accessCount mutation only supports + 1".into(),
+                            ));
+                        }
+                    }
+                    PromotionOnAccessMutationKind::IncrementAccessCount
+                }
+                other => {
+                    return Err(CypherError::ParseError(format!(
+                        "unsupported ON ACCESS field '{}'",
+                        other
+                    )));
+                }
+            };
+            mutations.push(PromotionOnAccessMutation { kind });
+        }
+        self.expect("}")?;
+        Ok(mutations)
     }
 
     fn parse_alter_promotion_policy(&mut self) -> Result<AlterPromotionPolicyClause, CypherError> {
@@ -659,6 +800,86 @@ impl<'a> ParseContext<'a> {
             )));
         }
         Ok(ShowPromotionPoliciesClause)
+    }
+
+    fn parse_knowledge_policy_target(&mut self) -> Result<KnowledgePolicyTarget, CypherError> {
+        self.expect("(")?;
+        if self.peek() == Some(")") {
+            self.advance();
+            if self.peek() == Some("-") {
+                self.advance();
+                self.expect("[")?;
+                self.advance_identifier()?;
+                self.expect(":")?;
+                let edge_type = self.advance_identifier()?;
+                self.expect("]")?;
+                self.expect("-")?;
+                self.expect("(")?;
+                self.expect(")")?;
+                return Ok(KnowledgePolicyTarget {
+                    target_labels: Vec::new(),
+                    target_edge_type: Some(edge_type),
+                    is_wildcard: false,
+                    is_edge: true,
+                });
+            }
+            return Ok(KnowledgePolicyTarget {
+                target_labels: Vec::new(),
+                target_edge_type: None,
+                is_wildcard: true,
+                is_edge: false,
+            });
+        }
+
+        self.advance_identifier()?;
+        let mut target_labels = Vec::new();
+        while self.peek() == Some(":") {
+            self.advance();
+            target_labels.push(self.advance_identifier()?);
+        }
+        self.expect(")")?;
+        if target_labels.is_empty() {
+            return Err(CypherError::ParseError(
+                "knowledge policy target labels are required".into(),
+            ));
+        }
+        Ok(KnowledgePolicyTarget {
+            target_labels,
+            target_edge_type: None,
+            is_wildcard: false,
+            is_edge: false,
+        })
+    }
+
+    fn parse_decay_apply_map(&mut self) -> Result<HashMap<String, Value>, CypherError> {
+        self.expect("{")?;
+        let mut options = HashMap::new();
+        while self.peek() != Some("}") {
+            if self.peek_is("DECAY") {
+                self.advance();
+                self.expect("PROFILE")?;
+                let profile_ref = self.advance_identifier()?;
+                options.insert("profileRef".to_string(), Value::String(profile_ref));
+            } else {
+                let key = self.advance_identifier()?;
+                self.expect(":")?;
+                let value = self.parse_option_value()?;
+                options.insert(key, value);
+            }
+
+            if self.peek() == Some(",") {
+                self.advance();
+                continue;
+            }
+            if self.peek() != Some("}") {
+                return Err(CypherError::ParseError(format!(
+                    "expected ',' or '}}' in decay APPLY block, got '{}'",
+                    self.peek().unwrap_or_default()
+                )));
+            }
+        }
+        self.expect("}")?;
+        Ok(options)
     }
 
     fn parse_options_map(&mut self) -> Result<HashMap<String, Value>, CypherError> {
@@ -1314,11 +1535,35 @@ mod tests {
         assert!(matches!(q.query_type, QueryType::Ddl));
         if let Clause::CreateDecayProfile(c) = q.clauses.first().expect("clause missing") {
             assert_eq!(c.name, "slow_decay");
+            assert!(c.target.is_none());
             assert_eq!(c.options.get("halfLifeSeconds"), Some(&Value::from(604800)));
             assert_eq!(
                 c.options.get("scope"),
                 Some(&Value::String("NODE".to_string()))
             );
+        } else {
+            panic!("expected CreateDecayProfile clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_decay_profile_binding() {
+        let p = Parser::new();
+        let q = p
+            .parse(
+                "CREATE DECAY PROFILE memory_binding FOR (n:MemoryEpisode) APPLY { DECAY PROFILE slow_decay, visibilityThreshold: 0.2, order: 10 }",
+            )
+            .unwrap();
+        if let Clause::CreateDecayProfile(c) = q.clauses.first().expect("clause missing") {
+            let target = c.target.as_ref().expect("binding target missing");
+            assert_eq!(target.target_labels, vec!["MemoryEpisode".to_string()]);
+            assert!(!target.is_wildcard);
+            assert!(!target.is_edge);
+            assert_eq!(
+                c.options.get("profileRef"),
+                Some(&Value::String("slow_decay".to_string()))
+            );
+            assert_eq!(c.options.get("order"), Some(&Value::from(10)));
         } else {
             panic!("expected CreateDecayProfile clause");
         }
@@ -1344,9 +1589,26 @@ mod tests {
             create_policy.clauses.first().expect("clause missing")
         {
             assert_eq!(c.name, "fact_policy");
-            assert_eq!(c.target_labels, vec!["KnowledgeFact".to_string()]);
+            assert_eq!(c.target.target_labels, vec!["KnowledgeFact".to_string()]);
             assert_eq!(c.when_clauses.len(), 1);
             assert_eq!(c.when_clauses[0].profile_ref, "boost_profile");
+            assert!(c.on_access_mutations.is_empty());
+        } else {
+            panic!("expected CreatePromotionPolicy clause");
+        }
+
+        let access_policy = p
+            .parse(
+                "CREATE PROMOTION POLICY access_policy FOR ()-[r:LINKS]-() APPLY { ON ACCESS { SET r.lastAccessedAt = timestamp() SET r.accessCount = coalesce(r.accessCount, 0) + 1 } }",
+            )
+            .unwrap();
+        if let Clause::CreatePromotionPolicy(c) =
+            access_policy.clauses.first().expect("clause missing")
+        {
+            assert!(c.target.is_edge);
+            assert_eq!(c.target.target_edge_type.as_deref(), Some("LINKS"));
+            assert_eq!(c.on_access_mutations.len(), 2);
+            assert!(c.when_clauses.is_empty());
         } else {
             panic!("expected CreatePromotionPolicy clause");
         }

@@ -65,7 +65,7 @@ use copperdb_search::{
     RrfConfig, RrfHydratedSearchOutcome, RrfHydrationRecord, RrfSearchBatch, RrfSearchOutcome,
     RrfSearchPolicy, SearchQuery,
 };
-use copperdb_storage::StorageEngine;
+use copperdb_storage::{KnowledgePolicyAccessMetadata, StorageEngine};
 use copperdb_topology::{
     ConsistencyLevel, DistributedReadPlan, DistributedSearchPlan, DistributedWriteMode,
     DistributedWritePlan, FabricDatabase, PlacementKey, TopologyRegistry,
@@ -206,6 +206,8 @@ pub struct DistributedBfsResult {
     pub failed_replicas: Vec<String>,
     pub path: Option<DistributedPath>,
 }
+
+type DistributedAccessWrites = BTreeMap<String, KnowledgePolicyAccessMetadata>;
 
 #[derive(Debug, Default, Clone)]
 pub struct ResultStats {
@@ -397,6 +399,7 @@ impl CopperDb {
                 let (result, bfs) = self
                     .execute_distributed_shortest_path_query(
                         &shape,
+                        &params,
                         placement,
                         consistency,
                         request_region,
@@ -418,6 +421,7 @@ impl CopperDb {
                 let (result, read_outcome) = self
                     .execute_distributed_direct_path_query(
                         &shape,
+                        &params,
                         placement,
                         consistency,
                         request_region,
@@ -498,6 +502,7 @@ impl CopperDb {
         let plan = self.plan_distributed_read(placement, consistency, request_region)?;
         let mut responded_by = BTreeSet::new();
         let mut failed_replicas = BTreeSet::new();
+        let mut access_writes = BTreeMap::new();
 
         let start_exists = self
             .distributed_graph_node_exists(
@@ -527,6 +532,7 @@ impl CopperDb {
         }
 
         let path = if start_exists && end_exists {
+            let params = HashMap::new();
             self.distributed_bfs_path(
                 &plan,
                 transport.as_ref(),
@@ -534,6 +540,8 @@ impl CopperDb {
                 end_node_id,
                 rel_type,
                 &direction,
+                &params,
+                &mut access_writes,
                 &mut responded_by,
                 &mut failed_replicas,
             )
@@ -549,6 +557,15 @@ impl CopperDb {
             }
             .into());
         }
+
+        self.flush_distributed_access_writes(
+            placement,
+            consistency,
+            request_region,
+            transport.clone(),
+            access_writes,
+        )
+        .await?;
 
         Ok(DistributedBfsResult {
             plan,
@@ -583,12 +600,16 @@ impl CopperDb {
             .await?;
 
         let path_value = if let Some(path) = &bfs.path {
+            let params = HashMap::new();
+            let mut access_writes = BTreeMap::new();
             Some(
                 self.materialize_distributed_path_value(
                     &bfs.plan,
                     transport.as_ref(),
                     path,
                     &direction,
+                    &params,
+                    &mut access_writes,
                 )
                 .await?,
             )
@@ -602,6 +623,7 @@ impl CopperDb {
     async fn execute_distributed_shortest_path_query(
         &self,
         shape: &DistributedShortestPathQueryShape,
+        params: &HashMap<String, Value>,
         placement: &PlacementKey,
         consistency: ConsistencyLevel,
         request_region: Option<&str>,
@@ -610,12 +632,15 @@ impl CopperDb {
         let plan = self.plan_distributed_read(placement, consistency, request_region)?;
         let mut responded_by = BTreeSet::new();
         let mut failed_replicas = BTreeSet::new();
+        let mut access_writes = BTreeMap::new();
 
         let start_candidates = self
             .distributed_resolve_node_candidates(
                 &plan,
                 transport.as_ref(),
                 &shape.start_selector,
+                params,
+                &mut access_writes,
                 &mut responded_by,
                 &mut failed_replicas,
             )
@@ -625,6 +650,8 @@ impl CopperDb {
                 &plan,
                 transport.as_ref(),
                 &shape.end_selector,
+                params,
+                &mut access_writes,
                 &mut responded_by,
                 &mut failed_replicas,
             )
@@ -652,6 +679,8 @@ impl CopperDb {
                         end_node_id,
                         shape.rel_type.as_deref(),
                         &shape.direction,
+                        params,
+                        &mut access_writes,
                         &mut responded_by,
                         &mut failed_replicas,
                     )
@@ -690,12 +719,23 @@ impl CopperDb {
                     transport.as_ref(),
                     path,
                     &shape.direction,
+                    params,
+                    &mut access_writes,
                 )
                 .await?,
             )
         } else {
             None
         };
+
+        self.flush_distributed_access_writes(
+            placement,
+            consistency,
+            request_region,
+            transport.clone(),
+            access_writes,
+        )
+        .await?;
 
         Ok((
             distributed_shortest_path_result(shape, path_value.as_ref())?,
@@ -706,6 +746,7 @@ impl CopperDb {
     async fn execute_distributed_direct_path_query(
         &self,
         shape: &DistributedDirectPathQueryShape,
+        params: &HashMap<String, Value>,
         placement: &PlacementKey,
         consistency: ConsistencyLevel,
         request_region: Option<&str>,
@@ -714,11 +755,14 @@ impl CopperDb {
         let plan = self.plan_distributed_read(placement, consistency, request_region)?;
         let mut responded_by = BTreeSet::new();
         let mut failed_replicas = BTreeSet::new();
+        let mut access_writes = BTreeMap::new();
         let mut path_values = self
             .distributed_direct_path_values(
                 &plan,
                 transport.as_ref(),
                 &shape.pattern,
+                params,
+                &mut access_writes,
                 &mut responded_by,
                 &mut failed_replicas,
             )
@@ -727,6 +771,23 @@ impl CopperDb {
         if shape.optional && path_values.is_empty() {
             path_values.push(Value::Null);
         }
+
+        if responded_by.len() < plan.required_responses {
+            return Err(ReplicationError::NoQuorum {
+                required: plan.required_responses,
+                received: responded_by.len(),
+            }
+            .into());
+        }
+
+        self.flush_distributed_access_writes(
+            placement,
+            consistency,
+            request_region,
+            transport.clone(),
+            access_writes,
+        )
+        .await?;
 
         Ok((
             distributed_path_query_result(&shape.return_items, &shape.path_variable, &path_values)?,
@@ -751,6 +812,7 @@ impl CopperDb {
         let plan = self.plan_distributed_read(placement, consistency, request_region)?;
         let mut responded_by = BTreeSet::new();
         let mut failed_replicas = BTreeSet::new();
+        let mut access_writes = BTreeMap::new();
 
         let mut base_rows = vec![HashMap::new()];
         for leading_step in &shape.leading_steps {
@@ -765,7 +827,9 @@ impl CopperDb {
                                         &plan,
                                         transport.as_ref(),
                                         selector,
+                                        params,
                                         base_row,
+                                        &mut access_writes,
                                         &mut responded_by,
                                         &mut failed_replicas,
                                     )
@@ -796,7 +860,9 @@ impl CopperDb {
                                         &plan,
                                         transport.as_ref(),
                                         pattern,
+                                        params,
                                         base_row,
+                                        &mut access_writes,
                                         &mut responded_by,
                                         &mut failed_replicas,
                                     )
@@ -847,7 +913,9 @@ impl CopperDb {
                                         &plan,
                                         transport.as_ref(),
                                         selector,
+                                        params,
                                         base_row,
+                                        &mut access_writes,
                                         &mut responded_by,
                                         &mut failed_replicas,
                                     )
@@ -888,7 +956,9 @@ impl CopperDb {
                                         &plan,
                                         transport.as_ref(),
                                         pattern,
+                                        params,
                                         base_row,
+                                        &mut access_writes,
                                         &mut responded_by,
                                         &mut failed_replicas,
                                     )
@@ -987,7 +1057,9 @@ impl CopperDb {
                     &plan,
                     transport.as_ref(),
                     &shape.path_shape.pattern,
+                    params,
                     &base_row,
+                    &mut access_writes,
                     &mut responded_by,
                     &mut failed_replicas,
                 )
@@ -1000,6 +1072,23 @@ impl CopperDb {
                 path_values.extend(row_path_values);
             }
         }
+
+        if responded_by.len() < plan.required_responses {
+            return Err(ReplicationError::NoQuorum {
+                required: plan.required_responses,
+                received: responded_by.len(),
+            }
+            .into());
+        }
+
+        self.flush_distributed_access_writes(
+            placement,
+            consistency,
+            request_region,
+            transport.clone(),
+            access_writes,
+        )
+        .await?;
 
         Ok((
             distributed_path_query_result(
@@ -1021,6 +1110,8 @@ impl CopperDb {
         plan: &DistributedReadPlan,
         transport: &dyn ReplicaTransport,
         pattern: &DistributedDirectPathPattern,
+        params: &HashMap<String, Value>,
+        access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
     ) -> Result<Vec<Value>, CopperDbError> {
@@ -1033,6 +1124,8 @@ impl CopperDb {
                         plan,
                         transport,
                         selector,
+                        params,
+                        access_writes,
                         responded_by,
                         failed_replicas,
                     )
@@ -1070,6 +1163,8 @@ impl CopperDb {
                         plan,
                         transport,
                         start_selector,
+                        params,
+                        access_writes,
                         responded_by,
                         failed_replicas,
                     )
@@ -1079,6 +1174,8 @@ impl CopperDb {
                         plan,
                         transport,
                         end_selector,
+                        params,
+                        access_writes,
                         responded_by,
                         failed_replicas,
                     )
@@ -1106,6 +1203,8 @@ impl CopperDb {
                             edge_properties,
                             *min_hops,
                             *max_hops,
+                            params,
+                            access_writes,
                             responded_by,
                             failed_replicas,
                         )
@@ -1113,7 +1212,7 @@ impl CopperDb {
                     {
                         path_values.push(
                             self.materialize_distributed_path_value(
-                                plan, transport, &path, direction,
+                                plan, transport, &path, direction, params, access_writes,
                             )
                             .await?,
                         );
@@ -1138,7 +1237,9 @@ impl CopperDb {
         plan: &DistributedReadPlan,
         transport: &dyn ReplicaTransport,
         pattern: &DistributedDirectPathPattern,
+        params: &HashMap<String, Value>,
         base_row: &HashMap<String, Value>,
+        access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
     ) -> Result<Vec<Value>, CopperDbError> {
@@ -1151,7 +1252,9 @@ impl CopperDb {
                         plan,
                         transport,
                         selector,
+                        params,
                         base_row,
+                        access_writes,
                         responded_by,
                         failed_replicas,
                     )
@@ -1189,7 +1292,9 @@ impl CopperDb {
                         plan,
                         transport,
                         start_selector,
+                        params,
                         base_row,
+                        access_writes,
                         responded_by,
                         failed_replicas,
                     )
@@ -1199,7 +1304,9 @@ impl CopperDb {
                         plan,
                         transport,
                         end_selector,
+                        params,
                         base_row,
+                        access_writes,
                         responded_by,
                         failed_replicas,
                     )
@@ -1227,6 +1334,8 @@ impl CopperDb {
                             edge_properties,
                             *min_hops,
                             *max_hops,
+                            params,
+                            access_writes,
                             responded_by,
                             failed_replicas,
                         )
@@ -1234,7 +1343,7 @@ impl CopperDb {
                     {
                         path_values.push(
                             self.materialize_distributed_path_value(
-                                plan, transport, &path, direction,
+                                plan, transport, &path, direction, params, access_writes,
                             )
                             .await?,
                         );
@@ -1259,7 +1368,9 @@ impl CopperDb {
         plan: &DistributedReadPlan,
         transport: &dyn ReplicaTransport,
         selector: &DistributedNodeSelector,
+        params: &HashMap<String, Value>,
         base_row: &HashMap<String, Value>,
+        access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
     ) -> Result<Vec<Value>, CopperDbError> {
@@ -1279,6 +1390,8 @@ impl CopperDb {
                     plan,
                     transport,
                     selector,
+                    params,
+                    access_writes,
                     responded_by,
                     failed_replicas,
                 )
@@ -1298,6 +1411,8 @@ impl CopperDb {
         edge_properties: &BTreeMap<String, Value>,
         min_hops: u32,
         max_hops: u32,
+        params: &HashMap<String, Value>,
+        access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
     ) -> Result<Vec<DistributedPath>, CopperDbError> {
@@ -1331,6 +1446,8 @@ impl CopperDb {
                     &current_node_id,
                     rel_type,
                     direction,
+                    params,
+                    access_writes,
                     responded_by,
                     failed_replicas,
                 )
@@ -1366,6 +1483,8 @@ impl CopperDb {
         plan: &DistributedReadPlan,
         transport: &dyn ReplicaTransport,
         selector: &DistributedNodeSelector,
+        params: &HashMap<String, Value>,
+        access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
     ) -> Result<Vec<Value>, CopperDbError> {
@@ -1375,6 +1494,8 @@ impl CopperDb {
                     plan,
                     transport,
                     node_id,
+                    params,
+                    access_writes,
                     responded_by,
                     failed_replicas,
                 )
@@ -1389,6 +1510,8 @@ impl CopperDb {
                             plan,
                             transport,
                             node_id,
+                            params,
+                            access_writes,
                             responded_by,
                             failed_replicas,
                         )
@@ -1406,6 +1529,8 @@ impl CopperDb {
                         primary_label,
                         property,
                         value,
+                        params,
+                        access_writes,
                         responded_by,
                         failed_replicas,
                     )
@@ -1415,6 +1540,8 @@ impl CopperDb {
                         plan,
                         transport,
                         primary_label,
+                            params,
+                            access_writes,
                         responded_by,
                         failed_replicas,
                     )
@@ -1427,6 +1554,8 @@ impl CopperDb {
                             plan,
                             transport,
                             primary_label,
+                            params,
+                            access_writes,
                             responded_by,
                             failed_replicas,
                         )
@@ -1448,6 +1577,8 @@ impl CopperDb {
         transport: &dyn ReplicaTransport,
         path: &DistributedPath,
         direction: &EdgeDirection,
+        params: &HashMap<String, Value>,
+        access_writes: &mut DistributedAccessWrites,
     ) -> Result<Value, CopperDbError> {
         let mut responded_by = BTreeSet::new();
         let mut failed_replicas = BTreeSet::new();
@@ -1459,6 +1590,8 @@ impl CopperDb {
                     plan,
                     transport,
                     node_id,
+                    params,
+                    access_writes,
                     &mut responded_by,
                     &mut failed_replicas,
                 )
@@ -1479,6 +1612,8 @@ impl CopperDb {
                     node_id,
                     edge_id,
                     direction,
+                    params,
+                    access_writes,
                     &mut responded_by,
                     &mut failed_replicas,
                 )
@@ -1531,6 +1666,8 @@ impl CopperDb {
         plan: &DistributedReadPlan,
         transport: &dyn ReplicaTransport,
         node_id: &str,
+        params: &HashMap<String, Value>,
+        access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
     ) -> Result<Option<Value>, CopperDbError> {
@@ -1540,7 +1677,26 @@ impl CopperDb {
                     responded_by.insert(replica.node_id.clone());
                     let props: BTreeMap<String, Value> = rmp_serde::from_slice(&bytes)
                         .map_err(|error| CopperDbError::Storage(error.to_string()))?;
-                    return Ok(Some(Value::Object(props.into_iter().collect())));
+                    let value = Value::Object(props.into_iter().collect());
+                    if let Some(node) = distributed_node_record(&value) {
+                        let access_metadata = self
+                            .distributed_graph_access_metadata(
+                                plan,
+                                transport,
+                                &node.id,
+                                responded_by,
+                                failed_replicas,
+                            )
+                            .await?;
+                        if !self
+                            .eval
+                            .node_visible_with_access_metadata(&node, access_metadata.clone(), params)?
+                        {
+                            return Ok(None);
+                        }
+                        self.record_distributed_node_access(&node, access_metadata, access_writes)?;
+                    }
+                    return Ok(Some(value));
                 }
                 Ok(None) => {
                     responded_by.insert(replica.node_id.clone());
@@ -1558,6 +1714,8 @@ impl CopperDb {
         plan: &DistributedReadPlan,
         transport: &dyn ReplicaTransport,
         label: &str,
+        params: &HashMap<String, Value>,
+        access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
     ) -> Result<Vec<Value>, CopperDbError> {
@@ -1573,6 +1731,25 @@ impl CopperDb {
                         let props: BTreeMap<String, Value> = rmp_serde::from_slice(&raw)
                             .map_err(|error| CopperDbError::Storage(error.to_string()))?;
                         let value = Value::Object(props.into_iter().collect());
+                        let Some(node) = distributed_node_record(&value) else {
+                            continue;
+                        };
+                        let access_metadata = self
+                            .distributed_graph_access_metadata(
+                                plan,
+                                transport,
+                                &node.id,
+                                responded_by,
+                                failed_replicas,
+                            )
+                            .await?;
+                        if !self
+                            .eval
+                            .node_visible_with_access_metadata(&node, access_metadata.clone(), params)?
+                        {
+                            continue;
+                        }
+                        self.record_distributed_node_access(&node, access_metadata, access_writes)?;
                         if let Some(node_id) = distributed_node_id(&value) {
                             nodes.insert(node_id, value);
                         }
@@ -1593,6 +1770,8 @@ impl CopperDb {
         label: &str,
         property: &str,
         value: &Value,
+        params: &HashMap<String, Value>,
+        access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
     ) -> Result<Vec<Value>, CopperDbError> {
@@ -1608,6 +1787,25 @@ impl CopperDb {
                         let props: BTreeMap<String, Value> = rmp_serde::from_slice(&raw)
                             .map_err(|error| CopperDbError::Storage(error.to_string()))?;
                         let value = Value::Object(props.into_iter().collect());
+                        let Some(node) = distributed_node_record(&value) else {
+                            continue;
+                        };
+                        let access_metadata = self
+                            .distributed_graph_access_metadata(
+                                plan,
+                                transport,
+                                &node.id,
+                                responded_by,
+                                failed_replicas,
+                            )
+                            .await?;
+                        if !self
+                            .eval
+                            .node_visible_with_access_metadata(&node, access_metadata.clone(), params)?
+                        {
+                            continue;
+                        }
+                        self.record_distributed_node_access(&node, access_metadata, access_writes)?;
                         if let Some(node_id) = distributed_node_id(&value) {
                             nodes.insert(node_id, value);
                         }
@@ -1628,6 +1826,8 @@ impl CopperDb {
         node_id: &str,
         edge_id: &str,
         direction: &EdgeDirection,
+        params: &HashMap<String, Value>,
+        access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
     ) -> Result<Option<Value>, CopperDbError> {
@@ -1638,6 +1838,8 @@ impl CopperDb {
                 node_id,
                 None,
                 &EdgeDirection::Both,
+                params,
+                access_writes,
                 responded_by,
                 failed_replicas,
             )
@@ -1659,6 +1861,8 @@ impl CopperDb {
         node_id: &str,
         rel_type: Option<&str>,
         direction: &EdgeDirection,
+        params: &HashMap<String, Value>,
+        access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
     ) -> Result<Vec<copperdb_storage::EdgeRecord>, CopperDbError> {
@@ -1722,7 +1926,106 @@ impl CopperDb {
                 }
             }
         }
-        Ok(edges.into_values().collect())
+        let mut visible_edges = Vec::new();
+        for edge in edges.into_values() {
+            let access_metadata = self
+                .distributed_graph_access_metadata(
+                    plan,
+                    transport,
+                    &edge.id,
+                    responded_by,
+                    failed_replicas,
+                )
+                .await?;
+            if self
+                .eval
+                .edge_visible_with_access_metadata(&edge, access_metadata.clone(), params)?
+            {
+                self.record_distributed_edge_access(&edge, access_metadata, access_writes)?;
+                visible_edges.push(edge);
+            }
+        }
+        Ok(visible_edges)
+    }
+
+    fn record_distributed_node_access(
+        &self,
+        node: &copperdb_storage::NodeRecord,
+        access_metadata: Option<KnowledgePolicyAccessMetadata>,
+        access_writes: &mut DistributedAccessWrites,
+    ) -> Result<(), CopperDbError> {
+        let current = access_writes.get(&node.id).cloned().or(access_metadata);
+        if let Some(updated) = self.eval.node_access_metadata_after_read(node, current)? {
+            access_writes.insert(node.id.clone(), updated);
+        }
+        Ok(())
+    }
+
+    fn record_distributed_edge_access(
+        &self,
+        edge: &copperdb_storage::EdgeRecord,
+        access_metadata: Option<KnowledgePolicyAccessMetadata>,
+        access_writes: &mut DistributedAccessWrites,
+    ) -> Result<(), CopperDbError> {
+        let current = access_writes.get(&edge.id).cloned().or(access_metadata);
+        if let Some(updated) = self.eval.edge_access_metadata_after_read(edge, current)? {
+            access_writes.insert(edge.id.clone(), updated);
+        }
+        Ok(())
+    }
+
+    async fn flush_distributed_access_writes(
+        &self,
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+        transport: Arc<dyn ReplicaTransport>,
+        access_writes: DistributedAccessWrites,
+    ) -> Result<(), CopperDbError> {
+        if access_writes.is_empty() {
+            return Ok(());
+        }
+
+        let coordinator = self.build_cassandra_coordinator(transport)?;
+        for (entity_id, metadata) in access_writes {
+            coordinator
+                .write(
+                    placement,
+                    consistency,
+                    Command::PutKnowledgePolicyAccessMetadata { entity_id, metadata },
+                    request_region,
+                )
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    async fn distributed_graph_access_metadata(
+        &self,
+        plan: &DistributedReadPlan,
+        transport: &dyn ReplicaTransport,
+        entity_id: &str,
+        responded_by: &mut BTreeSet<String>,
+        failed_replicas: &mut BTreeSet<String>,
+    ) -> Result<Option<copperdb_storage::KnowledgePolicyAccessMetadata>, CopperDbError> {
+        for replica in &plan.replicas {
+            match transport
+                .graph_access_metadata(&replica.node_id, entity_id)
+                .await
+            {
+                Ok(metadata) => {
+                    responded_by.insert(replica.node_id.clone());
+                    if metadata.is_some() {
+                        return Ok(metadata);
+                    }
+                }
+                Err(_) => {
+                    failed_replicas.insert(replica.node_id.clone());
+                }
+            }
+        }
+        Ok(None)
     }
 
     async fn distributed_bfs_path(
@@ -1733,6 +2036,8 @@ impl CopperDb {
         end_node_id: &str,
         rel_type: Option<&str>,
         direction: &EdgeDirection,
+        params: &HashMap<String, Value>,
+        access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
     ) -> Result<Option<DistributedPath>, CopperDbError> {
@@ -1755,6 +2060,8 @@ impl CopperDb {
                     &current_node_id,
                     rel_type,
                     direction,
+                    params,
+                    access_writes,
                     responded_by,
                     failed_replicas,
                 )
@@ -2509,12 +2816,21 @@ fn distributed_leading_path_query_shape(
 }
 
 fn distributed_literal_properties(
-    properties: &std::collections::HashMap<String, Expression>,
+    properties: &[copperdb_cypher::PropertyEntry],
 ) -> Option<BTreeMap<String, Value>> {
     properties
         .iter()
-        .map(|(key, expression)| match expression {
-            Expression::Literal(value) => Some((key.clone(), value.clone())),
+        .map(|entry| match &entry.value {
+            Expression::Literal(value) => Some((
+                entry.key.clone(),
+                match value {
+                    copperdb_cypher::LiteralValue::String(value) => Value::String(value.clone()),
+                    copperdb_cypher::LiteralValue::Integer(value) => Value::from(*value),
+                    copperdb_cypher::LiteralValue::Float(value) => Value::from(*value),
+                    copperdb_cypher::LiteralValue::Bool(value) => Value::Bool(*value),
+                    copperdb_cypher::LiteralValue::Null => Value::Null,
+                },
+            )),
             _ => None,
         })
         .collect::<Option<BTreeMap<_, _>>>()
@@ -2868,9 +3184,49 @@ fn distributed_edge_to_value(edge: &copperdb_storage::EdgeRecord) -> Value {
                 ("_type".to_string(), Value::String(edge.edge_type.clone())),
                 ("_start".to_string(), Value::String(edge.start_node.clone())),
                 ("_end".to_string(), Value::String(edge.end_node.clone())),
+                (
+                    "_created_at_unix_ms".to_string(),
+                    Value::from(edge.created_at_unix_ms),
+                ),
+                (
+                    "_updated_at_unix_ms".to_string(),
+                    Value::from(edge.updated_at_unix_ms),
+                ),
             ])
             .collect(),
     )
+}
+
+fn distributed_node_record(node: &Value) -> Option<copperdb_storage::NodeRecord> {
+    let Value::Object(map) = node else {
+        return None;
+    };
+    let id = map.get("_id")?.as_str()?.to_string();
+    let labels = map
+        .get("_labels")?
+        .as_array()?
+        .iter()
+        .map(|value| value.as_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    let created_at_unix_ms = map.get("_created_at_unix_ms")?.as_i64()?;
+    let updated_at_unix_ms = map.get("_updated_at_unix_ms")?.as_i64()?;
+    let properties = map
+        .iter()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "_id" | "_labels" | "_created_at_unix_ms" | "_updated_at_unix_ms"
+            )
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    Some(copperdb_storage::NodeRecord {
+        id,
+        labels,
+        properties,
+        created_at_unix_ms,
+        updated_at_unix_ms,
+    })
 }
 
 fn distributed_node_id(node: &Value) -> Option<String> {
@@ -3037,26 +3393,22 @@ fn collect_pattern_terms(
 ) {
     for node in &pattern.nodes {
         labels.extend(node.labels.iter().cloned());
-        properties.extend(node.properties.keys().cloned());
+        properties.extend(node.properties.iter().map(|entry| entry.key.clone()));
     }
     for edge in &pattern.edges {
-        properties.extend(edge.properties.keys().cloned());
+        properties.extend(edge.properties.iter().map(|entry| entry.key.clone()));
     }
 }
 
 fn collect_expression_properties(expression: &Expression, properties: &mut Vec<String>) {
     match expression {
         Expression::PropertyAccess { property, .. } => properties.push(property.clone()),
-        Expression::Comparison { left, right, .. }
-        | Expression::InList {
-            value: left,
-            list: right,
-            ..
-        }
-        | Expression::And(left, right)
-        | Expression::Or(left, right) => {
-            collect_expression_properties(left, properties);
-            collect_expression_properties(right, properties);
+        Expression::Comparison { operands, .. }
+        | Expression::InList { operands, .. }
+        | Expression::And(operands)
+        | Expression::Or(operands) => {
+            collect_expression_properties(&operands.left, properties);
+            collect_expression_properties(&operands.right, properties);
         }
         Expression::FunctionCall { args, .. } => {
             for arg in args {
@@ -3069,8 +3421,8 @@ fn collect_expression_properties(expression: &Expression, properties: &mut Vec<S
             }
         }
         Expression::MapLiteral(entries) => {
-            for (_, value) in entries {
-                collect_expression_properties(value, properties);
+            for entry in entries {
+                collect_expression_properties(&entry.value, properties);
             }
         }
         Expression::Not(inner) | Expression::IsNull(inner) | Expression::IsNotNull(inner) => {
@@ -5012,8 +5364,8 @@ mod tests {
                 id: "Node:A".into(),
                 labels: vec!["Node".into()],
                 properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
-                created_at_unix_ms: 0,
-                updated_at_unix_ms: 0,
+                created_at_unix_ms: 123,
+                updated_at_unix_ms: 456,
             })
             .unwrap();
         peer_one
@@ -5370,8 +5722,8 @@ mod tests {
                 id: "Node:A".into(),
                 labels: vec!["Node".into()],
                 properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
-                created_at_unix_ms: 0,
-                updated_at_unix_ms: 0,
+                created_at_unix_ms: 123,
+                updated_at_unix_ms: 456,
             })
             .unwrap();
 
@@ -5400,11 +5752,161 @@ mod tests {
             .expect("expected node list");
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].get("name"), Some(&Value::String("a".into())));
+        assert_eq!(nodes[0].get("_created_at_unix_ms"), Some(&Value::from(123)));
+        assert_eq!(nodes[0].get("_updated_at_unix_ms"), Some(&Value::from(456)));
         let path = outcome.result.rows[0]
             .get("path")
             .and_then(Value::as_object)
             .expect("expected path object");
         assert_eq!(path.get("length"), Some(&Value::from(0)));
+    }
+
+    #[tokio::test]
+    async fn engine_distributed_single_node_path_suppresses_stale_remote_node() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("copper");
+        db.storage()
+            .register_topology_peer(
+                &MeshPeer::new("node-1", "node-1.mesh.local:9000")
+                    .with_capability(NodeCapability::Storage)
+                    .with_capability(NodeCapability::Coordinator),
+            )
+            .unwrap();
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec![],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        db.execute(
+            "CREATE DECAY PROFILE stale_decay OPTIONS { halfLifeSeconds: 1, visibilityThreshold: 0.75, scoreFloor: 0.0, function: 'step', scope: 'NODE', scoreFrom: 'CREATED', enabled: true }",
+            Default::default(),
+        )
+        .unwrap();
+        db.execute(
+            "CREATE DECAY PROFILE stale_binding FOR (n:MemoryEpisode) APPLY { DECAY PROFILE stale_decay, order: 10 }",
+            Default::default(),
+        )
+        .unwrap();
+
+        let peer = StorageEngine::open_temporary().unwrap();
+        peer.put_node_record(&copperdb_storage::NodeRecord {
+            id: "memory:stale".into(),
+            labels: vec!["MemoryEpisode".into()],
+            properties: BTreeMap::from([("name".into(), Value::String("stale".into()))]),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        })
+        .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH p = (a:MemoryEpisode {_id: 'memory:stale'}) RETURN p AS path, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert!(outcome.result.rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn engine_distributed_single_node_path_persists_remote_on_access_metadata() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("copper");
+        db.storage()
+            .register_topology_peer(
+                &MeshPeer::new("node-1", "node-1.mesh.local:9000")
+                    .with_capability(NodeCapability::Storage)
+                    .with_capability(NodeCapability::Coordinator),
+            )
+            .unwrap();
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec![],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        db.execute(
+            "CREATE PROMOTION POLICY memory_access FOR (n:MemoryEpisode) APPLY { ON ACCESS { SET n.lastAccessedAt = timestamp() SET n.accessCount = coalesce(n.accessCount, 0) + 1 } }",
+            Default::default(),
+        )
+        .unwrap();
+
+        let peer_dir = tempfile::tempdir().unwrap();
+        let peer_path = peer_dir.path().join("peer");
+        let peer = StorageEngine::open(&peer_path).unwrap();
+        peer.put_node_record(&copperdb_storage::NodeRecord {
+            id: "memory:access".into(),
+            labels: vec!["MemoryEpisode".into()],
+            properties: BTreeMap::from([("name".into(), Value::String("access".into()))]),
+            created_at_unix_ms: 123,
+            updated_at_unix_ms: 123,
+        })
+        .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH p = (a:MemoryEpisode {_id: 'memory:access'}) RETURN p AS path, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result.rows.len(), 1);
+        assert_eq!(outcome.result.rows[0].get("hops"), Some(&Value::from(0)));
+
+        let reopened_peer = StorageEngine::open(&peer_path).unwrap();
+        let metadata = reopened_peer
+            .get_knowledge_policy_access_metadata("memory:access")
+            .unwrap()
+            .expect("expected replicated node access metadata");
+        assert_eq!(metadata.access_count, 1);
+        assert!(metadata.last_accessed_at_unix_ms.is_some());
     }
 
     #[tokio::test]
@@ -5527,6 +6029,190 @@ mod tests {
             .map(|node| node.get("name").and_then(Value::as_str).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn engine_distributed_direct_path_suppresses_stale_remote_edge() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("copper");
+        db.storage()
+            .register_topology_peer(
+                &MeshPeer::new("node-1", "node-1.mesh.local:9000")
+                    .with_capability(NodeCapability::Storage)
+                    .with_capability(NodeCapability::Coordinator),
+            )
+            .unwrap();
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec![],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        db.execute(
+            "CREATE DECAY PROFILE stale_edge_decay OPTIONS { halfLifeSeconds: 1, visibilityThreshold: 0.75, scoreFloor: 0.0, function: 'step', scope: 'EDGE', scoreFrom: 'CREATED', enabled: true }",
+            Default::default(),
+        )
+        .unwrap();
+        db.execute(
+            "CREATE DECAY PROFILE stale_edge_binding FOR ()-[r:LINKS]-() APPLY { DECAY PROFILE stale_edge_decay, order: 10 }",
+            Default::default(),
+        )
+        .unwrap();
+
+        let peer = StorageEngine::open_temporary().unwrap();
+        peer.put_node_record(&copperdb_storage::NodeRecord {
+            id: "Node:A".into(),
+            labels: vec!["Node".into()],
+            properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
+            created_at_unix_ms: 123,
+            updated_at_unix_ms: 123,
+        })
+        .unwrap();
+        peer.put_node_record(&copperdb_storage::NodeRecord {
+            id: "Node:B".into(),
+            labels: vec!["Node".into()],
+            properties: BTreeMap::from([("name".into(), Value::String("b".into()))]),
+            created_at_unix_ms: 123,
+            updated_at_unix_ms: 123,
+        })
+        .unwrap();
+        peer.put_edge_record(&EdgeRecord {
+            id: "edge:a-b".into(),
+            start_node: "Node:A".into(),
+            end_node: "Node:B".into(),
+            edge_type: "LINKS".into(),
+            properties: BTreeMap::new(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        })
+        .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH p = (a:Node {_id: 'Node:A'})-[:LINKS]->(b:Node {_id: 'Node:B'}) RETURN p AS path, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert!(outcome.result.rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn engine_distributed_direct_path_persists_remote_edge_on_access_metadata() {
+        use copperdb_replication::{InMemoryReplicaTransport, StorageEngineAdapter};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementKey, PlacementRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let placement = PlacementKey::default_for_database("copper");
+        db.storage()
+            .register_topology_peer(
+                &MeshPeer::new("node-1", "node-1.mesh.local:9000")
+                    .with_capability(NodeCapability::Storage)
+                    .with_capability(NodeCapability::Coordinator),
+            )
+            .unwrap();
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec![],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        db.execute(
+            "CREATE PROMOTION POLICY edge_access FOR ()-[r:LINKS]-() APPLY { ON ACCESS { SET r.lastAccessedAt = timestamp() SET r.accessCount = coalesce(r.accessCount, 0) + 1 } }",
+            Default::default(),
+        )
+        .unwrap();
+
+        let peer_dir = tempfile::tempdir().unwrap();
+        let peer_path = peer_dir.path().join("peer");
+        let peer = StorageEngine::open(&peer_path).unwrap();
+        peer.put_node_record(&copperdb_storage::NodeRecord {
+            id: "Node:A".into(),
+            labels: vec!["Node".into()],
+            properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
+            created_at_unix_ms: 123,
+            updated_at_unix_ms: 123,
+        })
+        .unwrap();
+        peer.put_node_record(&copperdb_storage::NodeRecord {
+            id: "Node:B".into(),
+            labels: vec!["Node".into()],
+            properties: BTreeMap::from([("name".into(), Value::String("b".into()))]),
+            created_at_unix_ms: 123,
+            updated_at_unix_ms: 123,
+        })
+        .unwrap();
+        peer.put_edge_record(&EdgeRecord {
+            id: "edge:a-b".into(),
+            start_node: "Node:A".into(),
+            end_node: "Node:B".into(),
+            edge_type: "LINKS".into(),
+            properties: BTreeMap::new(),
+            created_at_unix_ms: 123,
+            updated_at_unix_ms: 123,
+        })
+        .unwrap();
+
+        let transport = Arc::new(InMemoryReplicaTransport::new());
+        transport.register("node-1", Arc::new(StorageEngineAdapter::new(peer)));
+
+        let outcome = db
+            .execute_distributed_as(
+                "MATCH p = (a:Node {_id: 'Node:A'})-[:LINKS]->(b:Node {_id: 'Node:B'}) RETURN p AS path, length(p) AS hops",
+                HashMap::new(),
+                &["admin".into()],
+                &placement,
+                ConsistencyLevel::One,
+                None,
+                transport,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.result.rows.len(), 1);
+        assert_eq!(outcome.result.rows[0].get("hops"), Some(&Value::from(1)));
+
+        let reopened_peer = StorageEngine::open(&peer_path).unwrap();
+        let metadata = reopened_peer
+            .get_knowledge_policy_access_metadata("edge:a-b")
+            .unwrap()
+            .expect("expected replicated edge access metadata");
+        assert_eq!(metadata.access_count, 2);
+        assert!(metadata.last_accessed_at_unix_ms.is_some());
     }
 
     #[tokio::test]

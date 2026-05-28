@@ -622,6 +622,15 @@ impl ReplicaTransport for NornicGrpcReplicaTransport {
         self.endpoint_for(target)?;
         Err(self.graph_read_unavailable(target, "graph_nodes_by_property"))
     }
+
+    async fn graph_access_metadata(
+        &self,
+        target: &str,
+        _entity_id: &str,
+    ) -> Result<Option<copperdb_storage::KnowledgePolicyAccessMetadata>, ReplicationError> {
+        self.endpoint_for(target)?;
+        Err(self.graph_read_unavailable(target, "graph_access_metadata"))
+    }
 }
 
 #[async_trait]

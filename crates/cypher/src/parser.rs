@@ -187,6 +187,10 @@ impl Parser {
         parse_expression_text(expression.raw_text)
     }
 
+    pub fn parse_expression_text(&self, text: &str) -> Result<Expression, CypherError> {
+        parse_expression_text(text)
+    }
+
     pub fn parse(&self, cypher: &str) -> Result<Query, CypherError> {
         let tokens = self.tokenize_only(cypher)?;
         self.parse_tokenized(tokens)

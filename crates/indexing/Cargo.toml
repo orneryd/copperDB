@@ -10,8 +10,12 @@ repository.workspace = true
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 petgraph.workspace = true
 copperdb-storage = { workspace = true }
 copperdb-util = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true

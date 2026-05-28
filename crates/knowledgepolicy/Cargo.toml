@@ -1,0 +1,14 @@
+[package]
+name = "copperdb-knowledgepolicy"
+description = "Knowledge-policy binding resolution and promotion/decay runtime contracts"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+copperdb-cypher = { workspace = true }
+copperdb-storage = { workspace = true }

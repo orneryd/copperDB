@@ -159,6 +159,15 @@ pub struct ShowIndexesClause;
 pub struct CreateDecayProfileClause {
     pub name: String,
     pub options: HashMap<String, Value>,
+    pub target: Option<KnowledgePolicyTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePolicyTarget {
+    pub target_labels: Vec<String>,
+    pub target_edge_type: Option<String>,
+    pub is_wildcard: bool,
+    pub is_edge: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -204,11 +213,23 @@ pub struct PromotionWhenClause {
     pub order: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromotionOnAccessMutationKind {
+    SetLastAccessedNow,
+    IncrementAccessCount,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromotionOnAccessMutation {
+    pub kind: PromotionOnAccessMutationKind,
+}
+
 #[derive(Debug, Clone)]
 pub struct CreatePromotionPolicyClause {
     pub name: String,
-    pub target_labels: Vec<String>,
+    pub target: KnowledgePolicyTarget,
     pub enabled: bool,
+    pub on_access_mutations: Vec<PromotionOnAccessMutation>,
     pub when_clauses: Vec<PromotionWhenClause>,
 }
 

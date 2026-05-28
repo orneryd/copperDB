@@ -3,7 +3,7 @@
 //! Equivalent to Go's `pkg/filter` in NornicDB.
 //! Applies WHERE clause predicates and result projections to query output rows.
 
-use copperdb_cypher::Expression;
+use copperdb_cypher::{Expression, LiteralValue};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -33,7 +33,7 @@ pub fn eval_expression(
     params: &HashMap<String, Value>,
 ) -> Result<Value, FilterError> {
     match expr {
-        Expression::Literal(v) => Ok(v.clone()),
+        Expression::Literal(v) => Ok(literal_value_to_json(v)),
 
         Expression::Parameter(name) => params
             .get(name)
@@ -59,19 +59,15 @@ pub fn eval_expression(
             Ok(Value::Null)
         }
 
-        Expression::Comparison { left, op, right } => {
-            let lv = eval_expression(left, row, params)?;
-            let rv = eval_expression(right, row, params)?;
+        Expression::Comparison { operands, op } => {
+            let lv = eval_expression(&operands.left, row, params)?;
+            let rv = eval_expression(&operands.right, row, params)?;
             Ok(Value::Bool(compare_values(&lv, op, &rv)?))
         }
 
-        Expression::InList {
-            value,
-            list,
-            negated,
-        } => {
-            let needle = eval_expression(value, row, params)?;
-            let haystack = eval_expression(list, row, params)?;
+        Expression::InList { operands, negated } => {
+            let needle = eval_expression(&operands.left, row, params)?;
+            let haystack = eval_expression(&operands.right, row, params)?;
             let contains = match haystack {
                 Value::Array(items) => items.iter().any(|item| values_equal(item, &needle)),
                 _ => return Err(FilterError::TypeError("IN requires a list value".into())),
@@ -79,19 +75,19 @@ pub fn eval_expression(
             Ok(Value::Bool(if *negated { !contains } else { contains }))
         }
 
-        Expression::And(a, b) => {
+        Expression::And(operands) => {
             // Short-circuit
-            if !eval_predicate(a, row, params)? {
+            if !eval_predicate(&operands.left, row, params)? {
                 return Ok(Value::Bool(false));
             }
-            Ok(Value::Bool(eval_predicate(b, row, params)?))
+            Ok(Value::Bool(eval_predicate(&operands.right, row, params)?))
         }
 
-        Expression::Or(a, b) => {
-            if eval_predicate(a, row, params)? {
+        Expression::Or(operands) => {
+            if eval_predicate(&operands.left, row, params)? {
                 return Ok(Value::Bool(true));
             }
-            Ok(Value::Bool(eval_predicate(b, row, params)?))
+            Ok(Value::Bool(eval_predicate(&operands.right, row, params)?))
         }
 
         Expression::Not(inner) => Ok(Value::Bool(!eval_predicate(inner, row, params)?)),
@@ -120,8 +116,11 @@ pub fn eval_expression(
 
         Expression::MapLiteral(entries) => {
             let mut map = Map::new();
-            for (key, value) in entries {
-                map.insert(key.clone(), eval_expression(value, row, params)?);
+            for entry in entries {
+                map.insert(
+                    entry.key.clone(),
+                    eval_expression(&entry.value, row, params)?,
+                );
             }
             Ok(Value::Object(map))
         }
@@ -172,6 +171,18 @@ fn compare_values(left: &Value, op: &str, right: &Value) -> Result<bool, FilterE
             Ok(re.is_match(&s))
         }
         _ => Err(FilterError::TypeError(format!("unknown operator: {op}"))),
+    }
+}
+
+fn literal_value_to_json(value: &LiteralValue) -> Value {
+    match value {
+        LiteralValue::String(value) => Value::String(value.clone()),
+        LiteralValue::Integer(value) => Value::Number((*value).into()),
+        LiteralValue::Float(value) => serde_json::Number::from_f64(*value)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        LiteralValue::Bool(value) => Value::Bool(*value),
+        LiteralValue::Null => Value::Null,
     }
 }
 
@@ -545,8 +556,32 @@ impl Predicate for EqPredicate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use copperdb_cypher::Expression;
+    use copperdb_cypher::{BinaryExpression, Expression, LiteralValue, PropertyEntry};
     use serde_json::json;
+
+    fn literal_int(value: i64) -> Expression {
+        Expression::Literal(LiteralValue::Integer(value))
+    }
+
+    fn literal_string(value: &str) -> Expression {
+        Expression::Literal(LiteralValue::String(value.to_string()))
+    }
+
+    fn literal_bool(value: bool) -> Expression {
+        Expression::Literal(LiteralValue::Bool(value))
+    }
+
+    fn literal_null() -> Expression {
+        Expression::Literal(LiteralValue::Null)
+    }
+
+    fn list(items: Vec<Expression>) -> Expression {
+        Expression::ListLiteral(items)
+    }
+
+    fn binary(left: Expression, right: Expression) -> Box<BinaryExpression> {
+        Box::new(BinaryExpression { left, right })
+    }
 
     #[test]
     fn test_eq_predicate() {
@@ -564,7 +599,7 @@ mod tests {
 
     #[test]
     fn test_literal() {
-        let expr = Expression::Literal(json!(42));
+        let expr = literal_int(42);
         let row = HashMap::new();
         let params = HashMap::new();
         assert_eq!(eval_expression(&expr, &row, &params).unwrap(), json!(42));
@@ -572,8 +607,8 @@ mod tests {
 
     #[test]
     fn test_list_literal_evaluates_items() {
-        let expr = Expression::ListLiteral(vec![
-            Expression::Literal(json!(1)),
+        let expr = list(vec![
+            literal_int(1),
             Expression::Parameter("second".into()),
             Expression::Variable("third".into()),
         ]);
@@ -591,11 +626,14 @@ mod tests {
     #[test]
     fn test_map_literal_evaluates_values() {
         let expr = Expression::MapLiteral(vec![
-            ("name".into(), Expression::Parameter("name".into())),
-            (
-                "tags".into(),
-                Expression::ListLiteral(vec![Expression::Variable("tag".into())]),
-            ),
+            PropertyEntry {
+                key: "name".into(),
+                value: Expression::Parameter("name".into()),
+            },
+            PropertyEntry {
+                key: "tags".into(),
+                value: list(vec![Expression::Variable("tag".into())]),
+            },
         ]);
         let mut row = HashMap::new();
         row.insert("tag".into(), json!("engineer"));
@@ -650,9 +688,8 @@ mod tests {
     #[test]
     fn test_comparison_eq() {
         let expr = Expression::Comparison {
-            left: Box::new(Expression::Literal(json!(5))),
+            operands: binary(literal_int(5), literal_int(5)),
             op: "=".to_string(),
-            right: Box::new(Expression::Literal(json!(5))),
         };
         let row = HashMap::new();
         let params = HashMap::new();
@@ -662,9 +699,8 @@ mod tests {
     #[test]
     fn test_comparison_lt() {
         let expr = Expression::Comparison {
-            left: Box::new(Expression::Literal(json!(3))),
+            operands: binary(literal_int(3), literal_int(5)),
             op: "<".to_string(),
-            right: Box::new(Expression::Literal(json!(5))),
         };
         assert_eq!(
             eval_expression(&expr, &HashMap::new(), &HashMap::new()).unwrap(),
@@ -675,9 +711,8 @@ mod tests {
     #[test]
     fn test_comparison_contains() {
         let expr = Expression::Comparison {
-            left: Box::new(Expression::Literal(json!("Hello World"))),
+            operands: binary(literal_string("Hello World"), literal_string("World")),
             op: "CONTAINS".to_string(),
-            right: Box::new(Expression::Literal(json!("World"))),
         };
         assert_eq!(
             eval_expression(&expr, &HashMap::new(), &HashMap::new()).unwrap(),
@@ -688,9 +723,8 @@ mod tests {
     #[test]
     fn test_comparison_regex_match() {
         let expr = Expression::Comparison {
-            left: Box::new(Expression::Literal(json!("Alice"))),
+            operands: binary(literal_string("Alice"), literal_string("A.*")),
             op: "=~".to_string(),
-            right: Box::new(Expression::Literal(json!("A.*"))),
         };
         assert_eq!(
             eval_expression(&expr, &HashMap::new(), &HashMap::new()).unwrap(),
@@ -701,18 +735,17 @@ mod tests {
     #[test]
     fn test_in_and_not_in_list() {
         let expr = Expression::InList {
-            value: Box::new(Expression::Variable("status".into())),
-            list: Box::new(Expression::ListLiteral(vec![
-                Expression::Literal(json!("active")),
-                Expression::Literal(json!("pending")),
-            ])),
+            operands: binary(
+                Expression::Variable("status".into()),
+                list(vec![literal_string("active"), literal_string("pending")]),
+            ),
             negated: false,
         };
         let negated = Expression::InList {
-            value: Box::new(Expression::Variable("status".into())),
-            list: Box::new(Expression::ListLiteral(vec![Expression::Literal(json!(
-                "deleted"
-            ))])),
+            operands: binary(
+                Expression::Variable("status".into()),
+                list(vec![literal_string("deleted")]),
+            ),
             negated: true,
         };
         let mut row = HashMap::new();
@@ -730,10 +763,7 @@ mod tests {
 
     #[test]
     fn test_and_short_circuit() {
-        let expr = Expression::And(
-            Box::new(Expression::Literal(json!(false))),
-            Box::new(Expression::Literal(json!(true))),
-        );
+        let expr = Expression::And(binary(literal_bool(false), literal_bool(true)));
         assert_eq!(
             eval_predicate(&expr, &HashMap::new(), &HashMap::new()).unwrap(),
             false
@@ -742,10 +772,7 @@ mod tests {
 
     #[test]
     fn test_or_short_circuit() {
-        let expr = Expression::Or(
-            Box::new(Expression::Literal(json!(true))),
-            Box::new(Expression::Literal(json!(false))),
-        );
+        let expr = Expression::Or(binary(literal_bool(true), literal_bool(false)));
         assert_eq!(
             eval_predicate(&expr, &HashMap::new(), &HashMap::new()).unwrap(),
             true
@@ -754,7 +781,7 @@ mod tests {
 
     #[test]
     fn test_not() {
-        let expr = Expression::Not(Box::new(Expression::Literal(json!(false))));
+        let expr = Expression::Not(Box::new(literal_bool(false)));
         assert_eq!(
             eval_predicate(&expr, &HashMap::new(), &HashMap::new()).unwrap(),
             true
@@ -763,7 +790,7 @@ mod tests {
 
     #[test]
     fn test_is_null() {
-        let expr = Expression::IsNull(Box::new(Expression::Literal(Value::Null)));
+        let expr = Expression::IsNull(Box::new(literal_null()));
         assert_eq!(
             eval_predicate(&expr, &HashMap::new(), &HashMap::new()).unwrap(),
             true
@@ -772,7 +799,7 @@ mod tests {
 
     #[test]
     fn test_is_not_null() {
-        let expr = Expression::IsNotNull(Box::new(Expression::Literal(json!("hello"))));
+        let expr = Expression::IsNotNull(Box::new(literal_string("hello")));
         assert_eq!(
             eval_predicate(&expr, &HashMap::new(), &HashMap::new()).unwrap(),
             true
@@ -783,7 +810,7 @@ mod tests {
     fn test_function_toupper() {
         let expr = Expression::FunctionCall {
             name: "toUpper".to_string(),
-            args: vec![Expression::Literal(json!("hello"))],
+            args: vec![literal_string("hello")],
             distinct: false,
         };
         assert_eq!(
@@ -796,7 +823,7 @@ mod tests {
     fn test_function_size_array() {
         let expr = Expression::FunctionCall {
             name: "size".to_string(),
-            args: vec![Expression::Literal(json!([1, 2, 3]))],
+            args: vec![list(vec![literal_int(1), literal_int(2), literal_int(3)])],
             distinct: false,
         };
         assert_eq!(
@@ -810,9 +837,9 @@ mod tests {
         let expr = Expression::FunctionCall {
             name: "substring".to_string(),
             args: vec![
-                Expression::Literal(json!("Hello World")),
-                Expression::Literal(json!(6)),
-                Expression::Literal(json!(5)),
+                literal_string("Hello World"),
+                literal_int(6),
+                literal_int(5),
             ],
             distinct: false,
         };
@@ -838,9 +865,8 @@ mod tests {
     fn test_string_ordering() {
         // "apple" < "banana" in lexicographic order
         let expr_lt = Expression::Comparison {
-            left: Box::new(Expression::Literal(json!("apple"))),
+            operands: binary(literal_string("apple"), literal_string("banana")),
             op: "<".to_string(),
-            right: Box::new(Expression::Literal(json!("banana"))),
         };
         assert_eq!(
             eval_expression(&expr_lt, &HashMap::new(), &HashMap::new()).unwrap(),
@@ -849,9 +875,8 @@ mod tests {
 
         // "zebra" > "ant"
         let expr_gt = Expression::Comparison {
-            left: Box::new(Expression::Literal(json!("zebra"))),
+            operands: binary(literal_string("zebra"), literal_string("ant")),
             op: ">".to_string(),
-            right: Box::new(Expression::Literal(json!("ant"))),
         };
         assert_eq!(
             eval_expression(&expr_gt, &HashMap::new(), &HashMap::new()).unwrap(),
@@ -860,9 +885,8 @@ mod tests {
 
         // equal strings
         let expr_eq = Expression::Comparison {
-            left: Box::new(Expression::Literal(json!("same"))),
+            operands: binary(literal_string("same"), literal_string("same")),
             op: "=".to_string(),
-            right: Box::new(Expression::Literal(json!("same"))),
         };
         assert_eq!(
             eval_expression(&expr_eq, &HashMap::new(), &HashMap::new()).unwrap(),
@@ -875,9 +899,8 @@ mod tests {
         // Comparing a number and a string with < should return a FilterError,
         // not silently return false.
         let expr = Expression::Comparison {
-            left: Box::new(Expression::Literal(json!(42))),
+            operands: binary(literal_int(42), literal_string("text")),
             op: "<".to_string(),
-            right: Box::new(Expression::Literal(json!("text"))),
         };
         assert!(eval_predicate(&expr, &HashMap::new(), &HashMap::new()).is_err());
     }

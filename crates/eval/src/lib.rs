@@ -4,18 +4,28 @@
 
 use copperdb_cypher::{
     Clause, ConstraintKind, EdgeDirection, EdgePattern, Expression, NodePattern, Pattern,
-    PatternInfo, PipelineClause, PipelineClauseKind, Query, QueryPattern, ReturnItem, ShapeKind,
-    ShapeMatch, ShapeValue,
+    PatternInfo, PipelineClause, PipelineClauseKind, PropertyEntry, Query, QueryPattern,
+    ReturnItem, ShapeKind, ShapeMatch, ShapeValue, LiteralValue,
 };
 use copperdb_filter::{eval_expression, eval_predicate};
+use copperdb_indexing::{IndexCatalog, IndexError};
+use copperdb_knowledgepolicy::{
+    access_metadata_after_policy_access,
+    build_binding_table, build_bundles_by_name, build_decay_bindings,
+    build_promotion_policies_by_name, build_promotion_profiles_by_name, merge_access_metadata,
+    score_binding, AccessFlusher, AccessMutationBuffer, CompiledBinding,
+    PromotionProfileDef, Resolver, ScoreFromMode,
+};
 use copperdb_storage::{
-    Constraint, ConstraintEntityType, ConstraintType, DecayProfileSchema, EdgeRecord,
-    IndexDefinition, IndexEntityType, PromotionPolicySchema, PromotionProfileSchema,
-    PromotionWhenClauseSchema, StorageEngine,
+    Constraint, ConstraintEntityType, ConstraintType, DecayProfileBindingSchema,
+    DecayProfileSchema, EdgeRecord, KnowledgePolicyAccessMetadata, NodeRecord,
+    PromotionOnAccessMutationKindSchema, PromotionOnAccessMutationSchema,
+    PromotionPolicySchema, PromotionProfileSchema, PromotionWhenClauseSchema, StorageEngine,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -43,6 +53,12 @@ impl From<copperdb_storage::StorageError> for EvalError {
     }
 }
 
+impl From<IndexError> for EvalError {
+    fn from(e: IndexError) -> Self {
+        EvalError::ExecutionError(e.to_string())
+    }
+}
+
 impl From<copperdb_filter::FilterError> for EvalError {
     fn from(e: copperdb_filter::FilterError) -> Self {
         EvalError::FilterError(e.to_string())
@@ -66,6 +82,95 @@ pub struct EvalResult {
     pub stats: QueryStats,
 }
 
+#[derive(Debug, Clone)]
+struct KnowledgePolicyInspection {
+    entity_id: Option<String>,
+    target_kind: String,
+    target_labels: Vec<String>,
+    target_edge_type: Option<String>,
+    decay_binding: Option<String>,
+    promotion_policy: Option<String>,
+    matched_promotion_profile: Option<String>,
+    matched_promotion_predicate: Option<String>,
+    score_from: Option<String>,
+    anchor_unix_ms: Option<i64>,
+    access_count: Option<u64>,
+    last_accessed_at_unix_ms: Option<i64>,
+    base_score: f64,
+    final_score: f64,
+    visibility_threshold: f64,
+    suppressed: bool,
+    dry_run: bool,
+    explanation: String,
+}
+
+impl KnowledgePolicyInspection {
+    fn into_row(self) -> Row {
+        let mut row = Row::new();
+        row.insert(
+            "entityId".to_string(),
+            self.entity_id.map(Value::String).unwrap_or(Value::Null),
+        );
+        row.insert("targetKind".to_string(), Value::String(self.target_kind));
+        row.insert(
+            "targetLabels".to_string(),
+            Value::Array(self.target_labels.into_iter().map(Value::String).collect()),
+        );
+        row.insert(
+            "targetEdgeType".to_string(),
+            self.target_edge_type.map(Value::String).unwrap_or(Value::Null),
+        );
+        row.insert(
+            "decayBinding".to_string(),
+            self.decay_binding.map(Value::String).unwrap_or(Value::Null),
+        );
+        row.insert(
+            "promotionPolicy".to_string(),
+            self.promotion_policy.map(Value::String).unwrap_or(Value::Null),
+        );
+        row.insert(
+            "matchedPromotionProfile".to_string(),
+            self.matched_promotion_profile
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        row.insert(
+            "matchedPromotionPredicate".to_string(),
+            self.matched_promotion_predicate
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        row.insert(
+            "scoreFrom".to_string(),
+            self.score_from.map(Value::String).unwrap_or(Value::Null),
+        );
+        row.insert(
+            "anchorUnixMs".to_string(),
+            self.anchor_unix_ms.map(Value::from).unwrap_or(Value::Null),
+        );
+        row.insert(
+            "accessCount".to_string(),
+            self.access_count.map(Value::from).unwrap_or(Value::Null),
+        );
+        row.insert(
+            "lastAccessedAtUnixMs".to_string(),
+            self.last_accessed_at_unix_ms
+                .map(Value::from)
+                .unwrap_or(Value::Null),
+        );
+        row.insert("baseScore".to_string(), Value::from(self.base_score));
+        row.insert("finalScore".to_string(), Value::from(self.final_score));
+        row.insert(
+            "visibilityThreshold".to_string(),
+            Value::from(self.visibility_threshold),
+        );
+        row.insert("suppressed".to_string(), Value::Bool(self.suppressed));
+        row.insert("dryRun".to_string(), Value::Bool(self.dry_run));
+        row.insert("explanation".to_string(), Value::String(self.explanation));
+        row
+    }
+}
+
 /// The query executor.
 pub struct EvalEngine {
     storage: Arc<StorageEngine>,
@@ -75,6 +180,7 @@ pub struct EvalEngine {
     /// Invalidated on any write operation (CREATE / SET / DELETE) and on query error
     /// to prevent stale entries from masking newly created or deleted nodes.
     node_lookup_cache: Arc<Mutex<HashMap<String, Value>>>,
+    access_flusher: Arc<AccessFlusher>,
 }
 
 impl EvalEngine {
@@ -82,7 +188,64 @@ impl EvalEngine {
         Self {
             storage,
             node_lookup_cache: Arc::new(Mutex::new(HashMap::new())),
+            access_flusher: Arc::new(AccessFlusher::new()),
         }
+    }
+
+    fn with_access_buffer<T, F>(&self, operation: F) -> Result<T, EvalError>
+    where
+        F: FnOnce() -> Result<T, EvalError>,
+    {
+        self.access_flusher
+            .with_buffer(operation, |buffer| self.flush_access_mutation_buffer(buffer))
+    }
+
+    fn flush_access_mutation_buffer(
+        &self,
+        buffer: AccessMutationBuffer,
+    ) -> Result<(), EvalError> {
+        for (entity_id, pending) in buffer {
+            if pending.access_count_delta == 0 && pending.last_accessed_at_unix_ms.is_none() {
+                continue;
+            }
+            let mut metadata = self
+                .storage
+                .get_knowledge_policy_access_metadata(&entity_id)?
+                .unwrap_or_default();
+            if let Some(last_accessed_at_unix_ms) = pending.last_accessed_at_unix_ms {
+                metadata.last_accessed_at_unix_ms = Some(
+                    metadata
+                        .last_accessed_at_unix_ms
+                        .map(|current| current.max(last_accessed_at_unix_ms))
+                        .unwrap_or(last_accessed_at_unix_ms),
+                );
+            }
+            metadata.access_count = metadata
+                .access_count
+                .saturating_add(pending.access_count_delta);
+            self.storage
+                .put_knowledge_policy_access_metadata(&entity_id, &metadata)?;
+        }
+        Ok(())
+    }
+
+    pub fn knowledge_policy_resolver(&self) -> Result<Resolver, EvalError> {
+        let bundles = build_bundles_by_name(&self.storage.load_decay_profile_schemas()?)
+            .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
+        let bindings = build_decay_bindings(&self.storage.load_decay_profile_binding_schemas()?);
+        let promotion_profiles =
+            build_promotion_profiles_by_name(&self.storage.load_promotion_profile_schemas()?)
+                .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
+        let promotion_policies =
+            build_promotion_policies_by_name(&self.storage.load_promotion_policy_schemas()?);
+        let binding_table = build_binding_table(
+            &bundles,
+            &bindings,
+            &promotion_profiles,
+            &promotion_policies,
+        )
+        .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
+        Ok(Resolver::new(binding_table))
     }
 
     // ── MERGE node-lookup cache helpers ──────────────────────────────────────
@@ -132,14 +295,12 @@ impl EvalEngine {
 
         // Verify the cached node is still alive in storage and still matches all props.
         if let Some(Value::String(id)) = cached.as_object().and_then(|o| o.get("_id")) {
-            if let Ok(Some(bytes)) = self.storage.get_node(id) {
-                if let Ok(live_props) = rmp_serde::from_slice::<HashMap<String, Value>>(&bytes) {
-                    let all_props_match = props
-                        .iter()
-                        .all(|(k, v)| live_props.get(k).map(|pv| pv == v).unwrap_or(false));
-                    if all_props_match {
-                        return Some(cached);
-                    }
+            if let Ok(Some(live_props)) = self.node_props_by_id(id) {
+                let all_props_match = props
+                    .iter()
+                    .all(|(k, v)| live_props.get(k).map(|pv| pv == v).unwrap_or(false));
+                if all_props_match {
+                    return Some(cached);
                 }
             }
             // Stale – evict the entry
@@ -182,6 +343,14 @@ impl EvalEngine {
         query: &Query,
         params: &HashMap<String, Value>,
     ) -> Result<EvalResult, EvalError> {
+        self.with_access_buffer(|| self.execute_inner(query, params))
+    }
+
+    fn execute_inner(
+        &self,
+        query: &Query,
+        params: &HashMap<String, Value>,
+    ) -> Result<EvalResult, EvalError> {
         let mut current_rows = pooled_binding_rows();
         current_rows.push(HashMap::new());
         let mut stats = QueryStats::default();
@@ -190,6 +359,10 @@ impl EvalEngine {
 
         for clause in &query.clauses {
             match clause {
+                Clause::Call(call) => {
+                    return self.execute_call_clause(call, params);
+                }
+
                 Clause::CreateConstraint(create) => {
                     let existing = self.storage.load_constraints()?;
                     let already_exists = existing.iter().any(|c| c.name == create.name);
@@ -273,37 +446,31 @@ impl EvalEngine {
                 }
 
                 Clause::CreateIndex(create) => {
-                    let existing = self.storage.load_index_definitions()?;
-                    let already_exists = existing.iter().any(|i| i.name == create.name);
-                    if already_exists {
-                        if create.if_not_exists {
-                            continue;
-                        }
-                        return Err(EvalError::ExecutionError(format!(
-                            "index \"{}\" already exists",
-                            create.name
-                        )));
-                    }
-                    self.storage.persist_index_definition(&IndexDefinition {
+                    let catalog = IndexCatalog::new(self.storage.as_ref());
+                    let definition = copperdb_indexing::CatalogIndexDefinition {
                         name: create.name.clone(),
-                        entity_type: IndexEntityType::Node,
+                        entity_type: copperdb_indexing::CatalogIndexEntityType::Node,
                         label: create.label.clone(),
                         properties: create.properties.clone(),
-                    })?;
+                    };
+                    if create.if_not_exists {
+                        catalog.create_if_absent(definition)?;
+                    } else {
+                        catalog.create(definition)?;
+                    }
                 }
 
                 Clause::DropIndex(drop) => {
-                    let deleted = self.storage.delete_index_definition(&drop.name)?;
-                    if !deleted && !drop.if_exists {
-                        return Err(EvalError::ExecutionError(format!(
-                            "index \"{}\" not found",
-                            drop.name
-                        )));
+                    let catalog = IndexCatalog::new(self.storage.as_ref());
+                    if drop.if_exists {
+                        catalog.drop_if_present(&drop.name)?;
+                    } else {
+                        catalog.drop(&drop.name)?;
                     }
                 }
 
                 Clause::ShowIndexes(_) => {
-                    let indexes = self.storage.load_index_definitions()?;
+                    let indexes = IndexCatalog::new(self.storage.as_ref()).list()?;
                     columns = vec![
                         "name".to_string(),
                         "entityType".to_string(),
@@ -319,8 +486,10 @@ impl EvalEngine {
                                 "entityType".to_string(),
                                 Value::String(
                                     match idx.entity_type {
-                                        IndexEntityType::Node => "NODE",
-                                        IndexEntityType::Relationship => "RELATIONSHIP",
+                                        copperdb_indexing::CatalogIndexEntityType::Node => "NODE",
+                                        copperdb_indexing::CatalogIndexEntityType::Relationship => {
+                                            "RELATIONSHIP"
+                                        }
                                     }
                                     .to_string(),
                                 ),
@@ -338,26 +507,51 @@ impl EvalEngine {
                 }
 
                 Clause::CreateDecayProfile(create) => {
-                    let profile = DecayProfileSchema {
-                        name: create.name.clone(),
-                        half_life_seconds: option_i64(&create.options, "halfLifeSeconds", 0)?,
-                        visibility_threshold: option_f64(
-                            &create.options,
-                            "visibilityThreshold",
-                            0.0,
-                        )?,
-                        score_floor: option_f64(&create.options, "scoreFloor", 0.0)?,
-                        function: option_string(&create.options, "function", "none")?,
-                        scope: option_string(&create.options, "scope", "NODE")?,
-                        decay_enabled: option_bool(&create.options, "decayEnabled", true)?,
-                        score_from: option_string(&create.options, "scoreFrom", "CREATED")?,
-                        score_from_property: create
-                            .options
-                            .get("scoreFromProperty")
-                            .and_then(|v| v.as_str().map(|s| s.to_string())),
-                        enabled: option_bool(&create.options, "enabled", true)?,
-                    };
-                    self.storage.persist_decay_profile_schema(&profile)?;
+                    if let Some(target) = &create.target {
+                        let binding = DecayProfileBindingSchema {
+                            name: create.name.clone(),
+                            target_labels: target.target_labels.clone(),
+                            target_edge_type: target.target_edge_type.clone(),
+                            is_wildcard: target.is_wildcard,
+                            is_edge: target.is_edge,
+                            profile_ref: create
+                                .options
+                                .get("profileRef")
+                                .and_then(|v| v.as_str().map(|s| s.to_string())),
+                            no_decay: option_bool(&create.options, "noDecay", false)?,
+                            visibility_threshold: match create.options.get("visibilityThreshold") {
+                                Some(_) => Some(option_f64(
+                                    &create.options,
+                                    "visibilityThreshold",
+                                    0.0,
+                                )?),
+                                None => None,
+                            },
+                            order: option_i64(&create.options, "order", 0)?,
+                        };
+                        self.storage.persist_decay_profile_binding_schema(&binding)?;
+                    } else {
+                        let profile = DecayProfileSchema {
+                            name: create.name.clone(),
+                            half_life_seconds: option_i64(&create.options, "halfLifeSeconds", 0)?,
+                            visibility_threshold: option_f64(
+                                &create.options,
+                                "visibilityThreshold",
+                                0.0,
+                            )?,
+                            score_floor: option_f64(&create.options, "scoreFloor", 0.0)?,
+                            function: option_string(&create.options, "function", "none")?,
+                            scope: option_string(&create.options, "scope", "NODE")?,
+                            decay_enabled: option_bool(&create.options, "decayEnabled", true)?,
+                            score_from: option_string(&create.options, "scoreFrom", "CREATED")?,
+                            score_from_property: create
+                                .options
+                                .get("scoreFromProperty")
+                                .and_then(|v| v.as_str().map(|s| s.to_string())),
+                            enabled: option_bool(&create.options, "enabled", true)?,
+                        };
+                        self.storage.persist_decay_profile_schema(&profile)?;
+                    }
                 }
 
                 Clause::AlterDecayProfile(alter) => {
@@ -367,51 +561,62 @@ impl EvalEngine {
                 }
 
                 Clause::DropDecayProfile(drop) => {
-                    self.storage
-                        .delete_decay_profile_schema(&drop.name, drop.if_exists)?;
+                    if self
+                        .storage
+                        .load_decay_profile_binding_schemas()?
+                        .iter()
+                        .any(|binding| binding.name == drop.name)
+                    {
+                        self.storage
+                            .delete_decay_profile_binding_schema(&drop.name, drop.if_exists)?;
+                    } else {
+                        self.storage
+                            .delete_decay_profile_schema(&drop.name, drop.if_exists)?;
+                    }
                 }
 
                 Clause::ShowDecayProfiles(_) => {
                     let profiles = self.storage.load_decay_profile_schemas()?;
+                    let bindings = self.storage.load_decay_profile_binding_schemas()?;
                     columns = vec![
+                        "kind".to_string(),
                         "name".to_string(),
-                        "halfLifeSeconds".to_string(),
-                        "visibilityThreshold".to_string(),
-                        "scoreFloor".to_string(),
-                        "function".to_string(),
                         "scope".to_string(),
-                        "decayEnabled".to_string(),
-                        "scoreFrom".to_string(),
-                        "scoreFromProperty".to_string(),
+                        "target".to_string(),
+                        "profileRef".to_string(),
                         "enabled".to_string(),
                     ];
-                    result_rows = profiles
-                        .into_iter()
-                        .map(|p| {
+                    result_rows = profiles.into_iter().map(|p| {
                             let mut row = Row::new();
+                            row.insert("kind".to_string(), Value::String("bundle".to_string()));
                             row.insert("name".to_string(), Value::String(p.name));
-                            row.insert(
-                                "halfLifeSeconds".to_string(),
-                                Value::from(p.half_life_seconds),
-                            );
-                            row.insert(
-                                "visibilityThreshold".to_string(),
-                                Value::from(p.visibility_threshold),
-                            );
-                            row.insert("scoreFloor".to_string(), Value::from(p.score_floor));
-                            row.insert("function".to_string(), Value::String(p.function));
                             row.insert("scope".to_string(), Value::String(p.scope));
-                            row.insert("decayEnabled".to_string(), Value::Bool(p.decay_enabled));
-                            row.insert("scoreFrom".to_string(), Value::String(p.score_from));
                             row.insert(
-                                "scoreFromProperty".to_string(),
-                                p.score_from_property
-                                    .map(Value::String)
-                                    .unwrap_or(Value::Null),
+                                "target".to_string(),
+                                Value::String(String::new()),
                             );
+                            row.insert("profileRef".to_string(), Value::Null);
                             row.insert("enabled".to_string(), Value::Bool(p.enabled));
                             row
                         })
+                        .chain(bindings.into_iter().map(|binding| {
+                            let scope = binding_scope(&binding).to_string();
+                            let target = binding_target(&binding);
+                            let profile_ref = binding.profile_ref.clone();
+                            let mut row = Row::new();
+                            row.insert("kind".to_string(), Value::String("binding".to_string()));
+                            row.insert("name".to_string(), Value::String(binding.name));
+                            row.insert("scope".to_string(), Value::String(scope));
+                            row.insert("target".to_string(), Value::String(target));
+                            row.insert(
+                                "profileRef".to_string(),
+                                profile_ref
+                                    .map(Value::String)
+                                    .unwrap_or(Value::Null),
+                            );
+                            row.insert("enabled".to_string(), Value::Bool(true));
+                            row
+                        }))
                         .collect();
                 }
 
@@ -466,8 +671,25 @@ impl EvalEngine {
                 Clause::CreatePromotionPolicy(create) => {
                     let policy = PromotionPolicySchema {
                         name: create.name.clone(),
-                        target_labels: create.target_labels.clone(),
+                        target_labels: create.target.target_labels.clone(),
+                        target_edge_type: create.target.target_edge_type.clone(),
+                        is_wildcard: create.target.is_wildcard,
+                        is_edge: create.target.is_edge,
                         enabled: create.enabled,
+                        on_access_mutations: create
+                            .on_access_mutations
+                            .iter()
+                            .map(|mutation| PromotionOnAccessMutationSchema {
+                                kind: match mutation.kind {
+                                    copperdb_cypher::PromotionOnAccessMutationKind::SetLastAccessedNow => {
+                                        PromotionOnAccessMutationKindSchema::SetLastAccessedNow
+                                    }
+                                    copperdb_cypher::PromotionOnAccessMutationKind::IncrementAccessCount => {
+                                        PromotionOnAccessMutationKindSchema::IncrementAccessCount
+                                    }
+                                },
+                            })
+                            .collect(),
                         when_clauses: create
                             .when_clauses
                             .iter()
@@ -498,7 +720,11 @@ impl EvalEngine {
                     columns = vec![
                         "name".to_string(),
                         "targetLabels".to_string(),
+                        "targetEdgeType".to_string(),
+                        "isWildcard".to_string(),
+                        "isEdge".to_string(),
                         "enabled".to_string(),
+                        "onAccessMutations".to_string(),
                         "whenClauses".to_string(),
                     ];
                     result_rows = policies
@@ -515,7 +741,29 @@ impl EvalEngine {
                                         .collect::<Vec<_>>(),
                                 ),
                             );
+                            row.insert(
+                                "targetEdgeType".to_string(),
+                                p.target_edge_type.map(Value::String).unwrap_or(Value::Null),
+                            );
+                            row.insert("isWildcard".to_string(), Value::Bool(p.is_wildcard));
+                            row.insert("isEdge".to_string(), Value::Bool(p.is_edge));
                             row.insert("enabled".to_string(), Value::Bool(p.enabled));
+                            row.insert(
+                                "onAccessMutations".to_string(),
+                                Value::Array(
+                                    p.on_access_mutations
+                                        .into_iter()
+                                        .map(|mutation| Value::String(match mutation.kind {
+                                            PromotionOnAccessMutationKindSchema::SetLastAccessedNow => {
+                                                "SET_LAST_ACCESSED_NOW".to_string()
+                                            }
+                                            PromotionOnAccessMutationKindSchema::IncrementAccessCount => {
+                                                "INCREMENT_ACCESS_COUNT".to_string()
+                                            }
+                                        }))
+                                        .collect(),
+                                ),
+                            );
                             row.insert(
                                 "whenClauses".to_string(),
                                 Value::Array(
@@ -558,31 +806,9 @@ impl EvalEngine {
                     // Iteratively cross-join each node pattern so that bindings from
                     // earlier patterns are visible when processing later ones.
                     for node_pat in &match_clause.pattern.nodes {
-                        let label = node_pat.labels.first().cloned().unwrap_or_default();
-                        let prefix = if label.is_empty() {
-                            String::new()
-                        } else {
-                            format!("{label}:")
-                        };
-
                         let mut new_rows = pooled_binding_rows();
                         for base_row in &current_rows {
-                            let expected_props = evaluate_pattern_properties(
-                                &node_pat.properties,
-                                base_row,
-                                params,
-                            )?;
-                            for item in self.storage.scan_nodes_with_prefix(&prefix) {
-                                let (_key, val) =
-                                    item.map_err(|e| EvalError::StorageError(e.to_string()))?;
-                                let props: HashMap<String, Value> = rmp_serde::from_slice(&val)
-                                    .map_err(|e| EvalError::SerializationError(e.to_string()))?;
-
-                                if !node_matches_pattern(&props, &node_pat.labels, &expected_props)
-                                {
-                                    continue;
-                                }
-
+                            for props in self.matching_node_props(node_pat, base_row, params)? {
                                 let node_val = serde_json::to_value(&props)
                                     .map_err(|e| EvalError::SerializationError(e.to_string()))?;
 
@@ -626,29 +852,10 @@ impl EvalEngine {
                     // Iteratively cross-join each node pattern, preserving rows
                     // with null bindings when no matching node exists.
                     for node_pat in &match_clause.pattern.nodes {
-                        let label = node_pat.labels.first().cloned().unwrap_or_default();
-                        let prefix = if label.is_empty() {
-                            String::new()
-                        } else {
-                            format!("{label}:")
-                        };
                         let mut new_rows = pooled_binding_rows();
                         let mut found_any = false;
                         for base_row in &current_rows {
-                            let expected_props = evaluate_pattern_properties(
-                                &node_pat.properties,
-                                base_row,
-                                params,
-                            )?;
-                            for item in self.storage.scan_nodes_with_prefix(&prefix) {
-                                let (_key, val) =
-                                    item.map_err(|e| EvalError::StorageError(e.to_string()))?;
-                                let props: HashMap<String, Value> = rmp_serde::from_slice(&val)
-                                    .map_err(|e| EvalError::SerializationError(e.to_string()))?;
-                                if !node_matches_pattern(&props, &node_pat.labels, &expected_props)
-                                {
-                                    continue;
-                                }
+                            for props in self.matching_node_props(node_pat, base_row, params)? {
                                 let node_val = serde_json::to_value(&props)
                                     .map_err(|e| EvalError::SerializationError(e.to_string()))?;
                                 let mut row = base_row.clone();
@@ -769,7 +976,7 @@ impl EvalEngine {
                         for var in &vars_to_delete {
                             if let Some(Value::Object(props)) = row.get(var) {
                                 if let Some(Value::String(id)) = props.get("_id") {
-                                    self.storage.delete_node(id)?;
+                                    self.storage.delete_node_record(id)?;
                                     stats.nodes_deleted += 1;
                                 }
                             }
@@ -791,15 +998,10 @@ impl EvalEngine {
                                 props.insert(item.property.clone(), new_val.clone());
                                 stats.properties_set += 1;
                                 // Persist to storage
-                                if let Some(Value::String(id)) = props.get("_id") {
-                                    let id = id.clone();
+                                if let Some(Value::String(_)) = props.get("_id") {
                                     let new_props: HashMap<String, Value> =
                                         props.clone().into_iter().collect();
-                                    let bytes =
-                                        rmp_serde::to_vec_named(&new_props).map_err(|e| {
-                                            EvalError::SerializationError(e.to_string())
-                                        })?;
-                                    self.storage.put_node(&id, &bytes)?;
+                                    self.persist_node_props(&new_props)?;
                                 }
                             }
                         }
@@ -880,37 +1082,39 @@ impl EvalEngine {
         compound_match: Option<&ShapeMatch>,
         pipeline_clauses: Option<&[PipelineClause]>,
     ) -> Result<EvalResult, EvalError> {
-        match pattern_info.pattern {
-            QueryPattern::MutualRelationship if self.can_execute_simple_match_return(query) => {
-                return self.execute_mutual_relationship_optimized(query, pattern_info);
+        self.with_access_buffer(|| {
+            match pattern_info.pattern {
+                QueryPattern::MutualRelationship if self.can_execute_simple_match_return(query) => {
+                    return self.execute_mutual_relationship_optimized(query, pattern_info);
+                }
+                QueryPattern::IncomingCountAgg if self.can_execute_simple_match_return(query) => {
+                    return self.execute_count_agg_optimized(query, pattern_info, true);
+                }
+                QueryPattern::OutgoingCountAgg if self.can_execute_simple_match_return(query) => {
+                    return self.execute_count_agg_optimized(query, pattern_info, false);
+                }
+                QueryPattern::EdgePropertyAgg if self.can_execute_edge_property_agg(query) => {
+                    return self.execute_edge_property_agg_optimized(query, pattern_info, params);
+                }
+                _ => {}
             }
-            QueryPattern::IncomingCountAgg if self.can_execute_simple_match_return(query) => {
-                return self.execute_count_agg_optimized(query, pattern_info, true);
-            }
-            QueryPattern::OutgoingCountAgg if self.can_execute_simple_match_return(query) => {
-                return self.execute_count_agg_optimized(query, pattern_info, false);
-            }
-            QueryPattern::EdgePropertyAgg if self.can_execute_edge_property_agg(query) => {
-                return self.execute_edge_property_agg_optimized(query, pattern_info, params);
-            }
-            _ => {}
-        }
 
-        if let Some(shape_match) = compound_match {
-            if self.can_execute_compound_fast_path(query, shape_match) {
-                if let Some(result) = self.execute_compound_fast_path(query, shape_match)? {
-                    return Ok(result);
+            if let Some(shape_match) = compound_match {
+                if self.can_execute_compound_fast_path(query, shape_match) {
+                    if let Some(result) = self.execute_compound_fast_path(query, shape_match)? {
+                        return Ok(result);
+                    }
                 }
             }
-        }
 
-        if let Some(clauses) = pipeline_clauses {
-            if self.can_execute_pipeline_route(query, clauses) {
-                return self.execute_pipeline_routed(query, params, clauses);
+            if let Some(clauses) = pipeline_clauses {
+                if self.can_execute_pipeline_route(query, clauses) {
+                    return self.execute_pipeline_routed(query, params, clauses);
+                }
             }
-        }
 
-        self.execute(query, params)
+            self.execute_inner(query, params)
+        })
     }
 
     fn can_execute_simple_match_return(&self, query: &Query) -> bool {
@@ -934,7 +1138,7 @@ impl EvalEngine {
     ) -> Result<EvalResult, EvalError> {
         let ret = return_clause(query)?;
         let columns: Vec<String> = ret.items.iter().map(column_name).collect();
-        let edges = self.storage.get_edges_by_type(&pattern_info.rel_type)?;
+        let edges = self.lookup_edges(Some(pattern_info.rel_type.as_str()))?;
         let edge_set: HashSet<(String, String)> = edges
             .iter()
             .map(|edge| (edge.start_node.clone(), edge.end_node.clone()))
@@ -995,11 +1199,8 @@ impl EvalEngine {
     ) -> Result<EvalResult, EvalError> {
         let ret = return_clause(query)?;
         let columns: Vec<String> = ret.items.iter().map(column_name).collect();
-        let edges = if pattern_info.rel_type.is_empty() {
-            all_edges(&self.storage)?
-        } else {
-            self.storage.get_edges_by_type(&pattern_info.rel_type)?
-        };
+        let edge_type = (!pattern_info.rel_type.is_empty()).then_some(pattern_info.rel_type.as_str());
+        let edges = self.lookup_edges(edge_type)?;
         let mut counts: HashMap<String, i64> = HashMap::new();
 
         for edge in edges {
@@ -1076,10 +1277,7 @@ impl EvalEngine {
         } else {
             Some(pattern_info.rel_type.as_str())
         };
-        let edges = match edge_type {
-            Some(edge_type) => self.storage.get_edges_by_type(edge_type)?,
-            None => all_edges(&self.storage)?,
-        };
+        let edges = self.lookup_edges(edge_type)?;
 
         let mut stats_by_end: HashMap<String, EdgeAggStats> = HashMap::new();
         for edge in edges {
@@ -1621,10 +1819,7 @@ impl EvalEngine {
                             .collect(),
                     ),
                 );
-
-                let bytes = rmp_serde::to_vec_named(&props)
-                    .map_err(|e| EvalError::SerializationError(e.to_string()))?;
-                self.storage.put_node(&key, &bytes)?;
+                self.persist_node_props(&props)?;
                 stats.nodes_created += 1;
                 stats.properties_set += node_pat.properties.len();
                 resolved_node_ids.push(key.clone());
@@ -1655,7 +1850,7 @@ impl EvalEngine {
                     .clone()
                     .unwrap_or_else(|| "REL".to_string());
                 let id = format!("{}:{}", rel_type, Uuid::new_v4());
-                let edge = EdgeRecord {
+                let edge = self.persist_edge_record(EdgeRecord {
                     id: id.clone(),
                     start_node: start_node.clone(),
                     end_node: end_node.clone(),
@@ -1665,8 +1860,7 @@ impl EvalEngine {
                         .collect(),
                     created_at_unix_ms: 0,
                     updated_at_unix_ms: 0,
-                };
-                self.storage.put_edge_record(&edge)?;
+                })?;
                 stats.relationships_created += 1;
 
                 let edge_value = edge_record_to_value(&edge)?;
@@ -1705,7 +1899,6 @@ impl EvalEngine {
                 .first()
                 .cloned()
                 .unwrap_or_else(|| "Node".to_string());
-            let prefix = format!("{label}:");
             let mut next_rows = pooled_binding_rows();
 
             for base_row in &current_rows {
@@ -1717,11 +1910,7 @@ impl EvalEngine {
                         cached_val
                     } else {
                         let mut found_node: Option<Value> = None;
-                        for item in self.storage.scan_nodes_with_prefix(&prefix) {
-                            let (_key, val) =
-                                item.map_err(|e| EvalError::StorageError(e.to_string()))?;
-                            let props: HashMap<String, Value> = rmp_serde::from_slice(&val)
-                                .map_err(|e| EvalError::SerializationError(e.to_string()))?;
+                        for props in self.lookup_matching_node_props(labels, &merge_props)? {
                             if !node_matches_pattern(&props, labels, &merge_props) {
                                 continue;
                             }
@@ -1749,9 +1938,7 @@ impl EvalEngine {
                                         .collect(),
                                 ),
                             );
-                            let bytes = rmp_serde::to_vec_named(&props)
-                                .map_err(|e| EvalError::SerializationError(e.to_string()))?;
-                            self.storage.put_node(&key, &bytes)?;
+                            self.persist_node_props(&props)?;
                             stats.nodes_created += 1;
                             stats.properties_set += node_pat.properties.len();
                             let created = serde_json::to_value(&props)
@@ -2042,19 +2229,25 @@ impl EvalEngine {
         row: &Row,
         params: &HashMap<String, Value>,
     ) -> Result<Vec<HashMap<String, Value>>, EvalError> {
-        let label = pattern.labels.first().cloned().unwrap_or_default();
-        let prefix = if label.is_empty() {
-            String::new()
-        } else {
-            format!("{label}:")
-        };
         let expected_props = evaluate_pattern_properties(&pattern.properties, row, params)?;
+        self.lookup_matching_node_props(&pattern.labels, &expected_props)
+    }
+
+    fn lookup_matching_node_props(
+        &self,
+        labels: &[String],
+        expected_props: &HashMap<String, Value>,
+    ) -> Result<Vec<HashMap<String, Value>>, EvalError> {
+        let catalog = IndexCatalog::new(self.storage.as_ref());
+        let resolver = self.knowledge_policy_resolver()?;
         let mut out = Vec::new();
-        for item in self.storage.scan_nodes_with_prefix(&prefix) {
-            let (_key, val) = item.map_err(|e| EvalError::StorageError(e.to_string()))?;
-            let props: HashMap<String, Value> = rmp_serde::from_slice(&val)
-                .map_err(|e| EvalError::SerializationError(e.to_string()))?;
-            if node_matches_pattern(&props, &pattern.labels, &expected_props) {
+        for node in catalog.lookup_nodes(labels, expected_props)? {
+            if !self.node_visible_under_policy(&node, &resolver)? {
+                continue;
+            }
+            let props = node_record_to_props(&node);
+            if node_matches_pattern(&props, labels, expected_props) {
+                self.apply_on_access_for_node(&node, &resolver)?;
                 out.push(props);
             }
         }
@@ -2081,12 +2274,564 @@ impl EvalEngine {
     }
 
     fn node_props_by_id(&self, node_id: &str) -> Result<Option<HashMap<String, Value>>, EvalError> {
-        let Some(raw) = self.storage.get_node(node_id)? else {
+        let Some(node) = self.storage.get_node_record(node_id)? else {
             return Ok(None);
         };
-        Ok(Some(rmp_serde::from_slice(&raw).map_err(|e| {
-            EvalError::SerializationError(e.to_string())
-        })?))
+        let resolver = self.knowledge_policy_resolver()?;
+        if !self.node_visible_under_policy(&node, &resolver)? {
+            return Ok(None);
+        }
+        self.apply_on_access_for_node(&node, &resolver)?;
+        Ok(Some(node_record_to_props(&node)))
+    }
+
+    fn node_visible_under_policy(&self, node: &NodeRecord, resolver: &Resolver) -> Result<bool, EvalError> {
+        self.node_visible_under_policy_with_params(node, resolver, &HashMap::new())
+    }
+
+    fn node_visible_under_policy_with_params(
+        &self,
+        node: &NodeRecord,
+        resolver: &Resolver,
+        params: &HashMap<String, Value>,
+    ) -> Result<bool, EvalError> {
+        let Some(binding) = resolver.resolve_node(&node.labels) else {
+            return Ok(true);
+        };
+        let access_metadata = self.knowledge_policy_access_metadata(&node.id)?;
+        binding_visible_under_anchor(
+            self,
+            &binding,
+            &node.id,
+            node.created_at_unix_ms,
+            node.updated_at_unix_ms,
+            access_metadata,
+            &node.properties,
+            params,
+        )
+    }
+
+    fn edge_visible_under_policy(&self, edge: &EdgeRecord, resolver: &Resolver) -> Result<bool, EvalError> {
+        self.edge_visible_under_policy_with_params(edge, resolver, &HashMap::new())
+    }
+
+    fn edge_visible_under_policy_with_params(
+        &self,
+        edge: &EdgeRecord,
+        resolver: &Resolver,
+        params: &HashMap<String, Value>,
+    ) -> Result<bool, EvalError> {
+        let Some(binding) = resolver.resolve_edge(&edge.edge_type) else {
+            return Ok(true);
+        };
+        let access_metadata = self.knowledge_policy_access_metadata(&edge.id)?;
+        binding_visible_under_anchor(
+            self,
+            &binding,
+            &edge.id,
+            edge.created_at_unix_ms,
+            edge.updated_at_unix_ms,
+            access_metadata,
+            &edge.properties,
+            params,
+        )
+    }
+
+    fn knowledge_policy_access_metadata(
+        &self,
+        entity_id: &str,
+    ) -> Result<Option<KnowledgePolicyAccessMetadata>, EvalError> {
+        let persisted = self.storage.get_knowledge_policy_access_metadata(entity_id)?;
+        let pending = self.access_flusher.pending_mutation(entity_id);
+        Ok(merge_access_metadata(persisted, pending.as_ref()))
+    }
+
+    fn apply_on_access_for_node(&self, node: &NodeRecord, resolver: &Resolver) -> Result<(), EvalError> {
+        self.apply_on_access_mutations(
+            &node.id,
+            resolver
+                .resolve_node(&node.labels)
+                .and_then(|binding| binding.promotion_policy)
+                .or_else(|| resolver.resolve_node_promotion(&node.labels)),
+        )
+    }
+
+    fn apply_on_access_for_edge(&self, edge: &EdgeRecord, resolver: &Resolver) -> Result<(), EvalError> {
+        self.apply_on_access_mutations(
+            &edge.id,
+            resolver
+                .resolve_edge(&edge.edge_type)
+                .and_then(|binding| binding.promotion_policy)
+                .or_else(|| resolver.resolve_edge_promotion(&edge.edge_type)),
+        )
+    }
+
+    fn apply_on_access_mutations(
+        &self,
+        entity_id: &str,
+        policy: Option<copperdb_knowledgepolicy::PromotionPolicyDef>,
+    ) -> Result<(), EvalError> {
+        self.access_flusher
+            .record_policy_access(entity_id, policy.as_ref(), now_unix_ms());
+        Ok(())
+    }
+
+    fn execute_call_clause(
+        &self,
+        call: &copperdb_cypher::CallClause,
+        params: &HashMap<String, Value>,
+    ) -> Result<EvalResult, EvalError> {
+        if call.procedure.eq_ignore_ascii_case("nornicdb.knowledgepolicy.resolve") {
+            return self.execute_knowledge_policy_resolve_call(call, params);
+        }
+
+        Err(EvalError::ExecutionError(format!(
+            "CALL {} is not supported yet",
+            call.procedure
+        )))
+    }
+
+    fn execute_knowledge_policy_resolve_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+        params: &HashMap<String, Value>,
+    ) -> Result<EvalResult, EvalError> {
+        if call.args.len() != 3 {
+            return Err(EvalError::ExecutionError(
+                "nornicdb.knowledgepolicy.resolve expects 3 arguments: entityId, labelsCsv, edgeType"
+                    .to_string(),
+            ));
+        }
+
+        let row = Row::new();
+        let entity_id = eval_expression(&call.args[0], &row, params)?;
+        let labels_csv = eval_expression(&call.args[1], &row, params)?;
+        let edge_type = eval_expression(&call.args[2], &row, params)?;
+
+        let entity_id = entity_id.as_str().unwrap_or_default().trim().to_string();
+        let labels_csv = labels_csv.as_str().unwrap_or_default().trim().to_string();
+        let edge_type = edge_type.as_str().unwrap_or_default().trim().to_string();
+
+        let inspection = if !entity_id.is_empty() {
+            self.inspect_knowledge_policy_by_id(&entity_id, params)?
+        } else if !edge_type.is_empty() {
+            self.inspect_knowledge_policy_for_edge_type(&edge_type, params)?
+        } else {
+            let labels = labels_csv
+                .split(',')
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            self.inspect_knowledge_policy_for_labels(&labels, params)?
+        };
+
+        Ok(EvalResult {
+            columns: vec![
+                "entityId".to_string(),
+                "targetKind".to_string(),
+                "targetLabels".to_string(),
+                "targetEdgeType".to_string(),
+                "decayBinding".to_string(),
+                "promotionPolicy".to_string(),
+                "matchedPromotionProfile".to_string(),
+                "matchedPromotionPredicate".to_string(),
+                "scoreFrom".to_string(),
+                "anchorUnixMs".to_string(),
+                "accessCount".to_string(),
+                "lastAccessedAtUnixMs".to_string(),
+                "baseScore".to_string(),
+                "finalScore".to_string(),
+                "visibilityThreshold".to_string(),
+                "suppressed".to_string(),
+                "dryRun".to_string(),
+                "explanation".to_string(),
+            ],
+            rows: vec![inspection.into_row()],
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn inspect_knowledge_policy_by_id(
+        &self,
+        entity_id: &str,
+        params: &HashMap<String, Value>,
+    ) -> Result<KnowledgePolicyInspection, EvalError> {
+        let resolver = self.knowledge_policy_resolver()?;
+        if let Some(node) = self.storage.get_node_record(entity_id)? {
+            return self.inspect_node_policy(&resolver, &node, params, false);
+        }
+        if let Some(edge) = self.storage.get_edge_record(entity_id)? {
+            return self.inspect_edge_policy(&resolver, &edge, params, false);
+        }
+        Err(EvalError::ExecutionError(format!(
+            "entity {entity_id:?} not found"
+        )))
+    }
+
+    fn inspect_knowledge_policy_for_labels(
+        &self,
+        labels: &[String],
+        params: &HashMap<String, Value>,
+    ) -> Result<KnowledgePolicyInspection, EvalError> {
+        let resolver = self.knowledge_policy_resolver()?;
+        let binding = resolver.resolve_node(labels);
+        let promotion_policy = binding
+            .as_ref()
+            .and_then(|compiled| compiled.promotion_policy.clone())
+            .or_else(|| resolver.resolve_node_promotion(labels));
+
+        Ok(self.inspect_resolved_target(
+            None,
+            "NODE".to_string(),
+            labels.to_vec(),
+            None,
+            binding.as_ref(),
+            promotion_policy.as_ref(),
+            None,
+            None,
+            params,
+            true,
+        )?)
+    }
+
+    fn inspect_knowledge_policy_for_edge_type(
+        &self,
+        edge_type: &str,
+        params: &HashMap<String, Value>,
+    ) -> Result<KnowledgePolicyInspection, EvalError> {
+        let resolver = self.knowledge_policy_resolver()?;
+        let binding = resolver.resolve_edge(edge_type);
+        let promotion_policy = binding
+            .as_ref()
+            .and_then(|compiled| compiled.promotion_policy.clone())
+            .or_else(|| resolver.resolve_edge_promotion(edge_type));
+
+        Ok(self.inspect_resolved_target(
+            None,
+            "EDGE".to_string(),
+            Vec::new(),
+            Some(edge_type.to_string()),
+            binding.as_ref(),
+            promotion_policy.as_ref(),
+            None,
+            None,
+            params,
+            true,
+        )?)
+    }
+
+    fn inspect_node_policy(
+        &self,
+        resolver: &Resolver,
+        node: &NodeRecord,
+        params: &HashMap<String, Value>,
+        dry_run: bool,
+    ) -> Result<KnowledgePolicyInspection, EvalError> {
+        let access_metadata = self.knowledge_policy_access_metadata(&node.id)?;
+
+        self.inspect_node_policy_with_access_metadata(
+            resolver,
+            node,
+            access_metadata,
+            params,
+            dry_run,
+        )
+    }
+
+    fn inspect_node_policy_with_access_metadata(
+        &self,
+        resolver: &Resolver,
+        node: &NodeRecord,
+        access_metadata: Option<KnowledgePolicyAccessMetadata>,
+        params: &HashMap<String, Value>,
+        dry_run: bool,
+    ) -> Result<KnowledgePolicyInspection, EvalError> {
+        let binding = resolver.resolve_node(&node.labels);
+        let promotion_policy = binding
+            .as_ref()
+            .and_then(|compiled| compiled.promotion_policy.clone())
+            .or_else(|| resolver.resolve_node_promotion(&node.labels));
+
+        self.inspect_resolved_target(
+            Some(node.id.clone()),
+            "NODE".to_string(),
+            node.labels.clone(),
+            None,
+            binding.as_ref(),
+            promotion_policy.as_ref(),
+            Some((
+                node.created_at_unix_ms,
+                node.updated_at_unix_ms,
+                &node.properties,
+            )),
+            access_metadata,
+            params,
+            dry_run,
+        )
+    }
+
+    fn inspect_edge_policy(
+        &self,
+        resolver: &Resolver,
+        edge: &EdgeRecord,
+        params: &HashMap<String, Value>,
+        dry_run: bool,
+    ) -> Result<KnowledgePolicyInspection, EvalError> {
+        let access_metadata = self.knowledge_policy_access_metadata(&edge.id)?;
+
+        self.inspect_edge_policy_with_access_metadata(
+            resolver,
+            edge,
+            access_metadata,
+            params,
+            dry_run,
+        )
+    }
+
+    fn inspect_edge_policy_with_access_metadata(
+        &self,
+        resolver: &Resolver,
+        edge: &EdgeRecord,
+        access_metadata: Option<KnowledgePolicyAccessMetadata>,
+        params: &HashMap<String, Value>,
+        dry_run: bool,
+    ) -> Result<KnowledgePolicyInspection, EvalError> {
+        let binding = resolver.resolve_edge(&edge.edge_type);
+        let promotion_policy = binding
+            .as_ref()
+            .and_then(|compiled| compiled.promotion_policy.clone())
+            .or_else(|| resolver.resolve_edge_promotion(&edge.edge_type));
+
+        self.inspect_resolved_target(
+            Some(edge.id.clone()),
+            "EDGE".to_string(),
+            Vec::new(),
+            Some(edge.edge_type.clone()),
+            binding.as_ref(),
+            promotion_policy.as_ref(),
+            Some((
+                edge.created_at_unix_ms,
+                edge.updated_at_unix_ms,
+                &edge.properties,
+            )),
+            access_metadata,
+            params,
+            dry_run,
+        )
+    }
+
+    fn inspect_resolved_target(
+        &self,
+        entity_id: Option<String>,
+        target_kind: String,
+        target_labels: Vec<String>,
+        target_edge_type: Option<String>,
+        binding: Option<&CompiledBinding>,
+        promotion_policy: Option<&copperdb_knowledgepolicy::PromotionPolicyDef>,
+        entity_state: Option<(i64, i64, &BTreeMap<String, Value>)>,
+        access_metadata: Option<KnowledgePolicyAccessMetadata>,
+        params: &HashMap<String, Value>,
+        dry_run: bool,
+    ) -> Result<KnowledgePolicyInspection, EvalError> {
+        let Some(binding) = binding else {
+            let explanation = if let Some(policy) = promotion_policy {
+                format!(
+                    "policy-only target using promotion policy {}; no decay binding applies so final score defaults to 1.0",
+                    policy.name
+                )
+            } else {
+                "no decay binding or promotion policy matched; final score defaults to 1.0".to_string()
+            };
+            return Ok(KnowledgePolicyInspection {
+                entity_id,
+                target_kind,
+                target_labels,
+                target_edge_type,
+                decay_binding: None,
+                promotion_policy: promotion_policy.map(|policy| policy.name.clone()),
+                matched_promotion_profile: None,
+                matched_promotion_predicate: None,
+                score_from: None,
+                anchor_unix_ms: None,
+                access_count: access_metadata.as_ref().map(|metadata| metadata.access_count),
+                last_accessed_at_unix_ms: access_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.last_accessed_at_unix_ms),
+                base_score: 1.0,
+                final_score: 1.0,
+                visibility_threshold: 0.0,
+                suppressed: false,
+                dry_run,
+                explanation,
+            });
+        };
+
+        let (anchor_unix_ms, matched_rule, score) = if let Some((created_at_unix_ms, updated_at_unix_ms, properties)) =
+            entity_state
+        {
+            let anchor_unix_ms = binding_anchor_unix_ms(
+                binding,
+                created_at_unix_ms,
+                updated_at_unix_ms,
+                access_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.last_accessed_at_unix_ms),
+                properties,
+            );
+            let matched_rule = matched_promotion_rule(
+                binding,
+                properties,
+                access_metadata.as_ref(),
+                params,
+            )?;
+            let score = score_binding(
+                binding,
+                anchor_unix_ms,
+                now_unix_ms(),
+                matched_rule.as_ref().map(|rule| &rule.profile),
+            );
+            (anchor_unix_ms, matched_rule, score)
+        } else {
+            (
+                None,
+                None,
+                score_binding(binding, None, now_unix_ms(), None),
+            )
+        };
+
+        let explanation = if dry_run {
+            format!(
+                "dry-run target resolution using decay binding {}{}",
+                binding.decay_binding.name,
+                promotion_policy
+                    .map(|policy| format!(" and promotion policy {}", policy.name))
+                    .unwrap_or_default()
+            )
+        } else if score.suppressed {
+            format!(
+                "final score {:.4} is below visibility threshold {:.4}",
+                score.final_score, binding.visibility_threshold
+            )
+        } else if let Some(rule) = &matched_rule {
+            format!(
+                "promotion predicate {:?} matched profile {} and produced final score {:.4}",
+                rule.predicate, rule.profile.name, score.final_score
+            )
+        } else {
+            format!(
+                "no promotion predicate matched; final score {:.4} remains visible against threshold {:.4}",
+                score.final_score, binding.visibility_threshold
+            )
+        };
+
+        Ok(KnowledgePolicyInspection {
+            entity_id,
+            target_kind,
+            target_labels,
+            target_edge_type,
+            decay_binding: Some(binding.decay_binding.name.clone()),
+            promotion_policy: promotion_policy.map(|policy| policy.name.clone()),
+            matched_promotion_profile: matched_rule.as_ref().map(|rule| rule.profile.name.clone()),
+            matched_promotion_predicate: matched_rule.as_ref().map(|rule| rule.predicate.clone()),
+            score_from: Some(format!("{:?}", binding.score_from).to_ascii_uppercase()),
+            anchor_unix_ms,
+            access_count: access_metadata.as_ref().map(|metadata| metadata.access_count),
+            last_accessed_at_unix_ms: access_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.last_accessed_at_unix_ms),
+            base_score: score.base_score,
+            final_score: score.final_score,
+            visibility_threshold: binding.visibility_threshold,
+            suppressed: score.suppressed,
+            dry_run,
+            explanation,
+        })
+    }
+
+    pub fn node_visible_with_access_metadata(
+        &self,
+        node: &NodeRecord,
+        access_metadata: Option<KnowledgePolicyAccessMetadata>,
+        params: &HashMap<String, Value>,
+    ) -> Result<bool, EvalError> {
+        let resolver = self.knowledge_policy_resolver()?;
+        Ok(!self
+            .inspect_node_policy_with_access_metadata(&resolver, node, access_metadata, params, false)?
+            .suppressed)
+    }
+
+    pub fn edge_visible_with_access_metadata(
+        &self,
+        edge: &EdgeRecord,
+        access_metadata: Option<KnowledgePolicyAccessMetadata>,
+        params: &HashMap<String, Value>,
+    ) -> Result<bool, EvalError> {
+        let resolver = self.knowledge_policy_resolver()?;
+        Ok(!self
+            .inspect_edge_policy_with_access_metadata(&resolver, edge, access_metadata, params, false)?
+            .suppressed)
+    }
+
+    pub fn node_access_metadata_after_read(
+        &self,
+        node: &NodeRecord,
+        access_metadata: Option<KnowledgePolicyAccessMetadata>,
+    ) -> Result<Option<KnowledgePolicyAccessMetadata>, EvalError> {
+        let resolver = self.knowledge_policy_resolver()?;
+        let policy = resolver
+            .resolve_node(&node.labels)
+            .and_then(|binding| binding.promotion_policy)
+            .or_else(|| resolver.resolve_node_promotion(&node.labels));
+        Ok(access_metadata_after_policy_access(
+            access_metadata,
+            policy.as_ref(),
+            now_unix_ms(),
+        ))
+    }
+
+    pub fn edge_access_metadata_after_read(
+        &self,
+        edge: &EdgeRecord,
+        access_metadata: Option<KnowledgePolicyAccessMetadata>,
+    ) -> Result<Option<KnowledgePolicyAccessMetadata>, EvalError> {
+        let resolver = self.knowledge_policy_resolver()?;
+        let policy = resolver
+            .resolve_edge(&edge.edge_type)
+            .and_then(|binding| binding.promotion_policy)
+            .or_else(|| resolver.resolve_edge_promotion(&edge.edge_type));
+        Ok(access_metadata_after_policy_access(
+            access_metadata,
+            policy.as_ref(),
+            now_unix_ms(),
+        ))
+    }
+
+    fn persist_node_props(&self, props: &HashMap<String, Value>) -> Result<(), EvalError> {
+        let now = now_unix_ms();
+        let mut record = node_record_from_props(props)?;
+        if let Some(existing) = self.storage.get_node_record(&record.id)? {
+            record.created_at_unix_ms = existing.created_at_unix_ms;
+            record.updated_at_unix_ms = now;
+        } else {
+            record.created_at_unix_ms = now;
+            record.updated_at_unix_ms = now;
+        }
+        self.storage.put_node_record(&record)?;
+        Ok(())
+    }
+
+    fn persist_edge_record(&self, mut edge: EdgeRecord) -> Result<EdgeRecord, EvalError> {
+        let now = now_unix_ms();
+        if let Some(existing) = self.storage.get_edge_record(&edge.id)? {
+            edge.created_at_unix_ms = existing.created_at_unix_ms;
+            edge.updated_at_unix_ms = now;
+        } else {
+            edge.created_at_unix_ms = now;
+            edge.updated_at_unix_ms = now;
+        }
+        self.storage.put_edge_record(&edge)?;
+        Ok(edge)
     }
 
     fn relationship_candidates(
@@ -2094,7 +2839,7 @@ impl EvalEngine {
         node_id: &str,
         edge: &EdgePattern,
     ) -> Result<Vec<EdgeRecord>, EvalError> {
-        let mut candidates = match (&edge.direction, edge.rel_type.as_deref()) {
+        let candidates = match (&edge.direction, edge.rel_type.as_deref()) {
             (EdgeDirection::Outgoing, Some(edge_type)) => self
                 .storage
                 .get_edges_from_node_by_type(node_id, edge_type)?,
@@ -2116,9 +2861,31 @@ impl EvalEngine {
                 edges
             }
         };
-        candidates.sort_by(|a, b| a.id.cmp(&b.id));
-        candidates.dedup_by(|a, b| a.id == b.id);
-        Ok(candidates)
+        let resolver = self.knowledge_policy_resolver()?;
+        let mut visible = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            if self.edge_visible_under_policy(&candidate, &resolver)? {
+                visible.push(candidate);
+            }
+        }
+        visible.sort_by(|a, b| a.id.cmp(&b.id));
+        visible.dedup_by(|a, b| a.id == b.id);
+        for edge in &visible {
+            self.apply_on_access_for_edge(edge, &resolver)?;
+        }
+        Ok(visible)
+    }
+
+    fn lookup_edges(&self, edge_type: Option<&str>) -> Result<Vec<EdgeRecord>, EvalError> {
+        let resolver = self.knowledge_policy_resolver()?;
+        let mut visible = Vec::new();
+        for edge in IndexCatalog::new(self.storage.as_ref()).lookup_edges(edge_type)? {
+            if self.edge_visible_under_policy(&edge, &resolver)? {
+                self.apply_on_access_for_edge(&edge, &resolver)?;
+                visible.push(edge);
+            }
+        }
+        Ok(visible)
     }
 }
 
@@ -2176,6 +2943,173 @@ fn merge_cache_key(labels: &[String], prop: &str, val: &Value) -> String {
     format!("{}:{}={}", sorted_labels.join("|"), prop, val)
 }
 
+fn now_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
+}
+
+fn binding_visible_under_anchor(
+    _engine: &EvalEngine,
+    binding: &CompiledBinding,
+    entity_id: &str,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+    access_metadata: Option<KnowledgePolicyAccessMetadata>,
+    properties: &BTreeMap<String, Value>,
+    params: &HashMap<String, Value>,
+) -> Result<bool, EvalError> {
+    if binding.no_decay {
+        return Ok(true);
+    }
+
+    let Some(anchor_unix_ms) = binding_anchor_unix_ms(
+        binding,
+        created_at_unix_ms,
+        updated_at_unix_ms,
+        access_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.last_accessed_at_unix_ms),
+        properties,
+    ) else {
+        return Ok(true);
+    };
+
+    let matched_promotion = match_promotion_profile(
+        binding,
+        properties,
+        access_metadata.as_ref(),
+        params,
+    )
+    .map_err(|error| {
+        EvalError::FilterError(format!(
+            "promotion predicate evaluation failed for {entity_id}: {error}"
+        ))
+    })?;
+
+    Ok(
+        !score_binding(binding, Some(anchor_unix_ms), now_unix_ms(), matched_promotion.as_ref())
+            .suppressed,
+    )
+}
+
+fn binding_anchor_unix_ms(
+    binding: &copperdb_knowledgepolicy::CompiledBinding,
+    created_at_unix_ms: i64,
+    updated_at_unix_ms: i64,
+    last_accessed_at_unix_ms: Option<i64>,
+    properties: &BTreeMap<String, Value>,
+) -> Option<i64> {
+    match binding.score_from {
+        ScoreFromMode::Created => Some(created_at_unix_ms),
+        ScoreFromMode::Version => Some(updated_at_unix_ms),
+        ScoreFromMode::LastAccessed => last_accessed_at_unix_ms.or(Some(created_at_unix_ms)),
+        ScoreFromMode::Custom => binding
+            .score_from_property
+            .as_deref()
+            .and_then(|property| properties.get(property))
+            .and_then(value_as_unix_ms),
+    }
+}
+
+fn value_as_unix_ms(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+        .or_else(|| value.as_f64().map(|value| value as i64))
+}
+
+fn match_promotion_profile(
+    binding: &CompiledBinding,
+    properties: &BTreeMap<String, Value>,
+    access_metadata: Option<&KnowledgePolicyAccessMetadata>,
+    params: &HashMap<String, Value>,
+) -> Result<Option<PromotionProfileDef>, copperdb_filter::FilterError> {
+    Ok(matched_promotion_rule(binding, properties, access_metadata, params)?
+        .map(|rule| rule.profile))
+}
+
+fn matched_promotion_rule(
+    binding: &CompiledBinding,
+    properties: &BTreeMap<String, Value>,
+    access_metadata: Option<&KnowledgePolicyAccessMetadata>,
+    params: &HashMap<String, Value>,
+) -> Result<Option<copperdb_knowledgepolicy::CompiledPromotionRule>, copperdb_filter::FilterError> {
+    if binding.compiled_promotion_rules.is_empty() {
+        return Ok(None);
+    }
+
+    for rule in &binding.compiled_promotion_rules {
+        let row = promotion_predicate_row(&rule.expression, properties, access_metadata);
+        if eval_predicate(&rule.expression, &row, params)? {
+            return Ok(Some(rule.clone()));
+        }
+    }
+
+    Ok(None)
+}
+
+fn promotion_predicate_row(
+    expression: &Expression,
+    properties: &BTreeMap<String, Value>,
+    access_metadata: Option<&KnowledgePolicyAccessMetadata>,
+) -> Row {
+    let mut object = serde_json::Map::new();
+    for (key, value) in properties {
+        object.insert(key.clone(), value.clone());
+    }
+    object.insert(
+        "accessCount".to_string(),
+        Value::from(access_metadata.map(|metadata| metadata.access_count).unwrap_or(0)),
+    );
+    object.insert(
+        "lastAccessedAt".to_string(),
+        access_metadata
+            .and_then(|metadata| metadata.last_accessed_at_unix_ms)
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+    );
+
+    let binding_value = Value::Object(object);
+    let mut row = Row::new();
+    let mut variables = HashSet::new();
+    collect_expression_variables(expression, &mut variables);
+    for variable in variables {
+        row.insert(variable, binding_value.clone());
+    }
+    row
+}
+
+fn collect_expression_variables(expression: &Expression, variables: &mut HashSet<String>) {
+    match expression {
+        Expression::PropertyAccess { variable, .. } | Expression::Variable(variable) => {
+            variables.insert(variable.clone());
+        }
+        Expression::Comparison { operands, .. }
+        | Expression::InList { operands, .. }
+        | Expression::And(operands)
+        | Expression::Or(operands) => {
+            collect_expression_variables(&operands.left, variables);
+            collect_expression_variables(&operands.right, variables);
+        }
+        Expression::FunctionCall { args, .. } | Expression::ListLiteral(args) => {
+            for argument in args {
+                collect_expression_variables(argument, variables);
+            }
+        }
+        Expression::MapLiteral(entries) => {
+            for entry in entries {
+                collect_expression_variables(&entry.value, variables);
+            }
+        }
+        Expression::Not(inner)
+        | Expression::IsNull(inner)
+        | Expression::IsNotNull(inner) => collect_expression_variables(inner, variables),
+        Expression::Literal(_) | Expression::Parameter(_) => {}
+    }
+}
+
 /// Return `true` if the stored node's `_labels` array contains every label in
 /// `required`.  Used for multi-label MATCH/MERGE filtering (v1.0.42 parity).
 fn node_has_all_labels(props: &HashMap<String, Value>, required: &[String]) -> bool {
@@ -2210,15 +3144,15 @@ fn edge_matches_pattern(edge: &EdgeRecord, expected_props: &HashMap<String, Valu
 }
 
 fn evaluate_pattern_properties(
-    properties: &HashMap<String, Expression>,
+    properties: &[PropertyEntry],
     row: &Row,
     params: &HashMap<String, Value>,
 ) -> Result<HashMap<String, Value>, EvalError> {
     let mut out = HashMap::with_capacity(properties.len());
-    for (key, expr) in properties {
-        let value = eval_expression(expr, row, params)
+    for property in properties {
+        let value = eval_expression(&property.value, row, params)
             .map_err(|e| EvalError::FilterError(e.to_string()))?;
-        out.insert(key.clone(), value);
+        out.insert(property.key.clone(), value);
     }
     Ok(out)
 }
@@ -2257,6 +3191,56 @@ fn bound_node_matches_row(
         (Some(bound_id), Some(actual_id)) => bound_id == actual_id,
         _ => false,
     }
+}
+
+fn node_record_to_props(node: &NodeRecord) -> HashMap<String, Value> {
+    let mut props: HashMap<String, Value> = node
+        .properties
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    props.insert("_id".to_string(), Value::String(node.id.clone()));
+    props.insert(
+        "_labels".to_string(),
+        Value::Array(
+            node.labels
+                .iter()
+                .map(|label| Value::String(label.clone()))
+                .collect(),
+        ),
+    );
+    props
+}
+
+fn node_record_from_props(props: &HashMap<String, Value>) -> Result<NodeRecord, EvalError> {
+    let id = node_id(props).ok_or_else(|| {
+        EvalError::ExecutionError("node is missing _id metadata".to_string())
+    })?;
+    let labels = props
+        .get("_labels")
+        .and_then(Value::as_array)
+        .ok_or_else(|| EvalError::ExecutionError("node is missing _labels metadata".to_string()))?
+        .iter()
+        .map(|label| {
+            label.as_str().map(str::to_string).ok_or_else(|| {
+                EvalError::ExecutionError("node _labels metadata must be a string array".to_string())
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let properties = props
+        .iter()
+        .filter(|(key, _)| key.as_str() != "_id" && key.as_str() != "_labels")
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    Ok(NodeRecord {
+        id: id.to_string(),
+        labels,
+        properties,
+        created_at_unix_ms: 0,
+        updated_at_unix_ms: 0,
+    })
 }
 
 fn bound_edge_matches_row(row: &Row, variable: Option<&str>, edge: &EdgeRecord) -> bool {
@@ -2339,15 +3323,29 @@ fn edge_record_to_value(edge: &EdgeRecord) -> Result<Value, EvalError> {
     Ok(Value::Object(props))
 }
 
-fn all_edges(storage: &Arc<StorageEngine>) -> Result<Vec<EdgeRecord>, EvalError> {
-    storage.all_edges().map_err(Into::into)
-}
-
 fn options_to_btreemap(options: &HashMap<String, Value>) -> BTreeMap<String, Value> {
     options
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect::<BTreeMap<_, _>>()
+}
+
+fn binding_scope(binding: &DecayProfileBindingSchema) -> &'static str {
+    if binding.is_edge {
+        "EDGE"
+    } else {
+        "NODE"
+    }
+}
+
+fn binding_target(binding: &DecayProfileBindingSchema) -> String {
+    if binding.is_wildcard {
+        return "*".to_string();
+    }
+    if binding.is_edge {
+        return binding.target_edge_type.clone().unwrap_or_default();
+    }
+    binding.target_labels.join(":")
 }
 
 fn option_string(
@@ -2417,11 +3415,21 @@ fn expression_name(expr: &Expression) -> String {
     match expr {
         Expression::Variable(v) => v.clone(),
         Expression::PropertyAccess { variable, property } => format!("{variable}.{property}"),
-        Expression::Literal(v) => v.to_string(),
+        Expression::Literal(v) => literal_name(v),
         Expression::ListLiteral(_) => "list".to_string(),
         Expression::MapLiteral(_) => "map".to_string(),
         Expression::InList { .. } => "expr".to_string(),
         _ => "expr".to_string(),
+    }
+}
+
+fn literal_name(value: &LiteralValue) -> String {
+    match value {
+        LiteralValue::String(value) => value.clone(),
+        LiteralValue::Integer(value) => value.to_string(),
+        LiteralValue::Float(value) => value.to_string(),
+        LiteralValue::Bool(value) => value.to_string(),
+        LiteralValue::Null => "null".to_string(),
     }
 }
 
@@ -2597,12 +3605,31 @@ mod tests {
         can_execute_as_pipeline, detect_query_pattern, match_compound_query_shape, Parser,
         QueryPattern,
     };
-    use copperdb_storage::{EdgeRecord, StorageEngine};
+    use copperdb_storage::{EdgeRecord, NodeRecord, StorageEngine};
 
     fn node_props(name: &str) -> HashMap<String, Value> {
         [("name".to_string(), Value::String(name.to_string()))]
             .into_iter()
             .collect()
+    }
+
+    fn store_node(
+        storage: &StorageEngine,
+        id: &str,
+        labels: &[&str],
+        mut properties: HashMap<String, Value>,
+    ) {
+        properties.remove("_id");
+        properties.remove("_labels");
+        storage
+            .put_node_record(&NodeRecord {
+                id: id.to_string(),
+                labels: labels.iter().map(|label| (*label).to_string()).collect(),
+                properties: properties.into_iter().collect(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
     }
 
     fn review_edge(id: &str, start: &str, end: &str, rating: i64) -> EdgeRecord {
@@ -2629,10 +3656,8 @@ mod tests {
             ("product:2", node_props("Gadget")),
             ("product:3", node_props("Thing")),
         ] {
-            engine
-                .storage
-                .put_node(id, &rmp_serde::to_vec(&props).unwrap())
-                .unwrap();
+            let label = id.split(':').next().unwrap_or("Node");
+            store_node(engine.storage.as_ref(), id, &[label], props);
         }
 
         for edge in [
@@ -2654,10 +3679,8 @@ mod tests {
             ("person:3", node_props("Carol")),
             ("person:4", node_props("Dave")),
         ] {
-            engine
-                .storage
-                .put_node(id, &rmp_serde::to_vec(&props).unwrap())
-                .unwrap();
+            let label = id.split(':').next().unwrap_or("Node");
+            store_node(engine.storage.as_ref(), id, &[label], props);
         }
 
         for edge in [
@@ -3018,14 +4041,7 @@ mod tests {
                 HashMap::from([("name".to_string(), Value::String("C1".into()))]),
             ),
         ] {
-            let mut stored = props;
-            stored.insert("_id".into(), Value::String(id.into()));
-            stored.insert(
-                "_labels".into(),
-                Value::Array(vec![Value::String(label.into())]),
-            );
-            let bytes = rmp_serde::to_vec_named(&stored).unwrap();
-            engine.storage.put_node(id, &bytes).unwrap();
+            store_node(engine.storage.as_ref(), id, &[label], props);
         }
 
         for edge in [
@@ -3575,18 +4591,18 @@ mod tests {
 
         let start_raw = engine
             .storage
-            .get_node(&edges[0].start_node)
+            .get_node_record(&edges[0].start_node)
             .unwrap()
             .expect("customer node should exist");
-        let start_props: HashMap<String, Value> = rmp_serde::from_slice(&start_raw).unwrap();
+        let start_props = node_record_to_props(&start_raw);
         assert_eq!(start_props.get("customerID"), Some(&Value::from(1)));
 
         let end_raw = engine
             .storage
-            .get_node(&edges[0].end_node)
+            .get_node_record(&edges[0].end_node)
             .unwrap()
             .expect("order node should exist");
-        let end_props: HashMap<String, Value> = rmp_serde::from_slice(&end_raw).unwrap();
+        let end_props = node_record_to_props(&end_raw);
         assert_eq!(end_props.get("orderID"), Some(&Value::from(9001)));
     }
 
@@ -3609,13 +4625,12 @@ mod tests {
         let node_id_for = |label: &str, property: &str, expected: i64| {
             engine
                 .storage
-                .scan_nodes_with_prefix(&format!("{label}:"))
-                .find_map(|entry| {
-                    let (_, raw) = entry.ok()?;
-                    let props: HashMap<String, Value> = rmp_serde::from_slice(&raw).ok()?;
-                    (props.get(property) == Some(&Value::from(expected)))
-                        .then(|| props.get("_id").and_then(Value::as_str).map(str::to_string))
-                        .flatten()
+                .get_nodes_by_label(label)
+                .expect("label lookup should succeed")
+                .into_iter()
+                .find_map(|node| {
+                    let props = node_record_to_props(&node);
+                    (props.get(property) == Some(&Value::from(expected))).then(|| node.id)
                 })
                 .expect("expected seeded node")
         };
@@ -3719,8 +4734,8 @@ mod tests {
         let product_ids: HashSet<i64> = orders
             .iter()
             .filter_map(|edge| {
-                let raw = engine.storage.get_node(&edge.end_node).ok().flatten()?;
-                let props: HashMap<String, Value> = rmp_serde::from_slice(&raw).ok()?;
+                let node = engine.storage.get_node_record(&edge.end_node).ok().flatten()?;
+                let props = node_record_to_props(&node);
                 props.get("productID").and_then(Value::as_i64)
             })
             .collect();
@@ -3776,8 +4791,8 @@ mod tests {
         let product_ids: HashSet<i64> = orders
             .iter()
             .filter_map(|edge| {
-                let raw = engine.storage.get_node(&edge.end_node).ok().flatten()?;
-                let props: HashMap<String, Value> = rmp_serde::from_slice(&raw).ok()?;
+                let node = engine.storage.get_node_record(&edge.end_node).ok().flatten()?;
+                let props = node_record_to_props(&node);
                 props.get("productID").and_then(Value::as_i64)
             })
             .collect();
@@ -4223,13 +5238,12 @@ mod tests {
                 Value::Array(vec![Value::String("Node".into())]),
             );
             props.insert("name".to_string(), Value::String(format!("n{index:02}")));
-            engine
-                .storage
-                .put_node(
-                    &format!("Node:{index}"),
-                    &rmp_serde::to_vec(&props).unwrap(),
-                )
-                .unwrap();
+            store_node(
+                engine.storage.as_ref(),
+                &format!("Node:{index}"),
+                &["Node"],
+                props,
+            );
         }
 
         for index in 0..24 {
@@ -4369,8 +5383,7 @@ mod tests {
                     Value::String("Employee".to_string()),
                 ]),
             );
-            let bytes = rmp_serde::to_vec_named(&props).unwrap();
-            storage.put_node("Person:alice-id", &bytes).unwrap();
+            store_node(storage.as_ref(), "Person:alice-id", &["Person", "Employee"], props);
         }
 
         // Directly insert a node with only [:Person].
@@ -4385,8 +5398,7 @@ mod tests {
                 "_labels".to_string(),
                 Value::Array(vec![Value::String("Person".to_string())]),
             );
-            let bytes = rmp_serde::to_vec_named(&props).unwrap();
-            storage.put_node("Person:bob-id", &bytes).unwrap();
+            store_node(storage.as_ref(), "Person:bob-id", &["Person"], props);
         }
 
         let parser = Parser::new();
@@ -4583,7 +5595,7 @@ mod tests {
             Ok(_) => panic!("expected drop index to fail"),
             Err(err) => err,
         };
-        assert!(err.to_string().contains("index \"missing_idx\" not found"));
+        assert!(err.to_string().contains("index not found: missing_idx"));
 
         engine
             .execute(
@@ -4608,6 +5620,7 @@ mod tests {
         let show = parser.parse("SHOW DECAY PROFILES").unwrap();
         let shown = engine.execute(&show, &HashMap::new()).unwrap();
         assert_eq!(shown.rows.len(), 1);
+        assert_eq!(shown.rows[0].get("kind"), Some(&Value::String("bundle".to_string())));
         assert_eq!(
             shown.rows[0].get("name"),
             Some(&Value::String("slow_decay".to_string()))
@@ -4619,9 +5632,614 @@ mod tests {
         engine.execute(&alter, &HashMap::new()).unwrap();
         let shown = engine.execute(&show, &HashMap::new()).unwrap();
         assert_eq!(
-            shown.rows[0].get("visibilityThreshold"),
-            Some(&Value::from(0.2))
+            shown.rows[0].get("enabled"),
+            Some(&Value::Bool(true))
         );
+
+        let profiles = engine.storage.load_decay_profile_schemas().unwrap();
+        assert_eq!(profiles[0].visibility_threshold, 0.2);
+    }
+
+    #[test]
+    fn test_knowledge_policy_decay_binding_ddl_roundtrip() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let create_bundle = parser
+            .parse(
+                "CREATE DECAY PROFILE slow_decay OPTIONS { halfLifeSeconds: 604800, visibilityThreshold: 0.1, scoreFloor: 0.0, function: 'exponential', scope: 'NODE', scoreFrom: 'CREATED', enabled: true }",
+            )
+            .unwrap();
+        engine.execute(&create_bundle, &HashMap::new()).unwrap();
+
+        let create_binding = parser
+            .parse(
+                "CREATE DECAY PROFILE memory_binding FOR (n:MemoryEpisode) APPLY { DECAY PROFILE slow_decay, visibilityThreshold: 0.2, order: 10 }",
+            )
+            .unwrap();
+        engine.execute(&create_binding, &HashMap::new()).unwrap();
+
+        let show = parser.parse("SHOW DECAY PROFILES").unwrap();
+        let shown = engine.execute(&show, &HashMap::new()).unwrap();
+        assert_eq!(shown.rows.len(), 2);
+
+        let binding_row = shown
+            .rows
+            .iter()
+            .find(|row| row.get("kind") == Some(&Value::String("binding".to_string())))
+            .expect("binding row missing");
+        assert_eq!(
+            binding_row.get("name"),
+            Some(&Value::String("memory_binding".to_string()))
+        );
+        assert_eq!(
+            binding_row.get("target"),
+            Some(&Value::String("MemoryEpisode".to_string()))
+        );
+        assert_eq!(
+            binding_row.get("profileRef"),
+            Some(&Value::String("slow_decay".to_string()))
+        );
+
+        let stored = engine.storage.load_decay_profile_binding_schemas().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].order, 10);
+
+        let drop_binding = parser.parse("DROP DECAY PROFILE memory_binding").unwrap();
+        engine.execute(&drop_binding, &HashMap::new()).unwrap();
+        assert!(engine.storage.load_decay_profile_binding_schemas().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_knowledge_policy_resolver_builds_from_persisted_catalog() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let create_bundle = parser
+            .parse(
+                "CREATE DECAY PROFILE slow_decay OPTIONS { halfLifeSeconds: 604800, visibilityThreshold: 0.1, scoreFloor: 0.0, function: 'exponential', scope: 'NODE', scoreFrom: 'CREATED', enabled: true }",
+            )
+            .unwrap();
+        engine.execute(&create_bundle, &HashMap::new()).unwrap();
+
+        let create_binding = parser
+            .parse(
+                "CREATE DECAY PROFILE memory_binding FOR (n:MemoryEpisode) APPLY { DECAY PROFILE slow_decay, visibilityThreshold: 0.2, order: 10 }",
+            )
+            .unwrap();
+        engine.execute(&create_binding, &HashMap::new()).unwrap();
+
+        let resolver = engine.knowledge_policy_resolver().unwrap();
+        let resolved = resolver
+            .resolve_node(&["MemoryEpisode".to_string()])
+            .expect("binding should resolve");
+
+        assert_eq!(resolved.decay_binding.name, "memory_binding");
+        assert_eq!(resolved.decay_profile.as_ref().map(|profile| profile.name.as_str()), Some("slow_decay"));
+        assert_eq!(resolved.visibility_threshold, 0.2);
+    }
+
+    #[test]
+    fn test_match_hides_nodes_suppressed_by_created_age_threshold() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE short_decay OPTIONS { halfLifeSeconds: 1, visibilityThreshold: 0.5, scoreFloor: 0.0, function: 'step', scope: 'NODE', scoreFrom: 'CREATED', enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE memory_binding FOR (n:MemoryEpisode) APPLY { DECAY PROFILE short_decay, order: 10 }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        engine
+            .storage
+            .put_node_record(&NodeRecord {
+                id: "memory:old".to_string(),
+                labels: vec!["MemoryEpisode".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Old memory".to_string()))]),
+                created_at_unix_ms: now_unix_ms() - 5_000,
+                updated_at_unix_ms: now_unix_ms() - 5_000,
+            })
+            .unwrap();
+
+        let query = parser
+            .parse("MATCH (n:MemoryEpisode) RETURN n")
+            .unwrap();
+        let result = engine.execute(&query, &HashMap::new()).unwrap();
+        assert!(result.rows.is_empty());
+    }
+
+    #[test]
+    fn test_match_keeps_fresh_nodes_visible_under_created_age_threshold() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE short_decay OPTIONS { halfLifeSeconds: 1, visibilityThreshold: 0.5, scoreFloor: 0.0, function: 'step', scope: 'NODE', scoreFrom: 'CREATED', enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE memory_binding FOR (n:MemoryEpisode) APPLY { DECAY PROFILE short_decay, order: 10 }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let now = now_unix_ms();
+        engine
+            .storage
+            .put_node_record(&NodeRecord {
+                id: "memory:fresh".to_string(),
+                labels: vec!["MemoryEpisode".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Fresh memory".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .unwrap();
+
+        let query = parser
+            .parse("MATCH (n:MemoryEpisode) RETURN n")
+            .unwrap();
+        let result = engine.execute(&query, &HashMap::new()).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0]
+                .get("n")
+                .and_then(Value::as_object)
+                .and_then(|props| props.get("name")),
+            Some(&Value::String("Fresh memory".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_match_hides_edges_suppressed_by_created_age_threshold() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE short_decay OPTIONS { halfLifeSeconds: 1, visibilityThreshold: 0.5, scoreFloor: 0.0, function: 'step', scope: 'EDGE', scoreFrom: 'CREATED', enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE stale_edge_binding FOR ()-[r:LINKS]-() APPLY { DECAY PROFILE short_decay, order: 10 }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let now = now_unix_ms();
+        for node in [
+            NodeRecord {
+                id: "person:a".to_string(),
+                labels: vec!["Person".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Alice".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            },
+            NodeRecord {
+                id: "person:b".to_string(),
+                labels: vec!["Person".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Bob".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            },
+        ] {
+            engine.storage.put_node_record(&node).unwrap();
+        }
+        engine
+            .storage
+            .put_edge_record(&EdgeRecord {
+                id: "links:1".to_string(),
+                start_node: "person:a".to_string(),
+                end_node: "person:b".to_string(),
+                edge_type: "LINKS".to_string(),
+                properties: BTreeMap::from([("kind".to_string(), Value::String("stale".to_string()))]),
+                created_at_unix_ms: now - 5_000,
+                updated_at_unix_ms: now - 5_000,
+            })
+            .unwrap();
+
+        let query = parser
+            .parse("MATCH (:Person)-[r:LINKS]->(:Person) RETURN r")
+            .unwrap();
+        let result = engine.execute(&query, &HashMap::new()).unwrap();
+        assert!(result.rows.is_empty());
+    }
+
+    #[test]
+    fn test_match_hides_nodes_suppressed_by_custom_anchor_threshold() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE review_decay OPTIONS { halfLifeSeconds: 1, visibilityThreshold: 0.5, scoreFloor: 0.0, function: 'step', scope: 'NODE', scoreFrom: 'CUSTOM', scoreFromProperty: 'reviewedAt', enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE reviewed_memory_binding FOR (n:MemoryEpisode) APPLY { DECAY PROFILE review_decay, order: 10 }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let now = now_unix_ms();
+        engine
+            .storage
+            .put_node_record(&NodeRecord {
+                id: "memory:custom-old".to_string(),
+                labels: vec!["MemoryEpisode".to_string()],
+                properties: BTreeMap::from([
+                    ("name".to_string(), Value::String("Reviewed memory".to_string())),
+                    ("reviewedAt".to_string(), Value::from(now - 5_000)),
+                ]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .unwrap();
+
+        let query = parser.parse("MATCH (n:MemoryEpisode) RETURN n").unwrap();
+        let result = engine.execute(&query, &HashMap::new()).unwrap();
+        assert!(result.rows.is_empty());
+    }
+
+    #[test]
+    fn test_match_hides_edges_suppressed_by_custom_anchor_threshold() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE review_decay OPTIONS { halfLifeSeconds: 1, visibilityThreshold: 0.5, scoreFloor: 0.0, function: 'step', scope: 'EDGE', scoreFrom: 'CUSTOM', scoreFromProperty: 'reviewedAt', enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE reviewed_edge_binding FOR ()-[r:LINKS]-() APPLY { DECAY PROFILE review_decay, order: 10 }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let now = now_unix_ms();
+        for node in [
+            NodeRecord {
+                id: "person:custom-a".to_string(),
+                labels: vec!["Person".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Alice".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            },
+            NodeRecord {
+                id: "person:custom-b".to_string(),
+                labels: vec!["Person".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Bob".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            },
+        ] {
+            engine.storage.put_node_record(&node).unwrap();
+        }
+        engine
+            .storage
+            .put_edge_record(&EdgeRecord {
+                id: "links:custom-1".to_string(),
+                start_node: "person:custom-a".to_string(),
+                end_node: "person:custom-b".to_string(),
+                edge_type: "LINKS".to_string(),
+                properties: BTreeMap::from([
+                    ("kind".to_string(), Value::String("reviewed".to_string())),
+                    ("reviewedAt".to_string(), Value::from(now - 5_000)),
+                ]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .unwrap();
+
+        let query = parser
+            .parse("MATCH (:Person)-[r:LINKS]->(:Person) RETURN r")
+            .unwrap();
+        let result = engine.execute(&query, &HashMap::new()).unwrap();
+        assert!(result.rows.is_empty());
+    }
+
+    #[test]
+    fn test_match_keeps_stale_nodes_visible_under_recent_last_access_anchor() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE access_decay OPTIONS { halfLifeSeconds: 1, visibilityThreshold: 0.5, scoreFloor: 0.0, function: 'step', scope: 'NODE', scoreFrom: 'LAST_ACCESSED', enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE access_binding FOR (n:MemoryEpisode) APPLY { DECAY PROFILE access_decay, order: 10 }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let stale_time = now_unix_ms() - 5_000;
+        engine
+            .storage
+            .put_node_record(&NodeRecord {
+                id: "memory:recent-access".to_string(),
+                labels: vec!["MemoryEpisode".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Recently accessed memory".to_string()))]),
+                created_at_unix_ms: stale_time,
+                updated_at_unix_ms: stale_time,
+            })
+            .unwrap();
+        engine
+            .storage
+            .put_knowledge_policy_access_metadata(
+                "memory:recent-access",
+                &copperdb_storage::KnowledgePolicyAccessMetadata {
+                    last_accessed_at_unix_ms: Some(now_unix_ms()),
+                    access_count: 1,
+                },
+            )
+            .unwrap();
+
+        let query = parser.parse("MATCH (n:MemoryEpisode) RETURN n").unwrap();
+        let result = engine.execute(&query, &HashMap::new()).unwrap();
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_match_keeps_stale_edges_visible_under_recent_last_access_anchor() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE access_decay OPTIONS { halfLifeSeconds: 1, visibilityThreshold: 0.5, scoreFloor: 0.0, function: 'step', scope: 'EDGE', scoreFrom: 'LAST_ACCESSED', enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE access_binding FOR ()-[r:LINKS]-() APPLY { DECAY PROFILE access_decay, order: 10 }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let now = now_unix_ms();
+        for node in [
+            NodeRecord {
+                id: "person:access-a".to_string(),
+                labels: vec!["Person".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Alice".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            },
+            NodeRecord {
+                id: "person:access-b".to_string(),
+                labels: vec!["Person".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Bob".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            },
+        ] {
+            engine.storage.put_node_record(&node).unwrap();
+        }
+
+        let stale_time = now - 5_000;
+        engine
+            .storage
+            .put_edge_record(&EdgeRecord {
+                id: "links:recent-access".to_string(),
+                start_node: "person:access-a".to_string(),
+                end_node: "person:access-b".to_string(),
+                edge_type: "LINKS".to_string(),
+                properties: BTreeMap::from([("kind".to_string(), Value::String("recently-accessed".to_string()))]),
+                created_at_unix_ms: stale_time,
+                updated_at_unix_ms: stale_time,
+            })
+            .unwrap();
+        engine
+            .storage
+            .put_knowledge_policy_access_metadata(
+                "links:recent-access",
+                &copperdb_storage::KnowledgePolicyAccessMetadata {
+                    last_accessed_at_unix_ms: Some(now_unix_ms()),
+                    access_count: 2,
+                },
+            )
+            .unwrap();
+
+        let query = parser
+            .parse("MATCH (:Person)-[r:LINKS]->(:Person) RETURN r")
+            .unwrap();
+        let result = engine.execute(&query, &HashMap::new()).unwrap();
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_persist_node_props_refreshes_version_anchor_visibility_for_nodes() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE version_decay OPTIONS { halfLifeSeconds: 1, visibilityThreshold: 0.5, scoreFloor: 0.0, function: 'step', scope: 'NODE', scoreFrom: 'VERSION', enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE version_binding FOR (n:MemoryEpisode) APPLY { DECAY PROFILE version_decay, order: 10 }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let stale_time = now_unix_ms() - 5_000;
+        engine
+            .storage
+            .put_node_record(&NodeRecord {
+                id: "memory:versioned".to_string(),
+                labels: vec!["MemoryEpisode".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Versioned memory".to_string()))]),
+                created_at_unix_ms: stale_time,
+                updated_at_unix_ms: stale_time,
+            })
+            .unwrap();
+
+        let match_query = parser.parse("MATCH (n:MemoryEpisode) RETURN n").unwrap();
+        let hidden = engine.execute(&match_query, &HashMap::new()).unwrap();
+        assert!(hidden.rows.is_empty());
+
+        let mut refreshed_props = node_record_to_props(
+            &engine
+                .storage
+                .get_node_record("memory:versioned")
+                .unwrap()
+                .unwrap(),
+        );
+        refreshed_props.insert("status".to_string(), Value::String("fresh".to_string()));
+        engine.persist_node_props(&refreshed_props).unwrap();
+
+        let shown = engine.execute(&match_query, &HashMap::new()).unwrap();
+        assert_eq!(shown.rows.len(), 1);
+        assert_eq!(
+            shown.rows[0]
+                .get("n")
+                .and_then(Value::as_object)
+                .and_then(|props| props.get("status")),
+            Some(&Value::String("fresh".to_string()))
+        );
+
+        let stored = engine.storage.get_node_record("memory:versioned").unwrap().unwrap();
+        assert!(stored.updated_at_unix_ms > stale_time);
+        assert_eq!(stored.created_at_unix_ms, stale_time);
+    }
+
+    #[test]
+    fn test_create_keeps_fresh_edges_visible_under_version_anchor() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE version_decay OPTIONS { halfLifeSeconds: 1, visibilityThreshold: 0.5, scoreFloor: 0.0, function: 'step', scope: 'EDGE', scoreFrom: 'VERSION', enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE version_binding FOR ()-[r:LINKS]-() APPLY { DECAY PROFILE version_decay, order: 10 }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let create_query = parser
+            .parse(
+                "CREATE (a:Person { id: 'person:version-a', name: 'Alice' })-[:LINKS { kind: 'fresh' }]->(b:Person { id: 'person:version-b', name: 'Bob' })",
+            )
+            .unwrap();
+        engine.execute(&create_query, &HashMap::new()).unwrap();
+
+        let match_query = parser
+            .parse("MATCH (:Person)-[r:LINKS]->(:Person) RETURN r")
+            .unwrap();
+        let visible = engine.execute(&match_query, &HashMap::new()).unwrap();
+        assert_eq!(visible.rows.len(), 1);
+
+        let edge_id = visible.rows[0]
+            .get("r")
+            .and_then(Value::as_object)
+            .and_then(|props| props.get("_id"))
+            .and_then(Value::as_str)
+            .expect("edge id should be present")
+            .to_string();
+        let stored = engine.storage.get_edge_record(&edge_id).unwrap().unwrap();
+        assert!(stored.updated_at_unix_ms > 0);
+        assert!(stored.created_at_unix_ms > 0);
     }
 
     #[test]
@@ -4637,7 +6255,9 @@ mod tests {
         engine.execute(&create_profile, &HashMap::new()).unwrap();
 
         let create_policy = parser
-            .parse("CREATE PROMOTION POLICY fact_policy FOR (n:KnowledgeFact) APPLY PROFILE boost_profile WHEN 'n.evidence >= 3'")
+            .parse(
+                "CREATE PROMOTION POLICY fact_policy FOR (n:KnowledgeFact) APPLY { ON ACCESS { SET n.lastAccessedAt = timestamp() } APPLY PROFILE boost_profile WHEN 'n.evidence >= 3' }",
+            )
             .unwrap();
         engine.execute(&create_policy, &HashMap::new()).unwrap();
 
@@ -4648,7 +6268,14 @@ mod tests {
             shown.rows[0].get("name"),
             Some(&Value::String("fact_policy".to_string()))
         );
+        assert_eq!(shown.rows[0].get("isEdge"), Some(&Value::Bool(false)));
         assert_eq!(shown.rows[0].get("enabled"), Some(&Value::Bool(true)));
+        assert_eq!(
+            shown.rows[0].get("onAccessMutations"),
+            Some(&Value::Array(vec![Value::String(
+                "SET_LAST_ACCESSED_NOW".to_string(),
+            )]))
+        );
 
         let alter_policy = parser
             .parse("ALTER PROMOTION POLICY fact_policy SET ENABLED false")
@@ -4656,5 +6283,605 @@ mod tests {
         engine.execute(&alter_policy, &HashMap::new()).unwrap();
         let shown = engine.execute(&show_policies, &HashMap::new()).unwrap();
         assert_eq!(shown.rows[0].get("enabled"), Some(&Value::Bool(false)));
+    }
+
+    #[test]
+    fn test_call_knowledgepolicy_resolve_by_entity_id_reports_scoring() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE access_decay OPTIONS { halfLifeSeconds: 1, visibilityThreshold: 0.75, scoreFloor: 0.0, function: 'step', scope: 'NODE', scoreFrom: 'LAST_ACCESSED', enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE access_binding FOR (n:MemoryEpisode) APPLY { DECAY PROFILE access_decay, order: 10 }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE PROMOTION PROFILE reinforcement OPTIONS { scope: 'NODE', multiplier: 2.0, scoreFloor: 0.8, scoreCap: 1.0, enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE PROMOTION POLICY reinforcement_policy FOR (n:MemoryEpisode) APPLY PROFILE reinforcement WHEN 'n.accessCount >= 3'",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let stale_time = now_unix_ms() - 5_000;
+        engine
+            .storage
+            .put_node_record(&NodeRecord {
+                id: "memory:resolve-1".to_string(),
+                labels: vec!["MemoryEpisode".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Inspectable memory".to_string()))]),
+                created_at_unix_ms: stale_time,
+                updated_at_unix_ms: stale_time,
+            })
+            .unwrap();
+        engine
+            .storage
+            .put_knowledge_policy_access_metadata(
+                "memory:resolve-1",
+                &copperdb_storage::KnowledgePolicyAccessMetadata {
+                    last_accessed_at_unix_ms: Some(now_unix_ms() - 10_000),
+                    access_count: 3,
+                },
+            )
+            .unwrap();
+
+        let query = parser
+            .parse("CALL nornicdb.knowledgepolicy.resolve('memory:resolve-1', '', '')")
+            .unwrap();
+        let result = engine.execute(&query, &HashMap::new()).unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        let row = &result.rows[0];
+        assert_eq!(row.get("entityId"), Some(&Value::String("memory:resolve-1".to_string())));
+        assert_eq!(row.get("decayBinding"), Some(&Value::String("access_binding".to_string())));
+        assert_eq!(
+            row.get("promotionPolicy"),
+            Some(&Value::String("reinforcement_policy".to_string()))
+        );
+        assert_eq!(
+            row.get("matchedPromotionProfile"),
+            Some(&Value::String("reinforcement".to_string()))
+        );
+        assert_eq!(row.get("suppressed"), Some(&Value::Bool(false)));
+        assert_eq!(row.get("dryRun"), Some(&Value::Bool(false)));
+        assert_eq!(row.get("scoreFrom"), Some(&Value::String("LASTACCESSED".to_string())));
+        assert_eq!(row.get("accessCount"), Some(&Value::from(3u64)));
+    }
+
+    #[test]
+    fn test_call_knowledgepolicy_resolve_by_labels_is_dry_run() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE slow_decay OPTIONS { halfLifeSeconds: 3600, visibilityThreshold: 0.1, scoreFloor: 0.05, function: 'exponential', scope: 'NODE', scoreFrom: 'CREATED', enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE memory_binding FOR (n:MemoryEpisode) APPLY { DECAY PROFILE slow_decay, order: 10 }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let query = parser
+            .parse("CALL nornicdb.knowledgepolicy.resolve('', 'MemoryEpisode', '')")
+            .unwrap();
+        let result = engine.execute(&query, &HashMap::new()).unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        let row = &result.rows[0];
+        assert_eq!(row.get("dryRun"), Some(&Value::Bool(true)));
+        assert_eq!(row.get("decayBinding"), Some(&Value::String("memory_binding".to_string())));
+        assert_eq!(row.get("targetKind"), Some(&Value::String("NODE".to_string())));
+        assert_eq!(row.get("suppressed"), Some(&Value::Bool(false)));
+        assert_eq!(row.get("anchorUnixMs"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn test_match_updates_node_access_metadata_via_on_access_policy() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE visible_decay OPTIONS { halfLifeSeconds: 3600, visibilityThreshold: 0.5, scoreFloor: 0.5, function: 'step', scope: 'NODE', scoreFrom: 'CREATED', enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE memory_binding FOR (n:MemoryEpisode) APPLY { DECAY PROFILE visible_decay, order: 10 }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE PROMOTION POLICY memory_access FOR (n:MemoryEpisode) APPLY { ON ACCESS { SET n.lastAccessedAt = timestamp() SET n.accessCount = coalesce(n.accessCount, 0) + 1 } }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let now = now_unix_ms();
+        engine
+            .storage
+            .put_node_record(&NodeRecord {
+                id: "memory:on-access".to_string(),
+                labels: vec!["MemoryEpisode".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Tracked memory".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .unwrap();
+
+        let query = parser.parse("MATCH (n:MemoryEpisode) RETURN n").unwrap();
+        let result = engine.execute(&query, &HashMap::new()).unwrap();
+        assert_eq!(result.rows.len(), 1);
+
+        let metadata = engine
+            .storage
+            .get_knowledge_policy_access_metadata("memory:on-access")
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata.access_count, 1);
+        assert!(metadata.last_accessed_at_unix_ms.is_some());
+    }
+
+    #[test]
+    fn test_match_updates_node_access_metadata_with_policy_only_target() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE PROMOTION POLICY memory_access FOR (n:MemoryEpisode) APPLY { ON ACCESS { SET n.lastAccessedAt = timestamp() SET n.accessCount = coalesce(n.accessCount, 0) + 1 } }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let now = now_unix_ms();
+        engine
+            .storage
+            .put_node_record(&NodeRecord {
+                id: "memory:policy-only".to_string(),
+                labels: vec!["MemoryEpisode".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Tracked memory".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .unwrap();
+
+        let query = parser.parse("MATCH (n:MemoryEpisode) RETURN n").unwrap();
+        let result = engine.execute(&query, &HashMap::new()).unwrap();
+        assert_eq!(result.rows.len(), 1);
+
+        let metadata = engine
+            .storage
+            .get_knowledge_policy_access_metadata("memory:policy-only")
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata.access_count, 1);
+        assert!(metadata.last_accessed_at_unix_ms.is_some());
+    }
+
+    #[test]
+    fn test_match_updates_edge_access_metadata_via_on_access_policy() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE visible_decay OPTIONS { halfLifeSeconds: 3600, visibilityThreshold: 0.5, scoreFloor: 0.5, function: 'step', scope: 'EDGE', scoreFrom: 'CREATED', enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE edge_binding FOR ()-[r:LINKS]-() APPLY { DECAY PROFILE visible_decay, order: 10 }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE PROMOTION POLICY edge_access FOR ()-[r:LINKS]-() APPLY { ON ACCESS { SET r.lastAccessedAt = timestamp() SET r.accessCount = coalesce(r.accessCount, 0) + 1 } }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let now = now_unix_ms();
+        for node in [
+            NodeRecord {
+                id: "person:access-left".to_string(),
+                labels: vec!["Person".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Alice".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            },
+            NodeRecord {
+                id: "person:access-right".to_string(),
+                labels: vec!["Person".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Bob".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            },
+        ] {
+            engine.storage.put_node_record(&node).unwrap();
+        }
+        engine
+            .storage
+            .put_edge_record(&EdgeRecord {
+                id: "links:on-access".to_string(),
+                start_node: "person:access-left".to_string(),
+                end_node: "person:access-right".to_string(),
+                edge_type: "LINKS".to_string(),
+                properties: BTreeMap::from([("kind".to_string(), Value::String("tracked".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .unwrap();
+
+        let query = parser
+            .parse("MATCH (:Person)-[r:LINKS]->(:Person) RETURN r")
+            .unwrap();
+        let result = engine.execute(&query, &HashMap::new()).unwrap();
+        assert_eq!(result.rows.len(), 1);
+
+        let metadata = engine
+            .storage
+            .get_knowledge_policy_access_metadata("links:on-access")
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata.access_count, 1);
+        assert!(metadata.last_accessed_at_unix_ms.is_some());
+    }
+
+    #[test]
+    fn test_match_updates_edge_access_metadata_with_policy_only_target() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE PROMOTION POLICY edge_access FOR ()-[r:LINKS]-() APPLY { ON ACCESS { SET r.lastAccessedAt = timestamp() SET r.accessCount = coalesce(r.accessCount, 0) + 1 } }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let now = now_unix_ms();
+        for node in [
+            NodeRecord {
+                id: "person:policy-edge-left".to_string(),
+                labels: vec!["Person".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Alice".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            },
+            NodeRecord {
+                id: "person:policy-edge-right".to_string(),
+                labels: vec!["Person".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Bob".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            },
+        ] {
+            engine.storage.put_node_record(&node).unwrap();
+        }
+        engine
+            .storage
+            .put_edge_record(&EdgeRecord {
+                id: "links:policy-only".to_string(),
+                start_node: "person:policy-edge-left".to_string(),
+                end_node: "person:policy-edge-right".to_string(),
+                edge_type: "LINKS".to_string(),
+                properties: BTreeMap::from([("kind".to_string(), Value::String("tracked".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .unwrap();
+
+        let query = parser
+            .parse("MATCH (:Person)-[r:LINKS]->(:Person) RETURN r")
+            .unwrap();
+        let result = engine.execute(&query, &HashMap::new()).unwrap();
+        assert_eq!(result.rows.len(), 1);
+
+        let metadata = engine
+            .storage
+            .get_knowledge_policy_access_metadata("links:policy-only")
+            .unwrap()
+            .unwrap();
+        assert_eq!(metadata.access_count, 1);
+        assert!(metadata.last_accessed_at_unix_ms.is_some());
+    }
+
+    #[test]
+    fn test_match_keeps_stale_nodes_visible_when_promotion_predicate_matches() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE stale_decay OPTIONS { halfLifeSeconds: 1, visibilityThreshold: 0.75, scoreFloor: 0.0, function: 'step', scope: 'NODE', scoreFrom: 'CREATED', enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE stale_binding FOR (n:MemoryEpisode) APPLY { DECAY PROFILE stale_decay, order: 10 }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let stale_time = now_unix_ms() - 5_000;
+        engine
+            .storage
+            .put_node_record(&NodeRecord {
+                id: "memory:promotion-visible".to_string(),
+                labels: vec!["MemoryEpisode".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Reinforced memory".to_string()))]),
+                created_at_unix_ms: stale_time,
+                updated_at_unix_ms: stale_time,
+            })
+            .unwrap();
+
+        let query = parser.parse("MATCH (n:MemoryEpisode) RETURN n").unwrap();
+        let hidden = engine.execute(&query, &HashMap::new()).unwrap();
+        assert!(hidden.rows.is_empty());
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE PROMOTION PROFILE reinforcement OPTIONS { scope: 'NODE', multiplier: 2.0, scoreFloor: 0.8, scoreCap: 1.0, enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE PROMOTION POLICY reinforcement_policy FOR (n:MemoryEpisode) APPLY PROFILE reinforcement WHEN 'n.accessCount >= 3'",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .storage
+            .put_knowledge_policy_access_metadata(
+                "memory:promotion-visible",
+                &copperdb_storage::KnowledgePolicyAccessMetadata {
+                    last_accessed_at_unix_ms: None,
+                    access_count: 3,
+                },
+            )
+            .unwrap();
+
+        let visible = engine.execute(&query, &HashMap::new()).unwrap();
+        assert_eq!(visible.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_match_keeps_stale_edges_visible_when_promotion_predicate_matches() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE stale_edge_decay OPTIONS { halfLifeSeconds: 1, visibilityThreshold: 0.75, scoreFloor: 0.0, function: 'step', scope: 'EDGE', scoreFrom: 'CREATED', enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE stale_edge_binding FOR ()-[r:LINKS]-() APPLY { DECAY PROFILE stale_edge_decay, order: 10 }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let now = now_unix_ms();
+        for node in [
+            NodeRecord {
+                id: "person:promo-edge-left".to_string(),
+                labels: vec!["Person".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Alice".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            },
+            NodeRecord {
+                id: "person:promo-edge-right".to_string(),
+                labels: vec!["Person".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Bob".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            },
+        ] {
+            engine.storage.put_node_record(&node).unwrap();
+        }
+
+        let stale_time = now - 5_000;
+        engine
+            .storage
+            .put_edge_record(&EdgeRecord {
+                id: "links:promotion-visible".to_string(),
+                start_node: "person:promo-edge-left".to_string(),
+                end_node: "person:promo-edge-right".to_string(),
+                edge_type: "LINKS".to_string(),
+                properties: BTreeMap::from([("kind".to_string(), Value::String("reinforced".to_string()))]),
+                created_at_unix_ms: stale_time,
+                updated_at_unix_ms: stale_time,
+            })
+            .unwrap();
+
+        let query = parser
+            .parse("MATCH (:Person)-[r:LINKS]->(:Person) RETURN r")
+            .unwrap();
+        let hidden = engine.execute(&query, &HashMap::new()).unwrap();
+        assert!(hidden.rows.is_empty());
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE PROMOTION PROFILE reinforcement_edge OPTIONS { scope: 'EDGE', multiplier: 2.0, scoreFloor: 0.8, scoreCap: 1.0, enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE PROMOTION POLICY reinforcement_edge_policy FOR ()-[r:LINKS]-() APPLY PROFILE reinforcement_edge WHEN 'r.accessCount >= 2'",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .storage
+            .put_knowledge_policy_access_metadata(
+                "links:promotion-visible",
+                &copperdb_storage::KnowledgePolicyAccessMetadata {
+                    last_accessed_at_unix_ms: None,
+                    access_count: 2,
+                },
+            )
+            .unwrap();
+
+        let visible = engine.execute(&query, &HashMap::new()).unwrap();
+        assert_eq!(visible.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_match_does_not_flush_access_metadata_on_query_error() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE PROMOTION POLICY memory_access FOR (n:MemoryEpisode) APPLY { ON ACCESS { SET n.lastAccessedAt = timestamp() SET n.accessCount = coalesce(n.accessCount, 0) + 1 } }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let now = now_unix_ms();
+        engine
+            .storage
+            .put_node_record(&NodeRecord {
+                id: "memory:error-buffer".to_string(),
+                labels: vec!["MemoryEpisode".to_string()],
+                properties: BTreeMap::from([("name".to_string(), Value::String("Tracked memory".to_string()))]),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            })
+            .unwrap();
+
+        let query = parser
+            .parse("MATCH (n:MemoryEpisode) RETURN abs('x') AS bad")
+            .unwrap();
+        let err = match engine.execute(&query, &HashMap::new()) {
+            Ok(_) => panic!("query should fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, EvalError::FilterError(_)));
+        assert!(engine
+            .storage
+            .get_knowledge_policy_access_metadata("memory:error-buffer")
+            .unwrap()
+            .is_none());
     }
 }
