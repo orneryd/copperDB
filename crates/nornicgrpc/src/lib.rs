@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
-use tonic::transport::{Channel, Endpoint};
+use tonic::metadata::{Ascii, MetadataValue};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tonic::{Request, Response, Status};
 
 use copperdb_replication::{Command, ReplicaTransport, ReplicationError};
@@ -25,6 +26,60 @@ use serde_json::Value;
 
 pub mod proto {
     tonic::include_proto!("copperdb.nornic.v1");
+}
+
+const GRPC_AUTH_HEADER: &str = "authorization";
+const GRPC_AUTH_TOKEN_ENV: &str = "COPPERDB_GRPC_AUTH_TOKEN";
+
+fn ensure_tls_crypto_provider() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
+fn configured_grpc_auth_token() -> Option<String> {
+    std::env::var(GRPC_AUTH_TOKEN_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn bearer_value(token: &str) -> Result<MetadataValue<Ascii>, GrpcError> {
+    MetadataValue::try_from(format!("Bearer {token}"))
+        .map_err(|error| GrpcError::Encoding(error.to_string()))
+}
+
+fn authorize_request<T>(
+    request: &Request<T>,
+    required_auth_token: Option<&str>,
+) -> Result<(), Status> {
+    let Some(expected) = required_auth_token else {
+        return Ok(());
+    };
+    let Some(value) = request.metadata().get(GRPC_AUTH_HEADER) else {
+        return Err(Status::unauthenticated("missing gRPC authorization token"));
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| Status::unauthenticated("invalid gRPC authorization metadata"))?;
+    let Some(actual) = value.strip_prefix("Bearer ") else {
+        return Err(Status::unauthenticated("invalid gRPC authorization scheme"));
+    };
+    if actual != expected {
+        return Err(Status::unauthenticated("invalid gRPC authorization token"));
+    }
+    Ok(())
+}
+
+fn request_with_auth<T>(message: T, auth_token: Option<&str>) -> Result<Request<T>, GrpcError> {
+    let mut request = Request::new(message);
+    if let Some(token) = auth_token {
+        request
+            .metadata_mut()
+            .insert(GRPC_AUTH_HEADER, bearer_value(token)?);
+    }
+    Ok(request)
 }
 
 #[derive(Debug, Error)]
@@ -205,6 +260,7 @@ pub struct NornicReplicaService {
     handler: Arc<dyn RemoteReplicaClient>,
     ranked_search_handler: Arc<dyn RemoteRankedSearchClient>,
     hydration_handler: Arc<dyn RemoteHydrationClient>,
+    required_auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -243,7 +299,13 @@ impl NornicReplicaService {
             handler,
             ranked_search_handler: Arc::new(UnsupportedRemoteRankedSearchClient),
             hydration_handler: Arc::new(UnsupportedRemoteHydrationClient),
+            required_auth_token: configured_grpc_auth_token(),
         }
+    }
+
+    pub fn with_auth_token(mut self, token: impl Into<String>) -> Self {
+        self.required_auth_token = Some(token.into());
+        self
     }
 
     pub fn with_ranked_search_handler(
@@ -270,6 +332,7 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
         &self,
         request: Request<proto::RemoteReplicaApplyRequest>,
     ) -> Result<Response<proto::RemoteReplicaApplyResponse>, Status> {
+        authorize_request(&request, self.required_auth_token.as_deref())?;
         let request = RemoteReplicaApplyRequest::try_from(request.into_inner())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         self.handler
@@ -283,6 +346,7 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
         &self,
         request: Request<proto::RemoteReplicaReadRequest>,
     ) -> Result<Response<proto::RemoteReplicaReadResponse>, Status> {
+        authorize_request(&request, self.required_auth_token.as_deref())?;
         let response = self
             .handler
             .read_replica(RemoteReplicaReadRequest::from(request.into_inner()))
@@ -297,6 +361,7 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
         &self,
         request: Request<proto::RemoteRankedSearchRequest>,
     ) -> Result<Response<proto::RemoteRankedSearchResponse>, Status> {
+        authorize_request(&request, self.required_auth_token.as_deref())?;
         let request = RemoteRankedSearchRequest::try_from(request.into_inner())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let response = self
@@ -313,6 +378,7 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
         &self,
         request: Request<proto::RemoteHydrationRequest>,
     ) -> Result<Response<proto::RemoteHydrationResponse>, Status> {
+        authorize_request(&request, self.required_auth_token.as_deref())?;
         let request = RemoteHydrationRequest::try_from(request.into_inner())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let response = self
@@ -326,33 +392,109 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct TonicRemoteReplicaClient;
+#[derive(Debug, Clone)]
+pub struct TonicRemoteReplicaClient {
+    auth_token: Option<String>,
+    tls_enabled: bool,
+    tls_ca_certificate_pem: Option<String>,
+    tls_domain_name: Option<String>,
+    tls_identity_pem: Option<(String, String)>,
+}
 
-#[derive(Debug, Clone, Default)]
-pub struct TonicRemoteRankedSearchClient;
+#[derive(Debug, Clone)]
+pub struct TonicRemoteRankedSearchClient {
+    auth_token: Option<String>,
+    tls_enabled: bool,
+    tls_ca_certificate_pem: Option<String>,
+    tls_domain_name: Option<String>,
+    tls_identity_pem: Option<(String, String)>,
+}
 
-#[derive(Debug, Clone, Default)]
-pub struct TonicRemoteHydrationClient;
+#[derive(Debug, Clone)]
+pub struct TonicRemoteHydrationClient {
+    auth_token: Option<String>,
+    tls_enabled: bool,
+    tls_ca_certificate_pem: Option<String>,
+    tls_domain_name: Option<String>,
+    tls_identity_pem: Option<(String, String)>,
+}
 
 impl TonicRemoteReplicaClient {
     pub fn new() -> Self {
-        Self
+        Self {
+            auth_token: configured_grpc_auth_token(),
+            tls_enabled: false,
+            tls_ca_certificate_pem: None,
+            tls_domain_name: None,
+            tls_identity_pem: None,
+        }
     }
 
-    fn endpoint_uri(target_addr: &str) -> String {
+    pub fn with_auth_token(mut self, token: impl Into<String>) -> Self {
+        self.auth_token = Some(token.into());
+        self
+    }
+
+    pub fn with_tls_enabled(mut self, enabled: bool) -> Self {
+        self.tls_enabled = enabled;
+        self
+    }
+
+    pub fn with_tls_ca_certificate_pem(mut self, pem: impl Into<String>) -> Self {
+        self.tls_ca_certificate_pem = Some(pem.into());
+        self
+    }
+
+    pub fn with_tls_domain_name(mut self, domain_name: impl Into<String>) -> Self {
+        self.tls_domain_name = Some(domain_name.into());
+        self
+    }
+
+    pub fn with_tls_identity_pem(
+        mut self,
+        certificate_pem: impl Into<String>,
+        key_pem: impl Into<String>,
+    ) -> Self {
+        self.tls_identity_pem = Some((certificate_pem.into(), key_pem.into()));
+        self
+    }
+
+    fn endpoint_uri(target_addr: &str, tls_enabled: bool) -> String {
         if target_addr.starts_with("http://") || target_addr.starts_with("https://") {
             target_addr.into()
+        } else if tls_enabled {
+            format!("https://{target_addr}")
         } else {
             format!("http://{target_addr}")
         }
     }
 
     async fn connect(
+        &self,
         target_addr: &str,
     ) -> Result<proto::nornic_replica_client::NornicReplicaClient<Channel>, GrpcError> {
-        let endpoint = Endpoint::from_shared(Self::endpoint_uri(target_addr))
+        let uri = Self::endpoint_uri(target_addr, self.tls_enabled);
+        let mut endpoint = Endpoint::from_shared(uri.clone())
             .map_err(|error| GrpcError::Transport(error.to_string()))?;
+        if self.tls_enabled || uri.starts_with("https://") {
+            ensure_tls_crypto_provider();
+            let mut tls = ClientTlsConfig::new();
+            if let Some(pem) = &self.tls_ca_certificate_pem {
+                tls = tls.ca_certificate(Certificate::from_pem(pem.clone()));
+            }
+            if let Some(domain_name) = &self.tls_domain_name {
+                tls = tls.domain_name(domain_name.clone());
+            }
+            if let Some((cert_pem, key_pem)) = &self.tls_identity_pem {
+                tls = tls.identity(tonic::transport::Identity::from_pem(
+                    cert_pem.clone(),
+                    key_pem.clone(),
+                ));
+            }
+            endpoint = endpoint
+                .tls_config(tls)
+                .map_err(|error| GrpcError::Transport(error.to_string()))?;
+        }
         let channel = endpoint
             .connect()
             .await
@@ -365,13 +507,101 @@ impl TonicRemoteReplicaClient {
 
 impl TonicRemoteRankedSearchClient {
     pub fn new() -> Self {
-        Self
+        Self {
+            auth_token: configured_grpc_auth_token(),
+            tls_enabled: false,
+            tls_ca_certificate_pem: None,
+            tls_domain_name: None,
+            tls_identity_pem: None,
+        }
+    }
+
+    pub fn with_auth_token(mut self, token: impl Into<String>) -> Self {
+        self.auth_token = Some(token.into());
+        self
+    }
+
+    pub fn with_tls_enabled(mut self, enabled: bool) -> Self {
+        self.tls_enabled = enabled;
+        self
+    }
+
+    pub fn with_tls_ca_certificate_pem(mut self, pem: impl Into<String>) -> Self {
+        self.tls_ca_certificate_pem = Some(pem.into());
+        self
+    }
+
+    pub fn with_tls_domain_name(mut self, domain_name: impl Into<String>) -> Self {
+        self.tls_domain_name = Some(domain_name.into());
+        self
+    }
+
+    pub fn with_tls_identity_pem(
+        mut self,
+        certificate_pem: impl Into<String>,
+        key_pem: impl Into<String>,
+    ) -> Self {
+        self.tls_identity_pem = Some((certificate_pem.into(), key_pem.into()));
+        self
     }
 }
 
 impl TonicRemoteHydrationClient {
     pub fn new() -> Self {
-        Self
+        Self {
+            auth_token: configured_grpc_auth_token(),
+            tls_enabled: false,
+            tls_ca_certificate_pem: None,
+            tls_domain_name: None,
+            tls_identity_pem: None,
+        }
+    }
+
+    pub fn with_auth_token(mut self, token: impl Into<String>) -> Self {
+        self.auth_token = Some(token.into());
+        self
+    }
+
+    pub fn with_tls_enabled(mut self, enabled: bool) -> Self {
+        self.tls_enabled = enabled;
+        self
+    }
+
+    pub fn with_tls_ca_certificate_pem(mut self, pem: impl Into<String>) -> Self {
+        self.tls_ca_certificate_pem = Some(pem.into());
+        self
+    }
+
+    pub fn with_tls_domain_name(mut self, domain_name: impl Into<String>) -> Self {
+        self.tls_domain_name = Some(domain_name.into());
+        self
+    }
+
+    pub fn with_tls_identity_pem(
+        mut self,
+        certificate_pem: impl Into<String>,
+        key_pem: impl Into<String>,
+    ) -> Self {
+        self.tls_identity_pem = Some((certificate_pem.into(), key_pem.into()));
+        self
+    }
+}
+
+impl Default for TonicRemoteReplicaClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for TonicRemoteRankedSearchClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for TonicRemoteHydrationClient {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -379,8 +609,11 @@ impl TonicRemoteHydrationClient {
 impl RemoteReplicaClient for TonicRemoteReplicaClient {
     async fn apply_replica(&self, request: RemoteReplicaApplyRequest) -> Result<(), GrpcError> {
         let target_addr = request.target_addr.clone();
-        let proto_request = proto::RemoteReplicaApplyRequest::try_from(request)?;
-        Self::connect(&target_addr)
+        let proto_request = request_with_auth(
+            proto::RemoteReplicaApplyRequest::try_from(request)?,
+            self.auth_token.as_deref(),
+        )?;
+        self.connect(&target_addr)
             .await?
             .apply_replica(proto_request)
             .await
@@ -393,9 +626,13 @@ impl RemoteReplicaClient for TonicRemoteReplicaClient {
         request: RemoteReplicaReadRequest,
     ) -> Result<Option<Vec<u8>>, GrpcError> {
         let target_addr = request.target_addr.clone();
-        let response = Self::connect(&target_addr)
+        let response = self
+            .connect(&target_addr)
             .await?
-            .read_replica(proto::RemoteReplicaReadRequest::from(request))
+            .read_replica(request_with_auth(
+                proto::RemoteReplicaReadRequest::from(request),
+                self.auth_token.as_deref(),
+            )?)
             .await
             .map_err(|error| GrpcError::Transport(error.to_string()))?
             .into_inner();
@@ -410,9 +647,19 @@ impl RemoteRankedSearchClient for TonicRemoteRankedSearchClient {
         request: RemoteRankedSearchRequest,
     ) -> Result<RrfSearchBatch, GrpcError> {
         let target_addr = request.target_addr.clone();
-        let response = TonicRemoteReplicaClient::connect(&target_addr)
+        let response = TonicRemoteReplicaClient {
+            auth_token: self.auth_token.clone(),
+            tls_enabled: self.tls_enabled,
+            tls_ca_certificate_pem: self.tls_ca_certificate_pem.clone(),
+            tls_domain_name: self.tls_domain_name.clone(),
+            tls_identity_pem: self.tls_identity_pem.clone(),
+        }
+        .connect(&target_addr)
             .await?
-            .search_ranked(proto::RemoteRankedSearchRequest::try_from(request)?)
+            .search_ranked(request_with_auth(
+                proto::RemoteRankedSearchRequest::try_from(request)?,
+                self.auth_token.as_deref(),
+            )?)
             .await
             .map_err(|error| GrpcError::Transport(error.to_string()))?
             .into_inner();
@@ -427,9 +674,19 @@ impl RemoteHydrationClient for TonicRemoteHydrationClient {
         request: RemoteHydrationRequest,
     ) -> Result<Vec<RrfHydrationRecord>, GrpcError> {
         let target_addr = request.target_addr.clone();
-        let response = TonicRemoteReplicaClient::connect(&target_addr)
+        let response = TonicRemoteReplicaClient {
+            auth_token: self.auth_token.clone(),
+            tls_enabled: self.tls_enabled,
+            tls_ca_certificate_pem: self.tls_ca_certificate_pem.clone(),
+            tls_domain_name: self.tls_domain_name.clone(),
+            tls_identity_pem: self.tls_identity_pem.clone(),
+        }
+        .connect(&target_addr)
             .await?
-            .hydrate_entities(proto::RemoteHydrationRequest::try_from(request)?)
+            .hydrate_entities(request_with_auth(
+                proto::RemoteHydrationRequest::try_from(request)?,
+                self.auth_token.as_deref(),
+            )?)
             .await
             .map_err(|error| GrpcError::Transport(error.to_string()))?
             .into_inner();
@@ -1464,6 +1721,151 @@ mod tests {
         assert_eq!(hydration.requests.lock().unwrap().len(), 1);
     }
 
+    #[tokio::test]
+    async fn generated_replica_service_rejects_missing_auth_token() {
+        let service = NornicReplicaService::new(Arc::new(RecordingRemoteReplicaClient::default()))
+            .with_auth_token("shared-secret");
+
+        let error = service
+            .apply_replica(Request::new(
+                proto::RemoteReplicaApplyRequest::try_from(RemoteReplicaApplyRequest {
+                    target_node: "node-a".into(),
+                    target_addr: "node-a.mesh.local:50051".into(),
+                    command: Command::Put {
+                        key: b"auth-test".to_vec(),
+                        value: b"denied".to_vec(),
+                    },
+                })
+                .unwrap(),
+            ))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[tokio::test]
+    async fn tonic_ranked_search_client_sends_configured_auth_token() {
+        use tonic::transport::Server;
+
+        let ranked = Arc::new(RecordingRemoteRankedSearchClient::default());
+        let placement = PlacementKey::new("default", "copper", "primary");
+        ranked.batches.lock().unwrap().insert(
+            "search-a".into(),
+            RrfSearchBatch {
+                shard: placement.clone(),
+                source: "lexical".into(),
+                hits: vec![],
+            },
+        );
+
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let grpc_addr = reserved.local_addr().unwrap();
+        drop(reserved);
+
+        let service = NornicReplicaService::new(Arc::new(RecordingRemoteReplicaClient::default()))
+            .with_auth_token("shared-secret")
+            .with_ranked_search_handler(ranked.clone());
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(service.into_server())
+                .serve(grpc_addr)
+                .await
+                .unwrap();
+        });
+        tokio::task::yield_now().await;
+
+        let batch = TonicRemoteRankedSearchClient::new()
+            .with_auth_token("shared-secret")
+            .search_ranked(RemoteRankedSearchRequest {
+                target_node: "search-a".into(),
+                target_addr: grpc_addr.to_string(),
+                placement: placement.clone(),
+                query: SearchQuery::FullText {
+                    query: "alice".into(),
+                    fields: vec!["body".into()],
+                    limit: 10,
+                },
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(batch.shard, placement);
+        assert_eq!(ranked.requests.lock().unwrap().len(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tonic_ranked_search_client_connects_over_tls() {
+        use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
+
+        ensure_tls_crypto_provider();
+        let server_certified = rcgen::generate_simple_self_signed(["localhost".to_string()]).unwrap();
+        let server_cert_pem = server_certified.cert.pem();
+        let server_key_pem = server_certified.signing_key.serialize_pem();
+        let client_certified = rcgen::generate_simple_self_signed(["client.mesh.local".to_string()]).unwrap();
+        let client_cert_pem = client_certified.cert.pem();
+        let client_key_pem = client_certified.signing_key.serialize_pem();
+
+        let ranked = Arc::new(RecordingRemoteRankedSearchClient::default());
+        let placement = PlacementKey::new("default", "copper", "primary");
+        ranked.batches.lock().unwrap().insert(
+            "search-a".into(),
+            RrfSearchBatch {
+                shard: placement.clone(),
+                source: "lexical".into(),
+                hits: vec![],
+            },
+        );
+
+        let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let grpc_addr = reserved.local_addr().unwrap();
+        drop(reserved);
+
+        let service = NornicReplicaService::new(Arc::new(RecordingRemoteReplicaClient::default()))
+            .with_auth_token("shared-secret")
+            .with_ranked_search_handler(ranked.clone());
+        let server_cert_pem_clone = server_cert_pem.clone();
+        let client_cert_pem_clone = client_cert_pem.clone();
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .tls_config(
+                    ServerTlsConfig::new()
+                        .identity(Identity::from_pem(server_cert_pem_clone, server_key_pem))
+                        .client_ca_root(Certificate::from_pem(client_cert_pem_clone)),
+                )
+                .unwrap()
+                .add_service(service.into_server())
+                .serve(grpc_addr)
+                .await
+                .unwrap();
+        });
+        tokio::task::yield_now().await;
+
+        let batch = TonicRemoteRankedSearchClient::new()
+            .with_auth_token("shared-secret")
+            .with_tls_enabled(true)
+            .with_tls_ca_certificate_pem(server_cert_pem)
+            .with_tls_domain_name("localhost")
+            .with_tls_identity_pem(client_cert_pem, client_key_pem)
+            .search_ranked(RemoteRankedSearchRequest {
+                target_node: "search-a".into(),
+                target_addr: format!("localhost:{}", grpc_addr.port()),
+                placement: placement.clone(),
+                query: SearchQuery::FullText {
+                    query: "alice".into(),
+                    fields: vec!["body".into()],
+                    limit: 10,
+                },
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(batch.shard, placement);
+        assert_eq!(ranked.requests.lock().unwrap().len(), 1);
+        server.abort();
+    }
+
     #[test]
     fn generated_proto_converts_replica_apply_requests() {
         let request = RemoteReplicaApplyRequest {
@@ -1503,11 +1905,15 @@ mod tests {
     #[test]
     fn tonic_remote_client_normalizes_endpoint_uris() {
         assert_eq!(
-            TonicRemoteReplicaClient::endpoint_uri("node-1.mesh.local:50051"),
+            TonicRemoteReplicaClient::endpoint_uri("node-1.mesh.local:50051", false),
             "http://node-1.mesh.local:50051"
         );
         assert_eq!(
-            TonicRemoteReplicaClient::endpoint_uri("https://node-1.mesh.local:50051"),
+            TonicRemoteReplicaClient::endpoint_uri("node-1.mesh.local:50051", true),
+            "https://node-1.mesh.local:50051"
+        );
+        assert_eq!(
+            TonicRemoteReplicaClient::endpoint_uri("https://node-1.mesh.local:50051", false),
             "https://node-1.mesh.local:50051"
         );
     }

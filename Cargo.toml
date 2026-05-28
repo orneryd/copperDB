@@ -110,7 +110,7 @@ tower-http = { version = "0.6.8", features = ["cors", "trace"] }
 tokio-tungstenite = "0.29.0"
 
 # gRPC (replaces google.golang.org/grpc)
-tonic = "0.14.5"
+tonic = { version = "0.14.5", features = ["transport", "tls-ring", "tls-webpki-roots"] }
 tonic-prost = "0.14.5"
 prost = "0.14.3"
 prost-types = "0.14.3"
@@ -167,6 +167,9 @@ aws-sdk-kms = "1.105.0"
 oauth2 = "5.0.0"
 tempfile = "3.27.0"
 url = "2.5.4"
+
+# TLS setup
+rustls = "0.23.40"
 
 # Inter-crate dependencies within this workspace
 copperdb-util = { path = "crates/util" }

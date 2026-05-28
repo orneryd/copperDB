@@ -10,10 +10,16 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use copperdb_config::{
+    allowed_per_database_config_keys, resolve_per_database_config, validate_per_database_overrides,
+    Config as GlobalConfig, EffectiveDatabaseConfig, PerDatabaseConfigKey,
+};
 use copperdb_storage::{NodeRecord, StorageEngine};
 
 const DATABASE_LABEL: &str = "DatabaseCatalogEntry";
 const DATABASE_PAYLOAD_PROPERTY: &str = "payload";
+const DATABASE_CONFIG_LABEL: &str = "DatabaseConfigOverrideEntry";
+const DATABASE_CONFIG_PAYLOAD_PROPERTY: &str = "overrides";
 
 #[derive(Debug, Error)]
 pub enum MultiDbError {
@@ -27,6 +33,8 @@ pub enum MultiDbError {
     Storage(String),
     #[error("serialization error: {0}")]
     Serialization(String),
+    #[error("invalid database config override: {0}")]
+    InvalidConfig(String),
 }
 
 impl From<copperdb_storage::StorageError> for MultiDbError {
@@ -60,6 +68,7 @@ pub enum DatabaseStatus {
 /// System-level database manager.
 pub struct DatabaseManager {
     databases: DashMap<String, Database>,
+    config_overrides: DashMap<String, BTreeMap<String, String>>,
     catalog_path: Option<PathBuf>,
 }
 
@@ -67,6 +76,7 @@ impl Default for DatabaseManager {
     fn default() -> Self {
         Self {
             databases: DashMap::new(),
+            config_overrides: DashMap::new(),
             catalog_path: None,
         }
     }
@@ -84,11 +94,16 @@ impl DatabaseManager {
         let storage = StorageEngine::open(&catalog_path)?;
         let manager = Self {
             databases: DashMap::new(),
+            config_overrides: DashMap::new(),
             catalog_path: Some(catalog_path),
         };
         for node in storage.get_nodes_by_label(DATABASE_LABEL)? {
             let database = database_from_node(&node)?;
             manager.databases.insert(database.name.clone(), database);
+        }
+        for node in storage.get_nodes_by_label(DATABASE_CONFIG_LABEL)? {
+            let (name, overrides) = database_config_from_node(&node)?;
+            manager.config_overrides.insert(name, overrides);
         }
         drop(storage);
         manager.seed_builtin_databases();
@@ -158,6 +173,48 @@ impl DatabaseManager {
         self.databases.iter().map(|e| e.value().clone()).collect()
     }
 
+    pub fn allowed_config_keys(&self) -> &'static [PerDatabaseConfigKey] {
+        allowed_per_database_config_keys()
+    }
+
+    pub fn get_config_overrides(&self, name: &str) -> BTreeMap<String, String> {
+        self.config_overrides
+            .get(name)
+            .map(|entry| entry.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_config_overrides(
+        &self,
+        name: &str,
+        overrides: BTreeMap<String, String>,
+    ) -> Result<(), MultiDbError> {
+        if !self.databases.contains_key(name) {
+            return Err(MultiDbError::NotFound(name.to_owned()));
+        }
+        validate_per_database_overrides(&overrides)
+            .map_err(|error| MultiDbError::InvalidConfig(error.to_string()))?;
+        self.persist_database_config(name, &overrides)?;
+        if overrides.is_empty() {
+            self.config_overrides.remove(name);
+        } else {
+            self.config_overrides.insert(name.to_owned(), overrides);
+        }
+        Ok(())
+    }
+
+    pub fn effective_config(
+        &self,
+        name: &str,
+        global: &GlobalConfig,
+    ) -> Result<EffectiveDatabaseConfig, MultiDbError> {
+        if !self.databases.contains_key(name) {
+            return Err(MultiDbError::NotFound(name.to_owned()));
+        }
+        resolve_per_database_config(global, &self.get_config_overrides(name))
+            .map_err(|error| MultiDbError::InvalidConfig(error.to_string()))
+    }
+
     fn persist_all(&self) -> Result<(), MultiDbError> {
         for database in self.list() {
             self.persist_database(&database)?;
@@ -174,18 +231,48 @@ impl DatabaseManager {
         Ok(())
     }
 
+    fn persist_database_config(
+        &self,
+        name: &str,
+        overrides: &BTreeMap<String, String>,
+    ) -> Result<(), MultiDbError> {
+        let Some(path) = &self.catalog_path else {
+            return Ok(());
+        };
+        let storage = StorageEngine::open(path)?;
+        if overrides.is_empty() {
+            match storage.delete_node_record(&database_config_node_id(name)) {
+                Ok(()) => {}
+                Err(copperdb_storage::StorageError::NotFound(_)) => {}
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            storage.put_node_record(&database_config_to_node(name, overrides)?)?;
+        }
+        Ok(())
+    }
+
     fn delete_database_record(&self, name: &str) -> Result<(), MultiDbError> {
         let Some(path) = &self.catalog_path else {
             return Ok(());
         };
         let storage = StorageEngine::open(path)?;
         storage.delete_node_record(&database_node_id(name))?;
+        match storage.delete_node_record(&database_config_node_id(name)) {
+            Ok(()) => {}
+            Err(copperdb_storage::StorageError::NotFound(_)) => {}
+            Err(error) => return Err(error.into()),
+        }
         Ok(())
     }
 }
 
 fn database_node_id(name: &str) -> String {
     format!("multidb:database:{name}")
+}
+
+fn database_config_node_id(name: &str) -> String {
+    format!("multidb:database-config:{name}")
 }
 
 fn database_to_node(database: &Database) -> Result<NodeRecord, MultiDbError> {
@@ -214,6 +301,43 @@ fn database_from_node(node: &NodeRecord) -> Result<Database, MultiDbError> {
         .cloned()
         .ok_or_else(|| MultiDbError::Serialization("missing payload".into()))?;
     Ok(serde_json::from_value(payload)?)
+}
+
+fn database_config_to_node(
+    name: &str,
+    overrides: &BTreeMap<String, String>,
+) -> Result<NodeRecord, MultiDbError> {
+    let mut properties = BTreeMap::new();
+    properties.insert("name".into(), serde_json::Value::String(name.to_owned()));
+    properties.insert(
+        DATABASE_CONFIG_PAYLOAD_PROPERTY.into(),
+        serde_json::to_value(overrides)?,
+    );
+    Ok(NodeRecord {
+        id: database_config_node_id(name),
+        labels: vec![DATABASE_CONFIG_LABEL.into()],
+        properties,
+        created_at_unix_ms: now_unix_ms(),
+        updated_at_unix_ms: now_unix_ms(),
+    })
+}
+
+fn database_config_from_node(
+    node: &NodeRecord,
+) -> Result<(String, BTreeMap<String, String>), MultiDbError> {
+    let name = node
+        .properties
+        .get("name")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| MultiDbError::Serialization("missing name".into()))?
+        .to_owned();
+    let payload = node
+        .properties
+        .get(DATABASE_CONFIG_PAYLOAD_PROPERTY)
+        .cloned()
+        .ok_or_else(|| MultiDbError::Serialization("missing overrides".into()))?;
+    let overrides = serde_json::from_value(payload)?;
+    Ok((name, overrides))
 }
 
 fn now_unix_ms() -> i64 {
@@ -263,5 +387,72 @@ mod tests {
         assert!(reloaded.get("analytics").is_none());
         assert!(reloaded.get("system").is_some());
         assert!(reloaded.get("default").is_some());
+    }
+
+    #[test]
+    fn config_overrides_persist_and_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog_path = dir.path().join("catalog");
+
+        let manager = DatabaseManager::open(&catalog_path).unwrap();
+        manager.create("clinic", "./data/clinic").unwrap();
+        manager
+            .set_config_overrides(
+                "clinic",
+                BTreeMap::from([
+                    ("COPPERDB_SEARCH_BM25_ENABLED".into(), "true".into()),
+                    ("COPPERDB_SEARCH_VECTOR_ENABLED".into(), "false".into()),
+                ]),
+            )
+            .unwrap();
+        drop(manager);
+
+        let reloaded = DatabaseManager::open(&catalog_path).unwrap();
+        let overrides = reloaded.get_config_overrides("clinic");
+        assert_eq!(
+            overrides.get("COPPERDB_SEARCH_BM25_ENABLED").unwrap(),
+            "true"
+        );
+        assert_eq!(reloaded.allowed_config_keys().len(), 13);
+    }
+
+    #[test]
+    fn effective_config_uses_global_defaults_and_cli_precedence() {
+        let manager = DatabaseManager::new();
+        manager.create("clinic", "./data/clinic").unwrap();
+        manager
+            .set_config_overrides(
+                "clinic",
+                BTreeMap::from([(
+                    "COPPERDB_SEARCH_VECTOR_ENABLED".into(),
+                    "true".into(),
+                )]),
+            )
+            .unwrap();
+
+        let mut global = GlobalConfig::default();
+        global.cli_overrides.insert(
+            "COPPERDB_SEARCH_VECTOR_ENABLED".into(),
+            "false".into(),
+        );
+
+        let effective = manager.effective_config("clinic", &global).unwrap();
+        assert!(!effective.vector_enabled);
+    }
+
+    #[test]
+    fn rejecting_unknown_config_override_keeps_store_clean() {
+        let manager = DatabaseManager::new();
+        manager.create("clinic", "./data/clinic").unwrap();
+
+        let error = manager
+            .set_config_overrides(
+                "clinic",
+                BTreeMap::from([("COPPERDB_UNKNOWN".into(), "true".into())]),
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, MultiDbError::InvalidConfig(_)));
+        assert!(manager.get_config_overrides("clinic").is_empty());
     }
 }

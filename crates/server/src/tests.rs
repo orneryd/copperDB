@@ -114,6 +114,139 @@
     }
 
     #[tokio::test]
+    async fn database_config_admin_round_trips_overrides_and_effective_view() {
+        use axum::body::Body;
+        use axum::http::{header, Method, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_path = temp_dir
+            .path()
+            .join("clinic")
+            .to_string_lossy()
+            .into_owned();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("clinic", storage_path).unwrap();
+
+        let mut runtime_config = copperdb_config::Config::default();
+        runtime_config.cli_overrides.insert(
+            "COPPERDB_SEARCH_VECTOR_ENABLED".into(),
+            "false".into(),
+        );
+
+        let mut state = AppState {
+            db_name: "clinic".into(),
+            db_manager,
+            runtime_config: Arc::new(runtime_config),
+            ..Default::default()
+        };
+        state.auth.security_enabled = false;
+
+        let app = build_router(Arc::new(state));
+        let put_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/admin/databases/clinic/config")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "overrides": {
+                                "COPPERDB_SEARCH_BM25_ENABLED": "true",
+                                "COPPERDB_SEARCH_VECTOR_ENABLED": "true"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(put_response.status(), StatusCode::OK);
+
+        let get_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/databases/clinic/config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let get_body = axum::body::to_bytes(get_response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let overrides_json: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
+        assert_eq!(
+            overrides_json["overrides"]["COPPERDB_SEARCH_BM25_ENABLED"],
+            "true"
+        );
+        assert_eq!(
+            overrides_json["allowedKeys"].as_array().unwrap().len(),
+            13
+        );
+
+        let effective_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/databases/clinic/config/effective")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(effective_response.status(), StatusCode::OK);
+        let effective_body = axum::body::to_bytes(effective_response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let effective_json: serde_json::Value = serde_json::from_slice(&effective_body).unwrap();
+        assert_eq!(effective_json["effective"]["bm25_enabled"], true);
+        assert_eq!(effective_json["effective"]["vector_enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn database_config_admin_rejects_invalid_override_keys() {
+        use axum::body::Body;
+        use axum::http::{header, Method, Request, StatusCode};
+        use tower::ServiceExt;
+
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("clinic", "./data/clinic").unwrap();
+
+        let mut state = AppState {
+            db_name: "clinic".into(),
+            db_manager,
+            ..Default::default()
+        };
+        state.auth.security_enabled = false;
+
+        let app = build_router(Arc::new(state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/admin/databases/clinic/config")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "overrides": {
+                                "COPPERDB_UNKNOWN": "true"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn auth_token_uses_durable_authenticator_for_cookie_access() {
         use axum::body::Body;
         use axum::http::{header, Request, StatusCode};
@@ -320,6 +453,15 @@
             .into_owned();
         let db_manager = Arc::new(DatabaseManager::new());
         db_manager.create("copper", storage_path.clone()).unwrap();
+        db_manager
+            .set_config_overrides(
+                "copper",
+                std::collections::BTreeMap::from([(
+                    "COPPERDB_SEARCH_BM25_ENABLED".into(),
+                    "true".into(),
+                )]),
+            )
+            .unwrap();
         let mut state = AppState {
             db_name: "copper".into(),
             db_manager,
@@ -605,6 +747,15 @@
             .into_owned();
         let db_manager = Arc::new(DatabaseManager::new());
         db_manager.create("copper", storage_path.clone()).unwrap();
+        db_manager
+            .set_config_overrides(
+                "copper",
+                std::collections::BTreeMap::from([(
+                    "COPPERDB_SEARCH_BM25_ENABLED".into(),
+                    "true".into(),
+                )]),
+            )
+            .unwrap();
         let mut state = AppState {
             db_name: "copper".into(),
             db_manager,
@@ -734,6 +885,346 @@
     }
 
     #[tokio::test]
+    async fn engine_backed_ranked_search_rpc_handler_executes_local_fulltext_runtime() {
+        use copperdb_nornicgrpc::{
+            proto, RemoteHydrationRequest, RemoteRankedSearchRequest, RemoteReplicaApplyRequest,
+            RemoteReplicaClient, RemoteReplicaReadRequest,
+        };
+        use copperdb_nornicgrpc::proto::nornic_replica_server::NornicReplica;
+        use copperdb_search::RrfHydrationRecord;
+        use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind, NodeRecord};
+        use copperdb_topology::PlacementKey;
+        use tonic::Request;
+
+        struct NoopReplicaClient;
+
+        #[async_trait::async_trait]
+        impl RemoteReplicaClient for NoopReplicaClient {
+            async fn apply_replica(
+                &self,
+                _request: RemoteReplicaApplyRequest,
+            ) -> Result<(), GrpcError> {
+                Ok(())
+            }
+
+            async fn read_replica(
+                &self,
+                _request: RemoteReplicaReadRequest,
+            ) -> Result<Option<Vec<u8>>, GrpcError> {
+                Ok(None)
+            }
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_path = temp_dir.path().join("copper").to_string_lossy().into_owned();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("copper", storage_path.clone()).unwrap();
+        db_manager
+            .set_config_overrides(
+                "copper",
+                std::collections::BTreeMap::from([(
+                    "COPPERDB_SEARCH_BM25_ENABLED".into(),
+                    "true".into(),
+                )]),
+            )
+            .unwrap();
+
+        let mut state = AppState {
+            db_name: "copper".into(),
+            db_manager,
+            ..Default::default()
+        };
+        state.auth.security_enabled = false;
+
+        {
+            let engine = open_engine(&state, "copper").unwrap();
+            engine
+                .storage()
+                .persist_index_definition(&IndexDefinition {
+                    name: "person_bio_fulltext_idx".into(),
+                    entity_type: IndexEntityType::Node,
+                    label: "Person".into(),
+                    properties: vec!["bio".into()],
+                    kind: IndexKind::FullText,
+                })
+                .unwrap();
+            engine
+                .storage()
+                .put_node_record(&NodeRecord {
+                    id: "person:1".into(),
+                    labels: vec!["Person".into()],
+                    properties: BTreeMap::from([(
+                        "bio".into(),
+                        serde_json::Value::String("Alice builds reliable graph systems".into()),
+                    )]),
+                    created_at_unix_ms: 10,
+                    updated_at_unix_ms: 20,
+                })
+                .unwrap();
+        }
+
+        let placement = PlacementKey::new("default", "copper", "primary");
+        let service = build_engine_backed_nornic_replica_service(
+            Arc::new(state),
+            Arc::new(NoopReplicaClient),
+        );
+
+        let batch = copperdb_search::RrfSearchBatch::try_from(
+            service
+                .search_ranked(Request::new(
+                    proto::RemoteRankedSearchRequest::try_from(RemoteRankedSearchRequest {
+                        target_node: "search-a".into(),
+                        target_addr: "127.0.0.1:50051".into(),
+                        placement: placement.clone(),
+                        query: SearchQuery::FullText {
+                            query: "graph".into(),
+                            fields: vec!["bio".into()],
+                            limit: 10,
+                        },
+                    })
+                    .unwrap(),
+                ))
+                .await
+                .unwrap()
+                .into_inner(),
+        )
+        .unwrap();
+
+        assert_eq!(batch.source, "lexical");
+        assert_eq!(batch.hits.len(), 1);
+        assert_eq!(batch.hits[0].rank, 1);
+        assert_eq!(batch.hits[0].label, "Person");
+        assert_eq!(batch.hits[0].global_id.local_id, "person:1");
+        assert_eq!(
+            batch.hits[0].snippet.as_deref(),
+            Some("Alice builds reliable graph systems")
+        );
+
+        let records = Vec::<RrfHydrationRecord>::try_from(
+            service
+                .hydrate_entities(Request::new(
+                    proto::RemoteHydrationRequest::try_from(RemoteHydrationRequest {
+                        target_node: "search-a".into(),
+                        target_addr: "127.0.0.1:50051".into(),
+                        placement,
+                        global_ids: vec![batch.hits[0].global_id.clone()],
+                    })
+                    .unwrap(),
+                ))
+                .await
+                .unwrap()
+                .into_inner(),
+        )
+        .unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].labels, vec!["Person"]);
+        assert_eq!(records[0].entity["_id"], "person:1");
+        assert_eq!(records[0].entity["bio"], "Alice builds reliable graph systems");
+    }
+
+    #[tokio::test]
+    async fn engine_backed_ranked_search_rpc_handler_respects_bm25_gate() {
+        use copperdb_nornicgrpc::{
+            proto, RemoteRankedSearchRequest, RemoteReplicaApplyRequest, RemoteReplicaClient,
+            RemoteReplicaReadRequest,
+        };
+        use copperdb_nornicgrpc::proto::nornic_replica_server::NornicReplica;
+        use copperdb_topology::PlacementKey;
+        use tonic::{Code, Request};
+
+        struct NoopReplicaClient;
+
+        #[async_trait::async_trait]
+        impl RemoteReplicaClient for NoopReplicaClient {
+            async fn apply_replica(
+                &self,
+                _request: RemoteReplicaApplyRequest,
+            ) -> Result<(), GrpcError> {
+                Ok(())
+            }
+
+            async fn read_replica(
+                &self,
+                _request: RemoteReplicaReadRequest,
+            ) -> Result<Option<Vec<u8>>, GrpcError> {
+                Ok(None)
+            }
+        }
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_path = temp_dir.path().join("copper").to_string_lossy().into_owned();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("copper", storage_path).unwrap();
+
+        let mut state = AppState {
+            db_name: "copper".into(),
+            db_manager,
+            ..Default::default()
+        };
+        state.auth.security_enabled = false;
+
+        let service = build_engine_backed_nornic_replica_service(
+            Arc::new(state),
+            Arc::new(NoopReplicaClient),
+        );
+
+        let error = service
+            .search_ranked(Request::new(
+                proto::RemoteRankedSearchRequest::try_from(RemoteRankedSearchRequest {
+                    target_node: "search-a".into(),
+                    target_addr: "127.0.0.1:50051".into(),
+                    placement: PlacementKey::new("default", "copper", "primary"),
+                    query: SearchQuery::FullText {
+                        query: "graph".into(),
+                        fields: vec!["bio".into()],
+                        limit: 10,
+                    },
+                })
+                .unwrap(),
+            ))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), Code::Internal);
+        assert!(error
+            .message()
+            .contains("fulltext search is disabled for this database"));
+    }
+
+    #[tokio::test]
+    async fn engine_backed_replica_rpc_handler_applies_and_reads_storage() {
+        use copperdb_nornicgrpc::proto::nornic_replica_server::NornicReplica;
+        use copperdb_nornicgrpc::{proto, RemoteReplicaApplyRequest, RemoteReplicaReadRequest};
+        use copperdb_replication::Command;
+        use tonic::Request;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_path = temp_dir.path().join("copper").to_string_lossy().into_owned();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("copper", storage_path).unwrap();
+
+        let mut state = AppState {
+            db_name: "copper".into(),
+            db_manager,
+            ..Default::default()
+        };
+        state.auth.security_enabled = false;
+
+        let service = build_local_nornic_replica_service(Arc::new(state));
+
+        service
+            .apply_replica(Request::new(
+                proto::RemoteReplicaApplyRequest::try_from(RemoteReplicaApplyRequest {
+                    target_node: "node-a".into(),
+                    target_addr: "127.0.0.1:50051".into(),
+                    command: Command::Put {
+                        key: b"replica-key".to_vec(),
+                        value: b"replica-value".to_vec(),
+                    },
+                })
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        let response = service
+            .read_replica(Request::new(proto::RemoteReplicaReadRequest::from(
+                RemoteReplicaReadRequest {
+                    target_node: "node-a".into(),
+                    target_addr: "127.0.0.1:50051".into(),
+                    key: b"replica-key".to_vec(),
+                },
+            )))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(
+            Option::<Vec<u8>>::from(response),
+            Some(b"replica-value".to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn local_replica_service_uses_runtime_config_grpc_auth_token() {
+        use copperdb_nornicgrpc::proto::nornic_replica_server::NornicReplica;
+        use copperdb_nornicgrpc::{proto, RemoteReplicaApplyRequest, RemoteReplicaReadRequest};
+        use copperdb_replication::Command;
+        use tonic::metadata::MetadataValue;
+        use tonic::{Code, Request};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_path = temp_dir.path().join("copper").to_string_lossy().into_owned();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("copper", storage_path).unwrap();
+
+        let mut runtime_config = RuntimeConfig::default();
+        runtime_config.server.grpc_auth_token = Some("shared-secret".into());
+
+        let mut state = AppState {
+            db_name: "copper".into(),
+            db_manager,
+            runtime_config: Arc::new(runtime_config),
+            ..Default::default()
+        };
+        state.auth.security_enabled = false;
+
+        let service = build_local_nornic_replica_service(Arc::new(state));
+
+        let error = service
+            .apply_replica(Request::new(
+                proto::RemoteReplicaApplyRequest::try_from(RemoteReplicaApplyRequest {
+                    target_node: "node-a".into(),
+                    target_addr: "127.0.0.1:50051".into(),
+                    command: Command::Put {
+                        key: b"replica-key".to_vec(),
+                        value: b"replica-value".to_vec(),
+                    },
+                })
+                .unwrap(),
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::Unauthenticated);
+
+        let mut apply_request = Request::new(
+            proto::RemoteReplicaApplyRequest::try_from(RemoteReplicaApplyRequest {
+                target_node: "node-a".into(),
+                target_addr: "127.0.0.1:50051".into(),
+                command: Command::Put {
+                    key: b"replica-key".to_vec(),
+                    value: b"replica-value".to_vec(),
+                },
+            })
+            .unwrap(),
+        );
+        apply_request.metadata_mut().insert(
+            "authorization",
+            MetadataValue::try_from("Bearer shared-secret").unwrap(),
+        );
+        service.apply_replica(apply_request).await.unwrap();
+
+        let mut read_request = Request::new(proto::RemoteReplicaReadRequest::from(
+            RemoteReplicaReadRequest {
+                target_node: "node-a".into(),
+                target_addr: "127.0.0.1:50051".into(),
+                key: b"replica-key".to_vec(),
+            },
+        ));
+        read_request.metadata_mut().insert(
+            "authorization",
+            MetadataValue::try_from("Bearer shared-secret").unwrap(),
+        );
+
+        let response = service.read_replica(read_request).await.unwrap().into_inner();
+        assert_eq!(
+            Option::<Vec<u8>>::from(response),
+            Some(b"replica-value".to_vec())
+        );
+    }
+
+    #[tokio::test]
     async fn fabric_admin_api_requires_auth_when_security_enabled() {
         use axum::body::Body;
         use axum::http::{Request, StatusCode};
@@ -834,6 +1325,15 @@
         let db_manager = Arc::new(DatabaseManager::new());
         db_manager.create("copper", copper_path.clone()).unwrap();
         db_manager.create("secret", secret_path.clone()).unwrap();
+        db_manager
+            .set_config_overrides(
+                "copper",
+                std::collections::BTreeMap::from([(
+                    "COPPERDB_SEARCH_BM25_ENABLED".into(),
+                    "true".into(),
+                )]),
+            )
+            .unwrap();
         state.db_name = "copper".into();
         state.db_manager = db_manager;
 
@@ -1129,6 +1629,15 @@
         let db_manager = Arc::new(DatabaseManager::new());
         db_manager.create("copper", copper_path.clone()).unwrap();
         db_manager.create("secret", secret_path.clone()).unwrap();
+        db_manager
+            .set_config_overrides(
+                "copper",
+                std::collections::BTreeMap::from([(
+                    "COPPERDB_SEARCH_BM25_ENABLED".into(),
+                    "true".into(),
+                )]),
+            )
+            .unwrap();
         state.db_name = "copper".into();
         state.db_manager = db_manager;
 
@@ -1296,6 +1805,233 @@
         assert_eq!(denied.status(), StatusCode::FORBIDDEN);
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn fabric_ranked_search_rejects_databases_without_search_opt_in() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use copperdb_topology::{
+            FabricPartitionPolicy, FabricShard, FabricShardKind, MeshPeer, NodeCapability,
+            PlacementKey, PlacementRecord,
+        };
+        use tower::ServiceExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_path = temp_dir
+            .path()
+            .join("copper")
+            .to_string_lossy()
+            .into_owned();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("copper", storage_path.clone()).unwrap();
+        let mut state = AppState {
+            db_name: "copper".into(),
+            db_manager,
+            ..Default::default()
+        };
+        state.auth.security_enabled = false;
+
+        {
+            let engine = GraphEngine::open(EngineConfig {
+                data_dir: storage_path,
+                default_database: "copper".into(),
+                ..Default::default()
+            })
+            .unwrap();
+            engine
+                .storage()
+                .register_topology_peer(
+                    &MeshPeer::new("search-a", "search-a.mesh.local:9000")
+                        .with_capability(NodeCapability::Search)
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+            engine
+                .storage()
+                .register_topology_placement(&PlacementRecord {
+                    key: PlacementKey::new("default", "copper", "primary"),
+                    primary_node: "search-a".into(),
+                    replica_nodes: vec![],
+                    search_nodes: vec!["search-a".into()],
+                    hyperscaler_profile: None,
+                    min_write_replicas: 0,
+                    search_fanout: 1,
+                })
+                .unwrap();
+            engine
+                .register_fabric_database(&FabricDatabase {
+                    tenant: "default".into(),
+                    database: "copper".into(),
+                    default_shard: "primary".into(),
+                    partition_policy: FabricPartitionPolicy::HashByKey { buckets: 1 },
+                    shards: vec![FabricShard {
+                        placement: PlacementKey::new("default", "copper", "primary"),
+                        kind: FabricShardKind::Graph,
+                        labels: vec!["Person".into()],
+                        relationship_types: vec![],
+                        collections: vec![],
+                    }],
+                })
+                .unwrap();
+        }
+
+        let app = build_router(Arc::new(state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/fabric/databases/default/copper/ranked-search")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": SearchQuery::FullText {
+                                query: "alice".into(),
+                                fields: vec!["body".into()],
+                                limit: 10,
+                            },
+                            "config": RrfConfig::new(60.0, 10),
+                            "policy": RrfSearchPolicy::default(),
+                            "hydration_consistency": "one"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let decoded: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(decoded["error"]
+            .as_str()
+            .unwrap()
+            .contains("fulltext search is disabled for this database"));
+    }
+
+    #[tokio::test]
+    async fn fabric_ranked_search_respects_cli_vector_kill_switch() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use copperdb_topology::{
+            FabricPartitionPolicy, FabricShard, FabricShardKind, MeshPeer, NodeCapability,
+            PlacementKey, PlacementRecord,
+        };
+        use tower::ServiceExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_path = temp_dir
+            .path()
+            .join("copper")
+            .to_string_lossy()
+            .into_owned();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("copper", storage_path.clone()).unwrap();
+        db_manager
+            .set_config_overrides(
+                "copper",
+                std::collections::BTreeMap::from([(
+                    "COPPERDB_SEARCH_VECTOR_ENABLED".into(),
+                    "true".into(),
+                )]),
+            )
+            .unwrap();
+        let mut runtime_config = copperdb_config::Config::default();
+        runtime_config.cli_overrides.insert(
+            "COPPERDB_SEARCH_VECTOR_ENABLED".into(),
+            "false".into(),
+        );
+        let mut state = AppState {
+            db_name: "copper".into(),
+            db_manager,
+            runtime_config: Arc::new(runtime_config),
+            ..Default::default()
+        };
+        state.auth.security_enabled = false;
+
+        {
+            let engine = GraphEngine::open(EngineConfig {
+                data_dir: storage_path,
+                default_database: "copper".into(),
+                ..Default::default()
+            })
+            .unwrap();
+            engine
+                .storage()
+                .register_topology_peer(
+                    &MeshPeer::new("search-a", "search-a.mesh.local:9000")
+                        .with_capability(NodeCapability::Search)
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+            engine
+                .storage()
+                .register_topology_placement(&PlacementRecord {
+                    key: PlacementKey::new("default", "copper", "primary"),
+                    primary_node: "search-a".into(),
+                    replica_nodes: vec![],
+                    search_nodes: vec!["search-a".into()],
+                    hyperscaler_profile: None,
+                    min_write_replicas: 0,
+                    search_fanout: 1,
+                })
+                .unwrap();
+            engine
+                .register_fabric_database(&FabricDatabase {
+                    tenant: "default".into(),
+                    database: "copper".into(),
+                    default_shard: "primary".into(),
+                    partition_policy: FabricPartitionPolicy::HashByKey { buckets: 1 },
+                    shards: vec![FabricShard {
+                        placement: PlacementKey::new("default", "copper", "primary"),
+                        kind: FabricShardKind::Graph,
+                        labels: vec!["Person".into()],
+                        relationship_types: vec![],
+                        collections: vec![],
+                    }],
+                })
+                .unwrap();
+        }
+
+        let app = build_router(Arc::new(state));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/fabric/databases/default/copper/ranked-search")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "query": SearchQuery::Semantic {
+                                vector: vec![0.1, 0.2, 0.3],
+                                k: 5,
+                                min_score: 0.4,
+                            },
+                            "config": RrfConfig::new(60.0, 10),
+                            "policy": RrfSearchPolicy::default(),
+                            "hydration_consistency": "one"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let decoded: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(decoded["error"]
+            .as_str()
+            .unwrap()
+            .contains("vector search is disabled for this database"));
     }
 
     #[tokio::test]

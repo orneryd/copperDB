@@ -151,6 +151,87 @@ use copperdb_storage::EdgeRecord;
     }
 
     #[test]
+    fn test_local_fulltext_search_uses_catalogued_fulltext_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        config.runtime_config.bm25_enabled = true;
+
+        let db = CopperDb::open(config).unwrap();
+        db.storage()
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "person_bio_fulltext_idx".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Person".into(),
+                properties: vec!["bio".into(), "tags".into()],
+                kind: copperdb_storage::IndexKind::FullText,
+            })
+            .unwrap();
+        db.storage()
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "person:1".into(),
+                labels: vec!["Person".into()],
+                properties: BTreeMap::from([
+                    (
+                        "bio".into(),
+                        Value::String("Alice builds reliable graph systems".into()),
+                    ),
+                    (
+                        "tags".into(),
+                        Value::Array(vec![
+                            Value::String("graph".into()),
+                            Value::String("rust".into()),
+                        ]),
+                    ),
+                ]),
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 1,
+            })
+            .unwrap();
+        db.storage()
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "person:2".into(),
+                labels: vec!["Person".into()],
+                properties: BTreeMap::from([(
+                    "bio".into(),
+                    Value::String("Bob writes storage engines".into()),
+                )]),
+                created_at_unix_ms: 2,
+                updated_at_unix_ms: 2,
+            })
+            .unwrap();
+
+        let results = db
+            .search_fulltext_nodes("Person", &["bio".into(), "tags".into()], "graph rust", 10)
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "person:1");
+        assert_eq!(results[0].label, "Person");
+        assert_eq!(results[0].score, 3.0);
+        assert_eq!(
+            results[0].snippet.as_deref(),
+            Some("Alice builds reliable graph systems")
+        );
+    }
+
+    #[test]
+    fn test_local_fulltext_search_respects_bm25_toggle() {
+        let db = CopperDb::open_temporary().unwrap();
+
+        let error = db
+            .search_fulltext_nodes("Person", &["bio".into()], "alice", 10)
+            .unwrap_err();
+
+        assert!(matches!(error, CopperDbError::Config(_)));
+        assert!(error
+            .to_string()
+            .contains("fulltext search is disabled for this database"));
+    }
+
+    #[test]
     fn test_execute_routes_simple_edge_property_aggregation_through_fast_path() {
         let db = CopperDb::open_temporary().unwrap();
         for (id, props) in [
@@ -1016,6 +1097,8 @@ use copperdb_storage::EdgeRecord;
         let config = DatabaseConfig::default();
         assert!(!config.auth_enabled);
         assert_eq!(config.max_connections, 100);
+        assert!(!config.runtime_config.bm25_enabled);
+        assert!(!config.runtime_config.vector_enabled);
         assert!(config.storage_encryption_master_key.is_none());
     }
 
@@ -1105,11 +1188,33 @@ use copperdb_storage::EdgeRecord;
         };
 
         let dir = tempfile::tempdir().unwrap();
-        let db = CopperDb::open(DatabaseConfig {
+        let mut config = DatabaseConfig {
             data_dir: dir.path().join("db").to_string_lossy().into_owned(),
             ..Default::default()
-        })
-        .unwrap();
+        };
+        config.runtime_config.bm25_enabled = true;
+        let db = CopperDb::open(config).unwrap();
+        db.storage()
+            .persist_index_definition(&copperdb_storage::IndexDefinition {
+                name: "person_bio_fulltext_idx".into(),
+                entity_type: copperdb_storage::IndexEntityType::Node,
+                label: "Person".into(),
+                properties: vec!["bio".into()],
+                kind: copperdb_storage::IndexKind::FullText,
+            })
+            .unwrap();
+        db.storage()
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: "person:1".into(),
+                labels: vec!["Person".into()],
+                properties: BTreeMap::from([(
+                    "bio".into(),
+                    Value::String("Alice builds reliable graph systems".into()),
+                )]),
+                created_at_unix_ms: 10,
+                updated_at_unix_ms: 20,
+            })
+            .unwrap();
         for node_id in ["node-1", "node-2"] {
             db.storage()
                 .register_topology_peer(
@@ -1163,11 +1268,40 @@ use copperdb_storage::EdgeRecord;
             .plan_fabric_reads(&fabric, ConsistencyLevel::One, None)
             .unwrap();
         let search_plans = db.plan_fabric_searches(&fabric).unwrap();
+        let local_ranked_batch = db
+            .search_fabric_ranked_batch_locally(
+                &PlacementKey::new("default", "copper", "person-00"),
+                &SearchQuery::FullText {
+                    query: "graph".into(),
+                    fields: vec!["bio".into()],
+                    limit: 10,
+                },
+            )
+            .unwrap();
+        let local_hydration = db
+            .hydrate_fabric_entities_locally(&[local_ranked_batch.hits[0].global_id.clone()])
+            .unwrap();
 
         assert_eq!(read_plans.len(), 2);
         assert_eq!(search_plans.len(), 2);
         assert_eq!(read_plans[0].placement.shard, "primary");
         assert_eq!(read_plans[1].placement.shard, "person-00");
+        assert_eq!(local_ranked_batch.source, "lexical");
+        assert_eq!(local_ranked_batch.hits.len(), 1);
+        assert_eq!(local_ranked_batch.hits[0].rank, 1);
+        assert_eq!(local_ranked_batch.hits[0].label, "Person");
+        assert_eq!(
+            local_ranked_batch.hits[0].global_id,
+            FabricGlobalId::new(
+                PlacementKey::new("default", "copper", "person-00"),
+                "node",
+                "person:1",
+            )
+        );
+        assert_eq!(local_hydration.len(), 1);
+        assert_eq!(local_hydration[0].labels, vec!["Person"]);
+        assert_eq!(local_hydration[0].entity["bio"], "Alice builds reliable graph systems");
+        assert_eq!(local_hydration[0].entity["_id"], "person:1");
 
         let person_plan = db
             .plan_fabric_query_reads(

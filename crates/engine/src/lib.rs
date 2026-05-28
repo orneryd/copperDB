@@ -62,13 +62,15 @@ use copperdb_search::{
     collect_fabric_hydration_records, collect_planned_fabric_ranked_batches,
     execute_planned_fabric_ranked_search, hydrate_rrf_search_outcome, merge_rrf_search_batches,
     FabricHydrationRequest, FabricRankedSearchExecution, HydrationTransport, RankedSearchTransport,
-    RrfConfig, RrfHydratedSearchOutcome, RrfHydrationRecord, RrfSearchBatch, RrfSearchOutcome,
-    RrfSearchPolicy, SearchQuery,
+    RrfConfig, RrfHydratedSearchOutcome, RrfHydrationRecord, RrfSearchBatch, RrfSearchHit,
+    RrfSearchOutcome, RrfSearchPolicy, SearchQuery, SearchResult,
 };
-use copperdb_storage::{KnowledgePolicyAccessMetadata, StorageEngine};
+use copperdb_storage::{
+    IndexEntityType, IndexKind, KnowledgePolicyAccessMetadata, NodeRecord, StorageEngine,
+};
 use copperdb_topology::{
     ConsistencyLevel, DistributedReadPlan, DistributedSearchPlan, DistributedWriteMode,
-    DistributedWritePlan, FabricDatabase, PlacementKey, TopologyRegistry,
+    DistributedWritePlan, FabricDatabase, FabricGlobalId, PlacementKey, TopologyRegistry,
 };
 use copperdb_txsession::TransactionManager;
 use serde_json::Value;
@@ -96,6 +98,8 @@ pub enum CopperDbError {
     Compliance(String),
     #[error("replication error: {0}")]
     Replication(String),
+    #[error("configuration error: {0}")]
+    Config(String),
 }
 
 impl From<copperdb_storage::StorageError> for CopperDbError {
@@ -157,6 +161,7 @@ pub struct DatabaseConfig {
     pub default_database: String,
     pub auth_enabled: bool,
     pub log_queries: bool,
+    pub runtime_config: copperdb_config::EffectiveDatabaseConfig,
     pub storage_encryption_master_key: Option<Vec<u8>>,
     pub storage_encryption_key_uri: String,
     pub distributed_repair_queue_dir: Option<String>,
@@ -164,12 +169,18 @@ pub struct DatabaseConfig {
 
 impl Default for DatabaseConfig {
     fn default() -> Self {
+        let runtime_config = copperdb_config::resolve_per_database_config(
+            &copperdb_config::Config::default(),
+            &BTreeMap::new(),
+        )
+        .expect("default per-database config should resolve");
         Self {
             data_dir: "data".to_string(),
             max_connections: 100,
             default_database: "copperdb".to_string(),
             auth_enabled: false,
             log_queries: false,
+            runtime_config,
             storage_encryption_master_key: None,
             storage_encryption_key_uri: "kms://local/storage".into(),
             distributed_repair_queue_dir: None,

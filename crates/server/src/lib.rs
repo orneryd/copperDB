@@ -15,16 +15,21 @@ use axum::{
 };
 use copperdb_auth::{AuthConfig, AuthError, Authenticator, Claims, DatabaseAccessMode};
 use copperdb_buildinfo::{display_version, server_announcement, version};
+use copperdb_config::Config as RuntimeConfig;
 use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig, QueryResult};
 use copperdb_envutil::{get as env_get, get_bool_loose};
 use copperdb_fabric::{FabricReadRequest, FabricReadScope};
 use copperdb_multidb::{DatabaseManager, DatabaseStatus, MultiDbError};
 use copperdb_nornicgrpc::{
-    NornicGrpcHydrationTransport, NornicGrpcRankedSearchTransport, TonicRemoteHydrationClient,
-    TonicRemoteRankedSearchClient,
+    GrpcError, NornicGrpcHydrationTransport, NornicGrpcRankedSearchTransport,
+    NornicReplicaService, RemoteHydrationClient, RemoteHydrationRequest,
+    RemoteRankedSearchClient, RemoteRankedSearchRequest, RemoteReplicaClient,
+    TonicRemoteHydrationClient, TonicRemoteRankedSearchClient,
 };
 use copperdb_otel::{classify_cypher_op_type, Telemetry};
-use copperdb_replication::{InMemoryReplicaTransport, MemoryStorage};
+use copperdb_replication::{
+    Command, InMemoryReplicaTransport, MemoryStorage, ReplicationStorage, StorageEngineAdapter,
+};
 use copperdb_retention::{
     ErasureRequest, LegalHold, Manager as RetentionManager, Policy, RetentionError,
     RetentionSweepConfig,
@@ -41,7 +46,7 @@ use copperdb_storage::StorageEngine;
 use copperdb_topology::{ConsistencyLevel, FabricDatabase, FabricGlobalId, PlacementKey};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -161,6 +166,7 @@ fn default_auth_storage_path() -> String {
 #[derive(Clone)]
 pub struct AppState {
     pub db_name: String,
+    pub runtime_config: Arc<RuntimeConfig>,
     /// Shared retention manager for policy/hold/erasure CRUD.
     pub retention: Arc<RwLock<RetentionManager>>,
     /// Optional path to a directory of static UI files to serve at `/`.
@@ -181,6 +187,129 @@ pub struct AppState {
     pub distributed_cypher_enabled: bool,
 }
 
+#[derive(Clone)]
+struct LocalEngineReplicaHandler {
+    state: Arc<AppState>,
+}
+
+#[derive(Clone)]
+struct LocalEngineRankedSearchHandler {
+    state: Arc<AppState>,
+}
+
+#[derive(Clone)]
+struct LocalEngineHydrationHandler {
+    state: Arc<AppState>,
+}
+
+impl LocalEngineReplicaHandler {
+    fn new(state: Arc<AppState>) -> Self {
+        Self { state }
+    }
+
+    fn database_for_command(&self, command: &Command) -> String {
+        match command {
+            Command::CypherMutation { database, .. } if !database.is_empty() => database.clone(),
+            _ => self.state.db_name.clone(),
+        }
+    }
+
+    fn open_replication_storage(&self, database: &str) -> Result<StorageEngineAdapter, GrpcError> {
+        let data_dir = self
+            .state
+            .db_manager
+            .get(database)
+            .map(|database| database.storage_path)
+            .unwrap_or_else(|| format!("data/{database}"));
+        let engine = StorageEngine::open(&data_dir)
+            .map_err(|error| GrpcError::Transport(error.to_string()))?;
+        Ok(StorageEngineAdapter::new(engine))
+    }
+}
+
+#[async_trait::async_trait]
+impl RemoteReplicaClient for LocalEngineReplicaHandler {
+    async fn apply_replica(
+        &self,
+        request: copperdb_nornicgrpc::RemoteReplicaApplyRequest,
+    ) -> Result<(), GrpcError> {
+        let database = self.database_for_command(&request.command);
+        self.open_replication_storage(&database)?
+            .apply_command(&request.command)
+            .map_err(|error| GrpcError::Transport(error.to_string()))
+    }
+
+    async fn read_replica(
+        &self,
+        request: copperdb_nornicgrpc::RemoteReplicaReadRequest,
+    ) -> Result<Option<Vec<u8>>, GrpcError> {
+        self.open_replication_storage(&self.state.db_name)?
+            .read_key(&request.key)
+            .map_err(|error| GrpcError::Transport(error.to_string()))
+    }
+}
+
+impl LocalEngineRankedSearchHandler {
+    fn new(state: Arc<AppState>) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait::async_trait]
+impl RemoteRankedSearchClient for LocalEngineRankedSearchHandler {
+    async fn search_ranked(
+        &self,
+        request: RemoteRankedSearchRequest,
+    ) -> Result<copperdb_search::RrfSearchBatch, GrpcError> {
+        let engine = open_engine(&self.state, &request.placement.database)
+            .map_err(GrpcError::Transport)?;
+        engine
+            .search_fabric_ranked_batch_locally(&request.placement, &request.query)
+            .map_err(|error| GrpcError::Transport(error.to_string()))
+    }
+}
+
+impl LocalEngineHydrationHandler {
+    fn new(state: Arc<AppState>) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait::async_trait]
+impl RemoteHydrationClient for LocalEngineHydrationHandler {
+    async fn hydrate_entities(
+        &self,
+        request: RemoteHydrationRequest,
+    ) -> Result<Vec<copperdb_search::RrfHydrationRecord>, GrpcError> {
+        let engine = open_engine(&self.state, &request.placement.database)
+            .map_err(GrpcError::Transport)?;
+        engine
+            .hydrate_fabric_entities_locally(&request.global_ids)
+            .map_err(|error| GrpcError::Transport(error.to_string()))
+    }
+}
+
+pub fn build_engine_backed_nornic_replica_service(
+    state: Arc<AppState>,
+    replica_handler: Arc<dyn RemoteReplicaClient>,
+) -> NornicReplicaService {
+    let mut service = NornicReplicaService::new(replica_handler);
+    if let Some(token) = state.runtime_config.server.grpc_auth_token.clone() {
+        service = service.with_auth_token(token);
+    }
+    service
+        .with_ranked_search_handler(Arc::new(LocalEngineRankedSearchHandler::new(Arc::clone(
+            &state,
+        ))))
+        .with_hydration_handler(Arc::new(LocalEngineHydrationHandler::new(state)))
+}
+
+pub fn build_local_nornic_replica_service(state: Arc<AppState>) -> NornicReplicaService {
+    let replica_handler: Arc<dyn RemoteReplicaClient> =
+        Arc::new(LocalEngineReplicaHandler::new(Arc::clone(&state)));
+    build_engine_backed_nornic_replica_service(state, replica_handler)
+}
+
 impl Default for AppState {
     fn default() -> Self {
         let db_manager = Arc::new(
@@ -194,6 +323,7 @@ impl Default for AppState {
             .unwrap_or_else(RetentionManager::new);
         Self {
             db_name: "copperdb".into(),
+            runtime_config: Arc::new(RuntimeConfig::default()),
             retention: Arc::new(RwLock::new(retention)),
             static_dir: None,
             base_path: "/".into(),
@@ -274,6 +404,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/db/{database}", get(database_info_handler))
         .route("/db/{database}/tx/commit", post(neo4j_tx_commit_handler))
         .route("/db/data/cypher", post(cypher_handler))
+        .route(
+            "/admin/databases/{database}/config",
+            get(get_database_config_handler).put(update_database_config_handler),
+        )
+        .route(
+            "/admin/databases/{database}/config/effective",
+            get(get_effective_database_config_handler),
+        )
         .route(
             "/admin/fabric/databases",
             get(list_fabric_databases).post(register_fabric_database),
@@ -841,6 +979,11 @@ struct Neo4jError {
     message: String,
 }
 
+#[derive(Deserialize)]
+struct DatabaseConfigUpdateRequest {
+    overrides: BTreeMap<String, String>,
+}
+
 async fn database_info_handler(
     State(state): State<Arc<AppState>>,
     Path(database): Path<String>,
@@ -871,6 +1014,90 @@ async fn database_info_handler(
             .into_response()
         }
         None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn get_database_config_handler(
+    State(state): State<Arc<AppState>>,
+    Path(database): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(status) = authorize_database_access(&state, &headers, &database, false) {
+        return status.into_response();
+    }
+
+    if state.db_manager.get(&database).is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    Json(serde_json::json!({
+        "database": database,
+        "overrides": state.db_manager.get_config_overrides(&database),
+        "allowedKeys": state.db_manager.allowed_config_keys(),
+    }))
+    .into_response()
+}
+
+async fn update_database_config_handler(
+    State(state): State<Arc<AppState>>,
+    Path(database): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<DatabaseConfigUpdateRequest>,
+) -> impl IntoResponse {
+    if let Err(status) = authorize_database_access(&state, &headers, &database, true) {
+        return status.into_response();
+    }
+
+    match state.db_manager.set_config_overrides(&database, request.overrides) {
+        Ok(()) => Json(serde_json::json!({
+            "database": database,
+            "overrides": state.db_manager.get_config_overrides(&database),
+            "allowedKeys": state.db_manager.allowed_config_keys(),
+        }))
+        .into_response(),
+        Err(MultiDbError::NotFound(_)) => StatusCode::NOT_FOUND.into_response(),
+        Err(MultiDbError::InvalidConfig(error)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_effective_database_config_handler(
+    State(state): State<Arc<AppState>>,
+    Path(database): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(status) = authorize_database_access(&state, &headers, &database, false) {
+        return status.into_response();
+    }
+
+    match state
+        .db_manager
+        .effective_config(&database, state.runtime_config.as_ref())
+    {
+        Ok(config) => Json(serde_json::json!({
+            "database": database,
+            "effective": config,
+        }))
+        .into_response(),
+        Err(MultiDbError::NotFound(_)) => StatusCode::NOT_FOUND.into_response(),
+        Err(MultiDbError::InvalidConfig(error)) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -1134,11 +1361,16 @@ fn open_engine(state: &AppState, database: &str) -> Result<GraphEngine, String> 
         .get(database)
         .map(|database| database.storage_path)
         .unwrap_or_else(|| format!("data/{}", database));
+    let runtime_config = state
+        .db_manager
+        .effective_config(database, state.runtime_config.as_ref())
+        .map_err(|error| error.to_string())?;
     let config = EngineConfig {
         data_dir,
         default_database: database.into(),
         auth_enabled: state.auth.security_enabled,
         log_queries: false,
+        runtime_config,
         ..Default::default()
     };
     GraphEngine::open(config).map_err(|error| error.to_string())
@@ -1374,6 +1606,7 @@ async fn plan_fabric_database(
 }
 
 fn build_fabric_ranked_search_context(
+    runtime_config: &RuntimeConfig,
     engine: &GraphEngine,
     fabric: &FabricDatabase,
     hydration_consistency: ConsistencyLevel,
@@ -1412,15 +1645,70 @@ fn build_fabric_ranked_search_context(
         }
     }
 
+    let mut ranked_client = TonicRemoteRankedSearchClient::new();
+    if let Some(token) = runtime_config.server.grpc_auth_token.clone() {
+        ranked_client = ranked_client.with_auth_token(token);
+    }
+    if runtime_config.server.grpc_tls_enabled {
+        ranked_client = ranked_client.with_tls_enabled(true);
+    }
+    if let Some(domain_name) = runtime_config.server.grpc_tls_domain_name.clone() {
+        ranked_client = ranked_client.with_tls_domain_name(domain_name);
+    }
+    if let Some(ca_cert_path) = runtime_config.server.grpc_tls_ca_cert.as_deref() {
+        let ca_cert = std::fs::read_to_string(ca_cert_path)
+            .map_err(|error| format!("failed to read gRPC TLS CA certificate {ca_cert_path}: {error}"))?;
+        ranked_client = ranked_client.with_tls_ca_certificate_pem(ca_cert);
+    }
+    if let (Some(client_cert_path), Some(client_key_path)) = (
+        runtime_config.server.grpc_tls_client_cert.as_deref(),
+        runtime_config.server.grpc_tls_client_key.as_deref(),
+    ) {
+        let client_cert = std::fs::read_to_string(client_cert_path).map_err(|error| {
+            format!("failed to read gRPC TLS client certificate {client_cert_path}: {error}")
+        })?;
+        let client_key = std::fs::read_to_string(client_key_path).map_err(|error| {
+            format!("failed to read gRPC TLS client key {client_key_path}: {error}")
+        })?;
+        ranked_client = ranked_client.with_tls_identity_pem(client_cert, client_key);
+    }
+    let mut hydration_client = TonicRemoteHydrationClient::new();
+    if let Some(token) = runtime_config.server.grpc_auth_token.clone() {
+        hydration_client = hydration_client.with_auth_token(token);
+    }
+    if runtime_config.server.grpc_tls_enabled {
+        hydration_client = hydration_client.with_tls_enabled(true);
+    }
+    if let Some(domain_name) = runtime_config.server.grpc_tls_domain_name.clone() {
+        hydration_client = hydration_client.with_tls_domain_name(domain_name);
+    }
+    if let Some(ca_cert_path) = runtime_config.server.grpc_tls_ca_cert.as_deref() {
+        let ca_cert = std::fs::read_to_string(ca_cert_path)
+            .map_err(|error| format!("failed to read gRPC TLS CA certificate {ca_cert_path}: {error}"))?;
+        hydration_client = hydration_client.with_tls_ca_certificate_pem(ca_cert);
+    }
+    if let (Some(client_cert_path), Some(client_key_path)) = (
+        runtime_config.server.grpc_tls_client_cert.as_deref(),
+        runtime_config.server.grpc_tls_client_key.as_deref(),
+    ) {
+        let client_cert = std::fs::read_to_string(client_cert_path).map_err(|error| {
+            format!("failed to read gRPC TLS client certificate {client_cert_path}: {error}")
+        })?;
+        let client_key = std::fs::read_to_string(client_key_path).map_err(|error| {
+            format!("failed to read gRPC TLS client key {client_key_path}: {error}")
+        })?;
+        hydration_client = hydration_client.with_tls_identity_pem(client_cert, client_key);
+    }
+
     let ranked_transport: Arc<dyn RankedSearchTransport> =
         Arc::new(NornicGrpcRankedSearchTransport::new(
             search_endpoints,
-            Arc::new(TonicRemoteRankedSearchClient::new()),
+            Arc::new(ranked_client),
         ));
     let hydration_transport: Arc<dyn HydrationTransport> =
         Arc::new(NornicGrpcHydrationTransport::new(
             hydration_endpoints,
-            Arc::new(TonicRemoteHydrationClient::new()),
+            Arc::new(hydration_client),
         ));
     Ok((
         search_plans,
@@ -1555,8 +1843,27 @@ async fn execute_fabric_ranked_search_admin_impl(
                     .into_response();
             }
         };
+        if let Err(error) = engine.validate_ranked_search_query(&request.query) {
+            return match error {
+                copperdb_engine::CopperDbError::Config(message) => (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": message})),
+                )
+                    .into_response(),
+                other => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": other.to_string()})),
+                )
+                    .into_response(),
+            };
+        }
         let (search_plans, hydration_coordinators, ranked_transport, hydration_transport) =
-            match build_fabric_ranked_search_context(&engine, &fabric, hydration_consistency) {
+            match build_fabric_ranked_search_context(
+                &state.runtime_config,
+                &engine,
+                &fabric,
+                hydration_consistency,
+            ) {
                 Ok(transports) => transports,
                 Err(error) => {
                     return (

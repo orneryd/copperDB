@@ -733,7 +733,7 @@ use super::*;
     }
 
     #[test]
-    fn metadata_only_index_definitions_do_not_build_property_lookup_state() {
+    fn metadata_only_index_definitions_do_not_build_exact_property_lookup_state() {
         let engine = StorageEngine::open_temporary().unwrap();
 
         let mut alice = sample_node("db:n1", &["Person"]);
@@ -797,6 +797,69 @@ use super::*;
             .is_empty());
         assert!(engine
             .get_edges_by_property("KNOWS", "embedding", &json!([0.4, 0.5, 0.6]))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn fulltext_index_rebuilds_and_tracks_mutations() {
+        let engine = StorageEngine::open_temporary().unwrap();
+        let mut alice = sample_node("db:n1", &["Person"]);
+        alice
+            .properties
+            .insert("bio".into(), json!("Rust graph database engineer"));
+        let mut bob = sample_node("db:n2", &["Person"]);
+        bob.properties
+            .insert("bio".into(), json!("Storage systems specialist"));
+        engine.put_node_record(&alice).unwrap();
+        engine.put_node_record(&bob).unwrap();
+
+        assert!(engine
+            .search_fulltext_nodes_by_properties(
+                "Person",
+                &["bio".into()],
+                "graph engineer",
+                10,
+            )
+            .unwrap()
+            .is_empty());
+
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "person_bio_fulltext_idx".to_string(),
+                entity_type: IndexEntityType::Node,
+                kind: IndexKind::FullText,
+                label: "Person".to_string(),
+                properties: vec!["bio".to_string()],
+            })
+            .unwrap();
+
+        let results = engine
+            .search_fulltext_nodes_by_properties("Person", &["bio".into()], "graph engineer", 10)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.id, "db:n1");
+        assert_eq!(results[0].1, 2);
+
+        alice
+            .properties
+            .insert("bio".into(), json!("Updated biography about storage"));
+        engine.put_node_record(&alice).unwrap();
+
+        assert!(engine
+            .search_fulltext_nodes_by_properties("Person", &["bio".into()], "graph engineer", 10)
+            .unwrap()
+            .is_empty());
+        let updated = engine
+            .search_fulltext_nodes_by_properties("Person", &["bio".into()], "updated biography", 10)
+            .unwrap();
+        assert_eq!(updated.len(), 1);
+        assert_eq!(updated[0].0.id, "db:n1");
+        assert_eq!(updated[0].1, 2);
+
+        engine.delete_node_record("db:n1").unwrap();
+        assert!(engine
+            .search_fulltext_nodes_by_properties("Person", &["bio".into()], "updated biography", 10)
             .unwrap()
             .is_empty());
     }

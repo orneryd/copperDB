@@ -8,9 +8,9 @@ This is an audit and documentation artifact only. It records architecture and pe
 
 ## Executive Findings
 
-1. copperDB's explicit-index direction is correct, but the docs need to preserve the target policy: automatic index/search/embedding work must default off unless enabled through explicit per-database configuration. NornicDB already has per-DB search/vector/embedding controls in `pkg/config/dbconfig`; copperDB currently has no equivalent resolver or durable per-DB runtime config.
+1. copperDB's explicit-index direction is correct, but the docs need to preserve the target policy: Cypher schema DDL remains authoritative per database, so declared indexes should still load, rebuild, and maintain for that database, while automatic index/search/embedding work means only extra implicit/background indexing beyond declared schema and must default off unless enabled through explicit per-database configuration. NornicDB already has per-DB search/vector/embedding controls in `pkg/config/dbconfig`; copperDB now has a first per-DB resolver/override baseline, but broader runtime consumers and warming behavior still need to be threaded through the engine.
 2. Layer 2 storage is the largest structural drift. NornicDB has a substantial async write-behind engine, WAL repair/diagnostics, MVCC extension interfaces, streaming/prefix APIs, and richer schema/index lifecycle. copperDB has focused baselines but should not be documented as storage-complete for those operational surfaces.
-3. Layer 3 distributed packages are checked in the current dependency graph, but the audit found important production gaps versus NornicDB: multi-region replication, transport security, chaos testing, fragment-based fabric execution, distributed transaction context, remote fragment execution, and gRPC search/auth surfaces.
+3. Layer 3 distributed packages are checked in the current dependency graph, but the audit found important production gaps versus NornicDB: multi-region replication, transport security, chaos testing, fragment-based fabric execution, distributed transaction context, remote fragment execution, and full gRPC caller auth/TLS parity.
 4. Layer 4 query/index/search remains the most performance-sensitive gap. copperDB has strong progress on Cypher execution and range/temporal index semantics, but NornicDB has production BM25, HNSW/IVFPQ/vector file store, decay-filtered search, hot-path tracing, SIMD/math acceleration, reranking, and embedding cache/backends that copperDB has not ported. For the first runnable MVP, GPU acceleration and reranking/inference lifecycle work are deferred; CPU search/vector runtime and in-memory embeddings remain the core target.
 5. Layer 5 and Layer 6 still need the central engine/config/protocol composition pass: per-database config, search/embedding warming, Bolt role propagation, conversion/import-export streaming, and plugin-ready builtin function/procedure registration are MVP-relevant. MCP tools, GraphQL resolvers, and Heimdall governance workflows remain recorded for parity but are deferred until after the core distributed engine is working.
 
@@ -21,11 +21,13 @@ copperDB should keep user-defined indexes as the default operational mode. Any a
 Concrete target:
 
 - Global defaults for automatic work: `false` or disabled.
+- Cypher schema DDL is still authoritative per database: if a database defines property, RANGE, TEMPORAL, FULLTEXT, or VECTOR indexes in schema, those declared indexes should still load, rebuild, and maintain for that database.
 - Per-database overrides: durable and queryable through the multidb/config plane.
-- CLI overrides: highest precedence emergency kill switch, matching NornicDB's resolver pattern.
+- CLI overrides: highest precedence emergency kill switch, matching NornicDB's resolver pattern and acting as a hard global stop for all indexing work.
 - Warming modes: `startup` or `lazy`, but only meaningful after the relevant per-DB feature is enabled.
-- Explicit `CREATE INDEX` DDL remains the default path for property/range/temporal indexes.
-- `FULLTEXT` and `VECTOR` catalog rows remain metadata-only until their runtime paths have maintained storage/search backends.
+- Explicit `CREATE INDEX` DDL remains the default path for property/range/temporal indexes, and explicit `CREATE FULLTEXT INDEX` / `CREATE VECTOR INDEX` DDL is likewise the default path for search/vector index definitions.
+- Disabled automatic work must prevent duplicate or surprise implicit/background indexing only; it must not suppress rebuild or maintenance of schema-declared indexes.
+- `FULLTEXT` and `VECTOR` catalog rows still do not have NornicDB-level storage/search backends. copperDB now has a first maintained local fulltext baseline: storage keeps inverted-token entries for node FULLTEXT indexes and the engine consumes that path locally, but broader persisted search/index lifecycle parity and vector runtime remain open.
 
 NornicDB reference files:
 
@@ -36,8 +38,8 @@ NornicDB reference files:
 copperDB current drift:
 
 - `crates/config/src/lib.rs` has global storage/server/bolt/auth/replication/encryption/vectorspace/GPU config only.
-- `crates/multidb/src/lib.rs` tracks logical database catalog state but does not carry per-DB feature toggles or effective config.
-- No `dbconfig.Store`, `dbconfig.Resolver`, allowed-key registry, per-DB admin API, or search/embedding warming lifecycle exists yet.
+- `crates/multidb/src/lib.rs` now carries durable per-DB override maps and exposes effective-config resolution through the shared config layer, but the key surface is still intentionally narrow.
+- A first Rust baseline now exists for the NornicDB-style per-DB config path: `copperdb-config` owns the allowed-key registry and effective resolver, `copperdb-multidb` persists per-DB override maps durably, `copperdb-engine` validates ranked-search requests against the resolved per-DB search settings, and `copperdb-server` exposes per-DB config read/write plus effective-config admin endpoints while enforcing that ranked-search gate on the admin route. Engine-side search/embedding warming and broader runtime consumption are still open.
 
 ## MVP Scope Clarification
 
@@ -55,7 +57,7 @@ Still MVP-relevant preparation work:
 
 - Builtin function/procedure registration should be plugin-ready so APOC-style extensions can be added later without rewriting the call dispatch architecture.
 - Embedding runtime should prefer `mistral.rs` if feasible as the in-memory model backend, replacing the previously assumed llama.cpp/local GGUF direction while preserving NornicDB's goal of running embeddings locally in memory.
-- Automatic index/search/embedding behavior remains disabled by default and per-DB opt-in only.
+- Automatic index/search/embedding behavior remains disabled by default and per-DB opt-in only, but schema-declared indexes must still reload/rebuild per database and the CLI override remains a hard global kill switch.
 
 ## Layer 0 Audit: Shared Contracts And Config
 
@@ -112,7 +114,7 @@ copperDB current drift:
 
 - `txsession`: broadly aligned on session states, buffered operations, and logical transaction IDs.
 - `retention`: broadly aligned on policies, legal holds, and erasure request state.
-- `multidb`: durable logical database catalog exists, but NornicDB's per-DB config store/resolver is missing. This is now a high-priority cross-layer drift item.
+- `multidb`: durable logical database catalog and the first per-DB config store/resolver baseline now exist, but NornicDB's broader per-DB key surface and downstream runtime consumers are still missing. This remains a high-priority cross-layer drift item.
 
 Documentation actions:
 
@@ -130,7 +132,7 @@ NornicDB reference areas include `pkg/replication/multi_region.go`, `raft.go`, `
 Drift:
 
 - Multi-region replication and failover promotion are not ported as a first-class copperDB path.
-- Transport security for inter-node replication is incomplete: TLS/mTLS, certificate validation, cipher/version policy, and token/HMAC auth are not documented as implemented.
+- Transport security for inter-node replication is still incomplete: copperDB now has an mTLS-capable tonic baseline with server cert/key, client-auth CA, client cert/key, trust CA, and domain wiring plus startup validation, but stronger certificate lifecycle handling, cipher/version policy, and richer token/HMAC auth parity are still not documented as implemented.
 - Chaos testing for cross-region latency, jitter, packet loss, partitions, and corruption is missing.
 - Peer metrics garbage collection is missing, which risks unbounded observability cardinality under node churn.
 
@@ -156,7 +158,7 @@ Drift:
 - Vector file store and sparse embedding storage are missing.
 - Decay-filtered search is missing.
 - Qdrant client support exists, but full Qdrant collection/points/snapshot service parity is missing.
-- nornic gRPC has generated transport/adapters, but remote ranked-search service auth and server-side search execution parity should remain open.
+- nornic gRPC has generated transport/adapters, and copperDB now has an engine-owned local replica apply/read handler plus local fabric ranked-search batch and hydration seams that can back the server side, with the `copperdb` binary now able to start that tonic service behind config/CLI gRPC listener settings. A first shared bearer-token metadata auth baseline now exists through `COPPERDB_GRPC_AUTH_TOKEN`, and that token is now resolved through env or a KMS-encrypted startup secret rather than as an out-of-band runtime convention. copperDB now also has an mTLS-capable tonic transport baseline for listener and client paths through config-driven server cert/key, trust CA, client cert/key, client-auth CA, and domain settings plus focused handshake coverage, but stronger secret and certificate distribution or rotation, caller identity forwarding, and broader end-to-end server-side distributed execution parity should remain open.
 
 Documentation actions:
 
@@ -171,7 +173,7 @@ Layer 4 remains the active area with the most performance-sensitive drift.
 Current copperDB progress is real: expression parsing, relationship/path semantics, routed pipeline slices, knowledge-policy scoring, and range/temporal index semantics are now documented and tested. Remaining drift:
 
 - NornicDB has broader hot-path query routing and trace coverage for simple `MATCH ... LIMIT`, UNWIND/MERGE batches, call-tail traversal, compound mutation chains, and pipeline branch shapes. copperDB has pieces of routed execution but should keep hot-path parity open until query-shape routing and trace tests cover those performance paths.
-- `FULLTEXT` and `VECTOR` DDL/catalog lifecycle exists in copperDB, but runtime query/search paths are absent. Docs now correctly state these rows are metadata-only; the next parity step is not more DDL, but a maintained search/vector runtime bridge.
+- `FULLTEXT` and `VECTOR` DDL/catalog lifecycle exists in copperDB. A first maintained local fulltext runtime now exists through storage-maintained inverted-token entries plus engine-side local query execution, but vector runtime paths and broader search lifecycle parity are still absent. The next parity step is to deepen that maintained runtime rather than adding more DDL.
 - Composite range/temporal selection is now strong, but broader Neo4j index provider semantics, index options, analyzers, and vector index configuration are not ported.
 
 ### search
@@ -211,10 +213,10 @@ NornicDB `pkg/nornicdb` composes storage, search, embeddings, per-DB config, war
 
 Drift:
 
-- Per-database search flags resolver is missing from copperDB engine composition.
+- Per-database search flags resolver is no longer missing from copperDB engine composition: ranked-search gates, the first local fulltext runtime path, and engine-native local replica/ranked-search/hydration gRPC seams now consume the resolved per-database settings, with the binary able to start the local tonic service through config/CLI listener settings and thread the shared gRPC auth token plus first TLS settings through the same resolved runtime config. Broader search/vector/embedding runtime consumers are still missing.
 - Search index warmup strategy is missing: `startup` versus `lazy` should be a per-DB effective config value.
 - Embedding enablement/warming/cache/model/dimensions are not engine-composed per database.
-- Auto-index/search/embedding work should default disabled in copperDB, with explicit per-DB opt-in and CLI kill switch.
+- Auto-index/search/embedding work should default disabled in copperDB, with explicit per-DB opt-in for extra implicit/background work and a CLI kill switch that acts as the hard global stop for all indexing.
 - Engine composition still needs to thread auth, audit, compliance, retention, replication/fabric, search/index, knowledge-policy, and telemetry consistently through all query/protocol entrypoints.
 
 Documentation actions:
@@ -327,7 +329,7 @@ Layer 2 auto-indexing/index-default findings:
 
 - The agent inferred NornicDB auto-creates label/index structures around MATCH/WHERE and maintains composite property indexes on update/delete, but this was noted as inferred from implementation patterns and should be verified before being promoted to a hard requirement.
 - copperDB currently has explicit index DDL, persisted definitions, lookup-path preference, and ordered range encoding; the agent found no evidence of automatic index creation.
-- Documentation should state the copperDB target clearly: no surprise automatic property/search/vector indexes by default; explicit DDL is the default, and any automatic index/search/embedding behavior must be disabled/off until a database opts in.
+- Documentation should state the copperDB target clearly: no surprise automatic property/search/vector indexes by default; explicit DDL is the default, declared indexes still reload/rebuild per database from schema, and any automatic index/search/embedding behavior beyond schema DDL must be disabled/off until a database opts in.
 
 Layer 2 MVCC extension-interface findings from NornicDB `pkg/storage/types.go`:
 
@@ -381,7 +383,7 @@ Source report: architecture layer audit for `replication`, `fabric`, `search`, `
 Replication findings:
 
 1. Multi-region replication architecture is missing as a first-class copperDB path. NornicDB has local Raft cluster per region, async cross-region WAL streaming, primary/failover promotion, and cross-region connection pooling/streaming coordination.
-2. Replication transport security is missing or undocumented in copperDB. NornicDB `transport_security.go` includes TLS config building, cert/key loading, CA validation, TLS 1.2/1.3 policy, cipher parsing, mTLS client verification, and `AuthSecret` token-based auth with time-skew tolerance.
+2. Replication transport security is still incomplete in copperDB. NornicDB `transport_security.go` includes TLS config building, cert/key loading, CA validation, TLS 1.2/1.3 policy, cipher parsing, mTLS client verification, and `AuthSecret` token-based auth with time-skew tolerance; copperDB now has an mTLS-capable tonic baseline plus startup validation for required cert or key combinations, but not full parity.
 3. Chaos testing infrastructure is missing. NornicDB `chaos_test.go` has chaos configs for cross-region latency/jitter, partition latency, packet loss, corruption, and local/cross-region/global scenarios.
 4. Peer metrics garbage collection is missing. NornicDB `peer_metrics_gc.go` removes stale peer metric entries after topology changes to avoid unbounded metric cardinality.
 
@@ -410,7 +412,7 @@ Qdrant gRPC findings:
 NornicDB gRPC findings:
 
 1. Search service implementation is missing. NornicDB receives distributed `SearchQuery` calls over gRPC, executes local shard search, returns ranked batches, and handles auth forwarding.
-2. gRPC authentication/authorization is missing or incomplete. NornicDB has auth tests and OIDC token forwarding; copperDB must validate bearer tokens and enforce per-call entitlements before remote operations are safe.
+2. gRPC authentication/authorization is still incomplete. NornicDB has auth tests and OIDC token forwarding; copperDB now has a shared bearer-token metadata gate for internal RPCs, but it still must forward caller identity and enforce per-call entitlements before remote operations are fully safe.
 
 Distributed engine/server hook finding:
 
@@ -419,7 +421,7 @@ Distributed engine/server hook finding:
 Layer 3 summary table from the agent:
 
 - Multi-region replication: missing in copperDB, complete in NornicDB; blocks geo-distributed failover.
-- Transport security (TLS/mTLS): missing in copperDB, complete in NornicDB; blocks compliant inter-node deployment.
+- Transport security (TLS/mTLS): an mTLS-capable tonic baseline now exists in copperDB, while broader certificate-policy, rotation, and TLS-version or cipher parity remain incomplete relative to NornicDB; this still blocks compliant inter-node deployment.
 - Chaos testing infrastructure: missing in copperDB, complete in NornicDB; weakens failure-mode confidence.
 - Peer metrics GC: missing in copperDB, complete in NornicDB; risks metric-cardinality growth.
 - Fabric fragment routing: data structures only in copperDB, complete in NornicDB; multi-shard queries are non-functional without it.
@@ -435,7 +437,7 @@ Layer 3 summary table from the agent:
 - Qdrant points extended API: missing in copperDB, complete in NornicDB.
 - Qdrant snapshots: missing in copperDB, complete in NornicDB.
 - gRPC search service: missing in copperDB, complete in NornicDB.
-- gRPC authentication: missing in copperDB, complete in NornicDB.
+- gRPC authentication and transport: shared bearer-token and mTLS-capable tonic baselines now exist in copperDB, with the shared token resolved through env or a KMS-encrypted startup secret, while caller-forwarded auth, entitlement parity, and fuller secret and certificate lifecycle handling remain incomplete relative to NornicDB.
 
 ### Agent C: Layer 4 Query/Index/Search
 
@@ -516,7 +518,7 @@ Index runtime type semantics findings:
 
 Auto-indexing behavior finding:
 
-- The agent found defaults unspecified in the docs. copperDB should state explicit index creation is required by default and property writes do not auto-create indexes. Any automatic index/search/vector/embedding behavior must be opt-in per database.
+- The agent found defaults unspecified in the docs. copperDB should state explicit index creation is required by default, property writes do not auto-create indexes, schema-declared indexes still reload/rebuild per database, and any automatic index/search/vector/embedding behavior beyond schema DDL must be opt-in per database.
 
 Inference/local LLM findings:
 

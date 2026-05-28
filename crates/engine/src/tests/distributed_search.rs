@@ -10,11 +10,12 @@ use crate::copperdb::distributed_shortest_path_query_shape;
         };
 
         let dir = tempfile::tempdir().unwrap();
-        let db = CopperDb::open(DatabaseConfig {
+        let mut config = DatabaseConfig {
             data_dir: dir.path().join("db").to_string_lossy().into_owned(),
             ..Default::default()
-        })
-        .unwrap();
+        };
+        config.runtime_config.bm25_enabled = true;
+        let db = CopperDb::open(config).unwrap();
         for node_id in ["search-a", "search-b", "search-c"] {
             db.storage()
                 .register_topology_peer(
@@ -151,6 +152,172 @@ use crate::copperdb::distributed_shortest_path_query_shape;
             .unwrap()
             .get("secret")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn engine_blocks_ranked_search_when_database_search_is_disabled() {
+        use copperdb_search::InMemorySearchTransport;
+        use copperdb_topology::{
+            FabricDatabase, FabricPartitionPolicy, FabricShard, FabricShardKind, MeshPeer,
+            NodeCapability, PlacementKey, PlacementRecord,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        config.runtime_config.bm25_enabled = false;
+
+        let db = CopperDb::open(config).unwrap();
+        db.storage()
+            .register_topology_peer(
+                &MeshPeer::new("search-a", "search-a.mesh.local:9000")
+                    .with_capability(NodeCapability::Search)
+                    .with_capability(NodeCapability::Storage)
+                    .with_capability(NodeCapability::Coordinator),
+            )
+            .unwrap();
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: PlacementKey::new("default", "copper", "primary"),
+                primary_node: "search-a".into(),
+                replica_nodes: vec![],
+                search_nodes: vec!["search-a".into()],
+                hyperscaler_profile: None,
+                min_write_replicas: 0,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let fabric = FabricDatabase {
+            tenant: "default".into(),
+            database: "copper".into(),
+            default_shard: "primary".into(),
+            partition_policy: FabricPartitionPolicy::HashByKey { buckets: 1 },
+            shards: vec![FabricShard {
+                placement: PlacementKey::new("default", "copper", "primary"),
+                kind: FabricShardKind::Graph,
+                labels: vec!["Person".into()],
+                relationship_types: vec![],
+                collections: vec![],
+            }],
+        };
+
+        let error = db
+            .execute_fabric_ranked_search_with_transport(
+                &fabric,
+                SearchQuery::FullText {
+                    query: "alice".into(),
+                    fields: vec!["body".into()],
+                    limit: 10,
+                },
+                Vec::new(),
+                RrfConfig::new(60.0, 10),
+                RrfSearchPolicy::default(),
+                Arc::new(InMemorySearchTransport::new()),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, CopperDbError::Config(_)));
+        assert!(error
+            .to_string()
+            .contains("fulltext search is disabled for this database"));
+    }
+
+    #[tokio::test]
+    async fn engine_blocks_semantic_and_hybrid_search_when_vector_search_is_disabled() {
+        use copperdb_search::InMemorySearchTransport;
+        use copperdb_topology::{
+            FabricDatabase, FabricPartitionPolicy, FabricShard, FabricShardKind, MeshPeer,
+            NodeCapability, PlacementKey, PlacementRecord,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = DatabaseConfig {
+            data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        config.runtime_config.bm25_enabled = true;
+        config.runtime_config.vector_enabled = false;
+
+        let db = CopperDb::open(config).unwrap();
+        db.storage()
+            .register_topology_peer(
+                &MeshPeer::new("search-a", "search-a.mesh.local:9000")
+                    .with_capability(NodeCapability::Search)
+                    .with_capability(NodeCapability::Storage)
+                    .with_capability(NodeCapability::Coordinator),
+            )
+            .unwrap();
+        db.storage()
+            .register_topology_placement(&PlacementRecord {
+                key: PlacementKey::new("default", "copper", "primary"),
+                primary_node: "search-a".into(),
+                replica_nodes: vec![],
+                search_nodes: vec!["search-a".into()],
+                hyperscaler_profile: None,
+                min_write_replicas: 0,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        let fabric = FabricDatabase {
+            tenant: "default".into(),
+            database: "copper".into(),
+            default_shard: "primary".into(),
+            partition_policy: FabricPartitionPolicy::HashByKey { buckets: 1 },
+            shards: vec![FabricShard {
+                placement: PlacementKey::new("default", "copper", "primary"),
+                kind: FabricShardKind::Graph,
+                labels: vec!["Person".into()],
+                relationship_types: vec![],
+                collections: vec![],
+            }],
+        };
+
+        let semantic_error = db
+            .execute_fabric_ranked_search_with_transport(
+                &fabric,
+                SearchQuery::Semantic {
+                    vector: vec![0.1, 0.2, 0.3],
+                    k: 5,
+                    min_score: 0.4,
+                },
+                Vec::new(),
+                RrfConfig::new(60.0, 10),
+                RrfSearchPolicy::default(),
+                Arc::new(InMemorySearchTransport::new()),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(semantic_error, CopperDbError::Config(_)));
+        assert!(semantic_error
+            .to_string()
+            .contains("vector search is disabled for this database"));
+
+        let hybrid_error = db
+            .execute_fabric_ranked_search_with_transport(
+                &fabric,
+                SearchQuery::Hybrid {
+                    text: "alice".into(),
+                    vector: vec![0.1, 0.2, 0.3],
+                    k: 5,
+                },
+                Vec::new(),
+                RrfConfig::new(60.0, 10),
+                RrfSearchPolicy::default(),
+                Arc::new(InMemorySearchTransport::new()),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(hybrid_error, CopperDbError::Config(_)));
+        assert!(hybrid_error
+            .to_string()
+            .contains("hybrid search requires both fulltext and vector search to be enabled for this database"));
     }
 
     #[tokio::test]

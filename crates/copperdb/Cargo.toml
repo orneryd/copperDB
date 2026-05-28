@@ -11,11 +11,16 @@ repository.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 axum.workspace = true
+base64.workspace = true
 clap.workspace = true
+hex.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+tonic.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+rustls.workspace = true
+copperdb-kms = { workspace = true }
 copperdb-bolt = { workspace = true }
 copperdb-buildinfo = { workspace = true }
 copperdb-config = { workspace = true }

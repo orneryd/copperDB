@@ -45,6 +45,7 @@ const IDX_EDGE_TYPE_PREFIX: &str = "edge_type";
 const IDX_EDGE_START_PREFIX: &str = "edge_start";
 const IDX_EDGE_END_PREFIX: &str = "edge_end";
 const IDX_NODE_PROPERTY_PREFIX: &str = "node_property";
+const IDX_NODE_FULLTEXT_PREFIX: &str = "node_fulltext";
 pub(crate) const IDX_EDGE_PROPERTY_PREFIX: &str = "edge_property";
 
 #[derive(Debug, Error)]
@@ -1333,6 +1334,45 @@ impl StorageEngine {
         Ok(out)
     }
 
+    pub fn search_fulltext_nodes_by_properties(
+        &self,
+        label: &str,
+        properties: &[String],
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<(NodeRecord, usize)>, StorageError> {
+        let tokens = tokenize_fulltext(query);
+        if tokens.is_empty() || properties.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut scores: HashMap<String, usize> = HashMap::new();
+        for property in properties {
+            for token in &tokens {
+                let prefix = node_fulltext_token_prefix(label, property, token);
+                for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
+                    let (key, _) = entry?;
+                    let key_str =
+                        std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+                    if let Some(node_id) = key_str.rsplit('/').next() {
+                        *scores.entry(node_id.to_string()).or_default() += 1;
+                    }
+                }
+            }
+        }
+
+        let mut ranked: Vec<(String, usize)> = scores.into_iter().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+        let mut nodes = Vec::new();
+        for (node_id, score) in ranked.into_iter().take(limit) {
+            if let Some(node) = self.get_node_record(&node_id)? {
+                nodes.push((node, score));
+            }
+        }
+        Ok(nodes)
+    }
+
     pub fn get_nodes_by_properties(
         &self,
         label: &str,
@@ -1606,6 +1646,8 @@ impl StorageEngine {
         self.meta.insert(key, rmp_serde::to_vec(index)?)?;
         if is_node_property_index(index) {
             self.rebuild_node_property_index(index)?;
+        } else if is_node_fulltext_index(index) {
+            self.rebuild_node_fulltext_index(index)?;
         } else if is_relationship_property_index(index) {
             self.rebuild_relationship_property_index(index)?;
         }
@@ -1633,6 +1675,8 @@ impl StorageEngine {
             if let Some(index) = existing {
                 if is_node_property_index(&index) {
                     self.delete_node_property_index_entries(&index)?;
+                } else if is_node_fulltext_index(&index) {
+                    self.delete_node_fulltext_index_entries(&index)?;
                 } else if is_relationship_property_index(&index) {
                     self.delete_relationship_property_index_entries(&index)?;
                 }
@@ -2041,6 +2085,12 @@ impl StorageEngine {
                 self.indexes.insert(key.as_bytes(), &[])?;
             }
         }
+        for index in self.node_fulltext_index_definitions()? {
+            if !node.labels.iter().any(|label| label == &index.label) {
+                continue;
+            }
+            self.index_node_fulltext_entries(&index, node)?;
+        }
         Ok(())
     }
 
@@ -2052,6 +2102,12 @@ impl StorageEngine {
             if let Some(key) = node_property_index_key_for_node(&index, node) {
                 self.indexes.remove(key.as_bytes())?;
             }
+        }
+        for index in self.node_fulltext_index_definitions()? {
+            if !node.labels.iter().any(|label| label == &index.label) {
+                continue;
+            }
+            self.delete_node_fulltext_entries(&index, node)?;
         }
         Ok(())
     }
@@ -2082,12 +2138,28 @@ impl StorageEngine {
             .collect())
     }
 
+    fn node_fulltext_index_definitions(&self) -> Result<Vec<IndexDefinition>, StorageError> {
+        Ok(self
+            .load_index_definitions()?
+            .into_iter()
+            .filter(is_node_fulltext_index)
+            .collect())
+    }
+
     fn rebuild_node_property_index(&self, index: &IndexDefinition) -> Result<(), StorageError> {
         self.delete_node_property_index_entries(index)?;
         for node in self.get_nodes_by_label(&index.label)? {
             if let Some(key) = node_property_index_key_for_node(index, &node) {
                 self.indexes.insert(key.as_bytes(), &[])?;
             }
+        }
+        Ok(())
+    }
+
+    fn rebuild_node_fulltext_index(&self, index: &IndexDefinition) -> Result<(), StorageError> {
+        self.delete_node_fulltext_index_entries(index)?;
+        for node in self.get_nodes_by_label(&index.label)? {
+            self.index_node_fulltext_entries(index, &node)?;
         }
         Ok(())
     }
@@ -2105,6 +2177,62 @@ impl StorageEngine {
             .collect::<Result<Vec<_>, _>>()?;
         for key in keys {
             self.indexes.remove(key)?;
+        }
+        Ok(())
+    }
+
+    fn delete_node_fulltext_index_entries(&self, index: &IndexDefinition) -> Result<(), StorageError> {
+        for property in &index.properties {
+            let prefix = node_fulltext_property_prefix(&index.label, property);
+            let keys = self
+                .indexes
+                .scan_prefix(prefix.as_bytes())
+                .map(|entry| {
+                    entry
+                        .map(|(key, _)| key.to_vec())
+                        .map_err(StorageError::from)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for key in keys {
+                self.indexes.remove(key)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn index_node_fulltext_entries(
+        &self,
+        index: &IndexDefinition,
+        node: &NodeRecord,
+    ) -> Result<(), StorageError> {
+        for property in &index.properties {
+            let Some(value) = node.properties.get(property) else {
+                continue;
+            };
+            for token in fulltext_tokens_for_value(value) {
+                self.indexes.insert(
+                    node_fulltext_index_key(&index.label, property, &token, &node.id).as_bytes(),
+                    &[],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn delete_node_fulltext_entries(
+        &self,
+        index: &IndexDefinition,
+        node: &NodeRecord,
+    ) -> Result<(), StorageError> {
+        for property in &index.properties {
+            let Some(value) = node.properties.get(property) else {
+                continue;
+            };
+            for token in fulltext_tokens_for_value(value) {
+                self.indexes.remove(
+                    node_fulltext_index_key(&index.label, property, &token, &node.id).as_bytes(),
+                )?;
+            }
         }
         Ok(())
     }
@@ -2252,6 +2380,12 @@ fn is_node_property_index(index: &IndexDefinition) -> bool {
         && !index.properties.is_empty()
 }
 
+fn is_node_fulltext_index(index: &IndexDefinition) -> bool {
+    index.entity_type == IndexEntityType::Node
+        && index.kind == IndexKind::FullText
+        && !index.properties.is_empty()
+}
+
 fn is_property_backed_index_kind(kind: IndexKind) -> bool {
     matches!(kind, IndexKind::Range | IndexKind::Temporal)
 }
@@ -2261,6 +2395,30 @@ fn node_property_index_property_prefix(label: &str, property: &str) -> String {
         "{IDX_NODE_PROPERTY_PREFIX}/{}/{}/",
         escape_index_component(label),
         escape_index_component(property)
+    )
+}
+
+fn node_fulltext_property_prefix(label: &str, property: &str) -> String {
+    format!(
+        "{IDX_NODE_FULLTEXT_PREFIX}/{}/{}/",
+        escape_index_component(label),
+        escape_index_component(property)
+    )
+}
+
+fn node_fulltext_token_prefix(label: &str, property: &str, token: &str) -> String {
+    format!(
+        "{}{}/",
+        node_fulltext_property_prefix(label, property),
+        escape_index_component(token)
+    )
+}
+
+fn node_fulltext_index_key(label: &str, property: &str, token: &str, node_id: &str) -> String {
+    format!(
+        "{}{}",
+        node_fulltext_token_prefix(label, property, token),
+        node_id
     )
 }
 
@@ -2364,6 +2522,27 @@ fn node_property_index_key_for_node(index: &IndexDefinition, node: &NodeRecord) 
 
 fn escape_index_component(value: &str) -> String {
     hex::encode(value.as_bytes())
+}
+
+fn tokenize_fulltext(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| word.to_lowercase())
+        .collect()
+}
+
+fn fulltext_tokens_for_value(value: &serde_json::Value) -> Vec<String> {
+    match value {
+        serde_json::Value::Null => Vec::new(),
+        serde_json::Value::String(text) => tokenize_fulltext(text),
+        serde_json::Value::Bool(boolean) => tokenize_fulltext(&boolean.to_string()),
+        serde_json::Value::Number(number) => tokenize_fulltext(&number.to_string()),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .flat_map(fulltext_tokens_for_value)
+            .collect(),
+        serde_json::Value::Object(_) => Vec::new(),
+    }
 }
 
 fn value_as_f64(value: &serde_json::Value, field: &str) -> Result<f64, StorageError> {

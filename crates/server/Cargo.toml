@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 serde.workspace = true
@@ -26,6 +27,7 @@ uuid.workspace = true
 copperdb-auth = { workspace = true }
 copperdb-bolt = { workspace = true }
 copperdb-buildinfo = { workspace = true }
+copperdb-config = { workspace = true }
 copperdb-engine = { workspace = true }
 copperdb-envutil = { workspace = true }
 copperdb-fabric = { workspace = true }
@@ -42,7 +44,6 @@ copperdb-security = { workspace = true }
 copperdb-storage = { workspace = true }
 
 [dev-dependencies]
-async-trait.workspace = true
 copperdb-compliance = { workspace = true }
 tempfile.workspace = true
 tonic.workspace = true

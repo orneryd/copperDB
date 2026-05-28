@@ -18,6 +18,7 @@ tonic-prost.workspace = true
 prost.workspace = true
 prost-types.workspace = true
 tracing.workspace = true
+rustls.workspace = true
 copperdb-auth = { workspace = true }
 copperdb-replication = { workspace = true }
 copperdb-search = { workspace = true }
@@ -28,3 +29,6 @@ copperdb-util = { workspace = true }
 [build-dependencies]
 tonic-prost-build.workspace = true
 protoc-bin-vendored = "3.2.0"
+
+[dev-dependencies]
+rcgen = "0.14.5"

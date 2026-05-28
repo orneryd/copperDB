@@ -1,5 +1,171 @@
 use super::*;
 impl CopperDb {
+    fn ensure_ranked_search_query_enabled(&self, query: &SearchQuery) -> Result<(), CopperDbError> {
+        match query {
+            SearchQuery::FullText { .. } if !self.config.runtime_config.bm25_enabled => {
+                Err(CopperDbError::Config(
+                    "fulltext search is disabled for this database".into(),
+                ))
+            }
+            SearchQuery::Semantic { .. } if !self.config.runtime_config.vector_enabled => {
+                Err(CopperDbError::Config(
+                    "vector search is disabled for this database".into(),
+                ))
+            }
+            SearchQuery::Hybrid { .. }
+                if !self.config.runtime_config.bm25_enabled
+                    || !self.config.runtime_config.vector_enabled =>
+            {
+                Err(CopperDbError::Config(
+                    "hybrid search requires both fulltext and vector search to be enabled for this database"
+                        .into(),
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    pub fn validate_ranked_search_query(
+        &self,
+        query: &SearchQuery,
+    ) -> Result<(), CopperDbError> {
+        self.ensure_ranked_search_query_enabled(query)
+    }
+
+    pub fn search_fulltext_nodes(
+        &self,
+        label: &str,
+        fields: &[String],
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, CopperDbError> {
+        self.ensure_ranked_search_query_enabled(&SearchQuery::FullText {
+            query: query.to_string(),
+            fields: fields.to_vec(),
+            limit,
+        })?;
+
+        let index_definitions = self.storage.load_index_definitions()?;
+        let matched_properties = matched_fulltext_properties(&index_definitions, label, fields);
+        if matched_properties.is_empty() {
+            return Err(CopperDbError::Config(format!(
+                "no fulltext index configured for label {label} and requested fields"
+            )));
+        }
+
+        Ok(self
+            .storage
+            .search_fulltext_nodes_by_properties(label, &matched_properties, query, limit)?
+            .into_iter()
+            .map(|(node, score)| SearchResult {
+                snippet: build_fulltext_snippet(&node, &matched_properties),
+                id: node.id,
+                score: score as f32,
+                label: label.to_string(),
+            })
+            .collect())
+    }
+
+    pub fn search_fabric_ranked_batch_locally(
+        &self,
+        placement: &PlacementKey,
+        query: &SearchQuery,
+    ) -> Result<RrfSearchBatch, CopperDbError> {
+        self.ensure_ranked_search_query_enabled(query)?;
+
+        match query {
+            SearchQuery::FullText {
+                query,
+                fields,
+                limit,
+            } => {
+                let index_definitions = self.storage.load_index_definitions()?;
+                let labels = Self::local_ranked_search_labels(
+                    self.load_fabric_database(&placement.tenant, &placement.database)?
+                        .as_ref(),
+                    placement,
+                    &index_definitions,
+                    fields,
+                );
+                let mut hits = Vec::new();
+
+                for label in labels {
+                    let matched_properties =
+                        matched_fulltext_properties(&index_definitions, &label, fields);
+                    if matched_properties.is_empty() {
+                        continue;
+                    }
+
+                    for result in self.storage.search_fulltext_nodes_by_properties(
+                        &label,
+                        &matched_properties,
+                        query,
+                        *limit,
+                    )? {
+                        let (node, score) = result;
+                        hits.push(RrfSearchHit {
+                            global_id: FabricGlobalId::new(
+                                placement.clone(),
+                                "node",
+                                node.id.clone(),
+                            ),
+                            rank: 0,
+                            score: score as f32,
+                            source: "lexical".into(),
+                            shard: placement.clone(),
+                            label: label.clone(),
+                            snippet: build_fulltext_snippet(&node, &matched_properties),
+                        });
+                    }
+                }
+
+                hits.sort_by(|left, right| {
+                    right
+                        .score
+                        .total_cmp(&left.score)
+                        .then(left.global_id.stable_id().cmp(&right.global_id.stable_id()))
+                });
+                hits.truncate(*limit);
+                for (index, hit) in hits.iter_mut().enumerate() {
+                    hit.rank = index + 1;
+                }
+
+                Ok(RrfSearchBatch {
+                    shard: placement.clone(),
+                    source: "lexical".into(),
+                    hits,
+                })
+            }
+            SearchQuery::Semantic { .. } => Err(CopperDbError::Config(
+                "local semantic search runtime is not implemented".into(),
+            )),
+            SearchQuery::Hybrid { .. } => Err(CopperDbError::Config(
+                "local hybrid search runtime is not implemented".into(),
+            )),
+        }
+    }
+
+    pub fn hydrate_fabric_entities_locally(
+        &self,
+        global_ids: &[FabricGlobalId],
+    ) -> Result<Vec<RrfHydrationRecord>, CopperDbError> {
+        let mut records = Vec::new();
+        for global_id in global_ids {
+            if global_id.entity_kind != "node" {
+                continue;
+            }
+            let Some(node) = self.storage.get_node_record(&global_id.local_id)? else {
+                continue;
+            };
+            records.push(RrfHydrationRecord {
+                global_id: global_id.clone(),
+                labels: node.labels.clone(),
+                entity: node_record_to_value(&node),
+            });
+        }
+        Ok(records)
+    }
+
     /// Create a new in-memory (temporary) database instance.
     pub fn open_temporary() -> Result<Self, CopperDbError> {
         let storage = Arc::new(StorageEngine::open_temporary()?);
@@ -136,6 +302,57 @@ impl CopperDb {
     }
 }
 
+fn matched_fulltext_properties(
+    index_definitions: &[copperdb_storage::IndexDefinition],
+    label: &str,
+    fields: &[String],
+) -> Vec<String> {
+    let requested: HashSet<&str> = fields.iter().map(String::as_str).collect();
+    let mut properties = BTreeSet::new();
+    for index in index_definitions {
+        if index.entity_type != IndexEntityType::Node
+            || index.kind != IndexKind::FullText
+            || index.label != label
+        {
+            continue;
+        }
+
+        for property in &index.properties {
+            if requested.is_empty() || requested.contains(property.as_str()) {
+                properties.insert(property.clone());
+            }
+        }
+    }
+    properties.into_iter().collect()
+}
+
+fn build_fulltext_snippet(node: &NodeRecord, properties: &[String]) -> Option<String> {
+    properties.iter().find_map(|property| {
+        node.properties
+            .get(property)
+            .and_then(fulltext_property_value)
+    })
+}
+
+fn fulltext_property_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(text) if text.is_empty() => None,
+        Value::String(text) => Some(text.clone()),
+        Value::Bool(boolean) => Some(boolean.to_string()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Array(values) => {
+            let tokens: Vec<String> = values.iter().filter_map(fulltext_property_value).collect();
+            if tokens.is_empty() {
+                None
+            } else {
+                Some(tokens.join(" "))
+            }
+        }
+        Value::Object(_) => None,
+    }
+}
+
 #[path = "distributed.rs"]
 mod distributed;
 
@@ -243,6 +460,40 @@ impl CopperDb {
             .collect()
     }
 
+    fn local_ranked_search_labels(
+        database: Option<&FabricDatabase>,
+        placement: &PlacementKey,
+        index_definitions: &[copperdb_storage::IndexDefinition],
+        fields: &[String],
+    ) -> Vec<String> {
+        let mut labels = BTreeSet::new();
+
+        if let Some(database) = database {
+            if let Some(shard) = database.shards.iter().find(|shard| shard.placement == *placement) {
+                labels.extend(shard.labels.iter().cloned());
+            }
+        }
+
+        if labels.is_empty() {
+            labels.extend(
+                index_definitions
+                    .iter()
+                    .filter(|definition| {
+                        definition.entity_type == IndexEntityType::Node
+                            && definition.kind == IndexKind::FullText
+                            && (fields.is_empty()
+                                || definition
+                                    .properties
+                                    .iter()
+                                    .any(|property| fields.contains(property)))
+                    })
+                    .map(|definition| definition.label.clone()),
+            );
+        }
+
+        labels.into_iter().collect()
+    }
+
     pub fn plan_fabric_query_reads(
         &self,
         database: &FabricDatabase,
@@ -317,6 +568,7 @@ impl CopperDb {
         policy: RrfSearchPolicy,
         transport: Arc<dyn RankedSearchTransport>,
     ) -> Result<FabricRankedSearchExecution, CopperDbError> {
+        self.ensure_ranked_search_query_enabled(&query)?;
         let plans = self.plan_fabric_searches(database)?;
         let collected = collect_planned_fabric_ranked_batches(plans.clone(), query, transport)
             .await
@@ -373,6 +625,7 @@ impl CopperDb {
         ranked_transport: Arc<dyn RankedSearchTransport>,
         hydration_transport: Arc<dyn HydrationTransport>,
     ) -> Result<FabricRankedSearchExecution, CopperDbError> {
+        self.ensure_ranked_search_query_enabled(&query)?;
         let plans = self.plan_fabric_searches(database)?;
         let collected =
             collect_planned_fabric_ranked_batches(plans.clone(), query, ranked_transport)
@@ -1229,6 +1482,36 @@ fn distributed_edge_to_value(edge: &copperdb_storage::EdgeRecord) -> Value {
                 (
                     "_updated_at_unix_ms".to_string(),
                     Value::from(edge.updated_at_unix_ms),
+                ),
+            ])
+            .collect(),
+    )
+}
+
+fn node_record_to_value(node: &NodeRecord) -> Value {
+    Value::Object(
+        node.properties
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .chain([
+                ("_id".to_string(), Value::String(node.id.clone())),
+                (
+                    "_labels".to_string(),
+                    Value::Array(
+                        node.labels
+                            .iter()
+                            .cloned()
+                            .map(Value::String)
+                            .collect(),
+                    ),
+                ),
+                (
+                    "_created_at_unix_ms".to_string(),
+                    Value::from(node.created_at_unix_ms),
+                ),
+                (
+                    "_updated_at_unix_ms".to_string(),
+                    Value::from(node.updated_at_unix_ms),
                 ),
             ])
             .collect(),
