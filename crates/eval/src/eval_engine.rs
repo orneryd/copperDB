@@ -173,7 +173,15 @@ impl EvalEngine {
         let mut columns: Vec<String> = vec![];
         let mut result_rows: Vec<Row> = vec![];
 
-        for clause in &query.clauses {
+        let mut clause_index = 0;
+        while clause_index < query.clauses.len() {
+            let clause = &query.clauses[clause_index];
+            let next_where_expression = query.clauses.get(clause_index + 1).and_then(|clause| {
+                match clause {
+                    Clause::Where(where_clause) => Some(&where_clause.expression),
+                    _ => None,
+                }
+            });
             match clause {
                 Clause::Call(call) => {
                     return self.execute_call_clause(call, params);
@@ -265,7 +273,26 @@ impl EvalEngine {
                     let catalog = IndexCatalog::new(self.storage.as_ref());
                     let definition = copperdb_indexing::CatalogIndexDefinition {
                         name: create.name.clone(),
-                        entity_type: copperdb_indexing::CatalogIndexEntityType::Node,
+                        entity_type: match create.entity_type {
+                            copperdb_cypher::IndexEntityType::Node => {
+                                copperdb_indexing::CatalogIndexEntityType::Node
+                            }
+                            copperdb_cypher::IndexEntityType::Relationship => {
+                                copperdb_indexing::CatalogIndexEntityType::Relationship
+                            }
+                        },
+                        kind: match create.kind {
+                            copperdb_cypher::IndexKind::Range => copperdb_indexing::CatalogIndexKind::Range,
+                            copperdb_cypher::IndexKind::Temporal => {
+                                copperdb_indexing::CatalogIndexKind::Temporal
+                            }
+                            copperdb_cypher::IndexKind::FullText => {
+                                copperdb_indexing::CatalogIndexKind::FullText
+                            }
+                            copperdb_cypher::IndexKind::Vector => {
+                                copperdb_indexing::CatalogIndexKind::Vector
+                            }
+                        },
                         label: create.label.clone(),
                         properties: create.properties.clone(),
                     };
@@ -285,16 +312,30 @@ impl EvalEngine {
                     }
                 }
 
-                Clause::ShowIndexes(_) => {
+                Clause::ShowIndexes(show) => {
                     let indexes = IndexCatalog::new(self.storage.as_ref()).list()?;
                     columns = vec![
                         "name".to_string(),
                         "entityType".to_string(),
+                        "kind".to_string(),
                         "label".to_string(),
                         "properties".to_string(),
                     ];
                     result_rows = indexes
                         .into_iter()
+                        .filter(|idx| match show.kind {
+                            Some(copperdb_cypher::IndexKind::Range) => idx.kind == copperdb_indexing::CatalogIndexKind::Range,
+                            Some(copperdb_cypher::IndexKind::Temporal) => {
+                                idx.kind == copperdb_indexing::CatalogIndexKind::Temporal
+                            }
+                            Some(copperdb_cypher::IndexKind::FullText) => {
+                                idx.kind == copperdb_indexing::CatalogIndexKind::FullText
+                            }
+                            Some(copperdb_cypher::IndexKind::Vector) => {
+                                idx.kind == copperdb_indexing::CatalogIndexKind::Vector
+                            }
+                            None => true,
+                        })
                         .map(|idx| {
                             let mut row = Row::new();
                             row.insert("name".to_string(), Value::String(idx.name));
@@ -306,6 +347,18 @@ impl EvalEngine {
                                         copperdb_indexing::CatalogIndexEntityType::Relationship => {
                                             "RELATIONSHIP"
                                         }
+                                    }
+                                    .to_string(),
+                                ),
+                            );
+                            row.insert(
+                                "kind".to_string(),
+                                Value::String(
+                                    match idx.kind {
+                                        copperdb_indexing::CatalogIndexKind::Range => "RANGE",
+                                        copperdb_indexing::CatalogIndexKind::Temporal => "TEMPORAL",
+                                        copperdb_indexing::CatalogIndexKind::FullText => "FULLTEXT",
+                                        copperdb_indexing::CatalogIndexKind::Vector => "VECTOR",
                                     }
                                     .to_string(),
                                 ),
@@ -615,32 +668,37 @@ impl EvalEngine {
                             &current_rows,
                             &match_clause.pattern,
                             params,
+                            next_where_expression,
                         )?;
-                        continue;
-                    }
+                    } else {
+                        // Iteratively cross-join each node pattern so that bindings from
+                        // earlier patterns are visible when processing later ones.
+                        for node_pat in &match_clause.pattern.nodes {
+                            let mut new_rows = pooled_binding_rows();
+                            for base_row in &current_rows {
+                                for props in self.matching_node_props_with_where(
+                                    node_pat,
+                                    base_row,
+                                    params,
+                                    next_where_expression,
+                                )? {
+                                    let node_val = serde_json::to_value(&props)
+                                        .map_err(|e| EvalError::SerializationError(e.to_string()))?;
 
-                    // Iteratively cross-join each node pattern so that bindings from
-                    // earlier patterns are visible when processing later ones.
-                    for node_pat in &match_clause.pattern.nodes {
-                        let mut new_rows = pooled_binding_rows();
-                        for base_row in &current_rows {
-                            for props in self.matching_node_props(node_pat, base_row, params)? {
-                                let node_val = serde_json::to_value(&props)
-                                    .map_err(|e| EvalError::SerializationError(e.to_string()))?;
-
-                                let mut row = base_row.clone();
-                                if let Some(var) = &node_pat.variable {
-                                    row.insert(var.clone(), node_val.clone());
+                                    let mut row = base_row.clone();
+                                    if let Some(var) = &node_pat.variable {
+                                        row.insert(var.clone(), node_val.clone());
+                                    }
+                                    bind_single_node_path_variable(
+                                        &mut row,
+                                        &match_clause.pattern,
+                                        node_val,
+                                    );
+                                    new_rows.push(row);
                                 }
-                                bind_single_node_path_variable(
-                                    &mut row,
-                                    &match_clause.pattern,
-                                    node_val,
-                                );
-                                new_rows.push(row);
                             }
+                            replace_binding_rows(&mut current_rows, new_rows);
                         }
-                        replace_binding_rows(&mut current_rows, new_rows);
                     }
                 }
 
@@ -793,6 +851,7 @@ impl EvalEngine {
                         self.execute_merge_clause(&current_rows, merge, params, &mut stats)?;
                 }
             }
+            clause_index += 1;
         }
 
         // If no RETURN clause, result_rows is empty
@@ -1322,13 +1381,22 @@ impl EvalEngine {
         current_rows.push(Row::new());
         let mut stats = QueryStats::default();
 
-        for clause in &query.clauses {
+        let mut clause_index = 0;
+        while clause_index < query.clauses.len() {
+            let clause = &query.clauses[clause_index];
+            let next_where_expression = query.clauses.get(clause_index + 1).and_then(|clause| {
+                match clause {
+                    Clause::Where(where_clause) => Some(&where_clause.expression),
+                    _ => None,
+                }
+            });
             match clause {
                 Clause::Match(match_clause) => {
                     current_rows = self.execute_pipeline_match_clause(
                         &current_rows,
                         &match_clause.pattern,
                         params,
+                        next_where_expression,
                     )?;
                 }
                 Clause::OptionalMatch(match_clause) => {
@@ -1469,6 +1537,7 @@ impl EvalEngine {
                     ));
                 }
             }
+            clause_index += 1;
         }
 
         Ok(EvalResult {
@@ -1609,6 +1678,7 @@ impl EvalEngine {
                     std::slice::from_ref(base_row),
                     pattern,
                     params,
+                    None,
                 )?;
                 if matched.is_empty() {
                     let mut row = base_row.clone();
@@ -1659,9 +1729,10 @@ impl EvalEngine {
         base_rows: &[Row],
         pattern: &Pattern,
         params: &HashMap<String, Value>,
+        where_expression: Option<&Expression>,
     ) -> Result<Vec<Row>, EvalError> {
         if !pattern.edges.is_empty() {
-            return self.match_relationship_pattern(base_rows, pattern, params);
+            return self.match_relationship_pattern(base_rows, pattern, params, where_expression);
         }
 
         let mut current_rows = base_rows.to_vec();
@@ -1673,7 +1744,12 @@ impl EvalEngine {
                     .as_ref()
                     .and_then(|variable| pipeline_bound_node(base_row, variable))
                 else {
-                    for props in self.matching_node_props(node_pat, base_row, params)? {
+                    for props in self.matching_node_props_with_where(
+                        node_pat,
+                        base_row,
+                        params,
+                        where_expression,
+                    )? {
                         let node_val = serde_json::to_value(&props)
                             .map_err(|e| EvalError::SerializationError(e.to_string()))?;
                         let mut row = base_row.clone();
@@ -1711,12 +1787,18 @@ impl EvalEngine {
         base_rows: &[Row],
         pattern: &Pattern,
         params: &HashMap<String, Value>,
+        where_expression: Option<&Expression>,
     ) -> Result<Vec<Row>, EvalError> {
         let mut current_rows = base_rows.to_vec();
         for node_pat in &pattern.nodes {
             let mut new_rows = pooled_binding_rows();
             for base_row in &current_rows {
-                for props in self.matching_node_props(node_pat, base_row, params)? {
+                for props in self.matching_node_props_with_where(
+                    node_pat,
+                    base_row,
+                    params,
+                    where_expression,
+                )? {
                     let node_val = serde_json::to_value(&props)
                         .map_err(|e| EvalError::SerializationError(e.to_string()))?;
 
@@ -1978,21 +2060,27 @@ impl EvalEngine {
         base_rows: &[Row],
         pattern: &Pattern,
         params: &HashMap<String, Value>,
+        where_expression: Option<&Expression>,
     ) -> Result<Vec<Row>, EvalError> {
         let segments = pattern.split_segments();
         if segments.len() > 1 {
             let mut current_rows = base_rows.to_vec();
             for segment in &segments {
                 current_rows = if segment.edges.is_empty() {
-                    self.execute_node_match_clause(&current_rows, segment, params)?
+                    self.execute_node_match_clause(&current_rows, segment, params, None)?
                 } else {
-                    self.match_connected_relationship_pattern(&current_rows, segment, params)?
+                    self.match_connected_relationship_pattern(
+                        &current_rows,
+                        segment,
+                        params,
+                        where_expression,
+                    )?
                 };
             }
             return Ok(current_rows);
         }
 
-        self.match_connected_relationship_pattern(base_rows, pattern, params)
+        self.match_connected_relationship_pattern(base_rows, pattern, params, where_expression)
     }
 
     fn match_connected_relationship_pattern(
@@ -2000,6 +2088,7 @@ impl EvalEngine {
         base_rows: &[Row],
         pattern: &Pattern,
         params: &HashMap<String, Value>,
+        where_expression: Option<&Expression>,
     ) -> Result<Vec<Row>, EvalError> {
         if pattern.nodes.len() < 2 || pattern.edges.len() + 1 != pattern.nodes.len() {
             return Err(EvalError::ExecutionError(
@@ -2024,6 +2113,7 @@ impl EvalEngine {
                     pattern,
                     params,
                     0,
+                    where_expression,
                     row,
                     start_props,
                     vec![start_value],
@@ -2049,6 +2139,7 @@ impl EvalEngine {
         pattern: &Pattern,
         params: &HashMap<String, Value>,
         edge_index: usize,
+        where_expression: Option<&Expression>,
         row: Row,
         current_node_props: HashMap<String, Value>,
         node_values: Vec<Value>,
@@ -2076,6 +2167,7 @@ impl EvalEngine {
             edge_pattern,
             next_node_pattern,
             params,
+            where_expression,
         )? {
             let mut next_row = row.clone();
             if let Some(var) = &edge_pattern.variable {
@@ -2094,6 +2186,7 @@ impl EvalEngine {
                 pattern,
                 params,
                 edge_index + 1,
+                where_expression,
                 next_row,
                 step_match.next_props,
                 next_node_values,
@@ -2113,6 +2206,7 @@ impl EvalEngine {
         edge_pattern: &EdgePattern,
         end_pattern: &NodePattern,
         params: &HashMap<String, Value>,
+        where_expression: Option<&Expression>,
     ) -> Result<Vec<RelationshipStepMatch>, EvalError> {
         if edge_pattern.min_hops.is_none() && edge_pattern.max_hops.is_none() {
             return self.fixed_relationship_step_matches(
@@ -2121,10 +2215,18 @@ impl EvalEngine {
                 edge_pattern,
                 end_pattern,
                 params,
+                where_expression,
             );
         }
 
-        self.variable_relationship_step_matches(row, current_node_props, edge_pattern, end_pattern, params)
+        self.variable_relationship_step_matches(
+            row,
+            current_node_props,
+            edge_pattern,
+            end_pattern,
+            params,
+            where_expression,
+        )
     }
 
     fn fixed_relationship_step_matches(
@@ -2134,6 +2236,7 @@ impl EvalEngine {
         edge_pattern: &EdgePattern,
         end_pattern: &NodePattern,
         params: &HashMap<String, Value>,
+        where_expression: Option<&Expression>,
     ) -> Result<Vec<RelationshipStepMatch>, EvalError> {
         let Some(current_node_id) = node_id(current_node_props) else {
             return Ok(Vec::new());
@@ -2142,7 +2245,14 @@ impl EvalEngine {
         let expected_end_props = evaluate_pattern_properties(&end_pattern.properties, row, params)?;
         let mut matches = Vec::new();
 
-        for edge in self.relationship_candidates(current_node_id, edge_pattern)? {
+        for edge in self.relationship_candidates(
+            current_node_id,
+            edge_pattern,
+            &expected_edge_props,
+            row,
+            params,
+            where_expression,
+        )? {
             if !edge_matches_pattern(&edge, &expected_edge_props) {
                 continue;
             }
@@ -2185,6 +2295,7 @@ impl EvalEngine {
         edge_pattern: &EdgePattern,
         end_pattern: &NodePattern,
         params: &HashMap<String, Value>,
+        where_expression: Option<&Expression>,
     ) -> Result<Vec<RelationshipStepMatch>, EvalError> {
         let min_hops = edge_pattern.min_hops.unwrap_or(1);
         let max_hops = edge_pattern
@@ -2265,7 +2376,14 @@ impl EvalEngine {
                 continue;
             }
 
-            for edge in self.relationship_candidates(&current_id, edge_pattern)? {
+            for edge in self.relationship_candidates(
+                &current_id,
+                edge_pattern,
+                &expected_edge_props,
+                row,
+                params,
+                where_expression,
+            )? {
                 if !edge_matches_pattern(&edge, &expected_edge_props) {
                     continue;
                 }
@@ -2300,6 +2418,28 @@ impl EvalEngine {
         self.lookup_matching_node_props(&pattern.labels, &expected_props)
     }
 
+    fn matching_node_props_with_where(
+        &self,
+        pattern: &NodePattern,
+        row: &Row,
+        params: &HashMap<String, Value>,
+        where_expression: Option<&Expression>,
+    ) -> Result<Vec<HashMap<String, Value>>, EvalError> {
+        let expected_props = evaluate_pattern_properties(&pattern.properties, row, params)?;
+        if let Some(range_predicate) =
+            extract_node_range_predicate(pattern, where_expression, row, params)?
+        {
+            return self.lookup_matching_node_props_by_range(
+                &pattern.labels,
+                &expected_props,
+                &range_predicate.property,
+                range_predicate.comparison,
+                &range_predicate.value,
+            );
+        }
+        self.lookup_matching_node_props(&pattern.labels, &expected_props)
+    }
+
     fn lookup_matching_node_props(
         &self,
         labels: &[String],
@@ -2309,6 +2449,36 @@ impl EvalEngine {
         let resolver = self.knowledge_policy_resolver()?;
         let mut out = Vec::new();
         for node in catalog.lookup_nodes(labels, expected_props)? {
+            if !self.node_visible_under_policy(&node, &resolver)? {
+                continue;
+            }
+            let props = node_record_to_props(&node);
+            if node_matches_pattern(&props, labels, expected_props) {
+                self.apply_on_access_for_node(&node, &resolver)?;
+                out.push(props);
+            }
+        }
+        Ok(out)
+    }
+
+    fn lookup_matching_node_props_by_range(
+        &self,
+        labels: &[String],
+        expected_props: &HashMap<String, Value>,
+        property: &str,
+        comparison: CatalogRangeIndexComparison,
+        value: &Value,
+    ) -> Result<Vec<HashMap<String, Value>>, EvalError> {
+        let catalog = IndexCatalog::new(self.storage.as_ref());
+        let resolver = self.knowledge_policy_resolver()?;
+        let mut out = Vec::new();
+        for node in catalog.lookup_nodes_by_range(
+            labels,
+            property,
+            comparison,
+            value,
+            expected_props,
+        )? {
             if !self.node_visible_under_policy(&node, &resolver)? {
                 continue;
             }
@@ -2443,530 +2613,99 @@ impl EvalEngine {
         Ok(())
     }
 
-    fn execute_call_clause(
-        &self,
-        call: &copperdb_cypher::CallClause,
-        params: &HashMap<String, Value>,
-    ) -> Result<EvalResult, EvalError> {
-        if call.procedure.eq_ignore_ascii_case("nornicdb.knowledgepolicy.resolve") {
-            return self.execute_knowledge_policy_resolve_call(call, params);
-        }
+}
 
-        Err(EvalError::ExecutionError(format!(
-            "CALL {} is not supported yet",
-            call.procedure
-        )))
-    }
+struct NodeRangePredicate {
+    property: String,
+    comparison: CatalogRangeIndexComparison,
+    value: Value,
+}
 
-    fn execute_knowledge_policy_resolve_call(
-        &self,
-        call: &copperdb_cypher::CallClause,
-        params: &HashMap<String, Value>,
-    ) -> Result<EvalResult, EvalError> {
-        if call.args.len() != 3 {
-            return Err(EvalError::ExecutionError(
-                "nornicdb.knowledgepolicy.resolve expects 3 arguments: entityId, labelsCsv, edgeType"
-                    .to_string(),
-            ));
-        }
+fn extract_node_range_predicate(
+    pattern: &NodePattern,
+    where_expression: Option<&Expression>,
+    row: &Row,
+    params: &HashMap<String, Value>,
+) -> Result<Option<NodeRangePredicate>, EvalError> {
+    let Some(variable) = pattern.variable.as_deref() else {
+        return Ok(None);
+    };
+    let Some(expression) = where_expression else {
+        return Ok(None);
+    };
 
-        let row = Row::new();
-        let entity_id = eval_expression(&call.args[0], &row, params)?;
-        let labels_csv = eval_expression(&call.args[1], &row, params)?;
-        let edge_type = eval_expression(&call.args[2], &row, params)?;
-
-        let entity_id = entity_id.as_str().unwrap_or_default().trim().to_string();
-        let labels_csv = labels_csv.as_str().unwrap_or_default().trim().to_string();
-        let edge_type = edge_type.as_str().unwrap_or_default().trim().to_string();
-
-        let inspection = if !entity_id.is_empty() {
-            self.inspect_knowledge_policy_by_id(&entity_id, params)?
-        } else if !edge_type.is_empty() {
-            self.inspect_knowledge_policy_for_edge_type(&edge_type, params)?
-        } else {
-            let labels = labels_csv
-                .split(',')
-                .map(str::trim)
-                .filter(|label| !label.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>();
-            self.inspect_knowledge_policy_for_labels(&labels, params)?
-        };
-
-        Ok(EvalResult {
-            columns: vec![
-                "entityId".to_string(),
-                "targetKind".to_string(),
-                "targetLabels".to_string(),
-                "targetEdgeType".to_string(),
-                "decayBinding".to_string(),
-                "promotionPolicy".to_string(),
-                "matchedPromotionProfile".to_string(),
-                "matchedPromotionPredicate".to_string(),
-                "scoreFrom".to_string(),
-                "anchorUnixMs".to_string(),
-                "accessCount".to_string(),
-                "lastAccessedAtUnixMs".to_string(),
-                "baseScore".to_string(),
-                "finalScore".to_string(),
-                "visibilityThreshold".to_string(),
-                "suppressed".to_string(),
-                "dryRun".to_string(),
-                "explanation".to_string(),
-            ],
-            rows: vec![inspection.into_row()],
-            stats: QueryStats::default(),
-        })
-    }
-
-    fn inspect_knowledge_policy_by_id(
-        &self,
-        entity_id: &str,
-        params: &HashMap<String, Value>,
-    ) -> Result<KnowledgePolicyInspection, EvalError> {
-        let resolver = self.knowledge_policy_resolver()?;
-        if let Some(node) = self.storage.get_node_record(entity_id)? {
-            return self.inspect_node_policy(&resolver, &node, params, false);
-        }
-        if let Some(edge) = self.storage.get_edge_record(entity_id)? {
-            return self.inspect_edge_policy(&resolver, &edge, params, false);
-        }
-        Err(EvalError::ExecutionError(format!(
-            "entity {entity_id:?} not found"
-        )))
-    }
-
-    fn inspect_knowledge_policy_for_labels(
-        &self,
-        labels: &[String],
-        params: &HashMap<String, Value>,
-    ) -> Result<KnowledgePolicyInspection, EvalError> {
-        let resolver = self.knowledge_policy_resolver()?;
-        let binding = resolver.resolve_node(labels);
-        let promotion_policy = binding
-            .as_ref()
-            .and_then(|compiled| compiled.promotion_policy.clone())
-            .or_else(|| resolver.resolve_node_promotion(labels));
-
-        Ok(self.inspect_resolved_target(
-            None,
-            "NODE".to_string(),
-            labels.to_vec(),
-            None,
-            binding.as_ref(),
-            promotion_policy.as_ref(),
-            None,
-            None,
-            params,
-            true,
-        )?)
-    }
-
-    fn inspect_knowledge_policy_for_edge_type(
-        &self,
-        edge_type: &str,
-        params: &HashMap<String, Value>,
-    ) -> Result<KnowledgePolicyInspection, EvalError> {
-        let resolver = self.knowledge_policy_resolver()?;
-        let binding = resolver.resolve_edge(edge_type);
-        let promotion_policy = binding
-            .as_ref()
-            .and_then(|compiled| compiled.promotion_policy.clone())
-            .or_else(|| resolver.resolve_edge_promotion(edge_type));
-
-        Ok(self.inspect_resolved_target(
-            None,
-            "EDGE".to_string(),
-            Vec::new(),
-            Some(edge_type.to_string()),
-            binding.as_ref(),
-            promotion_policy.as_ref(),
-            None,
-            None,
-            params,
-            true,
-        )?)
-    }
-
-    fn inspect_node_policy(
-        &self,
-        resolver: &Resolver,
-        node: &NodeRecord,
-        params: &HashMap<String, Value>,
-        dry_run: bool,
-    ) -> Result<KnowledgePolicyInspection, EvalError> {
-        let access_metadata = self.knowledge_policy_access_metadata(&node.id)?;
-
-        self.inspect_node_policy_with_access_metadata(
-            resolver,
-            node,
-            access_metadata,
-            params,
-            dry_run,
-        )
-    }
-
-    fn inspect_node_policy_with_access_metadata(
-        &self,
-        resolver: &Resolver,
-        node: &NodeRecord,
-        access_metadata: Option<KnowledgePolicyAccessMetadata>,
-        params: &HashMap<String, Value>,
-        dry_run: bool,
-    ) -> Result<KnowledgePolicyInspection, EvalError> {
-        let binding = resolver.resolve_node(&node.labels);
-        let promotion_policy = binding
-            .as_ref()
-            .and_then(|compiled| compiled.promotion_policy.clone())
-            .or_else(|| resolver.resolve_node_promotion(&node.labels));
-
-        self.inspect_resolved_target(
-            Some(node.id.clone()),
-            "NODE".to_string(),
-            node.labels.clone(),
-            None,
-            binding.as_ref(),
-            promotion_policy.as_ref(),
-            Some((
-                node.created_at_unix_ms,
-                node.updated_at_unix_ms,
-                &node.properties,
-            )),
-            access_metadata,
-            params,
-            dry_run,
-        )
-    }
-
-    fn inspect_edge_policy(
-        &self,
-        resolver: &Resolver,
-        edge: &EdgeRecord,
-        params: &HashMap<String, Value>,
-        dry_run: bool,
-    ) -> Result<KnowledgePolicyInspection, EvalError> {
-        let access_metadata = self.knowledge_policy_access_metadata(&edge.id)?;
-
-        self.inspect_edge_policy_with_access_metadata(
-            resolver,
-            edge,
-            access_metadata,
-            params,
-            dry_run,
-        )
-    }
-
-    fn inspect_edge_policy_with_access_metadata(
-        &self,
-        resolver: &Resolver,
-        edge: &EdgeRecord,
-        access_metadata: Option<KnowledgePolicyAccessMetadata>,
-        params: &HashMap<String, Value>,
-        dry_run: bool,
-    ) -> Result<KnowledgePolicyInspection, EvalError> {
-        let binding = resolver.resolve_edge(&edge.edge_type);
-        let promotion_policy = binding
-            .as_ref()
-            .and_then(|compiled| compiled.promotion_policy.clone())
-            .or_else(|| resolver.resolve_edge_promotion(&edge.edge_type));
-
-        self.inspect_resolved_target(
-            Some(edge.id.clone()),
-            "EDGE".to_string(),
-            Vec::new(),
-            Some(edge.edge_type.clone()),
-            binding.as_ref(),
-            promotion_policy.as_ref(),
-            Some((
-                edge.created_at_unix_ms,
-                edge.updated_at_unix_ms,
-                &edge.properties,
-            )),
-            access_metadata,
-            params,
-            dry_run,
-        )
-    }
-
-    fn inspect_resolved_target(
-        &self,
-        entity_id: Option<String>,
-        target_kind: String,
-        target_labels: Vec<String>,
-        target_edge_type: Option<String>,
-        binding: Option<&CompiledBinding>,
-        promotion_policy: Option<&copperdb_knowledgepolicy::PromotionPolicyDef>,
-        entity_state: Option<(i64, i64, &BTreeMap<String, Value>)>,
-        access_metadata: Option<KnowledgePolicyAccessMetadata>,
-        params: &HashMap<String, Value>,
-        dry_run: bool,
-    ) -> Result<KnowledgePolicyInspection, EvalError> {
-        let Some(binding) = binding else {
-            let explanation = if let Some(policy) = promotion_policy {
-                format!(
-                    "policy-only target using promotion policy {}; no decay binding applies so final score defaults to 1.0",
-                    policy.name
-                )
-            } else {
-                "no decay binding or promotion policy matched; final score defaults to 1.0".to_string()
+    match expression {
+        Expression::Comparison { operands, op } => {
+            let Some(comparison) = range_comparison_from_operator(op) else {
+                return Ok(None);
             };
-            return Ok(KnowledgePolicyInspection {
-                entity_id,
-                target_kind,
-                target_labels,
-                target_edge_type,
-                decay_binding: None,
-                promotion_policy: promotion_policy.map(|policy| policy.name.clone()),
-                matched_promotion_profile: None,
-                matched_promotion_predicate: None,
-                score_from: None,
-                anchor_unix_ms: None,
-                access_count: access_metadata.as_ref().map(|metadata| metadata.access_count),
-                last_accessed_at_unix_ms: access_metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.last_accessed_at_unix_ms),
-                base_score: 1.0,
-                final_score: 1.0,
-                visibility_threshold: 0.0,
-                suppressed: false,
-                dry_run,
-                explanation,
-            });
-        };
 
-        let (anchor_unix_ms, matched_rule, score) = if let Some((created_at_unix_ms, updated_at_unix_ms, properties)) =
-            entity_state
-        {
-            let anchor_unix_ms = binding_anchor_unix_ms(
-                binding,
-                created_at_unix_ms,
-                updated_at_unix_ms,
-                access_metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.last_accessed_at_unix_ms),
-                properties,
-            );
-            let matched_rule = matched_promotion_rule(
-                binding,
-                properties,
-                access_metadata.as_ref(),
-                params,
-            )?;
-            let score = score_binding(
-                binding,
-                anchor_unix_ms,
-                now_unix_ms(),
-                matched_rule.as_ref().map(|rule| &rule.profile),
-            );
-            (anchor_unix_ms, matched_rule, score)
-        } else {
-            (
-                None,
-                None,
-                score_binding(binding, None, now_unix_ms(), None),
-            )
-        };
-
-        let explanation = if dry_run {
-            format!(
-                "dry-run target resolution using decay binding {}{}",
-                binding.decay_binding.name,
-                promotion_policy
-                    .map(|policy| format!(" and promotion policy {}", policy.name))
-                    .unwrap_or_default()
-            )
-        } else if score.suppressed {
-            format!(
-                "final score {:.4} is below visibility threshold {:.4}",
-                score.final_score, binding.visibility_threshold
-            )
-        } else if let Some(rule) = &matched_rule {
-            format!(
-                "promotion predicate {:?} matched profile {} and produced final score {:.4}",
-                rule.predicate, rule.profile.name, score.final_score
-            )
-        } else {
-            format!(
-                "no promotion predicate matched; final score {:.4} remains visible against threshold {:.4}",
-                score.final_score, binding.visibility_threshold
-            )
-        };
-
-        Ok(KnowledgePolicyInspection {
-            entity_id,
-            target_kind,
-            target_labels,
-            target_edge_type,
-            decay_binding: Some(binding.decay_binding.name.clone()),
-            promotion_policy: promotion_policy.map(|policy| policy.name.clone()),
-            matched_promotion_profile: matched_rule.as_ref().map(|rule| rule.profile.name.clone()),
-            matched_promotion_predicate: matched_rule.as_ref().map(|rule| rule.predicate.clone()),
-            score_from: Some(format!("{:?}", binding.score_from).to_ascii_uppercase()),
-            anchor_unix_ms,
-            access_count: access_metadata.as_ref().map(|metadata| metadata.access_count),
-            last_accessed_at_unix_ms: access_metadata
-                .as_ref()
-                .and_then(|metadata| metadata.last_accessed_at_unix_ms),
-            base_score: score.base_score,
-            final_score: score.final_score,
-            visibility_threshold: binding.visibility_threshold,
-            suppressed: score.suppressed,
-            dry_run,
-            explanation,
-        })
-    }
-
-    pub fn node_visible_with_access_metadata(
-        &self,
-        node: &NodeRecord,
-        access_metadata: Option<KnowledgePolicyAccessMetadata>,
-        params: &HashMap<String, Value>,
-    ) -> Result<bool, EvalError> {
-        let resolver = self.knowledge_policy_resolver()?;
-        Ok(!self
-            .inspect_node_policy_with_access_metadata(&resolver, node, access_metadata, params, false)?
-            .suppressed)
-    }
-
-    pub fn edge_visible_with_access_metadata(
-        &self,
-        edge: &EdgeRecord,
-        access_metadata: Option<KnowledgePolicyAccessMetadata>,
-        params: &HashMap<String, Value>,
-    ) -> Result<bool, EvalError> {
-        let resolver = self.knowledge_policy_resolver()?;
-        Ok(!self
-            .inspect_edge_policy_with_access_metadata(&resolver, edge, access_metadata, params, false)?
-            .suppressed)
-    }
-
-    pub fn node_access_metadata_after_read(
-        &self,
-        node: &NodeRecord,
-        access_metadata: Option<KnowledgePolicyAccessMetadata>,
-    ) -> Result<Option<KnowledgePolicyAccessMetadata>, EvalError> {
-        let resolver = self.knowledge_policy_resolver()?;
-        let policy = resolver
-            .resolve_node(&node.labels)
-            .and_then(|binding| binding.promotion_policy)
-            .or_else(|| resolver.resolve_node_promotion(&node.labels));
-        Ok(access_metadata_after_policy_access(
-            access_metadata,
-            policy.as_ref(),
-            now_unix_ms(),
-        ))
-    }
-
-    pub fn edge_access_metadata_after_read(
-        &self,
-        edge: &EdgeRecord,
-        access_metadata: Option<KnowledgePolicyAccessMetadata>,
-    ) -> Result<Option<KnowledgePolicyAccessMetadata>, EvalError> {
-        let resolver = self.knowledge_policy_resolver()?;
-        let policy = resolver
-            .resolve_edge(&edge.edge_type)
-            .and_then(|binding| binding.promotion_policy)
-            .or_else(|| resolver.resolve_edge_promotion(&edge.edge_type));
-        Ok(access_metadata_after_policy_access(
-            access_metadata,
-            policy.as_ref(),
-            now_unix_ms(),
-        ))
-    }
-
-    pub(crate) fn persist_node_props(&self, props: &HashMap<String, Value>) -> Result<(), EvalError> {
-        let now = now_unix_ms();
-        let mut record = node_record_from_props(props)?;
-        if let Some(existing) = self.storage.get_node_record(&record.id)? {
-            record.created_at_unix_ms = existing.created_at_unix_ms;
-            record.updated_at_unix_ms = now;
-        } else {
-            record.created_at_unix_ms = now;
-            record.updated_at_unix_ms = now;
-        }
-        self.storage.put_node_record(&record)?;
-        Ok(())
-    }
-
-    fn persist_edge_props(&self, props: &HashMap<String, Value>) -> Result<(), EvalError> {
-        let now = now_unix_ms();
-        let mut record = edge_record_from_props(props)?;
-        if let Some(existing) = self.storage.get_edge_record(&record.id)? {
-            record.created_at_unix_ms = existing.created_at_unix_ms;
-            record.updated_at_unix_ms = now;
-        } else {
-            record.created_at_unix_ms = now;
-            record.updated_at_unix_ms = now;
-        }
-        self.storage.put_edge_record(&record)?;
-        Ok(())
-    }
-
-    fn persist_edge_record(&self, mut edge: EdgeRecord) -> Result<EdgeRecord, EvalError> {
-        let now = now_unix_ms();
-        if let Some(existing) = self.storage.get_edge_record(&edge.id)? {
-            edge.created_at_unix_ms = existing.created_at_unix_ms;
-            edge.updated_at_unix_ms = now;
-        } else {
-            edge.created_at_unix_ms = now;
-            edge.updated_at_unix_ms = now;
-        }
-        self.storage.put_edge_record(&edge)?;
-        Ok(edge)
-    }
-
-    fn relationship_candidates(
-        &self,
-        node_id: &str,
-        edge: &EdgePattern,
-    ) -> Result<Vec<EdgeRecord>, EvalError> {
-        let candidates = match (&edge.direction, edge.rel_type.as_deref()) {
-            (EdgeDirection::Outgoing, Some(edge_type)) => self
-                .storage
-                .get_edges_from_node_by_type(node_id, edge_type)?,
-            (EdgeDirection::Outgoing, None) => self.storage.get_edges_from_node(node_id)?,
-            (EdgeDirection::Incoming, Some(edge_type)) => {
-                self.storage.get_edges_to_node_by_type(node_id, edge_type)?
+            if let Expression::PropertyAccess {
+                variable: left_variable,
+                property,
+            } = &operands.left
+            {
+                if left_variable == variable {
+                    let value = eval_expression(&operands.right, row, params)?;
+                    return Ok(is_range_comparable_value(&value).then(|| NodeRangePredicate {
+                        property: property.clone(),
+                        comparison,
+                        value,
+                    }));
+                }
             }
-            (EdgeDirection::Incoming, None) => self.storage.get_edges_to_node(node_id)?,
-            (EdgeDirection::Both, Some(edge_type)) => {
-                let mut edges = self
-                    .storage
-                    .get_edges_from_node_by_type(node_id, edge_type)?;
-                edges.extend(self.storage.get_edges_to_node_by_type(node_id, edge_type)?);
-                edges
-            }
-            (EdgeDirection::Both, None) => {
-                let mut edges = self.storage.get_edges_from_node(node_id)?;
-                edges.extend(self.storage.get_edges_to_node(node_id)?);
-                edges
-            }
-        };
-        let resolver = self.knowledge_policy_resolver()?;
-        let mut visible = Vec::with_capacity(candidates.len());
-        for candidate in candidates {
-            if self.edge_visible_under_policy(&candidate, &resolver)? {
-                visible.push(candidate);
-            }
-        }
-        visible.sort_by(|a, b| a.id.cmp(&b.id));
-        visible.dedup_by(|a, b| a.id == b.id);
-        for edge in &visible {
-            self.apply_on_access_for_edge(edge, &resolver)?;
-        }
-        Ok(visible)
-    }
 
-    fn lookup_edges(&self, edge_type: Option<&str>) -> Result<Vec<EdgeRecord>, EvalError> {
-        let resolver = self.knowledge_policy_resolver()?;
-        let mut visible = Vec::new();
-        for edge in IndexCatalog::new(self.storage.as_ref()).lookup_edges(edge_type)? {
-            if self.edge_visible_under_policy(&edge, &resolver)? {
-                self.apply_on_access_for_edge(&edge, &resolver)?;
-                visible.push(edge);
+            if let Expression::PropertyAccess {
+                variable: right_variable,
+                property,
+            } = &operands.right
+            {
+                if right_variable == variable {
+                    let value = eval_expression(&operands.left, row, params)?;
+                    return Ok(is_range_comparable_value(&value).then(|| NodeRangePredicate {
+                        property: property.clone(),
+                        comparison: invert_range_comparison(comparison),
+                        value,
+                    }));
+                }
             }
+
+            Ok(None)
         }
-        Ok(visible)
+        _ => Ok(None),
     }
 }
+
+fn range_comparison_from_operator(operator: &str) -> Option<CatalogRangeIndexComparison> {
+    match operator {
+        ">" => Some(CatalogRangeIndexComparison::GreaterThan),
+        ">=" => Some(CatalogRangeIndexComparison::GreaterThanOrEqual),
+        "<" => Some(CatalogRangeIndexComparison::LessThan),
+        "<=" => Some(CatalogRangeIndexComparison::LessThanOrEqual),
+        _ => None,
+    }
+}
+
+fn invert_range_comparison(comparison: CatalogRangeIndexComparison) -> CatalogRangeIndexComparison {
+    match comparison {
+        CatalogRangeIndexComparison::GreaterThan => CatalogRangeIndexComparison::LessThan,
+        CatalogRangeIndexComparison::GreaterThanOrEqual => {
+            CatalogRangeIndexComparison::LessThanOrEqual
+        }
+        CatalogRangeIndexComparison::LessThan => CatalogRangeIndexComparison::GreaterThan,
+        CatalogRangeIndexComparison::LessThanOrEqual => {
+            CatalogRangeIndexComparison::GreaterThanOrEqual
+        }
+    }
+}
+
+fn is_range_comparable_value(value: &Value) -> bool {
+    matches!(value, Value::Number(_) | Value::String(_))
+}
+
+#[path = "eval_engine_policy.rs"]
+mod eval_engine_policy;
+
+#[path = "eval_engine_tail.rs"]
+mod eval_engine_tail;
 

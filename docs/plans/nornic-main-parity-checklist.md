@@ -4,6 +4,7 @@
 - Repository: `https://github.com/orneryd/NornicDB`
 - Branch: `main`
 - Latest inspected commit: `fd37a21e9694c5739b6afe2e6d78a4225b55c981`
+- Full local package audit and full agent findings register: [nornicdb-full-sweep-audit-2026-05-28.md](nornicdb-full-sweep-audit-2026-05-28.md)
 
 ## Major storage architecture/features detected upstream
 
@@ -43,6 +44,7 @@
 - [ ] Deindex enqueue/worker/cleanup parity
 - [ ] Prefix/namespace stats parity
 - [ ] Embedding pending-index parity
+- [ ] Per-database search/index/embedding config parity, with automatic search/index/embedding work disabled by default in copperDB and enabled only through explicit per-DB overrides plus CLI kill switch to disable all indexing.
 
 ### Transaction model
 - [ ] Badger transaction behavior parity (atomic commit/rollback semantics)
@@ -72,6 +74,20 @@
 - [x] `crates/cypher` + `crates/eval`: routed pipeline execution now accepts `DELETE` after `WITH`, and eval’s shared delete path correctly distinguishes node vs relationship bindings when applying deletions.
 - [x] `crates/cypher` + `crates/eval`: routed pipeline execution now accepts `SET` after `WITH`, and eval’s shared set path correctly persists relationship property updates instead of only rewriting node bindings.
 - [x] `crates/cypher` + `crates/eval`: full `REMOVE` support now exists across parser, eval, and routed pipeline execution for relationship property removal and node label removal.
+- [x] `crates/storage` + `crates/indexing`: node-property index maintenance now covers composite node index definitions as real derived state, including rebuild-on-create, update/delete tracking, drop cleanup, and most-specific index selection during indexed lookup.
+- [x] `crates/storage` + `crates/indexing`: single-property relationship-property indexes are now real maintained state as well, including rebuild-on-create, update/delete tracking, drop cleanup, and catalog lookup by relationship type plus property filters.
+- [x] `crates/storage` + `crates/indexing`: composite relationship-property indexes now follow the same maintained-state path, including rebuild-on-create, update/delete tracking, drop cleanup, and most-specific relationship index selection during indexed lookup.
+- [x] `crates/storage` + `crates/indexing` + `crates/eval` + `crates/cypher`: index definitions now carry explicit kind metadata, generic `CREATE INDEX` persists `RANGE` kind, explicit `CREATE RANGE INDEX` and explicit `CREATE TEMPORAL|FULLTEXT|VECTOR INDEX` now persist typed catalog rows for node and relationship targets, `SHOW INDEXES` exposes kind in query-visible output, and the query surface can filter existing metadata rows through `SHOW RANGE INDEXES`, `SHOW TEMPORAL INDEXES`, `SHOW FULLTEXT INDEXES`, and `SHOW VECTOR INDEXES`. Those typed DDL forms now also share the same duplicate-name, `IF NOT EXISTS`, drop-by-name, and `IF EXISTS` behavior as generic/RANGE index creation. Simple node or relationship `WHERE ...prop <op> literal` comparisons can now narrow candidate rows through maintained RANGE and TEMPORAL index state before normal predicate evaluation. For single-property string and numeric ordered-comparison indexes, storage now uses order-preserving keys plus bounded range scans instead of full-prefix scans with in-memory value filtering. For maintained composite ordered-comparison indexes, the current Rust path now supports comparisons on the leading indexed property and on later indexed properties when every earlier indexed field is constrained by an exact predicate; exact suffix predicates remain optional for the scan itself, while the catalog prefers the best matching composite definition and storage applies any provided exact-property filters deterministically after the bounded scan. `FULLTEXT` and `VECTOR` rows are still metadata-only catalog state for now: storage persists them but does not rebuild or maintain property-backed lookup state, and they remain excluded from property-backed exact/range lookup selection until those runtime paths are implemented.
+
+### Full sweep audit deltas
+- [ ] `crates/config` + `crates/multidb` + `crates/engine` + `crates/server`: port NornicDB's per-database config model (`pkg/config/dbconfig`) with allowed keys, durable per-DB overrides, effective config resolution, and precedence of built-in defaults < global config/env/YAML < per-DB overrides < CLI overrides. In copperDB, automatic search/index/embedding work should default disabled and require explicit per-DB opt-in.
+- [ ] `crates/storage`: port NornicDB `AsyncEngine` semantics: write-behind cache, flush interval/thresholds, flush hold/result contracts, async count/read consistency, prefix streaming, label/edge index consistency, callback/event safety, and embedding-count update behavior.
+- [ ] `crates/storage`: expand MVCC/WAL parity beyond current baselines with snapshot-visible indexed reads, temporal point-in-time lookup, MVCC lifecycle pruning/rebuild orchestration, WAL repair/corruption diagnostics, and richer segment lifecycle tests.
+- [ ] `crates/replication` + `crates/fabric` + `crates/search` + `crates/nornicgrpc`: keep production distributed parity open for multi-region replication/failover, TLS/mTLS transport security, chaos tests, peer metrics garbage collection, fragment-tree fabric execution, remote fragment execution, distributed transaction context, remote search service auth, and search runtime execution.
+- [ ] `crates/search` + `crates/vectorspace` + `crates/embed` + `crates/embeddingutil` + `crates/simd` + `crates/math`: port MVP search/vector runtime architecture first: BM25/fulltext index, query-plan cache, CPU HNSW/IVFPQ strategy support, vector file store, search index persistence/versioning, decay filter, hybrid lexical/vector routing, embedding cache/backends/chunking, and observability. Prefer `mistral.rs` if feasible for local in-memory embedding execution. Defer reranking/MMR, broad inference lifecycle, and SIMD/GPU scoring paths until after the core distributed engine works.
+- [ ] `crates/temporal` + `crates/decay` + `crates/knowledgepolicy`: port temporal/decay adaptive behavior from NornicDB, including Kalman-style access velocity, adaptive decay multipliers, daily/burst pattern handling, cold-storage/archive decisions, and computed `ON ACCESS` mutation/overflow-property semantics where applicable.
+- [ ] `crates/cypher` + `crates/eval`: keep hot-path query optimization parity open for simple `MATCH ... LIMIT`, UNWIND/MERGE batch routing, call-tail traversal, compound mutation chains, pipeline branch routing, and trace-backed regression coverage.
+- [ ] `crates/bolt` + `crates/server` + `crates/convert` + builtin function/procedure registration: expand MVP protocol/runtime parity with Bolt role propagation into engine/distributed execution, per-DB config/admin routes, streaming import/export conversion utilities, and plugin hooks for future APOC-style extensions. Defer `crates/mcp`, `crates/heimdall`, and `crates/graphql` until after the core distributed engine works.
 
 ### Still stubbed / not yet parity-complete
 - [ ] `crates/storage`: full MVCC rebuild/orchestration parity with upstream beyond the reader-aware prune-now + lifecycle-status baseline.
@@ -113,7 +129,8 @@
 - [ ] `crates/temporal` — temporal lookup and pruning hooks
 - [ ] `crates/indexing` — index catalog/property index maintenance hooks
 - [ ] `crates/txsession` — transaction lifecycle integration
-- [ ] `crates/server` + `crates/graphql` — API surfacing for mesh/storage controls
+- [ ] `crates/server` — MVP API surfacing for mesh/storage/per-DB config controls
+- [ ] `crates/graphql` — deferred API surfacing for mesh/storage controls after core distributed engine MVP
 
 ## Test parity expectations
 - [ ] Deterministic test fixtures

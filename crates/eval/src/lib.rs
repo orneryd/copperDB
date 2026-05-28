@@ -8,7 +8,7 @@ use copperdb_cypher::{
     RemoveItem, ReturnItem, SetItem, ShapeKind, ShapeMatch, ShapeValue, LiteralValue,
 };
 use copperdb_filter::{eval_expression, eval_predicate};
-use copperdb_indexing::{IndexCatalog, IndexError};
+use copperdb_indexing::{CatalogRangeIndexComparison, IndexCatalog, IndexError};
 use copperdb_knowledgepolicy::{
     access_metadata_after_policy_access,
     build_binding_table, build_bundles_by_name, build_decay_bindings,

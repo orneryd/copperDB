@@ -717,6 +717,7 @@ use super::*;
             .persist_index_definition(&IndexDefinition {
                 name: "person_email_idx".to_string(),
                 entity_type: IndexEntityType::Node,
+                kind: IndexKind::Range,
                 label: "Person".to_string(),
                 properties: vec!["email".to_string()],
             })
@@ -729,6 +730,75 @@ use super::*;
         let deleted = engine.delete_index_definition("person_email_idx").unwrap();
         assert!(deleted);
         assert!(engine.load_index_definitions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn metadata_only_index_definitions_do_not_build_property_lookup_state() {
+        let engine = StorageEngine::open_temporary().unwrap();
+
+        let mut alice = sample_node("db:n1", &["Person"]);
+        alice
+            .properties
+            .insert("bio".into(), json!("Rust graph database engineer"));
+        engine.put_node_record(&alice).unwrap();
+
+        let mut edge = sample_edge("db:e1", "KNOWS", "db:n1", "db:n2");
+        edge.properties
+            .insert("embedding".to_string(), json!([0.1, 0.2, 0.3]));
+        engine.put_edge_record(&edge).unwrap();
+
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "person_bio_fulltext_idx".to_string(),
+                entity_type: IndexEntityType::Node,
+                kind: IndexKind::FullText,
+                label: "Person".to_string(),
+                properties: vec!["bio".to_string()],
+            })
+            .unwrap();
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "knows_embedding_vector_idx".to_string(),
+                entity_type: IndexEntityType::Relationship,
+                kind: IndexKind::Vector,
+                label: "KNOWS".to_string(),
+                properties: vec!["embedding".to_string()],
+            })
+            .unwrap();
+
+        let indexes = engine.load_index_definitions().unwrap();
+        assert_eq!(indexes.len(), 2);
+        assert_eq!(indexes[0].name, "knows_embedding_vector_idx");
+        assert_eq!(indexes[0].kind, IndexKind::Vector);
+        assert_eq!(indexes[1].name, "person_bio_fulltext_idx");
+        assert_eq!(indexes[1].kind, IndexKind::FullText);
+
+        assert!(engine
+            .get_nodes_by_property("Person", "bio", &json!("Rust graph database engineer"))
+            .unwrap()
+            .is_empty());
+        assert!(engine
+            .get_edges_by_property("KNOWS", "embedding", &json!([0.1, 0.2, 0.3]))
+            .unwrap()
+            .is_empty());
+
+        alice
+            .properties
+            .insert("bio".into(), json!("Updated searchable biography"));
+        engine.put_node_record(&alice).unwrap();
+
+        edge.properties
+            .insert("embedding".to_string(), json!([0.4, 0.5, 0.6]));
+        engine.put_edge_record(&edge).unwrap();
+
+        assert!(engine
+            .get_nodes_by_property("Person", "bio", &json!("Updated searchable biography"))
+            .unwrap()
+            .is_empty());
+        assert!(engine
+            .get_edges_by_property("KNOWS", "embedding", &json!([0.4, 0.5, 0.6]))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -753,6 +823,7 @@ use super::*;
             .persist_index_definition(&IndexDefinition {
                 name: "person_email_idx".to_string(),
                 entity_type: IndexEntityType::Node,
+                kind: IndexKind::Range,
                 label: "Person".to_string(),
                 properties: vec!["email".to_string()],
             })
@@ -791,6 +862,730 @@ use super::*;
             .get_nodes_by_property("Person", "email", &json!("bob@example.com"))
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn composite_node_property_index_rebuilds_and_tracks_mutations() {
+        let engine = StorageEngine::open_temporary().unwrap();
+        let mut alice_us = sample_node("db:n1", &["Person"]);
+        alice_us
+            .properties
+            .insert("email".into(), json!("alice@example.com"));
+        alice_us.properties.insert("country".into(), json!("US"));
+
+        let mut alice_ca = sample_node("db:n2", &["Person"]);
+        alice_ca
+            .properties
+            .insert("email".into(), json!("alice@example.com"));
+        alice_ca.properties.insert("country".into(), json!("CA"));
+
+        let mut bob_us = sample_node("db:n3", &["Person"]);
+        bob_us
+            .properties
+            .insert("email".into(), json!("bob@example.com"));
+        bob_us.properties.insert("country".into(), json!("US"));
+
+        engine.put_node_record(&alice_us).unwrap();
+        engine.put_node_record(&alice_ca).unwrap();
+        engine.put_node_record(&bob_us).unwrap();
+
+        let composite_properties = vec!["email".to_string(), "country".to_string()];
+        let lookup = std::collections::HashMap::from([
+            ("email".to_string(), json!("alice@example.com")),
+            ("country".to_string(), json!("US")),
+        ]);
+        assert!(engine
+            .get_nodes_by_properties("Person", &composite_properties, &lookup)
+            .unwrap()
+            .is_empty());
+
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "person_email_country_idx".to_string(),
+                entity_type: IndexEntityType::Node,
+                kind: IndexKind::Range,
+                label: "Person".to_string(),
+                properties: composite_properties.clone(),
+            })
+            .unwrap();
+
+        let hits = engine
+            .get_nodes_by_properties("Person", &composite_properties, &lookup)
+            .unwrap();
+        assert_eq!(hits.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(), vec!["db:n1"]);
+
+        alice_us.properties.insert("country".into(), json!("GB"));
+        engine.put_node_record(&alice_us).unwrap();
+        assert!(engine
+            .get_nodes_by_properties("Person", &composite_properties, &lookup)
+            .unwrap()
+            .is_empty());
+
+        let updated_lookup = std::collections::HashMap::from([
+            ("email".to_string(), json!("alice@example.com")),
+            ("country".to_string(), json!("GB")),
+        ]);
+        let updated_hits = engine
+            .get_nodes_by_properties("Person", &composite_properties, &updated_lookup)
+            .unwrap();
+        assert_eq!(updated_hits.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(), vec!["db:n1"]);
+
+        engine.delete_node_record("db:n1").unwrap();
+        assert!(engine
+            .get_nodes_by_properties("Person", &composite_properties, &updated_lookup)
+            .unwrap()
+            .is_empty());
+
+        engine
+            .delete_index_definition("person_email_country_idx")
+            .unwrap();
+        assert!(engine
+            .get_nodes_by_properties("Person", &composite_properties, &std::collections::HashMap::from([
+                ("email".to_string(), json!("bob@example.com")),
+                ("country".to_string(), json!("US")),
+            ]))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn node_property_range_index_filters_numeric_and_string_values() {
+        let engine = StorageEngine::open_temporary().unwrap();
+        let mut alice = sample_node("db:n1", &["Person"]);
+        alice.properties.insert("age".into(), json!(29));
+        alice.properties.insert("name".into(), json!("Alice"));
+
+        let mut bob = sample_node("db:n2", &["Person"]);
+        bob.properties.insert("age".into(), json!(35));
+        bob.properties.insert("name".into(), json!("Bob"));
+
+        let mut carol = sample_node("db:n3", &["Person"]);
+        carol.properties.insert("age".into(), json!(41));
+        carol.properties.insert("name".into(), json!("Carol"));
+
+        let mut device = sample_node("db:n4", &["Device"]);
+        device.properties.insert("age".into(), json!(99));
+        device.properties.insert("name".into(), json!("Zeta"));
+
+        engine.put_node_record(&alice).unwrap();
+        engine.put_node_record(&bob).unwrap();
+        engine.put_node_record(&carol).unwrap();
+        engine.put_node_record(&device).unwrap();
+
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "person_age_idx".to_string(),
+                entity_type: IndexEntityType::Node,
+                kind: IndexKind::Range,
+                label: "Person".to_string(),
+                properties: vec!["age".to_string()],
+            })
+            .unwrap();
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "person_name_idx".to_string(),
+                entity_type: IndexEntityType::Node,
+                kind: IndexKind::Range,
+                label: "Person".to_string(),
+                properties: vec!["name".to_string()],
+            })
+            .unwrap();
+
+        let greater_than = engine
+            .get_nodes_by_property_range("Person", "age", RangeIndexComparison::GreaterThan, &json!(30))
+            .unwrap();
+        assert_eq!(
+            greater_than
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db:n2", "db:n3"]
+        );
+
+        let less_than_or_equal = engine
+            .get_nodes_by_property_range(
+                "Person",
+                "age",
+                RangeIndexComparison::LessThanOrEqual,
+                &json!(35),
+            )
+            .unwrap();
+        assert_eq!(
+            less_than_or_equal
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db:n1", "db:n2"]
+        );
+
+        let string_range = engine
+            .get_nodes_by_property_range(
+                "Person",
+                "name",
+                RangeIndexComparison::GreaterThanOrEqual,
+                &json!("Bob"),
+            )
+            .unwrap();
+        assert_eq!(
+            string_range
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db:n2", "db:n3"]
+        );
+
+        assert!(engine
+            .get_nodes_by_property_range("Person", "missing", RangeIndexComparison::GreaterThan, &json!(1))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn property_index_value_keys_preserve_numeric_and_string_order() {
+        assert!(
+            property_index_value_key(&json!(-5)) < property_index_value_key(&json!(0)),
+            "negative numbers must sort before zero"
+        );
+        assert!(
+            property_index_value_key(&json!(2)) < property_index_value_key(&json!(10)),
+            "numeric key encoding must preserve numeric ordering"
+        );
+        assert!(
+            property_index_value_key(&json!("Bob")) < property_index_value_key(&json!("Carol")),
+            "string key encoding must preserve lexical ordering"
+        );
+    }
+
+    #[test]
+    fn composite_node_property_range_index_filters_exact_suffix_values() {
+        let engine = StorageEngine::open_temporary().unwrap();
+
+        let mut alice = sample_node("db:n1", &["Person"]);
+        alice.properties.insert("age".to_string(), json!(29));
+        alice.properties.insert("team".to_string(), json!("ops"));
+
+        let mut bob = sample_node("db:n2", &["Person"]);
+        bob.properties.insert("age".to_string(), json!(35));
+        bob.properties.insert("team".to_string(), json!("ops"));
+
+        let mut carol = sample_node("db:n3", &["Person"]);
+        carol.properties.insert("age".to_string(), json!(41));
+        carol.properties.insert("team".to_string(), json!("sales"));
+
+        let mut dan = sample_node("db:n4", &["Person"]);
+        dan.properties.insert("age".to_string(), json!(43));
+        dan.properties.insert("team".to_string(), json!("ops"));
+
+        engine.put_node_record(&alice).unwrap();
+        engine.put_node_record(&bob).unwrap();
+        engine.put_node_record(&carol).unwrap();
+        engine.put_node_record(&dan).unwrap();
+
+        let properties = vec!["age".to_string(), "team".to_string()];
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "person_age_team_idx".to_string(),
+                entity_type: IndexEntityType::Node,
+                kind: IndexKind::Range,
+                label: "Person".to_string(),
+                properties: properties.clone(),
+            })
+            .unwrap();
+
+        let matched = engine
+            .get_nodes_by_properties_range(
+                "Person",
+                &properties,
+                "age",
+                RangeIndexComparison::GreaterThan,
+                &json!(30),
+                &std::collections::HashMap::from([("team".to_string(), json!("ops"))]),
+            )
+            .unwrap();
+        assert_eq!(
+            matched.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+            vec!["db:n2", "db:n4"]
+        );
+    }
+
+    #[test]
+    fn composite_node_property_range_index_allows_missing_exact_suffix_values() {
+        let engine = StorageEngine::open_temporary().unwrap();
+
+        let mut alice = sample_node("db:n1", &["Person"]);
+        alice.properties.insert("age".to_string(), json!(29));
+        alice.properties.insert("team".to_string(), json!("ops"));
+
+        let mut bob = sample_node("db:n2", &["Person"]);
+        bob.properties.insert("age".to_string(), json!(35));
+        bob.properties.insert("team".to_string(), json!("ops"));
+
+        let mut carol = sample_node("db:n3", &["Person"]);
+        carol.properties.insert("age".to_string(), json!(41));
+        carol.properties.insert("team".to_string(), json!("sales"));
+
+        engine.put_node_record(&alice).unwrap();
+        engine.put_node_record(&bob).unwrap();
+        engine.put_node_record(&carol).unwrap();
+
+        let properties = vec!["age".to_string(), "team".to_string()];
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "person_age_team_idx".to_string(),
+                entity_type: IndexEntityType::Node,
+                kind: IndexKind::Range,
+                label: "Person".to_string(),
+                properties: properties.clone(),
+            })
+            .unwrap();
+
+        let matched = engine
+            .get_nodes_by_properties_range(
+                "Person",
+                &properties,
+                "age",
+                RangeIndexComparison::GreaterThan,
+                &json!(30),
+                &std::collections::HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            matched.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+            vec!["db:n2", "db:n3"]
+        );
+    }
+
+    #[test]
+    fn composite_node_property_range_index_supports_non_leading_range_with_exact_prefix_values() {
+        let engine = StorageEngine::open_temporary().unwrap();
+
+        let mut alice = sample_node("db:n1", &["Person"]);
+        alice.properties.insert("team".to_string(), json!("ops"));
+        alice.properties.insert("age".to_string(), json!(29));
+
+        let mut bob = sample_node("db:n2", &["Person"]);
+        bob.properties.insert("team".to_string(), json!("ops"));
+        bob.properties.insert("age".to_string(), json!(35));
+
+        let mut carol = sample_node("db:n3", &["Person"]);
+        carol.properties.insert("team".to_string(), json!("sales"));
+        carol.properties.insert("age".to_string(), json!(41));
+
+        let mut drew = sample_node("db:n4", &["Person"]);
+        drew.properties.insert("team".to_string(), json!("ops"));
+        drew.properties.insert("age".to_string(), json!(43));
+
+        engine.put_node_record(&alice).unwrap();
+        engine.put_node_record(&bob).unwrap();
+        engine.put_node_record(&carol).unwrap();
+        engine.put_node_record(&drew).unwrap();
+
+        let properties = vec!["team".to_string(), "age".to_string()];
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "person_team_age_idx".to_string(),
+                entity_type: IndexEntityType::Node,
+                kind: IndexKind::Range,
+                label: "Person".to_string(),
+                properties: properties.clone(),
+            })
+            .unwrap();
+
+        let matched = engine
+            .get_nodes_by_properties_range(
+                "Person",
+                &properties,
+                "age",
+                RangeIndexComparison::GreaterThan,
+                &json!(30),
+                &std::collections::HashMap::from([("team".to_string(), json!("ops"))]),
+            )
+            .unwrap();
+        assert_eq!(
+            matched.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+            vec!["db:n2", "db:n4"]
+        );
+    }
+
+    #[test]
+    fn relationship_property_index_rebuilds_and_tracks_mutations() {
+        let engine = StorageEngine::open_temporary().unwrap();
+        let mut edge = sample_edge("db:e1", "KNOWS", "db:n1", "db:n2");
+        engine.put_edge_record(&edge).unwrap();
+
+        assert!(engine
+            .get_edges_by_property("KNOWS", "weight", &json!(0.9))
+            .unwrap()
+            .is_empty());
+
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "knows_weight_idx".to_string(),
+                entity_type: IndexEntityType::Relationship,
+                kind: IndexKind::Range,
+                label: "KNOWS".to_string(),
+                properties: vec!["weight".to_string()],
+            })
+            .unwrap();
+
+        assert_eq!(
+            engine
+                .get_edges_by_property("KNOWS", "weight", &json!(0.9))
+                .unwrap()
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db:e1"]
+        );
+
+        edge.properties.insert("weight".to_string(), json!(1.5));
+        engine.put_edge_record(&edge).unwrap();
+        assert!(engine
+            .get_edges_by_property("KNOWS", "weight", &json!(0.9))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            engine
+                .get_edges_by_property("KNOWS", "weight", &json!(1.5))
+                .unwrap()
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db:e1"]
+        );
+
+        engine.delete_edge_record("db:e1").unwrap();
+        assert!(engine
+            .get_edges_by_property("KNOWS", "weight", &json!(1.5))
+            .unwrap()
+            .is_empty());
+
+        engine.delete_index_definition("knows_weight_idx").unwrap();
+        assert!(engine
+            .get_edges_by_property("KNOWS", "weight", &json!(1.5))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn composite_relationship_property_index_rebuilds_and_tracks_mutations() {
+        let engine = StorageEngine::open_temporary().unwrap();
+
+        let mut edge_one = sample_edge("db:e1", "KNOWS", "db:n1", "db:n2");
+        edge_one.properties.insert("years".to_string(), json!(5));
+        let mut edge_two = sample_edge("db:e2", "KNOWS", "db:n2", "db:n3");
+        edge_two.properties.insert("years".to_string(), json!(3));
+        engine.put_edge_record(&edge_one).unwrap();
+        engine.put_edge_record(&edge_two).unwrap();
+
+        let composite_properties = vec!["weight".to_string(), "years".to_string()];
+        let lookup = std::collections::HashMap::from([
+            ("weight".to_string(), json!(0.9)),
+            ("years".to_string(), json!(5)),
+        ]);
+        assert!(engine
+            .get_edges_by_properties("KNOWS", &composite_properties, &lookup)
+            .unwrap()
+            .is_empty());
+
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "knows_weight_years_idx".to_string(),
+                entity_type: IndexEntityType::Relationship,
+                kind: IndexKind::Range,
+                label: "KNOWS".to_string(),
+                properties: composite_properties.clone(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            engine
+                .get_edges_by_properties("KNOWS", &composite_properties, &lookup)
+                .unwrap()
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db:e1"]
+        );
+
+        edge_one.properties.insert("years".to_string(), json!(8));
+        engine.put_edge_record(&edge_one).unwrap();
+        assert!(engine
+            .get_edges_by_properties("KNOWS", &composite_properties, &lookup)
+            .unwrap()
+            .is_empty());
+
+        let updated_lookup = std::collections::HashMap::from([
+            ("weight".to_string(), json!(0.9)),
+            ("years".to_string(), json!(8)),
+        ]);
+        assert_eq!(
+            engine
+                .get_edges_by_properties("KNOWS", &composite_properties, &updated_lookup)
+                .unwrap()
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db:e1"]
+        );
+
+        engine.delete_edge_record("db:e1").unwrap();
+        assert!(engine
+            .get_edges_by_properties("KNOWS", &composite_properties, &updated_lookup)
+            .unwrap()
+            .is_empty());
+
+        engine.delete_index_definition("knows_weight_years_idx").unwrap();
+        assert!(engine
+            .get_edges_by_properties(
+                "KNOWS",
+                &composite_properties,
+                &std::collections::HashMap::from([
+                    ("weight".to_string(), json!(0.9)),
+                    ("years".to_string(), json!(3)),
+                ]),
+            )
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn relationship_property_range_index_filters_numeric_and_string_values() {
+        let engine = StorageEngine::open_temporary().unwrap();
+
+        let mut edge_one = sample_edge("db:e1", "KNOWS", "db:n1", "db:n2");
+        edge_one.properties.insert("weight".to_string(), json!(0.5));
+        edge_one.properties.insert("kind".to_string(), json!("close"));
+
+        let mut edge_two = sample_edge("db:e2", "KNOWS", "db:n2", "db:n3");
+        edge_two.properties.insert("weight".to_string(), json!(1.5));
+        edge_two.properties.insert("kind".to_string(), json!("trusted"));
+
+        let mut edge_three = sample_edge("db:e3", "KNOWS", "db:n3", "db:n4");
+        edge_three.properties.insert("weight".to_string(), json!(3.0));
+        edge_three.properties.insert("kind".to_string(), json!("vip"));
+
+        let mut other_type = sample_edge("db:e4", "LIKES", "db:n1", "db:n4");
+        other_type.properties.insert("weight".to_string(), json!(9.0));
+        other_type.properties.insert("kind".to_string(), json!("zzz"));
+
+        engine.put_edge_record(&edge_one).unwrap();
+        engine.put_edge_record(&edge_two).unwrap();
+        engine.put_edge_record(&edge_three).unwrap();
+        engine.put_edge_record(&other_type).unwrap();
+
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "knows_weight_idx".to_string(),
+                entity_type: IndexEntityType::Relationship,
+                kind: IndexKind::Range,
+                label: "KNOWS".to_string(),
+                properties: vec!["weight".to_string()],
+            })
+            .unwrap();
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "knows_kind_idx".to_string(),
+                entity_type: IndexEntityType::Relationship,
+                kind: IndexKind::Range,
+                label: "KNOWS".to_string(),
+                properties: vec!["kind".to_string()],
+            })
+            .unwrap();
+
+        let greater_than = engine
+            .get_edges_by_property_range(
+                "KNOWS",
+                "weight",
+                RangeIndexComparison::GreaterThan,
+                &json!(1.0),
+            )
+            .unwrap();
+        assert_eq!(
+            greater_than
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db:e2", "db:e3"]
+        );
+
+        let less_than_or_equal = engine
+            .get_edges_by_property_range(
+                "KNOWS",
+                "weight",
+                RangeIndexComparison::LessThanOrEqual,
+                &json!(1.5),
+            )
+            .unwrap();
+        assert_eq!(
+            less_than_or_equal
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db:e1", "db:e2"]
+        );
+
+        let string_range = engine
+            .get_edges_by_property_range(
+                "KNOWS",
+                "kind",
+                RangeIndexComparison::GreaterThanOrEqual,
+                &json!("trusted"),
+            )
+            .unwrap();
+        assert_eq!(
+            string_range
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["db:e2", "db:e3"]
+        );
+    }
+
+    #[test]
+    fn composite_relationship_property_range_index_filters_exact_suffix_values() {
+        let engine = StorageEngine::open_temporary().unwrap();
+
+        let mut edge_one = sample_edge("db:e1", "KNOWS", "db:n1", "db:n2");
+        edge_one.properties.insert("weight".to_string(), json!(1.5));
+        edge_one.properties.insert("years".to_string(), json!(3));
+
+        let mut edge_two = sample_edge("db:e2", "KNOWS", "db:n2", "db:n3");
+        edge_two.properties.insert("weight".to_string(), json!(2.5));
+        edge_two.properties.insert("years".to_string(), json!(5));
+
+        let mut edge_three = sample_edge("db:e3", "KNOWS", "db:n3", "db:n4");
+        edge_three.properties.insert("weight".to_string(), json!(3.0));
+        edge_three.properties.insert("years".to_string(), json!(5));
+
+        engine.put_edge_record(&edge_one).unwrap();
+        engine.put_edge_record(&edge_two).unwrap();
+        engine.put_edge_record(&edge_three).unwrap();
+
+        let properties = vec!["weight".to_string(), "years".to_string()];
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "knows_weight_years_idx".to_string(),
+                entity_type: IndexEntityType::Relationship,
+                kind: IndexKind::Range,
+                label: "KNOWS".to_string(),
+                properties: properties.clone(),
+            })
+            .unwrap();
+
+        let matched = engine
+            .get_edges_by_properties_range(
+                "KNOWS",
+                &properties,
+                "weight",
+                RangeIndexComparison::GreaterThan,
+                &json!(2.0),
+                &std::collections::HashMap::from([("years".to_string(), json!(5))]),
+            )
+            .unwrap();
+        assert_eq!(
+            matched.iter().map(|edge| edge.id.as_str()).collect::<Vec<_>>(),
+            vec!["db:e2", "db:e3"]
+        );
+    }
+
+    #[test]
+    fn composite_relationship_property_range_index_allows_missing_exact_suffix_values() {
+        let engine = StorageEngine::open_temporary().unwrap();
+
+        let mut edge_one = sample_edge("db:e1", "KNOWS", "db:n1", "db:n2");
+        edge_one.properties.insert("weight".to_string(), json!(1.5));
+        edge_one.properties.insert("years".to_string(), json!(3));
+
+        let mut edge_two = sample_edge("db:e2", "KNOWS", "db:n2", "db:n3");
+        edge_two.properties.insert("weight".to_string(), json!(2.5));
+        edge_two.properties.insert("years".to_string(), json!(5));
+
+        let mut edge_three = sample_edge("db:e3", "KNOWS", "db:n3", "db:n4");
+        edge_three.properties.insert("weight".to_string(), json!(3.0));
+        edge_three.properties.insert("years".to_string(), json!(5));
+
+        engine.put_edge_record(&edge_one).unwrap();
+        engine.put_edge_record(&edge_two).unwrap();
+        engine.put_edge_record(&edge_three).unwrap();
+
+        let properties = vec!["weight".to_string(), "years".to_string()];
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "knows_weight_years_idx".to_string(),
+                entity_type: IndexEntityType::Relationship,
+                kind: IndexKind::Range,
+                label: "KNOWS".to_string(),
+                properties: properties.clone(),
+            })
+            .unwrap();
+
+        let matched = engine
+            .get_edges_by_properties_range(
+                "KNOWS",
+                &properties,
+                "weight",
+                RangeIndexComparison::GreaterThan,
+                &json!(2.0),
+                &std::collections::HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            matched.iter().map(|edge| edge.id.as_str()).collect::<Vec<_>>(),
+            vec!["db:e2", "db:e3"]
+        );
+    }
+
+    #[test]
+    fn composite_relationship_property_range_index_supports_non_leading_range_with_exact_prefix_values() {
+        let engine = StorageEngine::open_temporary().unwrap();
+
+        let mut edge_one = sample_edge("db:e1", "KNOWS", "db:n1", "db:n2");
+        edge_one.properties.insert("years".to_string(), json!(5));
+        edge_one.properties.insert("weight".to_string(), json!(1.5));
+
+        let mut edge_two = sample_edge("db:e2", "KNOWS", "db:n2", "db:n3");
+        edge_two.properties.insert("years".to_string(), json!(5));
+        edge_two.properties.insert("weight".to_string(), json!(2.5));
+
+        let mut edge_three = sample_edge("db:e3", "KNOWS", "db:n3", "db:n4");
+        edge_three.properties.insert("years".to_string(), json!(2));
+        edge_three.properties.insert("weight".to_string(), json!(7.0));
+
+        let mut edge_four = sample_edge("db:e4", "KNOWS", "db:n4", "db:n5");
+        edge_four.properties.insert("years".to_string(), json!(5));
+        edge_four.properties.insert("weight".to_string(), json!(3.0));
+
+        engine.put_edge_record(&edge_one).unwrap();
+        engine.put_edge_record(&edge_two).unwrap();
+        engine.put_edge_record(&edge_three).unwrap();
+        engine.put_edge_record(&edge_four).unwrap();
+
+        let properties = vec!["years".to_string(), "weight".to_string()];
+        engine
+            .persist_index_definition(&IndexDefinition {
+                name: "knows_years_weight_idx".to_string(),
+                entity_type: IndexEntityType::Relationship,
+                kind: IndexKind::Range,
+                label: "KNOWS".to_string(),
+                properties: properties.clone(),
+            })
+            .unwrap();
+
+        let matched = engine
+            .get_edges_by_properties_range(
+                "KNOWS",
+                &properties,
+                "weight",
+                RangeIndexComparison::GreaterThan,
+                &json!(2.0),
+                &std::collections::HashMap::from([("years".to_string(), json!(5))]),
+            )
+            .unwrap();
+        assert_eq!(
+            matched.iter().map(|edge| edge.id.as_str()).collect::<Vec<_>>(),
+            vec!["db:e2", "db:e4"]
+        );
     }
 
     #[test]

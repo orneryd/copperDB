@@ -499,15 +499,33 @@ impl<'a> ParseContext<'a> {
         Ok(ShowConstraintsClause)
     }
 
-    fn parse_create_index(&mut self) -> Result<CreateIndexClause, CypherError> {
+    fn parse_create_index(&mut self, kind: IndexKind) -> Result<CreateIndexClause, CypherError> {
         let name = self.advance_identifier()?;
         let if_not_exists = self.consume_if_not_exists()?;
         self.expect("FOR")?;
         self.expect("(")?;
-        let variable = self.advance_identifier()?;
-        self.expect(":")?;
-        let label = self.advance_identifier()?;
-        self.expect(")")?;
+        let (entity_type, variable, label) = if self.peek() == Some(")") {
+            self.advance();
+            self.expect("-")?;
+            self.expect("[")?;
+            let variable = self.advance_identifier()?;
+            self.expect(":")?;
+            let label = self.advance_identifier()?;
+            self.expect("]")?;
+            self.expect("-")?;
+            if self.peek() == Some(">") {
+                self.advance();
+            }
+            self.expect("(")?;
+            self.expect(")")?;
+            (IndexEntityType::Relationship, variable, label)
+        } else {
+            let variable = self.advance_identifier()?;
+            self.expect(":")?;
+            let label = self.advance_identifier()?;
+            self.expect(")")?;
+            (IndexEntityType::Node, variable, label)
+        };
         self.expect("ON")?;
         self.expect("(")?;
         let mut properties = Vec::new();
@@ -535,6 +553,8 @@ impl<'a> ParseContext<'a> {
         Ok(CreateIndexClause {
             name,
             if_not_exists,
+            kind,
+            entity_type,
             label,
             properties,
         })
@@ -546,14 +566,14 @@ impl<'a> ParseContext<'a> {
         Ok(DropIndexClause { name, if_exists })
     }
 
-    fn parse_show_indexes(&mut self) -> Result<ShowIndexesClause, CypherError> {
+    fn parse_show_indexes(&mut self, kind: Option<IndexKind>) -> Result<ShowIndexesClause, CypherError> {
         if self.peek().is_some() {
             return Err(CypherError::ParseError(format!(
                 "unexpected token '{}' after SHOW INDEXES",
                 self.peek().unwrap_or_default()
             )));
         }
-        Ok(ShowIndexesClause)
+        Ok(ShowIndexesClause { kind })
     }
 
     fn parse_create_decay_profile(&mut self) -> Result<CreateDecayProfileClause, CypherError> {
@@ -1550,8 +1570,198 @@ mod tests {
         if let Clause::CreateIndex(c) = q.clauses.first().expect("clause missing") {
             assert_eq!(c.name, "person_idx");
             assert!(c.if_not_exists);
+            assert_eq!(c.kind, IndexKind::Range);
+            assert_eq!(c.entity_type, IndexEntityType::Node);
             assert_eq!(c.label, "Person");
             assert_eq!(c.properties, vec!["email".to_string(), "name".to_string()]);
+        } else {
+            panic!("expected CreateIndex clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_range_index() {
+        let p = Parser::new();
+        let q = p
+            .parse("CREATE RANGE INDEX person_idx FOR (n:Person) ON (n.email)")
+            .unwrap();
+        if let Clause::CreateIndex(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.name, "person_idx");
+            assert_eq!(c.kind, IndexKind::Range);
+            assert_eq!(c.entity_type, IndexEntityType::Node);
+            assert_eq!(c.label, "Person");
+            assert_eq!(c.properties, vec!["email".to_string()]);
+        } else {
+            panic!("expected CreateIndex clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_relationship_range_index() {
+        let p = Parser::new();
+        let q = p
+            .parse("CREATE RANGE INDEX follows_weight_idx FOR ()-[r:FOLLOWS]-() ON (r.weight)")
+            .unwrap();
+        if let Clause::CreateIndex(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.name, "follows_weight_idx");
+            assert_eq!(c.kind, IndexKind::Range);
+            assert_eq!(c.entity_type, IndexEntityType::Relationship);
+            assert_eq!(c.label, "FOLLOWS");
+            assert_eq!(c.properties, vec!["weight".to_string()]);
+        } else {
+            panic!("expected CreateIndex clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_relationship_index() {
+        let p = Parser::new();
+        let q = p
+            .parse("CREATE INDEX follows_weight_idx IF NOT EXISTS FOR ()-[r:FOLLOWS]-() ON (r.weight, r.since)")
+            .unwrap();
+        if let Clause::CreateIndex(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.name, "follows_weight_idx");
+            assert!(c.if_not_exists);
+            assert_eq!(c.kind, IndexKind::Range);
+            assert_eq!(c.entity_type, IndexEntityType::Relationship);
+            assert_eq!(c.label, "FOLLOWS");
+            assert_eq!(
+                c.properties,
+                vec!["weight".to_string(), "since".to_string()]
+            );
+        } else {
+            panic!("expected CreateIndex clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_temporal_index() {
+        let p = Parser::new();
+        let q = p
+            .parse("CREATE TEMPORAL INDEX person_seen_at_idx FOR (n:Person) ON (n.seenAt)")
+            .unwrap();
+        if let Clause::CreateIndex(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.name, "person_seen_at_idx");
+            assert_eq!(c.kind, IndexKind::Temporal);
+            assert_eq!(c.entity_type, IndexEntityType::Node);
+            assert_eq!(c.label, "Person");
+            assert_eq!(c.properties, vec!["seenAt".to_string()]);
+        } else {
+            panic!("expected CreateIndex clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_temporal_index_if_not_exists() {
+        let p = Parser::new();
+        let q = p
+            .parse(
+                "CREATE TEMPORAL INDEX person_seen_at_idx IF NOT EXISTS FOR (n:Person) ON (n.seenAt)",
+            )
+            .unwrap();
+        if let Clause::CreateIndex(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.name, "person_seen_at_idx");
+            assert!(c.if_not_exists);
+            assert_eq!(c.kind, IndexKind::Temporal);
+            assert_eq!(c.entity_type, IndexEntityType::Node);
+            assert_eq!(c.label, "Person");
+            assert_eq!(c.properties, vec!["seenAt".to_string()]);
+        } else {
+            panic!("expected CreateIndex clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_fulltext_relationship_index() {
+        let p = Parser::new();
+        let q = p
+            .parse("CREATE FULLTEXT INDEX follows_note_idx FOR ()-[r:FOLLOWS]-() ON (r.note)")
+            .unwrap();
+        if let Clause::CreateIndex(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.name, "follows_note_idx");
+            assert_eq!(c.kind, IndexKind::FullText);
+            assert_eq!(c.entity_type, IndexEntityType::Relationship);
+            assert_eq!(c.label, "FOLLOWS");
+            assert_eq!(c.properties, vec!["note".to_string()]);
+        } else {
+            panic!("expected CreateIndex clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_fulltext_relationship_index_if_not_exists() {
+        let p = Parser::new();
+        let q = p
+            .parse(
+                "CREATE FULLTEXT INDEX follows_note_idx IF NOT EXISTS FOR ()-[r:FOLLOWS]-() ON (r.note)",
+            )
+            .unwrap();
+        if let Clause::CreateIndex(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.name, "follows_note_idx");
+            assert!(c.if_not_exists);
+            assert_eq!(c.kind, IndexKind::FullText);
+            assert_eq!(c.entity_type, IndexEntityType::Relationship);
+            assert_eq!(c.label, "FOLLOWS");
+            assert_eq!(c.properties, vec!["note".to_string()]);
+        } else {
+            panic!("expected CreateIndex clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_vector_index() {
+        let p = Parser::new();
+        let q = p
+            .parse("CREATE VECTOR INDEX person_embedding_idx FOR (n:Person) ON (n.embedding)")
+            .unwrap();
+        if let Clause::CreateIndex(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.name, "person_embedding_idx");
+            assert_eq!(c.kind, IndexKind::Vector);
+            assert_eq!(c.entity_type, IndexEntityType::Node);
+            assert_eq!(c.label, "Person");
+            assert_eq!(c.properties, vec!["embedding".to_string()]);
+        } else {
+            panic!("expected CreateIndex clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_vector_index_if_not_exists() {
+        let p = Parser::new();
+        let q = p
+            .parse(
+                "CREATE VECTOR INDEX person_embedding_idx IF NOT EXISTS FOR (n:Person) ON (n.embedding)",
+            )
+            .unwrap();
+        if let Clause::CreateIndex(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.name, "person_embedding_idx");
+            assert!(c.if_not_exists);
+            assert_eq!(c.kind, IndexKind::Vector);
+            assert_eq!(c.entity_type, IndexEntityType::Node);
+            assert_eq!(c.label, "Person");
+            assert_eq!(c.properties, vec!["embedding".to_string()]);
+        } else {
+            panic!("expected CreateIndex clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_composite_relationship_range_index() {
+        let p = Parser::new();
+        let q = p
+            .parse(
+                "CREATE RANGE INDEX follows_weight_since_idx FOR ()-[r:FOLLOWS]-() ON (r.weight, r.since)",
+            )
+            .unwrap();
+        if let Clause::CreateIndex(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.name, "follows_weight_since_idx");
+            assert_eq!(c.kind, IndexKind::Range);
+            assert_eq!(c.entity_type, IndexEntityType::Relationship);
+            assert_eq!(c.label, "FOLLOWS");
+            assert_eq!(
+                c.properties,
+                vec!["weight".to_string(), "since".to_string()]
+            );
         } else {
             panic!("expected CreateIndex clause");
         }
@@ -1564,6 +1774,17 @@ mod tests {
             .parse("CREATE INDEX person_idx FOR (n:Person)")
             .unwrap_err();
         assert!(err.to_string().contains("expected 'ON'"));
+    }
+
+    #[test]
+    fn test_parse_create_relationship_index_variable_mismatch_errors() {
+        let p = Parser::new();
+        let err = p
+            .parse("CREATE RANGE INDEX follows_weight_idx FOR ()-[r:FOLLOWS]-() ON (x.weight)")
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("index variable mismatch: expected 'r', got 'x'"));
     }
 
     #[test]
@@ -1582,10 +1803,55 @@ mod tests {
     fn test_parse_show_indexes() {
         let p = Parser::new();
         let q = p.parse("SHOW INDEXES").unwrap();
-        assert!(matches!(
-            q.clauses.first().expect("clause missing"),
-            Clause::ShowIndexes(_)
-        ));
+        if let Clause::ShowIndexes(c) = q.clauses.first().expect("clause missing") {
+            assert!(c.kind.is_none());
+        } else {
+            panic!("expected ShowIndexes clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_show_range_indexes() {
+        let p = Parser::new();
+        let q = p.parse("SHOW RANGE INDEXES").unwrap();
+        if let Clause::ShowIndexes(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.kind, Some(IndexKind::Range));
+        } else {
+            panic!("expected ShowIndexes clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_show_temporal_indexes() {
+        let p = Parser::new();
+        let q = p.parse("SHOW TEMPORAL INDEXES").unwrap();
+        if let Clause::ShowIndexes(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.kind, Some(IndexKind::Temporal));
+        } else {
+            panic!("expected ShowIndexes clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_show_fulltext_indexes() {
+        let p = Parser::new();
+        let q = p.parse("SHOW FULLTEXT INDEXES").unwrap();
+        if let Clause::ShowIndexes(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.kind, Some(IndexKind::FullText));
+        } else {
+            panic!("expected ShowIndexes clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_show_vector_indexes() {
+        let p = Parser::new();
+        let q = p.parse("SHOW VECTOR INDEXES").unwrap();
+        if let Clause::ShowIndexes(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.kind, Some(IndexKind::Vector));
+        } else {
+            panic!("expected ShowIndexes clause");
+        }
     }
 
     #[test]

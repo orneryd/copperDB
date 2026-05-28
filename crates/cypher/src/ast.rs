@@ -149,6 +149,8 @@ pub struct ShowConstraintsClause;
 pub struct CreateIndexClause {
     pub name: String,
     pub if_not_exists: bool,
+    pub kind: IndexKind,
+    pub entity_type: IndexEntityType,
     pub label: String,
     pub properties: Vec<String>,
 }
@@ -160,7 +162,23 @@ pub struct DropIndexClause {
 }
 
 #[derive(Debug, Clone)]
-pub struct ShowIndexesClause;
+pub struct ShowIndexesClause {
+    pub kind: Option<IndexKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexEntityType {
+    Node,
+    Relationship,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexKind {
+    Range,
+    Temporal,
+    FullText,
+    Vector,
+}
 
 #[derive(Debug, Clone)]
 pub struct CreateDecayProfileClause {

@@ -133,6 +133,7 @@ use copperdb_storage::EdgeRecord;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "node_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Node".into(),
                 properties: vec!["name".into()],
             })
@@ -163,6 +164,7 @@ use copperdb_storage::EdgeRecord;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "node_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Node".into(),
                 properties: vec!["name".into()],
             })
@@ -193,6 +195,7 @@ use copperdb_storage::EdgeRecord;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "node_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Node".into(),
                 properties: vec!["name".into()],
             })
@@ -274,6 +277,7 @@ use copperdb_storage::EdgeRecord;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "node_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Node".into(),
                 properties: vec!["name".into()],
             })
@@ -304,6 +308,7 @@ use copperdb_storage::EdgeRecord;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "node_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Node".into(),
                 properties: vec!["name".into()],
             })
@@ -334,6 +339,7 @@ use copperdb_storage::EdgeRecord;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "node_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Node".into(),
                 properties: vec!["name".into()],
             })
@@ -431,6 +437,7 @@ use copperdb_storage::EdgeRecord;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "person_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Person".into(),
                 properties: vec!["name".into()],
             })
@@ -536,6 +543,7 @@ use copperdb_storage::EdgeRecord;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "seed_id".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Seed".into(),
                 properties: vec!["id".into()],
             })
@@ -562,6 +570,7 @@ use copperdb_storage::EdgeRecord;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "person_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Person".into(),
                 properties: vec!["name".into()],
             })
@@ -667,6 +676,7 @@ use copperdb_storage::EdgeRecord;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "seed_id".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Seed".into(),
                 properties: vec!["id".into()],
             })
@@ -675,6 +685,7 @@ use copperdb_storage::EdgeRecord;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "person_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Person".into(),
                 properties: vec!["name".into()],
             })
@@ -802,6 +813,7 @@ use copperdb_storage::EdgeRecord;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "seed_id".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Seed".into(),
                 properties: vec!["id".into()],
             })
@@ -810,6 +822,7 @@ use copperdb_storage::EdgeRecord;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "tag_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Tag".into(),
                 properties: vec!["name".into()],
             })
@@ -818,6 +831,7 @@ use copperdb_storage::EdgeRecord;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "person_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Person".into(),
                 properties: vec!["name".into()],
             })
@@ -946,18 +960,21 @@ use copperdb_storage::EdgeRecord;
             copperdb_storage::IndexDefinition {
                 name: "seed_id".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Seed".into(),
                 properties: vec!["id".into()],
             },
             copperdb_storage::IndexDefinition {
                 name: "tag_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Tag".into(),
                 properties: vec!["name".into()],
             },
             copperdb_storage::IndexDefinition {
                 name: "person_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Person".into(),
                 properties: vec!["name".into()],
             },
@@ -1108,18 +1125,21 @@ use copperdb_storage::EdgeRecord;
             copperdb_storage::IndexDefinition {
                 name: "seed_id".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Seed".into(),
                 properties: vec!["id".into()],
             },
             copperdb_storage::IndexDefinition {
                 name: "tag_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Tag".into(),
                 properties: vec!["name".into()],
             },
             copperdb_storage::IndexDefinition {
                 name: "person_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Person".into(),
                 properties: vec!["name".into()],
             },
@@ -1270,18 +1290,21 @@ use copperdb_storage::EdgeRecord;
             copperdb_storage::IndexDefinition {
                 name: "seed_id".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Seed".into(),
                 properties: vec!["id".into()],
             },
             copperdb_storage::IndexDefinition {
                 name: "tag_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Tag".into(),
                 properties: vec!["name".into()],
             },
             copperdb_storage::IndexDefinition {
                 name: "person_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Person".into(),
                 properties: vec!["name".into()],
             },
@@ -1446,18 +1469,21 @@ use copperdb_storage::EdgeRecord;
             copperdb_storage::IndexDefinition {
                 name: "seed_id".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Seed".into(),
                 properties: vec!["id".into()],
             },
             copperdb_storage::IndexDefinition {
                 name: "tag_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Tag".into(),
                 properties: vec!["name".into()],
             },
             copperdb_storage::IndexDefinition {
                 name: "person_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Person".into(),
                 properties: vec!["name".into()],
             },

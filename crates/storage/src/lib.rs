@@ -10,7 +10,7 @@ use copperdb_kms::KeyProvider;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use sled::{Db, Tree};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,6 +18,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+
+mod storage_edge_property_index;
+mod storage_node_property_range;
+mod storage_property_index_encoding;
+use crate::storage_edge_property_index::is_relationship_property_index;
+use crate::storage_property_index_encoding::property_index_value_key;
+pub use crate::storage_node_property_range::RangeIndexComparison;
 
 pub const STORAGE_LAYOUT_VERSION: u8 = 0;
 const META_LAYOUT_MANIFEST_KEY: &[u8] = b"layout_manifest";
@@ -38,6 +45,7 @@ const IDX_EDGE_TYPE_PREFIX: &str = "edge_type";
 const IDX_EDGE_START_PREFIX: &str = "edge_start";
 const IDX_EDGE_END_PREFIX: &str = "edge_end";
 const IDX_NODE_PROPERTY_PREFIX: &str = "node_property";
+pub(crate) const IDX_EDGE_PROPERTY_PREFIX: &str = "edge_property";
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -674,6 +682,15 @@ pub enum IndexEntityType {
     Relationship,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum IndexKind {
+    #[default]
+    Range,
+    Temporal,
+    FullText,
+    Vector,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ConstraintEntityType {
     Node,
@@ -695,6 +712,7 @@ pub struct IndexDefinition {
     pub entity_type: IndexEntityType,
     pub label: String,
     pub properties: Vec<String>,
+    pub kind: IndexKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1315,6 +1333,23 @@ impl StorageEngine {
         Ok(out)
     }
 
+    pub fn get_nodes_by_properties(
+        &self,
+        label: &str,
+        properties: &[String],
+        values: &HashMap<String, serde_json::Value>,
+    ) -> Result<Vec<NodeRecord>, StorageError> {
+        if !self.has_exact_node_property_index(label, properties)? {
+            return Ok(Vec::new());
+        }
+
+        let Some(prefix) = node_property_index_lookup_prefix(label, properties, values) else {
+            return Ok(Vec::new());
+        };
+
+        self.load_nodes_from_index_prefix(&prefix)
+    }
+
     pub fn node_count_by_prefix(&self, prefix: &str) -> Result<u64, StorageError> {
         Ok(self.nodes.scan_prefix(prefix.as_bytes()).count() as u64)
     }
@@ -1569,8 +1604,10 @@ impl StorageEngine {
     pub fn persist_index_definition(&self, index: &IndexDefinition) -> Result<(), StorageError> {
         let key = [META_SCHEMA_INDEX_PREFIX, index.name.as_bytes()].concat();
         self.meta.insert(key, rmp_serde::to_vec(index)?)?;
-        if is_single_property_node_index(index) {
+        if is_node_property_index(index) {
             self.rebuild_node_property_index(index)?;
+        } else if is_relationship_property_index(index) {
+            self.rebuild_relationship_property_index(index)?;
         }
         Ok(())
     }
@@ -1593,8 +1630,12 @@ impl StorageEngine {
         let key = [META_SCHEMA_INDEX_PREFIX, name.as_bytes()].concat();
         let deleted = self.meta.remove(key)?.is_some();
         if deleted {
-            if let Some(index) = existing.filter(is_single_property_node_index) {
-                self.delete_node_property_index_entries(&index.label, &index.properties[0])?;
+            if let Some(index) = existing {
+                if is_node_property_index(&index) {
+                    self.delete_node_property_index_entries(&index)?;
+                } else if is_relationship_property_index(&index) {
+                    self.delete_relationship_property_index_entries(&index)?;
+                }
             }
         }
         Ok(deleted)
@@ -1996,12 +2037,8 @@ impl StorageEngine {
             if !node.labels.iter().any(|label| label == &index.label) {
                 continue;
             }
-            let property = &index.properties[0];
-            if let Some(value) = node.properties.get(property) {
-                self.indexes.insert(
-                    node_property_index_key(&index.label, property, value, &node.id).as_bytes(),
-                    &[],
-                )?;
+            if let Some(key) = node_property_index_key_for_node(&index, node) {
+                self.indexes.insert(key.as_bytes(), &[])?;
             }
         }
         Ok(())
@@ -2012,11 +2049,8 @@ impl StorageEngine {
             if !node.labels.iter().any(|label| label == &index.label) {
                 continue;
             }
-            let property = &index.properties[0];
-            if let Some(value) = node.properties.get(property) {
-                self.indexes.remove(
-                    node_property_index_key(&index.label, property, value, &node.id).as_bytes(),
-                )?;
+            if let Some(key) = node_property_index_key_for_node(&index, node) {
+                self.indexes.remove(key.as_bytes())?;
             }
         }
         Ok(())
@@ -2029,34 +2063,37 @@ impl StorageEngine {
             .any(|index| index.label == label && index.properties[0] == property))
     }
 
+    fn has_exact_node_property_index(
+        &self,
+        label: &str,
+        properties: &[String],
+    ) -> Result<bool, StorageError> {
+        Ok(self
+            .node_property_index_definitions()?
+            .iter()
+            .any(|index| index.label == label && index.properties == properties))
+    }
+
     fn node_property_index_definitions(&self) -> Result<Vec<IndexDefinition>, StorageError> {
         Ok(self
             .load_index_definitions()?
             .into_iter()
-            .filter(is_single_property_node_index)
+            .filter(is_node_property_index)
             .collect())
     }
 
     fn rebuild_node_property_index(&self, index: &IndexDefinition) -> Result<(), StorageError> {
-        self.delete_node_property_index_entries(&index.label, &index.properties[0])?;
+        self.delete_node_property_index_entries(index)?;
         for node in self.get_nodes_by_label(&index.label)? {
-            if let Some(value) = node.properties.get(&index.properties[0]) {
-                self.indexes.insert(
-                    node_property_index_key(&index.label, &index.properties[0], value, &node.id)
-                        .as_bytes(),
-                    &[],
-                )?;
+            if let Some(key) = node_property_index_key_for_node(index, &node) {
+                self.indexes.insert(key.as_bytes(), &[])?;
             }
         }
         Ok(())
     }
 
-    fn delete_node_property_index_entries(
-        &self,
-        label: &str,
-        property: &str,
-    ) -> Result<(), StorageError> {
-        let prefix = node_property_index_property_prefix(label, property);
+    fn delete_node_property_index_entries(&self, index: &IndexDefinition) -> Result<(), StorageError> {
+        let prefix = node_property_index_definition_prefix(&index.label, &index.properties);
         let keys = self
             .indexes
             .scan_prefix(prefix.as_bytes())
@@ -2096,6 +2133,22 @@ impl StorageEngine {
         Ok(out)
     }
 
+    fn load_nodes_from_index_prefix(&self, prefix: &str) -> Result<Vec<NodeRecord>, StorageError> {
+        let mut out = Vec::new();
+        for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
+            let (key, _) = entry?;
+            let key_str =
+                std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            if let Some(node_id) = key_str.rsplit('/').next() {
+                if let Some(node) = self.get_node_record(node_id)? {
+                    out.push(node);
+                }
+            }
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        Ok(out)
+    }
+
     fn index_edge(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
         self.indexes.insert(
             edge_type_index_key(&edge.edge_type, &edge.id).as_bytes(),
@@ -2109,6 +2162,7 @@ impl StorageEngine {
             edge_end_index_key(&edge.end_node, &edge.edge_type, &edge.id).as_bytes(),
             &[],
         )?;
+        self.index_edge_property_indexes(edge)?;
         Ok(())
     }
 
@@ -2119,6 +2173,7 @@ impl StorageEngine {
             .remove(edge_start_index_key(&edge.start_node, &edge.edge_type, &edge.id).as_bytes())?;
         self.indexes
             .remove(edge_end_index_key(&edge.end_node, &edge.edge_type, &edge.id).as_bytes())?;
+        self.unindex_edge_property_indexes(edge)?;
         Ok(())
     }
 }
@@ -2191,8 +2246,14 @@ fn edge_end_index_key(node_id: &str, edge_type: &str, edge_id: &str) -> String {
     )
 }
 
-fn is_single_property_node_index(index: &IndexDefinition) -> bool {
-    index.entity_type == IndexEntityType::Node && index.properties.len() == 1
+fn is_node_property_index(index: &IndexDefinition) -> bool {
+    index.entity_type == IndexEntityType::Node
+        && is_property_backed_index_kind(index.kind)
+        && !index.properties.is_empty()
+}
+
+fn is_property_backed_index_kind(kind: IndexKind) -> bool {
+    matches!(kind, IndexKind::Range | IndexKind::Temporal)
 }
 
 fn node_property_index_property_prefix(label: &str, property: &str) -> String {
@@ -2228,9 +2289,77 @@ fn node_property_index_key(
     )
 }
 
-fn property_index_value_key(value: &serde_json::Value) -> String {
-    let bytes = serde_json::to_vec(value).unwrap_or_else(|_| value.to_string().into_bytes());
-    hex::encode(bytes)
+fn node_property_index_definition_prefix(label: &str, properties: &[String]) -> String {
+    if properties.len() == 1 {
+        return node_property_index_property_prefix(label, &properties[0]);
+    }
+
+    format!(
+        "{IDX_NODE_PROPERTY_PREFIX}/{}/composite/{}/values/",
+        escape_index_component(label),
+        properties
+            .iter()
+            .map(|property| escape_index_component(property))
+            .collect::<Vec<_>>()
+            .join("/")
+    )
+}
+
+fn node_property_index_lookup_prefix(
+    label: &str,
+    properties: &[String],
+    values: &HashMap<String, serde_json::Value>,
+) -> Option<String> {
+    let value_refs = properties
+        .iter()
+        .map(|property| values.get(property))
+        .collect::<Option<Vec<_>>>()?;
+
+    if properties.len() == 1 {
+        return Some(node_property_index_value_prefix(
+            label,
+            &properties[0],
+            value_refs[0],
+        ));
+    }
+
+    Some(format!(
+        "{}{}/",
+        node_property_index_definition_prefix(label, properties),
+        value_refs
+            .iter()
+            .map(|value| property_index_value_key(value))
+            .collect::<Vec<_>>()
+            .join("/")
+    ))
+}
+
+fn node_property_index_key_for_node(index: &IndexDefinition, node: &NodeRecord) -> Option<String> {
+    let value_refs = index
+        .properties
+        .iter()
+        .map(|property| node.properties.get(property))
+        .collect::<Option<Vec<_>>>()?;
+
+    if index.properties.len() == 1 {
+        return Some(node_property_index_key(
+            &index.label,
+            &index.properties[0],
+            value_refs[0],
+            &node.id,
+        ));
+    }
+
+    Some(format!(
+        "{}{}/{}",
+        node_property_index_definition_prefix(&index.label, &index.properties),
+        value_refs
+            .iter()
+            .map(|value| property_index_value_key(value))
+            .collect::<Vec<_>>()
+            .join("/"),
+        node.id
+    ))
 }
 
 fn escape_index_component(value: &str) -> String {

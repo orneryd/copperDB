@@ -532,6 +532,7 @@ use crate::copperdb::distributed_shortest_path_query_shape;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "node_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Node".into(),
                 properties: vec!["name".into()],
             })
@@ -562,6 +563,7 @@ use crate::copperdb::distributed_shortest_path_query_shape;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "node_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Node".into(),
                 properties: vec!["name".into()],
             })
@@ -606,6 +608,7 @@ use crate::copperdb::distributed_shortest_path_query_shape;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "node_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Node".into(),
                 properties: vec!["name".into()],
             })
@@ -719,6 +722,7 @@ use crate::copperdb::distributed_shortest_path_query_shape;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "node_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Node".into(),
                 properties: vec!["name".into()],
             })
@@ -749,6 +753,7 @@ use crate::copperdb::distributed_shortest_path_query_shape;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "node_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Node".into(),
                 properties: vec!["name".into()],
             })
@@ -779,6 +784,7 @@ use crate::copperdb::distributed_shortest_path_query_shape;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "node_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Node".into(),
                 properties: vec!["name".into()],
             })
@@ -890,6 +896,7 @@ use crate::copperdb::distributed_shortest_path_query_shape;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "node_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Node".into(),
                 properties: vec!["name".into()],
             })
@@ -1124,6 +1131,7 @@ use crate::copperdb::distributed_shortest_path_query_shape;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "node_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Node".into(),
                 properties: vec!["name".into()],
             })
@@ -1154,6 +1162,7 @@ use crate::copperdb::distributed_shortest_path_query_shape;
             .persist_index_definition(&copperdb_storage::IndexDefinition {
                 name: "node_name".into(),
                 entity_type: copperdb_storage::IndexEntityType::Node,
+                kind: copperdb_storage::IndexKind::Range,
                 label: "Node".into(),
                 properties: vec!["name".into()],
             })

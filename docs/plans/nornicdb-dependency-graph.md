@@ -4,6 +4,8 @@ Date: 2026-05-26
 
 This graph is the package-porting order for copperDB. It follows NornicDB's package architecture while keeping Rust dependency cycles out of the workspace. Each layer may depend on earlier layers; later layers should not be required by earlier layers.
 
+Audit note: the full local on-disk package comparison against NornicDB is tracked in [nornicdb-full-sweep-audit-2026-05-28.md](nornicdb-full-sweep-audit-2026-05-28.md), including the full agent findings register. That audit calls out architecture/performance drift that should guide future implementation order without automatically changing the checked status of this dependency graph.
+
 A checked package means the Rust package has a single-path implementation, full durable persistence for package-owned state, is threaded into its immediate consumers, and has focused contract tests. Unchecked packages may exist as scaffolds or partial ports but are not complete enough to call done.
 
 ## Layer 0: Shared Contracts And Process Foundation
@@ -125,6 +127,14 @@ On the distributed engine path, `execute_distributed_as(...)` routes path-query 
 
 These packages remain unchecked until broader Neo4j/Cypher compatibility, broader distributed row-aware routed reads beyond the current routed prefix subset, broader pipeline-shape parity beyond the currently routed clause mix, broader compound-query execution parity, index maintenance, and query execution contracts are complete.
 
+Audit delta: `indexing` parity now needs to be tracked in two lanes. Property-backed exact, RANGE, and TEMPORAL indexes are actively moving through storage/indexing/eval parity. `FULLTEXT` and `VECTOR` are catalog/DDL rows only until a real search/vector runtime bridge exists. Automatic search/index/embedding work must default disabled in copperDB and become available only through explicit per-database config overrides plus an operator CLI kill switch.
+
+Index maintenance is incrementally broader now: storage rebuilds, updates, and drops maintained node-property index state for both single-property and composite node index definitions, maintains single-property and composite relationship-property indexes keyed by relationship type, and the indexing catalog prefers the most specific matching node or relationship index definition during lookup instead of treating richer definitions as catalog-only metadata.
+
+Index catalog metadata is also closer to current Cypher DDL expectations now: `IndexDefinition` carries an explicit index kind, generic `CREATE INDEX` currently materializes as `RANGE`, explicit `CREATE RANGE INDEX` plus explicit `CREATE TEMPORAL|FULLTEXT|VECTOR INDEX` now persist their typed catalog rows, and `SHOW INDEXES` exposes kind instead of collapsing every property-backed definition into an untyped bucket. The query surface can also filter stored index metadata through `SHOW RANGE INDEXES`, `SHOW TEMPORAL INDEXES`, `SHOW FULLTEXT INDEXES`, and `SHOW VECTOR INDEXES` without inventing alternate catalog rows. Those typed DDL forms now also follow the same duplicate-name, `IF NOT EXISTS`, drop-by-name, and `IF EXISTS` contract as the older generic/RANGE path. That ordered-comparison path is no longer RANGE-only either: current Cypher DDL now accepts both node `FOR (n:Label) ON (n.prop)` and relationship `FOR ()-[r:TYPE]-() ON (r.prop)` RANGE or TEMPORAL index targets, and storage/indexing can use maintained single-property and composite node or relationship RANGE and TEMPORAL indexes to narrow simple `<op>` comparisons before eval applies the normal predicate filter. Single-property ordered keys are now encoded in an order-preserving storage form for strings and numbers, so those node and relationship comparison reads run as bounded sled range scans instead of scanning an entire property prefix and filtering every indexed value in memory. Maintained composite ordered-comparison indexes now participate in the same current-state path when the compared property is either the leading indexed property or a later indexed property whose preceding indexed fields are all constrained by exact predicates; exact suffix predicates are no longer required for the scan itself, but when they are present the catalog prefers the composite definition with the most matching exact fields and storage filters those exact properties deterministically. `FULLTEXT` and `VECTOR` definitions are catalog-visible DDL metadata only at this stage; storage persists them without rebuilding or maintaining property-backed lookup state, and exact-match and ordered-comparison lookup selection intentionally exclude those kinds until they have real maintained runtime paths.
+
+Search/vector audit status: NornicDB's `pkg/search` includes BM25/fulltext indexes, HNSW, IVFPQ, vector file storage, index persistence/versioning, decay filtering, reranking, hybrid cluster routing, GPU acceleration, and search observability. copperDB's current search layer is not yet at that runtime parity. The next search/index slices should prioritize a per-database config resolver, explicit opt-in defaults, CPU maintained search/vector runtime, vector file storage, and local in-memory embedding execution before exposing any automatic fulltext/vector behavior. GPU acceleration, reranking, and the broader inference lifecycle are deferred out of the first runnable MVP.
+
 Layer 4 delta: `knowledgepolicy` now owns the shared `ON ACCESS` flusher/runtime boundary rather than eval-local buffering, promotion `WHEN` clauses compile into parsed expressions up front, eval now applies promotion multiplier/floor/cap math against persisted plus buffered access metadata when deciding node and edge visibility, and `CALL nornicdb.knowledgepolicy.resolve(...)` exposes the same local scoring/target-resolution path as a tested inspection surface.
 
 Current Layer 4 distributed status: routed/special-path distributed reads now reuse the same node/edge scoring path as local evaluation for visibility suppression, and successful remote reads now persist `ON ACCESS` mutations through the replicated access-metadata write primitive with coordinator semantics. Deterministic engine regressions now cover stale remote node suppression, stale remote edge suppression, node access-metadata persistence, and edge access-metadata persistence.
@@ -137,6 +147,10 @@ This is the embedded database facade.
 - [ ] copperDB: `crates/engine` / package `copperdb-engine`.
 
 The engine should compose storage, transactions, cache, eval, auth context, audit/compliance hooks, replication/fabric routing, retention checks, knowledge policy runtime, and telemetry. Today it composes storage, parser, eval, transaction manager handle, and query cache only.
+
+Audit delta: NornicDB has a per-database config resolver for search/vector/embedding controls and warming behavior. copperDB does not yet have a durable per-DB config store, allowed-key registry, effective-config resolver, admin API, or CLI override path. Add this before enabling any automatic index/search/embedding behavior; defaults for automatic work should be disabled and opt-in per database.
+
+MVP scope note: the first runnable MVP should use an in-process embedding backend if feasible, preferring `mistral.rs` over a llama.cpp-based local backend while preserving NornicDB's local in-memory embedding goal. Heimdall governance, reranking, GPU acceleration, MCP, GraphQL, and APOC are deferred until after the core distributed engine works.
 
 ## Layer 6: Protocols And User-Facing APIs
 
@@ -151,6 +165,8 @@ These packages should be thin protocol adapters over the engine/query pipeline.
 - [ ] `copperdb` -> executable binary and component assembly.
 
 Required direction: protocol packages should not implement storage/query semantics directly. They should authenticate, decode protocol input, call the engine/query pipeline, encode responses, and emit telemetry.
+
+Audit delta: protocol parity remains broader than thin transport shape. The full sweep found missing or incomplete NornicDB surfaces for per-DB config admin routes, MCP tools (`store`, `recall`, `discover`, `link`, `task`, `tasks`), Heimdall governance/LLM quality-control workflows, GraphQL engine-backed resolvers, Bolt auth/role propagation, and streaming import/export conversion utilities. For MVP, prioritize server per-DB config routes, Bolt auth/role propagation, streaming conversion, and plugin-ready builtin function/procedure registration; defer MCP, GraphQL, Heimdall, and APOC compatibility.
 
 ## Implementation Walk Order
 
