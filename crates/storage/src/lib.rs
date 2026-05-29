@@ -78,6 +78,8 @@ pub enum StorageError {
     InvalidChunkSize(usize),
     #[error("invalid utf8 in key")]
     InvalidUtf8,
+    #[error("mvcc rebuild is blocked by {active_readers} active reader(s)")]
+    MvccRebuildBlocked { active_readers: u64 },
     #[error("mvcc head truncated: {0} bytes")]
     MvccHeadTruncated(usize),
     #[error("mvcc head missing floor: {0} bytes")]
@@ -852,6 +854,16 @@ impl StorageEngine {
             self.mvcc.put_edge_record(&edge)?;
         }
         Ok(())
+    }
+
+    pub fn rebuild_mvcc_from_current_state(&self) -> Result<(), StorageError> {
+        let active_readers = self.mvcc.active_reader_count();
+        if active_readers != 0 {
+            return Err(StorageError::MvccRebuildBlocked { active_readers });
+        }
+
+        self.mvcc.reset_for_rebuild();
+        self.bootstrap_mvcc_from_current_state()
     }
 
     fn ensure_layout_manifest(&self) -> Result<(), StorageError> {

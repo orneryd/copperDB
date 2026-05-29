@@ -227,4 +227,4 @@ copperdb-otel = { path = "crates/otel" }
 copperdb = { path = "crates/copperdb" }
 
 [patch.crates-io]
-sled = { path = "../sled" }
+sled = { git = "https://github.com/orneryd/sled", branch = "main" }

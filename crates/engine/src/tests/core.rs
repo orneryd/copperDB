@@ -773,6 +773,44 @@ fn test_storage_mvcc_visible_reads_are_reachable_from_copperdb() {
 }
 
 #[test]
+fn test_storage_mvcc_rebuild_is_reachable_from_copperdb() {
+    let db = CopperDb::open_temporary().unwrap();
+    db.execute("CREATE (n:Person {name: 'Ada'})", Default::default())
+        .unwrap();
+
+    let mut current = db.storage().get_nodes_by_label("Person").unwrap();
+    assert_eq!(current.len(), 1);
+    let node_id = current.pop().unwrap().id;
+
+    let lease = db.storage().begin_registered_mvcc_snapshot();
+    assert!(matches!(
+        db.storage().rebuild_mvcc_from_current_state(),
+        Err(copperdb_storage::StorageError::MvccRebuildBlocked { active_readers: 1 })
+    ));
+    drop(lease);
+
+    db.storage().delete_node(&node_id).unwrap();
+
+    let stale_snapshot = db.storage().begin_mvcc_snapshot();
+    assert_eq!(
+        db.storage()
+            .get_nodes_by_label_visible_at(&stale_snapshot, "Person")
+            .unwrap()
+            .len(),
+        1
+    );
+
+    db.storage().rebuild_mvcc_from_current_state().unwrap();
+
+    let repaired_snapshot = db.storage().begin_mvcc_snapshot();
+    assert!(db
+        .storage()
+        .get_nodes_by_label_visible_at(&repaired_snapshot, "Person")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn test_execute_routes_pipeline_match_respects_bound_relationship_endpoints() {
     let db = CopperDb::open_temporary().unwrap();
     for cypher in [

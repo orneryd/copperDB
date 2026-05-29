@@ -17,7 +17,7 @@
 
 ### MVCC and lifecycle
 - [x] MVCC version/head model parity (baseline in `crates/storage::MvccStore`; current reads are now pinned to a per-key current head while archived historical versions stay off the hot index path, retained-floor anchoring avoids sparse post-prune ghost-chain reads, and the storage baseline exposes Nornic-style lifecycle pause/resume/schedule/debt inspection controls)
-- [x] Snapshot-visible read selectors parity (snapshot timestamp reads in `MvccStore::read`, plus storage-owned snapshot-visible label and edge-type reads that no longer collapse to current-state-only behavior)
+- [x] Snapshot-visible read selectors parity (snapshot timestamp reads in `MvccStore::read`, plus real `StorageEngine` and `NamespacedStorageEngine` snapshot-visible node, label, edge, and edge-type reads backed by the storage-owned MVCC path instead of collapsing to current-state-only behavior)
 - [ ] MVCC pruning/rebuild lifecycle parity
 - [x] Snapshot reader registry parity (tracked snapshot leases now pin the oldest active reader and pruning respects that floor)
 - [x] Lifecycle debt/scheduling controller baseline parity (lifecycle status now reports active readers, retained-version debt, and safe prune-now behavior)
@@ -58,7 +58,9 @@
 - [x] `crates/storage` + `crates/nornicgrpc`: oversized crate-root cleanup baseline now follows the cypher-module pattern more closely: storage moved MVCC types and logic into `src/mvcc.rs`, `nornicgrpc` moved its large inline test module into `src/tests.rs`, both crate roots are back under the current size ceiling, and focused crate tests pass warning-clean after the split.
 - [x] `crates/txsession`: transaction lifecycle/error surface updated to include NornicDB messages (`no active transaction`, `transaction already closed`, `transaction rolled back`) with error-path tests.
 - [x] `crates/storage`: MVCC snapshot isolation primitives (`MvccStore`, `MvccSnapshot`, head encode/decode) with pruning + error-path tests.
-- [x] `crates/storage`: MVCC head/archive split now follows the Nornic hot-path architecture more closely: current values are stored behind per-key heads, historical bodies are archived separately so old versions do not participate in current indexing, retained-floor anchoring keeps post-prune historical reads deterministic, focused churn plus lifecycle-admin regressions cover ghost-chain pruning pressure and pause/resume/schedule/debt inspection behavior, and the in-memory baseline now has typed snapshot-visible label and edge-type reads plus a bounded `NamespacedMvccStore` wrapper that delegates lifecycle controls through the namespaced seam.
+- [x] `crates/storage`: MVCC head/archive split now follows the Nornic hot-path architecture more closely: current values are stored behind per-key heads, historical bodies are archived separately so old versions do not participate in current indexing, retained-floor anchoring keeps post-prune historical reads deterministic, focused churn plus lifecycle-admin regressions cover ghost-chain pruning pressure and pause/resume/schedule/debt inspection behavior, and the typed snapshot-visible node or edge plus label or edge-type path is now embedded into `StorageEngine` itself so real storage opens, writes, and namespaced wrappers reach that MVCC surface instead of leaving it test-baseline-only.
+- [x] `crates/storage` + `crates/engine`: `StorageEngine` now owns an internal `MvccStore`, bootstraps it from persisted current state on open, mirrors node and edge mutations into the MVCC head or archive model, exposes visible-at reads plus lifecycle controls on the real storage surface, and has focused storage plus engine regressions proving `db.storage()` reaches those snapshot-visible APIs.
+- [x] `crates/storage`: the real storage surface now also exposes a guarded `rebuild_mvcc_from_current_state()` control that clears and replays MVCC state from persisted current rows when no active readers are registered, repairing raw-storage drift without pretending the broader upstream lifecycle orchestration work is finished.
 - [x] `crates/storage`: WAL primitives (`WAL`, `WALEntry`, `WALSegment`) including batch append/replay, checksum verification, degraded-mode signaling, and close/error-path tests.
 - [x] `crates/storage`: schema primitives (`SchemaManager`, `Constraint`) including unique/existence/node-key validation and persistent catalog round-trip tests.
 - [x] `crates/storage`: optional extension interface baselines for maintained namespace prefix counts, namespace label cardinality, adjacent-edge lookup, and namespace-scoped schema snapshots. Planning correction: the namespace schema provider is not modeled as a filtered view over the global catalog; it persists constraints/index definitions in a dedicated namespace keyspace.
@@ -100,7 +102,7 @@
 - [ ] `crates/bolt` + `crates/server` + `crates/convert` + builtin function/procedure registration: expand MVP protocol/runtime parity with Bolt role propagation into engine/distributed execution, streaming import/export conversion utilities, search/vector control-plane and other distributed status or repair endpoints, and plugin hooks for future APOC-style extensions. Defer `crates/mcp`, `crates/heimdall`, and `crates/graphql` until after the core distributed engine works.
 
 ### Still stubbed / not yet parity-complete
-- [ ] `crates/storage`: full MVCC rebuild/orchestration parity with upstream beyond the reader-aware prune-now + lifecycle-status baseline.
+- [ ] `crates/storage`: full MVCC rebuild/orchestration parity with upstream beyond the current reader-aware prune-now, guarded rebuild-from-current-state control, and lifecycle-status baseline.
 - [ ] `crates/storage`: fuller WAL durability parity beyond the current persisted compaction/truncation baseline (e.g. richer snapshot install/orchestration and diagnostics wiring).
 - [ ] `crates/storage`: WAL snapshot compaction/truncation orchestration parity with upstream.
 - [ ] `crates/storage`: full schema contract bundles/type constraints/relationship cardinality enforcement parity with upstream.
@@ -114,7 +116,7 @@
 - [ ] Storage event notifier parity
 
 ### Multi-database and routing
-- [ ] Namespaced engine parity (a bounded `crates/storage::NamespacedStorageEngine` baseline now exists for namespace-local CRUD/query/count/stream/schema/delete behavior over prefix-owned storage helpers, and `crates/storage::NamespacedMvccStore` now delegates lifecycle controls plus snapshot-visible label/type reads through the namespaced seam; broader upstream engine surface, async/cache integration, and composite/remote wrappers remain open)
+- [ ] Namespaced engine parity (a bounded `crates/storage::NamespacedStorageEngine` baseline now exists for namespace-local CRUD/query/count/stream/schema/delete behavior over prefix-owned storage helpers, and it now also delegates snapshot-visible node or edge plus label or edge-type reads and lifecycle controls through the real storage-owned MVCC surface; the narrower `crates/storage::NamespacedMvccStore` baseline still exists for the direct MVCC store seam, while broader upstream engine surface, async/cache integration, and composite/remote wrappers remain open)
 - [ ] Composite engine/routing parity
 - [ ] Remote engine adapter parity
 

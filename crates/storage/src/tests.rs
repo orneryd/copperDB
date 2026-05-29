@@ -882,6 +882,61 @@ fn namespaced_storage_engine_delegates_mvcc_visible_reads_and_lifecycle_controls
 }
 
 #[test]
+fn storage_engine_rebuild_mvcc_repairs_raw_storage_drift_and_blocks_active_readers() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    engine
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+
+    let snapshot = engine.begin_mvcc_snapshot();
+    assert!(engine.rebuild_mvcc_from_current_state().err().is_none());
+    assert_eq!(
+        engine
+            .get_nodes_by_label_visible_at(&snapshot, "Person")
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let lease = engine.begin_registered_mvcc_snapshot();
+    let err = engine.rebuild_mvcc_from_current_state().err().unwrap();
+    assert!(matches!(
+        err,
+        StorageError::MvccRebuildBlocked { active_readers: 1 }
+    ));
+    drop(lease);
+
+    engine.delete_node("n1").unwrap();
+    assert!(engine.get_node_record("n1").unwrap().is_none());
+
+    let stale_snapshot = engine.begin_mvcc_snapshot();
+    assert!(engine
+        .get_node_record_visible_at(&stale_snapshot, "n1")
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        engine
+            .get_nodes_by_label_visible_at(&stale_snapshot, "Person")
+            .unwrap()
+            .into_iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>(),
+        vec!["n1".to_string()]
+    );
+
+    engine.rebuild_mvcc_from_current_state().unwrap();
+    let repaired_snapshot = engine.begin_mvcc_snapshot();
+    assert!(engine
+        .get_node_record_visible_at(&repaired_snapshot, "n1")
+        .unwrap()
+        .is_none());
+    assert!(engine
+        .get_nodes_by_label_visible_at(&repaired_snapshot, "Person")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn topology_metadata_round_trip_builds_valid_registry() {
     use copperdb_topology::{
         DistributedWriteMode, HyperscalerProfile as TopologyHyperscalerProfile, MeshPeer,

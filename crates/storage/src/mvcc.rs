@@ -601,6 +601,17 @@ impl MvccStore {
         guard.values().map(MvccKeyState::retained_versions).sum()
     }
 
+    pub(crate) fn reset_for_rebuild(&self) {
+        self.current_version.store(0, Ordering::SeqCst);
+        self.floor.store(0, Ordering::SeqCst);
+        self.values.write().clear();
+        self.current_node_labels.write().clear();
+        self.node_label_history.write().clear();
+        self.current_edge_types.write().clear();
+        self.edge_type_history.write().clear();
+        self.active_readers.lock().clear();
+    }
+
     fn safe_prune_floor(&self, requested_floor: u64) -> u64 {
         self.oldest_active_reader()
             .map(|oldest_reader| requested_floor.min(oldest_reader))
