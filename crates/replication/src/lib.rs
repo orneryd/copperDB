@@ -7,7 +7,9 @@
 //! - a transport abstraction with an in-memory implementation for tests
 
 use async_trait::async_trait;
-use copperdb_storage::{EdgeRecord, KnowledgePolicyAccessMetadata, StorageEngine, StorageError};
+use copperdb_storage::{
+    EdgeAdjacencyDirection, EdgeRecord, KnowledgePolicyAccessMetadata, StorageEngine, StorageError,
+};
 use copperdb_topology::{
     ConsistencyLevel, DistributedReadPlan, DistributedWriteMode, DistributedWritePlan,
     LogicalTransactionId, PlacementKey, TopologyError, TopologyRegistry,
@@ -439,12 +441,9 @@ impl ReplicationStorage for StorageEngineAdapter {
         rel_type: Option<&str>,
     ) -> Result<Vec<EdgeRecord>, ReplicationError> {
         let engine = self.engine.lock().unwrap();
-        match rel_type {
-            Some(rel_type) => engine
-                .get_edges_from_node_by_type(node_id, rel_type)
-                .map_err(Into::into),
-            None => engine.get_edges_from_node(node_id).map_err(Into::into),
-        }
+        engine
+            .get_adjacent_edges(node_id, EdgeAdjacencyDirection::Outgoing, rel_type)
+            .map_err(Into::into)
     }
 
     fn graph_edges_to_node(
@@ -453,12 +452,9 @@ impl ReplicationStorage for StorageEngineAdapter {
         rel_type: Option<&str>,
     ) -> Result<Vec<EdgeRecord>, ReplicationError> {
         let engine = self.engine.lock().unwrap();
-        match rel_type {
-            Some(rel_type) => engine
-                .get_edges_to_node_by_type(node_id, rel_type)
-                .map_err(Into::into),
-            None => engine.get_edges_to_node(node_id).map_err(Into::into),
-        }
+        engine
+            .get_adjacent_edges(node_id, EdgeAdjacencyDirection::Incoming, rel_type)
+            .map_err(Into::into)
     }
 
     fn graph_nodes_by_label(&self, label: &str) -> Result<Vec<Vec<u8>>, ReplicationError> {

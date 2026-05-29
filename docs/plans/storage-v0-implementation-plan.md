@@ -14,10 +14,10 @@ Implement a Rust-native storage architecture baseline aligned to current NornicD
 
 ## Phase 2 (next)
 - [ ] Add transaction API model parity
-- [ ] Add WAL wrapper + durability primitives
+- [x] Add WAL wrapper + durability primitives
 - [ ] Add async write-behind engine and flush reconciliation
-- [ ] Add schema/constraint manager parity
-- [ ] Add streaming and prefix-delete behaviors
+- [x] Add schema/constraint manager parity
+- [x] Add streaming and prefix-delete behaviors
 
 ## Phase 3 (next)
 - [ ] Add MVCC visibility/head model and lifecycle controls

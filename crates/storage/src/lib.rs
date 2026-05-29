@@ -20,12 +20,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 mod mvcc;
+mod namespaced;
 mod storage_edge_property_index;
 mod storage_node_property_range;
 mod storage_property_index_encoding;
 pub use crate::mvcc::{
-    MvccHead, MvccLifecycleStatus, MvccSnapshot, MvccSnapshotLease, MvccStore, MvccVersion,
+    MvccHead, MvccLifecycleDebtKey, MvccLifecycleStatus, MvccLogicalHead, MvccSnapshot,
+    MvccSnapshotLease, MvccStore, MvccVersion, NamespacedMvccStore,
 };
+pub use crate::namespaced::NamespacedStorageEngine;
 use crate::storage_edge_property_index::is_relationship_property_index;
 pub use crate::storage_node_property_range::RangeIndexComparison;
 use crate::storage_property_index_encoding::property_index_value_key;
@@ -39,6 +42,11 @@ const META_TOPOLOGY_PLACEMENT_PREFIX: &[u8] = b"topology_placement/";
 const META_FABRIC_DATABASE_PREFIX: &[u8] = b"fabric_database/";
 const META_SCHEMA_CONSTRAINT_PREFIX: &[u8] = b"schema_constraint/";
 const META_SCHEMA_INDEX_PREFIX: &[u8] = b"schema_index/";
+const META_SCHEMA_NAMESPACE_CONSTRAINT_PREFIX: &[u8] = b"schema_constraint_ns/";
+const META_SCHEMA_NAMESPACE_INDEX_PREFIX: &[u8] = b"schema_index_ns/";
+const META_NAMESPACE_NODE_COUNT_PREFIX: &[u8] = b"namespace_node_count/";
+const META_NAMESPACE_EDGE_COUNT_PREFIX: &[u8] = b"namespace_edge_count/";
+const META_NAMESPACE_LABEL_COUNT_PREFIX: &[u8] = b"namespace_label_count/";
 const META_KP_DECAY_PROFILE_PREFIX: &[u8] = b"kp_decay_profile/";
 const META_KP_DECAY_BINDING_PREFIX: &[u8] = b"kp_decay_binding/";
 const META_KP_PROMOTION_PROFILE_PREFIX: &[u8] = b"kp_promotion_profile/";
@@ -64,6 +72,10 @@ pub enum StorageError {
     UnsupportedLayoutVersion { expected: u8, actual: u8 },
     #[error("key not found: {0}")]
     NotFound(String),
+    #[error("prefix cannot be empty")]
+    EmptyPrefix,
+    #[error("invalid chunk size: {0}")]
+    InvalidChunkSize(usize),
     #[error("invalid utf8 in key")]
     InvalidUtf8,
     #[error("mvcc head truncated: {0} bytes")]
@@ -111,6 +123,13 @@ pub enum StorageError {
     EncryptionRequired,
     #[error("storage encryption metadata mismatch: {0}")]
     EncryptionMismatch(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeAdjacencyDirection {
+    Outgoing,
+    Incoming,
+    Both,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -480,6 +499,12 @@ pub struct IndexDefinition {
     pub kind: IndexKind,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct NamespaceSchema {
+    pub constraints: Vec<Constraint>,
+    pub indexes: Vec<IndexDefinition>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DecayProfileSchema {
     pub name: String,
@@ -699,6 +724,7 @@ pub struct StorageEngine {
     nodes: Tree,
     edges: Tree,
     indexes: Tree,
+    mvcc: MvccStore,
     encryption: Option<StorageEncryption>,
     temp_dir: Option<tempfile::TempDir>,
 }
@@ -751,6 +777,10 @@ impl StorageEncryption {
 }
 
 impl StorageEngine {
+    pub fn for_namespace(&self, namespace: impl Into<String>) -> NamespacedStorageEngine<'_> {
+        NamespacedStorageEngine::new(self, namespace)
+    }
+
     /// Open (or create) a storage engine at the given path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         let db = sled::open(path)?;
@@ -783,11 +813,13 @@ impl StorageEngine {
             nodes,
             edges,
             indexes,
+            mvcc: MvccStore::new(),
             encryption: None,
             temp_dir: Some(temp_dir),
         };
         engine.ensure_layout_manifest()?;
         engine.ensure_encryption_manifest()?;
+        engine.bootstrap_mvcc_from_current_state()?;
         Ok(engine)
     }
 
@@ -802,12 +834,24 @@ impl StorageEngine {
             nodes,
             edges,
             indexes,
+            mvcc: MvccStore::new(),
             encryption,
             temp_dir: None,
         };
         engine.ensure_layout_manifest()?;
         engine.ensure_encryption_manifest()?;
+        engine.bootstrap_mvcc_from_current_state()?;
         Ok(engine)
+    }
+
+    fn bootstrap_mvcc_from_current_state(&self) -> Result<(), StorageError> {
+        for node in self.all_node_records()? {
+            self.mvcc.put_node_record(&node)?;
+        }
+        for edge in self.all_edges()? {
+            self.mvcc.put_edge_record(&edge)?;
+        }
+        Ok(())
     }
 
     fn ensure_layout_manifest(&self) -> Result<(), StorageError> {
@@ -997,6 +1041,7 @@ impl StorageEngine {
         if let Some(old) = self.get_node_record(&node.id)? {
             self.unindex_node_labels(&old)?;
             self.unindex_node_properties(&old)?;
+            self.apply_node_stats_delta(&old, -1)?;
         }
         self.nodes.insert(
             node.id.as_bytes(),
@@ -1004,6 +1049,8 @@ impl StorageEngine {
         )?;
         self.index_node_labels(node)?;
         self.index_node_properties(node)?;
+        self.apply_node_stats_delta(node, 1)?;
+        self.mvcc.put_node_record(node)?;
         Ok(())
     }
 
@@ -1020,9 +1067,33 @@ impl StorageEngine {
         if let Some(existing) = self.get_node_record(id)? {
             self.unindex_node_labels(&existing)?;
             self.unindex_node_properties(&existing)?;
+            self.apply_node_stats_delta(&existing, -1)?;
             self.nodes.remove(id.as_bytes())?;
+            self.mvcc.delete_node_record(id)?;
         }
         Ok(())
+    }
+
+    pub fn delete_by_prefix(&self, prefix: &str) -> Result<(u64, u64), StorageError> {
+        if prefix.is_empty() {
+            return Err(StorageError::EmptyPrefix);
+        }
+
+        let node_ids = self.ids_with_prefix(&self.nodes, prefix)?;
+        let edge_ids = self.ids_with_prefix(&self.edges, prefix)?;
+
+        for node_id in &node_ids {
+            self.delete_node_record(node_id)?;
+        }
+        for edge_id in &edge_ids {
+            self.delete_edge_record(edge_id)?;
+        }
+
+        if let Some(namespace) = namespace_from_prefix(prefix) {
+            self.delete_namespace_metadata(namespace)?;
+        }
+
+        Ok((node_ids.len() as u64, edge_ids.len() as u64))
     }
 
     pub fn get_nodes_by_label(&self, label: &str) -> Result<Vec<NodeRecord>, StorageError> {
@@ -1073,6 +1144,55 @@ impl StorageEngine {
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)
+    }
+
+    pub fn stream_node_records<F>(&self, visit: F) -> Result<u64, StorageError>
+    where
+        F: FnMut(NodeRecord) -> Result<(), StorageError>,
+    {
+        self.stream_node_records_from_entries(self.nodes.iter(), visit)
+    }
+
+    pub fn stream_node_records_by_prefix<F>(
+        &self,
+        prefix: &str,
+        visit: F,
+    ) -> Result<u64, StorageError>
+    where
+        F: FnMut(NodeRecord) -> Result<(), StorageError>,
+    {
+        self.stream_node_records_from_entries(self.nodes.scan_prefix(prefix.as_bytes()), visit)
+    }
+
+    pub fn stream_node_record_chunks<F>(
+        &self,
+        chunk_size: usize,
+        mut visit: F,
+    ) -> Result<u64, StorageError>
+    where
+        F: FnMut(&[NodeRecord]) -> Result<(), StorageError>,
+    {
+        if chunk_size == 0 {
+            return Err(StorageError::InvalidChunkSize(0));
+        }
+
+        let mut chunk = Vec::with_capacity(chunk_size);
+        let mut streamed = 0;
+        self.stream_node_records(|node| {
+            chunk.push(node);
+            streamed += 1;
+            if chunk.len() == chunk_size {
+                visit(&chunk)?;
+                chunk.clear();
+            }
+            Ok(())
+        })?;
+
+        if !chunk.is_empty() {
+            visit(&chunk)?;
+        }
+
+        Ok(streamed)
     }
 
     pub fn get_nodes_by_property(
@@ -1158,18 +1278,24 @@ impl StorageEngine {
     }
 
     pub fn node_count_by_prefix(&self, prefix: &str) -> Result<u64, StorageError> {
+        if let Some(namespace) = namespace_from_prefix(prefix) {
+            return self.meta_counter(namespace_node_count_key(namespace));
+        }
         Ok(self.nodes.scan_prefix(prefix.as_bytes()).count() as u64)
     }
 
     pub fn put_edge_record(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
         if let Some(old) = self.get_edge_record(&edge.id)? {
             self.unindex_edge(&old)?;
+            self.apply_edge_stats_delta(&old, -1)?;
         }
         self.edges.insert(
             edge.id.as_bytes(),
             self.encode_record_bytes(rmp_serde::to_vec(edge)?)?,
         )?;
         self.index_edge(edge)?;
+        self.apply_edge_stats_delta(edge, 1)?;
+        self.mvcc.put_edge_record(edge)?;
         Ok(())
     }
 
@@ -1185,9 +1311,75 @@ impl StorageEngine {
     pub fn delete_edge_record(&self, id: &str) -> Result<(), StorageError> {
         if let Some(existing) = self.get_edge_record(id)? {
             self.unindex_edge(&existing)?;
+            self.apply_edge_stats_delta(&existing, -1)?;
             self.edges.remove(id.as_bytes())?;
+            self.mvcc.delete_edge_record(id)?;
         }
         Ok(())
+    }
+
+    pub fn begin_mvcc_snapshot(&self) -> MvccSnapshot {
+        self.mvcc.begin_snapshot()
+    }
+
+    pub fn begin_registered_mvcc_snapshot(&self) -> MvccSnapshotLease {
+        self.mvcc.begin_registered_snapshot()
+    }
+
+    pub fn get_node_record_visible_at(
+        &self,
+        snapshot: &MvccSnapshot,
+        id: &str,
+    ) -> Result<Option<NodeRecord>, StorageError> {
+        self.mvcc.get_node_record_visible_at(snapshot, id)
+    }
+
+    pub fn get_nodes_by_label_visible_at(
+        &self,
+        snapshot: &MvccSnapshot,
+        label: &str,
+    ) -> Result<Vec<NodeRecord>, StorageError> {
+        self.mvcc.get_nodes_by_label_visible_at(snapshot, label)
+    }
+
+    pub fn get_edge_record_visible_at(
+        &self,
+        snapshot: &MvccSnapshot,
+        id: &str,
+    ) -> Result<Option<EdgeRecord>, StorageError> {
+        self.mvcc.get_edge_record_visible_at(snapshot, id)
+    }
+
+    pub fn get_edges_by_type_visible_at(
+        &self,
+        snapshot: &MvccSnapshot,
+        edge_type: &str,
+    ) -> Result<Vec<EdgeRecord>, StorageError> {
+        self.mvcc.get_edges_by_type_visible_at(snapshot, edge_type)
+    }
+
+    pub fn lifecycle_status(&self) -> MvccLifecycleStatus {
+        self.mvcc.lifecycle_status()
+    }
+
+    pub fn trigger_prune_now(&self, retain_last_n_versions: u64) -> usize {
+        self.mvcc.trigger_prune_now(retain_last_n_versions)
+    }
+
+    pub fn pause_lifecycle(&self) {
+        self.mvcc.pause_lifecycle();
+    }
+
+    pub fn resume_lifecycle(&self) {
+        self.mvcc.resume_lifecycle();
+    }
+
+    pub fn set_lifecycle_schedule_ms(&self, interval_ms: u64) {
+        self.mvcc.set_lifecycle_schedule_ms(interval_ms);
+    }
+
+    pub fn top_lifecycle_debt_keys(&self, limit: usize) -> Vec<MvccLifecycleDebtKey> {
+        self.mvcc.top_lifecycle_debt_keys(limit)
     }
 
     pub fn get_edges_by_type(&self, edge_type: &str) -> Result<Vec<EdgeRecord>, StorageError> {
@@ -1223,6 +1415,23 @@ impl StorageEngine {
         Ok(out)
     }
 
+    pub fn stream_edge_records<F>(&self, mut visit: F) -> Result<u64, StorageError>
+    where
+        F: FnMut(EdgeRecord) -> Result<(), StorageError>,
+    {
+        let mut streamed = 0;
+        for entry in self.edges.iter() {
+            let (key, _) = entry?;
+            let key_str =
+                std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            if let Some(edge) = self.get_edge_record(key_str)? {
+                visit(edge)?;
+                streamed += 1;
+            }
+        }
+        Ok(streamed)
+    }
+
     pub fn get_edges_from_node(&self, node_id: &str) -> Result<Vec<EdgeRecord>, StorageError> {
         self.get_edges_by_adjacency_prefix(&edge_start_index_prefix(node_id))
     }
@@ -1247,24 +1456,67 @@ impl StorageEngine {
         self.get_edges_by_adjacency_prefix(&edge_end_type_index_prefix(node_id, edge_type))
     }
 
+    pub fn get_adjacent_edges(
+        &self,
+        node_id: &str,
+        direction: EdgeAdjacencyDirection,
+        edge_type: Option<&str>,
+    ) -> Result<Vec<EdgeRecord>, StorageError> {
+        match (direction, edge_type) {
+            (EdgeAdjacencyDirection::Outgoing, Some(edge_type)) => {
+                self.get_edges_from_node_by_type(node_id, edge_type)
+            }
+            (EdgeAdjacencyDirection::Outgoing, None) => self.get_edges_from_node(node_id),
+            (EdgeAdjacencyDirection::Incoming, Some(edge_type)) => {
+                self.get_edges_to_node_by_type(node_id, edge_type)
+            }
+            (EdgeAdjacencyDirection::Incoming, None) => self.get_edges_to_node(node_id),
+            (EdgeAdjacencyDirection::Both, Some(edge_type)) => {
+                let mut edges = self.get_edges_from_node_by_type(node_id, edge_type)?;
+                edges.extend(self.get_edges_to_node_by_type(node_id, edge_type)?);
+                Ok(edges)
+            }
+            (EdgeAdjacencyDirection::Both, None) => {
+                let mut edges = self.get_edges_from_node(node_id)?;
+                edges.extend(self.get_edges_to_node(node_id)?);
+                Ok(edges)
+            }
+        }
+    }
+
     pub fn edge_count_by_prefix(&self, prefix: &str) -> Result<u64, StorageError> {
+        if let Some(namespace) = namespace_from_prefix(prefix) {
+            return self.meta_counter(namespace_edge_count_key(namespace));
+        }
         Ok(self.edges.scan_prefix(prefix.as_bytes()).count() as u64)
+    }
+
+    pub fn node_count_by_label_in_namespace(
+        &self,
+        namespace: &str,
+        label: &str,
+    ) -> Result<u64, StorageError> {
+        self.meta_counter(namespace_label_count_key(namespace, label))
     }
 
     pub fn list_namespaces(&self) -> Result<Vec<String>, StorageError> {
         let mut out = BTreeSet::new();
 
-        for kv in self.nodes.iter() {
-            let (k, _) = kv?;
-            if let Some(ns) = namespace_from_id(k.as_ref()) {
-                out.insert(ns);
+        for entry in self.meta.scan_prefix(META_NAMESPACE_NODE_COUNT_PREFIX) {
+            let (key, _) = entry?;
+            if let Some(namespace) =
+                namespace_from_stats_key(key.as_ref(), META_NAMESPACE_NODE_COUNT_PREFIX)
+            {
+                out.insert(namespace);
             }
         }
 
-        for kv in self.edges.iter() {
-            let (k, _) = kv?;
-            if let Some(ns) = namespace_from_id(k.as_ref()) {
-                out.insert(ns);
+        for entry in self.meta.scan_prefix(META_NAMESPACE_EDGE_COUNT_PREFIX) {
+            let (key, _) = entry?;
+            if let Some(namespace) =
+                namespace_from_stats_key(key.as_ref(), META_NAMESPACE_EDGE_COUNT_PREFIX)
+            {
+                out.insert(namespace);
             }
         }
 
@@ -1393,6 +1645,16 @@ impl StorageEngine {
         Ok(())
     }
 
+    pub fn persist_constraint_for_namespace(
+        &self,
+        namespace: &str,
+        constraint: &Constraint,
+    ) -> Result<(), StorageError> {
+        let key = namespace_schema_constraint_key(namespace, &constraint.name);
+        self.meta.insert(key, rmp_serde::to_vec(constraint)?)?;
+        Ok(())
+    }
+
     pub fn load_constraints(&self) -> Result<Vec<Constraint>, StorageError> {
         let mut constraints: Vec<Constraint> = Vec::new();
         for entry in self.meta.scan_prefix(META_SCHEMA_CONSTRAINT_PREFIX) {
@@ -1403,8 +1665,31 @@ impl StorageEngine {
         Ok(constraints)
     }
 
+    pub fn load_constraints_for_namespace(
+        &self,
+        namespace: &str,
+    ) -> Result<Vec<Constraint>, StorageError> {
+        let mut constraints: Vec<Constraint> = Vec::new();
+        let prefix = namespace_schema_constraint_prefix(namespace);
+        for entry in self.meta.scan_prefix(prefix.as_bytes()) {
+            let (_, value) = entry?;
+            constraints.push(rmp_serde::from_slice(value.as_ref())?);
+        }
+        constraints.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(constraints)
+    }
+
     pub fn delete_constraint(&self, name: &str) -> Result<bool, StorageError> {
         let key = [META_SCHEMA_CONSTRAINT_PREFIX, name.as_bytes()].concat();
+        Ok(self.meta.remove(key)?.is_some())
+    }
+
+    pub fn delete_constraint_for_namespace(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<bool, StorageError> {
+        let key = namespace_schema_constraint_key(namespace, name);
         Ok(self.meta.remove(key)?.is_some())
     }
 
@@ -1421,6 +1706,16 @@ impl StorageEngine {
         Ok(())
     }
 
+    pub fn persist_index_definition_for_namespace(
+        &self,
+        namespace: &str,
+        index: &IndexDefinition,
+    ) -> Result<(), StorageError> {
+        let key = namespace_schema_index_key(namespace, &index.name);
+        self.meta.insert(key, rmp_serde::to_vec(index)?)?;
+        Ok(())
+    }
+
     pub fn load_index_definitions(&self) -> Result<Vec<IndexDefinition>, StorageError> {
         let mut indexes: Vec<IndexDefinition> = Vec::new();
         for entry in self.meta.scan_prefix(META_SCHEMA_INDEX_PREFIX) {
@@ -1429,6 +1724,27 @@ impl StorageEngine {
         }
         indexes.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(indexes)
+    }
+
+    pub fn load_index_definitions_for_namespace(
+        &self,
+        namespace: &str,
+    ) -> Result<Vec<IndexDefinition>, StorageError> {
+        let mut indexes: Vec<IndexDefinition> = Vec::new();
+        let prefix = namespace_schema_index_prefix(namespace);
+        for entry in self.meta.scan_prefix(prefix.as_bytes()) {
+            let (_, value) = entry?;
+            indexes.push(rmp_serde::from_slice(value.as_ref())?);
+        }
+        indexes.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(indexes)
+    }
+
+    pub fn schema_for_namespace(&self, namespace: &str) -> Result<NamespaceSchema, StorageError> {
+        Ok(NamespaceSchema {
+            constraints: self.load_constraints_for_namespace(namespace)?,
+            indexes: self.load_index_definitions_for_namespace(namespace)?,
+        })
     }
 
     pub fn delete_index_definition(&self, name: &str) -> Result<bool, StorageError> {
@@ -2077,6 +2393,108 @@ impl StorageEngine {
         self.unindex_edge_property_indexes(edge)?;
         Ok(())
     }
+
+    fn apply_node_stats_delta(&self, node: &NodeRecord, delta: i64) -> Result<(), StorageError> {
+        let Some(namespace) = namespace_from_str(&node.id) else {
+            return Ok(());
+        };
+        self.adjust_meta_counter(namespace_node_count_key(namespace), delta)?;
+        for label in node.labels.iter().collect::<BTreeSet<_>>() {
+            self.adjust_meta_counter(namespace_label_count_key(namespace, label), delta)?;
+        }
+        Ok(())
+    }
+
+    fn apply_edge_stats_delta(&self, edge: &EdgeRecord, delta: i64) -> Result<(), StorageError> {
+        let Some(namespace) = namespace_from_str(&edge.id) else {
+            return Ok(());
+        };
+        self.adjust_meta_counter(namespace_edge_count_key(namespace), delta)
+    }
+
+    fn meta_counter(&self, key: Vec<u8>) -> Result<u64, StorageError> {
+        match self.meta.get(key)? {
+            Some(raw) => Ok(rmp_serde::from_slice(raw.as_ref())?),
+            None => Ok(0),
+        }
+    }
+
+    fn adjust_meta_counter(&self, key: Vec<u8>, delta: i64) -> Result<(), StorageError> {
+        let current = self.meta_counter(key.clone())?;
+        let updated = if delta >= 0 {
+            current.saturating_add(delta as u64)
+        } else {
+            current.saturating_sub(delta.unsigned_abs())
+        };
+
+        if updated == 0 {
+            self.meta.remove(key)?;
+        } else {
+            self.meta.insert(key, rmp_serde::to_vec(&updated)?)?;
+        }
+        Ok(())
+    }
+
+    fn ids_with_prefix(&self, tree: &Tree, prefix: &str) -> Result<Vec<String>, StorageError> {
+        tree.scan_prefix(prefix.as_bytes())
+            .map(|entry| {
+                let (key, _) = entry?;
+                std::str::from_utf8(key.as_ref())
+                    .map(str::to_string)
+                    .map_err(|_| StorageError::InvalidUtf8)
+            })
+            .collect()
+    }
+
+    fn stream_node_records_from_entries<F, I, K, V>(
+        &self,
+        iter: I,
+        mut visit: F,
+    ) -> Result<u64, StorageError>
+    where
+        F: FnMut(NodeRecord) -> Result<(), StorageError>,
+        I: IntoIterator<Item = std::io::Result<(K, V)>>,
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        let mut streamed = 0;
+        for entry in iter {
+            let (key, value) = entry?;
+            let key_str =
+                std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            let raw = self.decode_record_bytes(value.as_ref())?;
+            if let Some(node) = compat_node_record_from_bytes(key_str, &raw)? {
+                visit(node)?;
+                streamed += 1;
+            }
+        }
+        Ok(streamed)
+    }
+
+    fn delete_namespace_metadata(&self, namespace: &str) -> Result<(), StorageError> {
+        self.meta.remove(namespace_node_count_key(namespace))?;
+        self.meta.remove(namespace_edge_count_key(namespace))?;
+        self.delete_meta_prefix(&namespace_label_count_prefix(namespace))?;
+        self.delete_meta_prefix(namespace_schema_constraint_prefix(namespace).as_bytes())?;
+        self.delete_meta_prefix(namespace_schema_index_prefix(namespace).as_bytes())?;
+        Ok(())
+    }
+
+    fn delete_meta_prefix(&self, prefix: &[u8]) -> Result<(), StorageError> {
+        let keys = self
+            .meta
+            .scan_prefix(prefix)
+            .map(|entry| {
+                entry
+                    .map(|(key, _)| key.to_vec())
+                    .map_err(StorageError::from)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for key in keys {
+            self.meta.remove(key)?;
+        }
+        Ok(())
+    }
 }
 
 /// A RAII guard that signals "no flush should occur while I am alive".
@@ -2090,6 +2508,66 @@ impl Drop for FlushGuard {
 
 fn label_index_prefix(label: &str) -> String {
     format!("{IDX_LABEL_PREFIX}/{label}/")
+}
+
+fn namespace_schema_constraint_prefix(namespace: &str) -> String {
+    format!(
+        "{}{}/",
+        std::str::from_utf8(META_SCHEMA_NAMESPACE_CONSTRAINT_PREFIX)
+            .unwrap_or("schema_constraint_ns/"),
+        escape_index_component(namespace)
+    )
+}
+
+fn namespace_schema_constraint_key(namespace: &str, name: &str) -> Vec<u8> {
+    format!("{}{}", namespace_schema_constraint_prefix(namespace), name).into_bytes()
+}
+
+fn namespace_schema_index_prefix(namespace: &str) -> String {
+    format!(
+        "{}{}/",
+        std::str::from_utf8(META_SCHEMA_NAMESPACE_INDEX_PREFIX).unwrap_or("schema_index_ns/"),
+        escape_index_component(namespace)
+    )
+}
+
+fn namespace_schema_index_key(namespace: &str, name: &str) -> Vec<u8> {
+    format!("{}{}", namespace_schema_index_prefix(namespace), name).into_bytes()
+}
+
+fn namespace_node_count_key(namespace: &str) -> Vec<u8> {
+    [
+        META_NAMESPACE_NODE_COUNT_PREFIX,
+        escape_index_component(namespace).as_bytes(),
+    ]
+    .concat()
+}
+
+fn namespace_edge_count_key(namespace: &str) -> Vec<u8> {
+    [
+        META_NAMESPACE_EDGE_COUNT_PREFIX,
+        escape_index_component(namespace).as_bytes(),
+    ]
+    .concat()
+}
+
+fn namespace_label_count_key(namespace: &str, label: &str) -> Vec<u8> {
+    [
+        META_NAMESPACE_LABEL_COUNT_PREFIX,
+        escape_index_component(namespace).as_bytes(),
+        b"/",
+        escape_index_component(label).as_bytes(),
+    ]
+    .concat()
+}
+
+fn namespace_label_count_prefix(namespace: &str) -> Vec<u8> {
+    [
+        META_NAMESPACE_LABEL_COUNT_PREFIX,
+        escape_index_component(namespace).as_bytes(),
+        b"/",
+    ]
+    .concat()
 }
 
 fn label_index_key(label: &str, node_id: &str) -> String {
@@ -2658,9 +3136,21 @@ fn derived_label_from_id(id: &str) -> Option<String> {
     Some(label)
 }
 
-fn namespace_from_id(id: &[u8]) -> Option<String> {
-    let id = std::str::from_utf8(id).ok()?;
-    id.split_once(':').map(|(ns, _)| ns.to_string())
+fn namespace_from_str(id: &str) -> Option<&str> {
+    id.split_once(':').map(|(ns, _)| ns)
+}
+
+fn namespace_from_prefix(prefix: &str) -> Option<&str> {
+    prefix
+        .strip_suffix(':')
+        .filter(|namespace| !namespace.is_empty())
+}
+
+fn namespace_from_stats_key(key: &[u8], key_prefix: &[u8]) -> Option<String> {
+    let encoded = key.strip_prefix(key_prefix)?;
+    let encoded = std::str::from_utf8(encoded).ok()?;
+    let decoded = hex::decode(encoded).ok()?;
+    String::from_utf8(decoded).ok()
 }
 
 fn now_unix_ms() -> i64 {

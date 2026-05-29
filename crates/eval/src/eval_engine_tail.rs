@@ -1,4 +1,5 @@
 use super::*;
+use copperdb_storage::EdgeAdjacencyDirection;
 
 impl EvalEngine {
     pub(crate) fn persist_node_props(
@@ -65,28 +66,15 @@ impl EvalEngine {
         let candidates = if let Some(range_predicate) = simple_range_predicate {
             self.relationship_candidates_by_range(node_id, edge, &range_predicate, expected_props)?
         } else {
-            match (&edge.direction, edge.rel_type.as_deref()) {
-                (EdgeDirection::Outgoing, Some(edge_type)) => self
-                    .storage
-                    .get_edges_from_node_by_type(node_id, edge_type)?,
-                (EdgeDirection::Outgoing, None) => self.storage.get_edges_from_node(node_id)?,
-                (EdgeDirection::Incoming, Some(edge_type)) => {
-                    self.storage.get_edges_to_node_by_type(node_id, edge_type)?
-                }
-                (EdgeDirection::Incoming, None) => self.storage.get_edges_to_node(node_id)?,
-                (EdgeDirection::Both, Some(edge_type)) => {
-                    let mut edges = self
-                        .storage
-                        .get_edges_from_node_by_type(node_id, edge_type)?;
-                    edges.extend(self.storage.get_edges_to_node_by_type(node_id, edge_type)?);
-                    edges
-                }
-                (EdgeDirection::Both, None) => {
-                    let mut edges = self.storage.get_edges_from_node(node_id)?;
-                    edges.extend(self.storage.get_edges_to_node(node_id)?);
-                    edges
-                }
-            }
+            self.storage.get_adjacent_edges(
+                node_id,
+                match edge.direction {
+                    EdgeDirection::Outgoing => EdgeAdjacencyDirection::Outgoing,
+                    EdgeDirection::Incoming => EdgeAdjacencyDirection::Incoming,
+                    EdgeDirection::Both => EdgeAdjacencyDirection::Both,
+                },
+                edge.rel_type.as_deref(),
+            )?
         };
         let resolver = self.knowledge_policy_resolver()?;
         let mut visible = Vec::with_capacity(candidates.len());

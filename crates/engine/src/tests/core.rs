@@ -747,6 +747,32 @@ fn test_execute_routes_pipeline_create_reuses_bound_nodes() {
 }
 
 #[test]
+fn test_storage_mvcc_visible_reads_are_reachable_from_copperdb() {
+    let db = CopperDb::open_temporary().unwrap();
+    db.execute("CREATE (n:Person {name: 'Ada'})", Default::default())
+        .unwrap();
+    let snapshot = db.storage().begin_mvcc_snapshot();
+    let mut current = db.storage().get_nodes_by_label("Person").unwrap();
+    assert_eq!(current.len(), 1);
+    let mut updated = current.pop().unwrap();
+    updated.labels = vec!["Device".to_string()];
+    updated.updated_at_unix_ms += 1;
+    db.storage().put_node_record(&updated).unwrap();
+
+    assert!(db
+        .storage()
+        .get_nodes_by_label("Person")
+        .unwrap()
+        .is_empty());
+    let visible_then = db
+        .storage()
+        .get_nodes_by_label_visible_at(&snapshot, "Person")
+        .unwrap();
+    assert_eq!(visible_then.len(), 1);
+    assert_eq!(visible_then[0].labels, vec!["Person".to_string()]);
+}
+
+#[test]
 fn test_execute_routes_pipeline_match_respects_bound_relationship_endpoints() {
     let db = CopperDb::open_temporary().unwrap();
     for cypher in [

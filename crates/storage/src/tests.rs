@@ -257,6 +257,48 @@ fn edge_record_indexes_are_maintained_and_updated() {
 }
 
 #[test]
+fn adjacent_edge_queries_respect_direction_and_type_filters() {
+    let engine = StorageEngine::open_temporary().unwrap();
+
+    let knows_out = sample_edge("db1:e1", "KNOWS", "db1:n1", "db1:n2");
+    let mentors_out = sample_edge("db1:e2", "MENTORS", "db1:n1", "db1:n3");
+    let knows_in = sample_edge("db1:e3", "KNOWS", "db1:n4", "db1:n1");
+
+    for edge in [&knows_out, &mentors_out, &knows_in] {
+        engine.put_edge_record(edge).unwrap();
+    }
+
+    assert_eq!(
+        engine
+            .get_adjacent_edges("db1:n1", EdgeAdjacencyDirection::Outgoing, None)
+            .unwrap(),
+        vec![knows_out.clone(), mentors_out.clone()]
+    );
+    assert_eq!(
+        engine
+            .get_adjacent_edges("db1:n1", EdgeAdjacencyDirection::Incoming, None)
+            .unwrap(),
+        vec![knows_in.clone()]
+    );
+    assert_eq!(
+        engine
+            .get_adjacent_edges("db1:n1", EdgeAdjacencyDirection::Both, None)
+            .unwrap(),
+        vec![knows_out.clone(), mentors_out.clone(), knows_in.clone()]
+    );
+    assert_eq!(
+        engine
+            .get_adjacent_edges("db1:n1", EdgeAdjacencyDirection::Both, Some("KNOWS"))
+            .unwrap(),
+        vec![knows_out, knows_in]
+    );
+    assert!(engine
+        .get_adjacent_edges("db1:n1", EdgeAdjacencyDirection::Both, Some("LIKES"))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn prefix_scan_counts_and_namespace_listing_are_deterministic() {
     let engine = StorageEngine::open_temporary().unwrap();
 
@@ -281,9 +323,562 @@ fn prefix_scan_counts_and_namespace_listing_are_deterministic() {
     assert_eq!(engine.node_count_by_prefix("beta:").unwrap(), 1);
     assert_eq!(engine.edge_count_by_prefix("alpha:").unwrap(), 1);
     assert_eq!(engine.edge_count_by_prefix("beta:").unwrap(), 1);
+    assert_eq!(
+        engine
+            .node_count_by_label_in_namespace("alpha", "Person")
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        engine
+            .node_count_by_label_in_namespace("beta", "Robot")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine
+            .node_count_by_label_in_namespace("beta", "Person")
+            .unwrap(),
+        0
+    );
 
     let namespaces = engine.list_namespaces().unwrap();
     assert_eq!(namespaces, vec!["alpha".to_string(), "beta".to_string()]);
+
+    engine
+        .put_node_record(&sample_node("alpha:n1", &["Robot"]))
+        .unwrap();
+    assert_eq!(engine.node_count_by_prefix("alpha:").unwrap(), 2);
+    assert_eq!(
+        engine
+            .node_count_by_label_in_namespace("alpha", "Person")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        engine
+            .node_count_by_label_in_namespace("alpha", "Robot")
+            .unwrap(),
+        1
+    );
+
+    engine.delete_node_record("beta:n1").unwrap();
+    engine.delete_edge_record("beta:e1").unwrap();
+    assert_eq!(engine.node_count_by_prefix("beta:").unwrap(), 0);
+    assert_eq!(engine.edge_count_by_prefix("beta:").unwrap(), 0);
+    assert_eq!(
+        engine
+            .node_count_by_label_in_namespace("beta", "Robot")
+            .unwrap(),
+        0
+    );
+    assert_eq!(engine.list_namespaces().unwrap(), vec!["alpha".to_string()]);
+}
+
+#[test]
+fn namespace_scoped_schema_is_isolated_from_global_catalog() {
+    let engine = StorageEngine::open_temporary().unwrap();
+
+    let global_constraint = Constraint {
+        name: "global_person_email_unique".to_string(),
+        constraint_type: ConstraintType::Unique,
+        entity_type: ConstraintEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["email".to_string()],
+    };
+    let alpha_constraint = Constraint {
+        name: "alpha_person_name_exists".to_string(),
+        constraint_type: ConstraintType::Exists,
+        entity_type: ConstraintEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["name".to_string()],
+    };
+    let alpha_index = IndexDefinition {
+        name: "alpha_person_name_idx".to_string(),
+        entity_type: IndexEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["name".to_string()],
+        kind: IndexKind::Range,
+    };
+    let beta_index = IndexDefinition {
+        name: "beta_robot_model_idx".to_string(),
+        entity_type: IndexEntityType::Node,
+        label: "Robot".to_string(),
+        properties: vec!["model".to_string()],
+        kind: IndexKind::Range,
+    };
+
+    engine.persist_constraint(&global_constraint).unwrap();
+    engine
+        .persist_constraint_for_namespace("alpha", &alpha_constraint)
+        .unwrap();
+    engine
+        .persist_index_definition_for_namespace("alpha", &alpha_index)
+        .unwrap();
+    engine
+        .persist_index_definition_for_namespace("beta", &beta_index)
+        .unwrap();
+
+    let alpha_schema = engine.schema_for_namespace("alpha").unwrap();
+    assert_eq!(alpha_schema.constraints, vec![alpha_constraint.clone()]);
+    assert_eq!(alpha_schema.indexes, vec![alpha_index.clone()]);
+
+    let beta_schema = engine.schema_for_namespace("beta").unwrap();
+    assert!(beta_schema.constraints.is_empty());
+    assert_eq!(beta_schema.indexes, vec![beta_index]);
+
+    assert_eq!(engine.load_constraints().unwrap(), vec![global_constraint]);
+}
+
+#[test]
+fn delete_by_prefix_removes_namespace_records_indexes_stats_and_schema() {
+    let engine = StorageEngine::open_temporary().unwrap();
+
+    engine
+        .put_node_record(&sample_node("alpha:n1", &["Person"]))
+        .unwrap();
+    engine
+        .put_node_record(&sample_node("alpha:n2", &["Person"]))
+        .unwrap();
+    engine
+        .put_node_record(&sample_node("beta:n1", &["Person"]))
+        .unwrap();
+    engine
+        .put_edge_record(&sample_edge("alpha:e1", "KNOWS", "alpha:n1", "alpha:n2"))
+        .unwrap();
+    engine
+        .put_edge_record(&sample_edge("beta:e1", "KNOWS", "beta:n1", "beta:n1"))
+        .unwrap();
+
+    let alpha_constraint = Constraint {
+        name: "alpha_person_name_exists".to_string(),
+        constraint_type: ConstraintType::Exists,
+        entity_type: ConstraintEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["name".to_string()],
+    };
+    let alpha_index = IndexDefinition {
+        name: "alpha_person_name_idx".to_string(),
+        entity_type: IndexEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["name".to_string()],
+        kind: IndexKind::Range,
+    };
+    engine
+        .persist_constraint_for_namespace("alpha", &alpha_constraint)
+        .unwrap();
+    engine
+        .persist_index_definition_for_namespace("alpha", &alpha_index)
+        .unwrap();
+
+    let (nodes_deleted, edges_deleted) = engine.delete_by_prefix("alpha:").unwrap();
+    assert_eq!((nodes_deleted, edges_deleted), (2, 1));
+
+    assert!(engine.get_node_record("alpha:n1").unwrap().is_none());
+    assert!(engine.get_edge_record("alpha:e1").unwrap().is_none());
+    assert!(engine.get_node_record("beta:n1").unwrap().is_some());
+    assert!(engine.get_edge_record("beta:e1").unwrap().is_some());
+
+    assert_eq!(
+        engine
+            .get_nodes_by_label("Person")
+            .unwrap()
+            .into_iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>(),
+        vec!["beta:n1".to_string()]
+    );
+    assert_eq!(
+        engine
+            .get_edges_by_type("KNOWS")
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec!["beta:e1".to_string()]
+    );
+    assert_eq!(engine.node_count_by_prefix("alpha:").unwrap(), 0);
+    assert_eq!(engine.edge_count_by_prefix("alpha:").unwrap(), 0);
+    assert_eq!(
+        engine
+            .node_count_by_label_in_namespace("alpha", "Person")
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine.schema_for_namespace("alpha").unwrap(),
+        NamespaceSchema::default()
+    );
+    assert_eq!(engine.list_namespaces().unwrap(), vec!["beta".to_string()]);
+}
+
+#[test]
+fn delete_by_prefix_rejects_empty_prefix_and_reports_missing_prefix() {
+    let engine = StorageEngine::open_temporary().unwrap();
+
+    let err = engine.delete_by_prefix("").unwrap_err();
+    assert!(matches!(err, StorageError::EmptyPrefix));
+    assert_eq!(err.to_string(), "prefix cannot be empty");
+
+    engine
+        .put_node_record(&sample_node("alpha:n1", &["Person"]))
+        .unwrap();
+
+    assert_eq!(engine.delete_by_prefix("missing:").unwrap(), (0, 0));
+    assert!(engine.get_node_record("alpha:n1").unwrap().is_some());
+}
+
+#[test]
+fn streaming_apis_visit_nodes_edges_prefixes_and_chunks_in_order() {
+    let engine = StorageEngine::open_temporary().unwrap();
+
+    for node_id in ["alpha:n1", "alpha:n2", "beta:n1"] {
+        engine
+            .put_node_record(&sample_node(node_id, &["Person"]))
+            .unwrap();
+    }
+    for edge in [
+        sample_edge("alpha:e1", "KNOWS", "alpha:n1", "alpha:n2"),
+        sample_edge("beta:e1", "KNOWS", "beta:n1", "beta:n1"),
+    ] {
+        engine.put_edge_record(&edge).unwrap();
+    }
+
+    let mut node_ids = Vec::new();
+    let streamed = engine
+        .stream_node_records(|node| {
+            node_ids.push(node.id);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(streamed, 3);
+    assert_eq!(node_ids, vec!["alpha:n1", "alpha:n2", "beta:n1"]);
+
+    let mut alpha_node_ids = Vec::new();
+    let streamed = engine
+        .stream_node_records_by_prefix("alpha:", |node| {
+            alpha_node_ids.push(node.id);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(streamed, 2);
+    assert_eq!(alpha_node_ids, vec!["alpha:n1", "alpha:n2"]);
+
+    let mut edge_ids = Vec::new();
+    let streamed = engine
+        .stream_edge_records(|edge| {
+            edge_ids.push(edge.id);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(streamed, 2);
+    assert_eq!(edge_ids, vec!["alpha:e1", "beta:e1"]);
+
+    let mut chunks = Vec::new();
+    let streamed = engine
+        .stream_node_record_chunks(2, |chunk| {
+            chunks.push(chunk.iter().map(|node| node.id.clone()).collect::<Vec<_>>());
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(streamed, 3);
+    assert_eq!(
+        chunks,
+        vec![
+            vec!["alpha:n1".to_string(), "alpha:n2".to_string()],
+            vec!["beta:n1".to_string()],
+        ]
+    );
+}
+
+#[test]
+fn streaming_apis_propagate_callback_errors_and_reject_zero_chunk_size() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    engine
+        .put_node_record(&sample_node("alpha:n1", &["Person"]))
+        .unwrap();
+    engine
+        .put_edge_record(&sample_edge("alpha:e1", "KNOWS", "alpha:n1", "alpha:n1"))
+        .unwrap();
+
+    let err = engine
+        .stream_node_records(|_| Err(StorageError::NotFound("node callback".to_string())))
+        .unwrap_err();
+    assert!(matches!(err, StorageError::NotFound(message) if message == "node callback"));
+
+    let err = engine
+        .stream_edge_records(|_| Err(StorageError::NotFound("edge callback".to_string())))
+        .unwrap_err();
+    assert!(matches!(err, StorageError::NotFound(message) if message == "edge callback"));
+
+    let err = engine.stream_node_record_chunks(0, |_| Ok(())).unwrap_err();
+    assert!(matches!(err, StorageError::InvalidChunkSize(0)));
+    assert_eq!(err.to_string(), "invalid chunk size: 0");
+}
+
+#[test]
+fn namespaced_storage_engine_isolates_crud_queries_and_counts() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let tenant_a = engine.for_namespace("tenant_a");
+    let tenant_b = engine.for_namespace("tenant_b");
+
+    let mut tenant_a_n1 = sample_node("n1", &["Person"]);
+    tenant_a_n1
+        .properties
+        .insert("tenant".to_string(), json!("a"));
+    let mut tenant_a_n2 = sample_node("n2", &["Person"]);
+    tenant_a_n2
+        .properties
+        .insert("tenant".to_string(), json!("a"));
+    let mut tenant_b_n1 = sample_node("n1", &["Person"]);
+    tenant_b_n1
+        .properties
+        .insert("tenant".to_string(), json!("b"));
+
+    tenant_a.put_node_record(&tenant_a_n1).unwrap();
+    tenant_a.put_node_record(&tenant_a_n2).unwrap();
+    tenant_b.put_node_record(&tenant_b_n1).unwrap();
+
+    let mut tenant_a_edge = sample_edge("e1", "KNOWS", "n1", "n2");
+    tenant_a_edge
+        .properties
+        .insert("tenant".to_string(), json!("a"));
+    tenant_a.put_edge_record(&tenant_a_edge).unwrap();
+
+    assert!(engine.get_node_record("tenant_a:n1").unwrap().is_some());
+    assert!(engine.get_node_record("tenant_b:n1").unwrap().is_some());
+    assert_eq!(tenant_a.get_node_record("n1").unwrap().unwrap().id, "n1");
+    assert_eq!(tenant_b.get_node_record("n1").unwrap().unwrap().id, "n1");
+    assert!(tenant_a.get_edge_record("e1").unwrap().is_some());
+
+    assert_eq!(tenant_a.node_count().unwrap(), 2);
+    assert_eq!(tenant_b.node_count().unwrap(), 1);
+    assert_eq!(tenant_a.edge_count().unwrap(), 1);
+    assert_eq!(tenant_b.edge_count().unwrap(), 0);
+    assert_eq!(tenant_a.node_count_by_label("Person").unwrap(), 2);
+    assert_eq!(tenant_b.node_count_by_label("Person").unwrap(), 1);
+
+    assert_eq!(
+        tenant_a
+            .get_nodes_by_label("Person")
+            .unwrap()
+            .into_iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>(),
+        vec!["n1".to_string(), "n2".to_string()]
+    );
+    assert_eq!(
+        tenant_b
+            .get_nodes_by_label("Person")
+            .unwrap()
+            .into_iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>(),
+        vec!["n1".to_string()]
+    );
+    assert_eq!(
+        tenant_a
+            .get_edges_from_node("n1")
+            .unwrap()
+            .into_iter()
+            .map(|edge| (edge.id, edge.start_node, edge.end_node))
+            .collect::<Vec<_>>(),
+        vec![("e1".to_string(), "n1".to_string(), "n2".to_string())]
+    );
+    assert_eq!(
+        tenant_a
+            .get_adjacent_edges("n2", EdgeAdjacencyDirection::Incoming, Some("KNOWS"))
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec!["e1".to_string()]
+    );
+    assert!(tenant_b.get_edges_by_type("KNOWS").unwrap().is_empty());
+}
+
+#[test]
+fn namespaced_storage_engine_streams_schema_and_deletes_within_namespace() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let tenant_a = engine.for_namespace("tenant_a");
+    let tenant_b = engine.for_namespace("tenant_b");
+
+    tenant_a
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+    tenant_a
+        .put_node_record(&sample_node("n2", &["Person"]))
+        .unwrap();
+    tenant_b
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+    tenant_a
+        .put_edge_record(&sample_edge("e1", "KNOWS", "n1", "n2"))
+        .unwrap();
+    tenant_b
+        .put_edge_record(&sample_edge("e1", "KNOWS", "n1", "n1"))
+        .unwrap();
+
+    let tenant_a_constraint = Constraint {
+        name: "tenant_a_person_name_exists".to_string(),
+        constraint_type: ConstraintType::Exists,
+        entity_type: ConstraintEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["name".to_string()],
+    };
+    let tenant_a_index = IndexDefinition {
+        name: "tenant_a_person_name_idx".to_string(),
+        entity_type: IndexEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["name".to_string()],
+        kind: IndexKind::Range,
+    };
+    engine
+        .persist_constraint_for_namespace("tenant_a", &tenant_a_constraint)
+        .unwrap();
+    engine
+        .persist_index_definition_for_namespace("tenant_a", &tenant_a_index)
+        .unwrap();
+
+    assert_eq!(
+        tenant_a.schema().unwrap(),
+        NamespaceSchema {
+            constraints: vec![tenant_a_constraint],
+            indexes: vec![tenant_a_index],
+        }
+    );
+
+    let mut streamed_nodes = Vec::new();
+    let streamed = tenant_a
+        .stream_node_records(|node| {
+            streamed_nodes.push(node.id);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(streamed, 2);
+    assert_eq!(streamed_nodes, vec!["n1", "n2"]);
+
+    let mut streamed_edges = Vec::new();
+    let streamed = tenant_a
+        .stream_edge_records(|edge| {
+            streamed_edges.push((edge.id, edge.start_node, edge.end_node));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(streamed, 1);
+    assert_eq!(
+        streamed_edges,
+        vec![("e1".to_string(), "n1".to_string(), "n2".to_string())]
+    );
+
+    assert_eq!(tenant_a.all_nodes().unwrap().len(), 2);
+    assert_eq!(tenant_b.all_nodes().unwrap().len(), 1);
+
+    assert_eq!(tenant_a.delete_all().unwrap(), (2, 1));
+    assert!(tenant_a.all_nodes().unwrap().is_empty());
+    assert!(tenant_a.all_edges().unwrap().is_empty());
+    assert_eq!(tenant_a.schema().unwrap(), NamespaceSchema::default());
+    assert_eq!(tenant_b.all_nodes().unwrap().len(), 1);
+    assert_eq!(tenant_b.all_edges().unwrap().len(), 1);
+}
+
+#[test]
+fn storage_engine_exposes_mvcc_visible_reads_and_lifecycle_controls() {
+    let engine = StorageEngine::open_temporary().unwrap();
+
+    let mut node = sample_node("n1", &["Person"]);
+    node.properties.insert("state".to_string(), json!("v1"));
+    engine.put_node_record(&node).unwrap();
+    engine
+        .put_edge_record(&sample_edge("e1", "KNOWS", "n1", "n1"))
+        .unwrap();
+    let snapshot = engine.begin_mvcc_snapshot();
+
+    let mut updated = sample_node("n1", &["Device"]);
+    updated.properties.insert("state".to_string(), json!("v2"));
+    engine.put_node_record(&updated).unwrap();
+    engine
+        .put_edge_record(&sample_edge("e1", "SEES", "n1", "n1"))
+        .unwrap();
+
+    assert!(engine.get_nodes_by_label("Person").unwrap().is_empty());
+    assert!(engine.get_edges_by_type("KNOWS").unwrap().is_empty());
+    assert_eq!(
+        engine
+            .get_nodes_by_label_visible_at(&snapshot, "Person")
+            .unwrap()
+            .into_iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>(),
+        vec!["n1".to_string()]
+    );
+    assert_eq!(
+        engine
+            .get_edges_by_type_visible_at(&snapshot, "KNOWS")
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec!["e1".to_string()]
+    );
+
+    engine.pause_lifecycle();
+    assert!(engine.lifecycle_status().paused);
+    engine.set_lifecycle_schedule_ms(7_500);
+    assert_eq!(engine.lifecycle_status().schedule_interval_ms, 7_500);
+    assert!(!engine.top_lifecycle_debt_keys(4).is_empty());
+    engine.resume_lifecycle();
+    assert!(!engine.lifecycle_status().paused);
+}
+
+#[test]
+fn namespaced_storage_engine_delegates_mvcc_visible_reads_and_lifecycle_controls() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let tenant_a = engine.for_namespace("tenant_a");
+    let tenant_b = engine.for_namespace("tenant_b");
+
+    tenant_a
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+    tenant_b
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+    tenant_a
+        .put_edge_record(&sample_edge("e1", "KNOWS", "n1", "n1"))
+        .unwrap();
+    let snapshot = tenant_a.begin_mvcc_snapshot();
+
+    tenant_a
+        .put_node_record(&sample_node("n1", &["Device"]))
+        .unwrap();
+    tenant_a
+        .put_edge_record(&sample_edge("e1", "SEES", "n1", "n1"))
+        .unwrap();
+
+    assert_eq!(
+        tenant_a
+            .get_nodes_by_label_visible_at(&snapshot, "Person")
+            .unwrap()
+            .into_iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>(),
+        vec!["n1".to_string()]
+    );
+    assert!(tenant_b
+        .get_edges_by_type_visible_at(&snapshot, "KNOWS")
+        .unwrap()
+        .is_empty());
+
+    tenant_a.pause_lifecycle();
+    assert!(tenant_a.lifecycle_status().paused);
+    tenant_a.set_lifecycle_schedule_ms(12_000);
+    assert_eq!(tenant_a.lifecycle_status().schedule_interval_ms, 12_000);
+    let debt = tenant_a.top_lifecycle_debt_keys(8);
+    assert!(debt
+        .iter()
+        .all(|entry| !entry.logical_key.contains("tenant_a:")));
+    tenant_a.resume_lifecycle();
+    assert!(!tenant_a.lifecycle_status().paused);
 }
 
 #[test]
@@ -476,6 +1071,9 @@ fn mvcc_lifecycle_status_reports_debt_and_reader_pressure() {
     mvcc.commit_batch(vec![("node:1".to_string(), Some(b"v3".to_vec()))]);
 
     let status = mvcc.lifecycle_status();
+    assert!(status.enabled);
+    assert!(!status.paused);
+    assert_eq!(status.schedule_interval_ms, 60_000);
     assert_eq!(status.floor, 0);
     assert_eq!(status.head, 3);
     assert_eq!(status.oldest_active_reader, Some(1));
@@ -490,6 +1088,226 @@ fn mvcc_lifecycle_status_reports_debt_and_reader_pressure() {
     assert_eq!(status.active_reader_count, 0);
     assert_eq!(status.suggested_prune_floor, 3);
     assert_eq!(status.prune_debt, 2);
+}
+
+#[test]
+fn mvcc_churn_prune_bounds_retained_chain_and_hides_pre_floor_reads() {
+    let mvcc = MvccStore::new();
+    mvcc.commit_batch(vec![("node:1".to_string(), Some(b"seed".to_vec()))]);
+
+    for iteration in 1..=24 {
+        mvcc.commit_batch(vec![(
+            "node:1".to_string(),
+            Some(format!("live-{iteration}").into_bytes()),
+        )]);
+        if iteration % 6 == 0 {
+            mvcc.commit_batch(vec![("node:1".to_string(), None)]);
+            mvcc.commit_batch(vec![(
+                "node:1".to_string(),
+                Some(format!("ghost-reset-{iteration}").into_bytes()),
+            )]);
+        }
+    }
+
+    let head_before = mvcc.current_head_for_key("node:1").unwrap();
+    assert!(mvcc.retained_version_count() > 12);
+
+    let removed = mvcc.trigger_prune_now(3);
+    assert!(removed > 0);
+
+    let head_after = mvcc.current_head_for_key("node:1").unwrap();
+    assert_eq!(head_after.head, head_before.head);
+    assert!(!head_after.tombstoned);
+    assert!(head_after.floor >= head_before.floor);
+    assert!(mvcc.retained_version_count() <= 4);
+
+    let latest_snapshot = mvcc.begin_snapshot();
+    assert_eq!(
+        mvcc.read(&latest_snapshot, "node:1"),
+        Some(b"ghost-reset-24".to_vec())
+    );
+
+    let floor_snapshot = MvccSnapshot {
+        id: head_after.floor,
+        read_ts: head_after.floor,
+    };
+    assert!(mvcc.read(&floor_snapshot, "node:1").is_some());
+
+    let pre_floor = head_after.floor.saturating_sub(1);
+    let pre_floor_snapshot = MvccSnapshot {
+        id: pre_floor,
+        read_ts: pre_floor,
+    };
+    assert_eq!(mvcc.read(&pre_floor_snapshot, "node:1"), None);
+}
+
+#[test]
+fn mvcc_lifecycle_admin_controls_surface_pause_schedule_and_debt_keys() {
+    let mvcc = MvccStore::new();
+    mvcc.commit_batch(vec![("node:1".to_string(), Some(b"v1".to_vec()))]);
+    mvcc.commit_batch(vec![("node:1".to_string(), Some(b"v2".to_vec()))]);
+    mvcc.commit_batch(vec![("node:1".to_string(), Some(b"v3".to_vec()))]);
+    mvcc.commit_batch(vec![("node:2".to_string(), Some(b"a1".to_vec()))]);
+    mvcc.commit_batch(vec![("node:2".to_string(), Some(b"a2".to_vec()))]);
+
+    let debt = mvcc.top_lifecycle_debt_keys(2);
+    assert_eq!(debt.len(), 2);
+    assert_eq!(
+        debt[0],
+        MvccLifecycleDebtKey {
+            logical_key: "node:1".to_string(),
+            retained_versions: 3,
+            prune_debt: 2,
+        }
+    );
+    assert_eq!(
+        debt[1],
+        MvccLifecycleDebtKey {
+            logical_key: "node:2".to_string(),
+            retained_versions: 2,
+            prune_debt: 1,
+        }
+    );
+
+    mvcc.pause_lifecycle();
+    assert!(mvcc.lifecycle_status().paused);
+
+    mvcc.set_lifecycle_schedule_ms(15_000);
+    assert_eq!(mvcc.lifecycle_status().schedule_interval_ms, 15_000);
+
+    mvcc.resume_lifecycle();
+    assert!(!mvcc.lifecycle_status().paused);
+}
+
+#[test]
+fn mvcc_indexed_visible_reads_follow_history_without_polluting_current_indexes() {
+    let mvcc = MvccStore::new();
+
+    let mut node = sample_node("n1", &["Person"]);
+    node.properties.insert("state".to_string(), json!("v1"));
+    mvcc.put_node_record(&node).unwrap();
+
+    let edge = sample_edge("e1", "KNOWS", "n1", "n1");
+    mvcc.put_edge_record(&edge).unwrap();
+    let before_change = mvcc.begin_snapshot();
+
+    let mut updated_node = sample_node("n1", &["Device"]);
+    updated_node
+        .properties
+        .insert("state".to_string(), json!("v2"));
+    mvcc.put_node_record(&updated_node).unwrap();
+
+    let updated_edge = sample_edge("e1", "SEES", "n1", "n1");
+    mvcc.put_edge_record(&updated_edge).unwrap();
+
+    assert!(mvcc.get_nodes_by_label("Person").unwrap().is_empty());
+    assert_eq!(
+        mvcc.get_nodes_by_label("Device")
+            .unwrap()
+            .into_iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>(),
+        vec!["n1".to_string()]
+    );
+    assert!(mvcc.get_edges_by_type("KNOWS").unwrap().is_empty());
+    assert_eq!(
+        mvcc.get_edges_by_type("SEES")
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec!["e1".to_string()]
+    );
+
+    assert_eq!(
+        mvcc.get_nodes_by_label_visible_at(&before_change, "Person")
+            .unwrap()
+            .into_iter()
+            .map(|node| (node.id, node.properties.get("state").cloned()))
+            .collect::<Vec<_>>(),
+        vec![("n1".to_string(), Some(json!("v1")))]
+    );
+    assert!(mvcc
+        .get_nodes_by_label_visible_at(&before_change, "Device")
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        mvcc.get_edges_by_type_visible_at(&before_change, "KNOWS")
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec!["e1".to_string()]
+    );
+    assert!(mvcc
+        .get_edges_by_type_visible_at(&before_change, "SEES")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn namespaced_mvcc_store_delegates_lifecycle_controls_and_visible_reads() {
+    let mvcc = MvccStore::new();
+    let tenant_a = mvcc.for_namespace("tenant_a");
+    let tenant_b = mvcc.for_namespace("tenant_b");
+
+    tenant_a
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+    tenant_b
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+    tenant_a
+        .put_edge_record(&sample_edge("e1", "KNOWS", "n1", "n1"))
+        .unwrap();
+    let snapshot = tenant_a.begin_snapshot();
+
+    tenant_a
+        .put_node_record(&sample_node("n1", &["Device"]))
+        .unwrap();
+    tenant_a
+        .put_edge_record(&sample_edge("e1", "SEES", "n1", "n1"))
+        .unwrap();
+
+    assert_eq!(
+        tenant_a
+            .get_nodes_by_label_visible_at(&snapshot, "Person")
+            .unwrap()
+            .into_iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>(),
+        vec!["n1".to_string()]
+    );
+    assert!(tenant_b
+        .get_nodes_by_label_visible_at(&snapshot, "Person")
+        .unwrap()
+        .into_iter()
+        .all(|node| node.id == "n1"));
+    assert_eq!(
+        tenant_a
+            .get_edges_by_type_visible_at(&snapshot, "KNOWS")
+            .unwrap()
+            .into_iter()
+            .map(|edge| (edge.id, edge.start_node, edge.end_node))
+            .collect::<Vec<_>>(),
+        vec![("e1".to_string(), "n1".to_string(), "n1".to_string())]
+    );
+
+    tenant_a.pause_lifecycle();
+    assert!(tenant_a.lifecycle_status().paused);
+    tenant_a.set_lifecycle_schedule_ms(5_000);
+    assert_eq!(tenant_a.lifecycle_status().schedule_interval_ms, 5_000);
+    tenant_a.resume_lifecycle();
+    assert!(!tenant_a.lifecycle_status().paused);
+
+    let debt = tenant_a.top_lifecycle_debt_keys(4);
+    assert!(debt
+        .iter()
+        .all(|entry| entry.logical_key.starts_with("node:")
+            || entry.logical_key.starts_with("edge:")));
+    assert!(debt
+        .iter()
+        .all(|entry| !entry.logical_key.contains("tenant_a:")));
 }
 
 #[test]

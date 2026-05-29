@@ -101,10 +101,11 @@ NornicDB reference areas:
 copperDB current drift:
 
 - Async write-behind engine is missing. copperDB mutations are effectively synchronous against storage and do not expose NornicDB's flush hold/result model.
-- MVCC exists as a foundational baseline, but snapshot-visible indexed reads, temporal point-in-time lookup, and automated version pruning/rebuild orchestration remain incomplete.
+- MVCC now matches one important upstream architectural constraint more closely: `MvccStore` keeps current-head state separate from archived historical versions so hot-path reads stay pinned to the current head, old versions stay off the current index path, retained-floor anchoring prevents sparse post-prune ghost-chain reads, and a bounded lifecycle-control surface exists for pause/resume/schedule/debt inspection. The in-memory baseline also now has typed snapshot-visible label and edge-type reads plus a bounded namespaced wrapper that delegates those lifecycle controls through the namespace seam. Broader snapshot-visible indexed parity, temporal point-in-time lookup, and automated pruning/rebuild orchestration remain incomplete.
 - WAL exists as a focused baseline, but NornicDB's repair/diagnostic/segment lifecycle is much broader.
-- Prefix/namespace stats and adjacent-edge fast APIs are not fully ported. This affects counts, namespace dashboards, and BFS/shortest-path performance.
-- Streaming APIs and prefix delete/namespace deletion remain on the checklist and should stay prominent.
+- Prefix/namespace stats, namespace label-cardinality, adjacent-edge fast APIs, namespace-scoped schema snapshots, and callback-based node/edge/chunk streaming now have copperDB storage baselines. Deeper MVCC/temporal optional interfaces remain open.
+- Prefix delete/namespace deletion now has a storage baseline through structured prefix deletion with index, stats, and namespace-schema cleanup. Async streaming context cancellation and cache-merge behavior remain open under AsyncEngine parity.
+- A bounded namespaced storage wrapper now exists as `crates/storage::NamespacedStorageEngine`, built on those prefix/stat/schema helpers for namespace-local CRUD, counts, schema, and streaming. Broader namespaced parity still remains open where upstream layers also compose async, MVCC-visible, composite, and remote wrappers.
 
 ### Cache And Pool
 
@@ -116,7 +117,7 @@ copperDB current drift:
 - `txsession`: broadly aligned on session states, buffered operations, and logical transaction IDs.
 - `txsession` now has the right first seam for the hybrid direction: the local transaction clock can be abstracted behind a transaction-time oracle, but the distributed consensus-backed implementation and bookmark/read-fence semantics are still missing.
 - `retention`: broadly aligned on policies, legal holds, and erasure request state.
-- `multidb`: durable logical database catalog and the first per-DB config store/resolver baseline now exist, but NornicDB's broader per-DB key surface and downstream runtime consumers are still missing. This remains a high-priority cross-layer drift item.
+- `multidb`: durable logical database catalog and the first per-DB config store/resolver baseline now exist, and the catalog itself now consumes the namespace-aware storage wrapper instead of hand-encoding the `multidb:` prefix. NornicDB's broader per-DB key surface and downstream runtime consumers are still missing, so this remains a high-priority cross-layer drift item.
 
 Documentation actions:
 
@@ -343,9 +344,10 @@ Layer 2 MVCC extension-interface findings from NornicDB `pkg/storage/types.go`:
 - `MVCCIndexedVisibilityEngine`: historical label/type/topology query acceleration is not fully ported.
 - `TemporalLookupEngine`: temporal point-in-time lookup is not fully ported.
 - `TemporalMaintenanceEngine`: temporal history pruning is not fully ported.
-- `PrefixStatsEngine`: fast per-namespace counts without scans are not fully ported.
-- `AdjacentEdgesEngine`: dual-direction BFS adjacency in one transaction is not fully ported.
-- `NamespaceLabelStatsProvider`: per-namespace label cardinality is not fully ported.
+- `PrefixStatsEngine`: fast per-namespace node/edge counts now have a maintained storage baseline for namespace prefixes.
+- `AdjacentEdgesEngine`: dual-direction adjacency now has a storage-owned baseline consumed by local eval traversal.
+- `NamespaceLabelStatsProvider`: per-namespace label cardinality now has a maintained storage baseline.
+- `NamespaceSchemaProvider`: namespace-scoped schema snapshots now have a dedicated storage keyspace; this corrects the earlier planning assumption that the global schema catalog could stand in for isolated per-database schema.
 
 Layer 2 indexing architecture findings:
 
@@ -377,8 +379,8 @@ Layer 2 concrete missed parity rank order from the agent:
 4. `storage`: WAL segment repair and diagnostics are broader in NornicDB; copperDB needs explicit repair/corruption recovery seams.
 5. `config`: feature flag system is missing in copperDB; experimental and safety behavior cannot be toggled operationally.
 6. `indexing`: automatic index creation behavior is unclear/inferred; copperDB should document explicit DDL defaults and disabled automatic work.
-7. `storage`: `PrefixStatsEngine` is missing; namespace node/edge counts may require scans.
-8. `storage`: `AdjacentEdgesEngine` is missing; graph traversal/BFS can be slower without dual-direction adjacency APIs.
+7. `storage`: `PrefixStatsEngine` has a maintained namespace-prefix counter baseline; broader streaming and async count consistency remain open under async-engine parity.
+8. `storage`: `AdjacentEdgesEngine` has a storage-owned adjacent-edge baseline; broader remote/distributed traversal optimizations remain open where transport still exposes split directional calls.
 9. `encryption`: DEK caching and rotation behavior should be verified as explicit parity coverage.
 10. `config`: WAL auto-compaction defaults are not clearly documented in copperDB.
 

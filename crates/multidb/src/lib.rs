@@ -92,16 +92,17 @@ impl DatabaseManager {
     pub fn open(catalog_path: impl AsRef<Path>) -> Result<Self, MultiDbError> {
         let catalog_path = catalog_path.as_ref().to_path_buf();
         let storage = StorageEngine::open(&catalog_path)?;
+        let catalog = storage.for_namespace("multidb");
         let manager = Self {
             databases: DashMap::new(),
             config_overrides: DashMap::new(),
             catalog_path: Some(catalog_path),
         };
-        for node in storage.get_nodes_by_label(DATABASE_LABEL)? {
+        for node in catalog.get_nodes_by_label(DATABASE_LABEL)? {
             let database = database_from_node(&node)?;
             manager.databases.insert(database.name.clone(), database);
         }
-        for node in storage.get_nodes_by_label(DATABASE_CONFIG_LABEL)? {
+        for node in catalog.get_nodes_by_label(DATABASE_CONFIG_LABEL)? {
             let (name, overrides) = database_config_from_node(&node)?;
             manager.config_overrides.insert(name, overrides);
         }
@@ -227,7 +228,9 @@ impl DatabaseManager {
             return Ok(());
         };
         let storage = StorageEngine::open(path)?;
-        storage.put_node_record(&database_to_node(database)?)?;
+        storage
+            .for_namespace("multidb")
+            .put_node_record(&database_to_node(database)?)?;
         Ok(())
     }
 
@@ -240,14 +243,15 @@ impl DatabaseManager {
             return Ok(());
         };
         let storage = StorageEngine::open(path)?;
+        let catalog = storage.for_namespace("multidb");
         if overrides.is_empty() {
-            match storage.delete_node_record(&database_config_node_id(name)) {
+            match catalog.delete_node_record(&database_config_node_id(name)) {
                 Ok(()) => {}
                 Err(copperdb_storage::StorageError::NotFound(_)) => {}
                 Err(error) => return Err(error.into()),
             }
         } else {
-            storage.put_node_record(&database_config_to_node(name, overrides)?)?;
+            catalog.put_node_record(&database_config_to_node(name, overrides)?)?;
         }
         Ok(())
     }
@@ -257,8 +261,9 @@ impl DatabaseManager {
             return Ok(());
         };
         let storage = StorageEngine::open(path)?;
-        storage.delete_node_record(&database_node_id(name))?;
-        match storage.delete_node_record(&database_config_node_id(name)) {
+        let catalog = storage.for_namespace("multidb");
+        catalog.delete_node_record(&database_node_id(name))?;
+        match catalog.delete_node_record(&database_config_node_id(name)) {
             Ok(()) => {}
             Err(copperdb_storage::StorageError::NotFound(_)) => {}
             Err(error) => return Err(error.into()),
@@ -268,11 +273,11 @@ impl DatabaseManager {
 }
 
 fn database_node_id(name: &str) -> String {
-    format!("multidb:database:{name}")
+    format!("database:{name}")
 }
 
 fn database_config_node_id(name: &str) -> String {
-    format!("multidb:database-config:{name}")
+    format!("database-config:{name}")
 }
 
 fn database_to_node(database: &Database) -> Result<NodeRecord, MultiDbError> {
