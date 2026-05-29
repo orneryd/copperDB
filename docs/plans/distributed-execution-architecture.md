@@ -6,6 +6,8 @@ This document is the implementation contract for copperDB distributed writes, re
 
 This document defines one replicated placement at a time. The higher-level federated multi-shard AI fabric plan is defined in [federated-ai-fabric-architecture.md](federated-ai-fabric-architecture.md).
 
+Request cancellation and timeout propagation across HTTP, Bolt, gRPC, local execution, and mesh fan-out is defined in [request-cancellation-propagation.md](request-cancellation-propagation.md). Distributed execution envelopes must follow that contract once implemented so cancelled ingress work stops locally and across remote children instead of continuing expensive loops nobody is awaiting.
+
 ## Goals
 
 - Any healthy coordinator-capable node can accept a client write, read, or search request.
@@ -28,6 +30,7 @@ This document defines one replicated placement at a time. The higher-level feder
 - `DistributedWritePlan`: coordinator, target replicas, consistency level, and required acknowledgements.
 - `DistributedReadPlan`: coordinator, target replicas, consistency level, and required responses.
 - `DistributedSearchPlan`: latency-ranked search fan-out, bounded parallelism, and hedge deadline.
+- `RequestContext`: request id, parent lineage, deadline, cancellation handle, trace context, auth/compliance context, and optional read-fence/bookmark context. The implementation contract is documented in [request-cancellation-propagation.md](request-cancellation-propagation.md).
 
 ## Distributed Write Flow
 
@@ -69,6 +72,7 @@ Write execution rules:
 - A write that cannot satisfy the required acknowledgement count fails with `NoQuorum` and must not be reported as committed.
 - A distributed write that cannot obtain an authoritative transaction time from the oracle must also fail; quorum success alone is insufficient for the SI/RYOW path.
 - Late replica responses may still be accepted as durability progress, but they cannot change a client-visible failure into success after the coordinator has returned.
+- If the request context is cancelled before a transaction commit decision, the coordinator should request transaction abort when the write path has a transaction record/protocol capable of abort. For non-transactional Dynamo/quorum writes, cancellation before acknowledgement threshold stops surplus work and outstanding sends where possible, but in-flight acknowledgements can still make the result unknown. If commit/quorum success has already happened, cancellation cannot be reported as rollback.
 - Future remote transports should preserve the same plan and acknowledgement contract; only the transport implementation should change.
 
 ## Distributed Read Flow
@@ -109,6 +113,7 @@ Read execution rules:
 - Missing, stale, or older-version responses should enqueue read repair once versioned storage values are wired through the engine.
 - A read can return `None` only after the requested consistency level has responded and no newer value is found.
 - Degraded peers may serve reads when topology policy allows it; unreachable peers do not count toward consistency.
+- Reads must stop local merge/repair-adjacent work and cancel outstanding remote children when the request context is cancelled or its deadline expires.
 
 ## Distributed Search Flow
 
@@ -144,6 +149,7 @@ Search execution rules:
 - Topology ranks candidates by observed RTT plus cross-region penalty plus load divided by capacity weight.
 - Same-region search nodes are preferred when `request_region` is known and policy requests locality.
 - Hedged requests are issued after the plan hedge deadline to reduce p99 latency.
+- Hedged losers and surplus fan-out after enough successful results have been collected must be cancelled through the request context so remote nodes stop unnecessary work.
 - Result merging must be deterministic for equal scores, using stable document ids as tie breakers.
 - Vector offload through `qdrantgrpc` and internal remote execution through `nornicgrpc` must consume the same `DistributedSearchPlan` rather than inventing separate routing rules.
 
@@ -171,6 +177,7 @@ Search execution rules:
 - Peer health changes must flow through topology and alter future plans without changing the consistency contract.
 - Cross-region failures should prefer local quorum when requested and avoid global stalls for locality-scoped operations.
 - Transaction ordering must compare the authoritative transaction times attached to committed values. The local topology logical transaction ID format `(epoch, counter, node_ordinal)` remains the default/fallback allocator and merge helper until the consensus-backed oracle is fully threaded through the distributed write and read-fence paths.
+- Request cancellation is best-effort for stopping work, but write outcome is determined by the active transaction or quorum protocol. Before a durable transaction commit decision, cancellation should drive an abort path when one exists. During commit uncertainty, the result must be resolved as committed, aborted, or unknown rather than guessed. After commit/quorum success, cancellation stops surplus CPU and remote work but does not retract the write. Coordinators propagate deadlines passively and cancellation actively to remote children; remote nodes also expire in-flight request registry entries by deadline in case active cancel messages are lost.
 
 ## Implementation Order
 

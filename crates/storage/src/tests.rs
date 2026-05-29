@@ -619,6 +619,67 @@ fn streaming_apis_propagate_callback_errors_and_reject_zero_chunk_size() {
 }
 
 #[test]
+fn streaming_apis_treat_iteration_stopped_as_normal_completion() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    for node in [
+        sample_node("alpha:n1", &["Person"]),
+        sample_node("alpha:n2", &["Person"]),
+        sample_node("beta:n1", &["Person"]),
+    ] {
+        engine.put_node_record(&node).unwrap();
+    }
+    for edge in [
+        sample_edge("alpha:e1", "KNOWS", "alpha:n1", "alpha:n2"),
+        sample_edge("beta:e1", "KNOWS", "beta:n1", "beta:n1"),
+    ] {
+        engine.put_edge_record(&edge).unwrap();
+    }
+
+    let mut node_ids = Vec::new();
+    let streamed = engine
+        .stream_node_records(|node| {
+            node_ids.push(node.id);
+            if node_ids.len() == 2 {
+                return Err(StorageError::IterationStopped);
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(streamed, 2);
+    assert_eq!(node_ids, vec!["alpha:n1", "alpha:n2"]);
+
+    let mut alpha_ids = Vec::new();
+    let streamed = engine
+        .stream_node_records_by_prefix("alpha:", |node| {
+            alpha_ids.push(node.id);
+            Err(StorageError::IterationStopped)
+        })
+        .unwrap();
+    assert_eq!(streamed, 1);
+    assert_eq!(alpha_ids, vec!["alpha:n1"]);
+
+    let mut edge_ids = Vec::new();
+    let streamed = engine
+        .stream_edge_records(|edge| {
+            edge_ids.push(edge.id);
+            Err(StorageError::IterationStopped)
+        })
+        .unwrap();
+    assert_eq!(streamed, 1);
+    assert_eq!(edge_ids, vec!["alpha:e1"]);
+
+    let mut chunks = Vec::new();
+    let streamed = engine
+        .stream_node_record_chunks(2, |chunk| {
+            chunks.push(chunk.iter().map(|node| node.id.clone()).collect::<Vec<_>>());
+            Err(StorageError::IterationStopped)
+        })
+        .unwrap();
+    assert_eq!(streamed, 2);
+    assert_eq!(chunks, vec![vec!["alpha:n1".to_string(), "alpha:n2".to_string()]]);
+}
+
+#[test]
 fn namespaced_storage_engine_isolates_crud_queries_and_counts() {
     let engine = StorageEngine::open_temporary().unwrap();
     let tenant_a = engine.for_namespace("tenant_a");
@@ -1415,6 +1476,567 @@ fn async_storage_engine_pending_edge_type_index_rebuilds_and_evicts_on_flush() {
     async_engine.flush().unwrap();
     assert!(async_engine.pending_edge_ids_for_type("KNOWS").is_empty());
     assert!(async_engine.pending_edge_ids_for_type("LIKES").is_empty());
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_pending_adjacency_indexes_rebuild_and_evict_on_flush() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+        }),
+    );
+
+    async_engine
+        .put_edge_record(&sample_edge("e1", "KNOWS", "n1", "n2"))
+        .unwrap();
+    async_engine
+        .put_edge_record(&sample_edge("e2", "KNOWS", "n1", "n3"))
+        .unwrap();
+
+    assert_eq!(
+        async_engine.pending_edge_ids_from_start("n1"),
+        vec!["e1".to_string(), "e2".to_string()]
+    );
+    assert_eq!(async_engine.pending_edge_ids_to_end("n2"), vec!["e1".to_string()]);
+
+    let mut moved = sample_edge("e1", "KNOWS", "n4", "n1");
+    moved.updated_at_unix_ms += 1;
+    async_engine.put_edge_record(&moved).unwrap();
+
+    assert_eq!(async_engine.pending_edge_ids_from_start("n1"), vec!["e2".to_string()]);
+    assert!(async_engine.pending_edge_ids_to_end("n2").is_empty());
+    assert_eq!(async_engine.pending_edge_ids_from_start("n4"), vec!["e1".to_string()]);
+    assert_eq!(async_engine.pending_edge_ids_to_end("n1"), vec!["e1".to_string()]);
+
+    async_engine.flush().unwrap();
+    assert!(async_engine.pending_edge_ids_from_start("n1").is_empty());
+    assert!(async_engine.pending_edge_ids_to_end("n1").is_empty());
+    assert!(async_engine.pending_edge_ids_from_start("n4").is_empty());
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_effective_adjacency_reads_reflect_pending_edge_updates_before_flush() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+        }),
+    );
+
+    async_engine
+        .put_edge_record(&sample_edge("e1", "KNOWS", "n1", "n2"))
+        .unwrap();
+    async_engine
+        .put_edge_record(&sample_edge("e2", "KNOWS", "n3", "n1"))
+        .unwrap();
+    async_engine.flush().unwrap();
+
+    let mut moved = sample_edge("e1", "KNOWS", "n4", "n1");
+    moved.updated_at_unix_ms += 1;
+    async_engine.put_edge_record(&moved).unwrap();
+    async_engine.delete_edge_record("e2").unwrap();
+    async_engine
+        .put_edge_record(&sample_edge("e3", "LIKES", "n1", "n5"))
+        .unwrap();
+
+    assert_eq!(
+        async_engine
+            .get_persisted_adjacent_edges("n1", EdgeAdjacencyDirection::Outgoing, None)
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec!["e1".to_string()]
+    );
+    assert_eq!(
+        async_engine
+            .get_edges_from_node("n1")
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec!["e3".to_string()]
+    );
+    assert_eq!(
+        async_engine
+            .get_edges_to_node("n1")
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec!["e1".to_string()]
+    );
+    assert_eq!(
+        async_engine
+            .get_adjacent_edges("n1", EdgeAdjacencyDirection::Both, Some("KNOWS"))
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec!["e1".to_string()]
+    );
+    assert_eq!(
+        {
+            let mut ids = async_engine
+                .get_adjacent_edges("n1", EdgeAdjacencyDirection::Both, None)
+                .unwrap()
+                .into_iter()
+                .map(|edge| edge.id)
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids
+        },
+        vec!["e1".to_string(), "e3".to_string()]
+    );
+
+    async_engine.flush().unwrap();
+    assert_eq!(
+        {
+            let mut ids = async_engine
+                .get_persisted_adjacent_edges("n1", EdgeAdjacencyDirection::Both, None)
+                .unwrap()
+                .into_iter()
+                .map(|edge| edge.id)
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids
+        },
+        vec!["e1".to_string(), "e3".to_string()]
+    );
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_typed_adjacency_reads_reflect_pending_edge_updates_before_flush() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+        }),
+    );
+
+    async_engine
+        .put_edge_record(&sample_edge("e1", "KNOWS", "n1", "n2"))
+        .unwrap();
+    async_engine
+        .put_edge_record(&sample_edge("e2", "MENTORS", "n1", "n2"))
+        .unwrap();
+    async_engine
+        .put_edge_record(&sample_edge("e3", "KNOWS", "n3", "n1"))
+        .unwrap();
+    async_engine.flush().unwrap();
+
+    let mut moved = sample_edge("e1", "MENTORS", "n4", "n1");
+    moved.updated_at_unix_ms += 1;
+    async_engine.put_edge_record(&moved).unwrap();
+    async_engine.delete_edge_record("e2").unwrap();
+    async_engine
+        .put_edge_record(&sample_edge("e4", "KNOWS", "n1", "n5"))
+        .unwrap();
+
+    assert_eq!(
+        async_engine
+            .get_edges_from_node_by_type("n1", "KNOWS")
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec!["e4".to_string()]
+    );
+    assert!(async_engine.get_edges_from_node_by_type("n1", "MENTORS").unwrap().is_empty());
+    assert_eq!(
+        async_engine
+            .get_edges_to_node_by_type("n1", "MENTORS")
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec!["e1".to_string()]
+    );
+    assert_eq!(
+        async_engine
+            .get_edges_to_node_by_type("n1", "KNOWS")
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec!["e3".to_string()]
+    );
+
+    async_engine.flush().unwrap();
+    assert_eq!(
+        async_engine
+            .get_persisted_adjacent_edges("n1", EdgeAdjacencyDirection::Outgoing, Some("KNOWS"))
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec!["e4".to_string()]
+    );
+    assert_eq!(
+        async_engine
+            .get_persisted_adjacent_edges("n1", EdgeAdjacencyDirection::Incoming, Some("MENTORS"))
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec!["e1".to_string()]
+    );
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_all_and_stream_reads_merge_pending_updates_before_flush() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+        }),
+    );
+
+    async_engine
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+    async_engine
+        .put_node_record(&sample_node("n2", &["Person"]))
+        .unwrap();
+    async_engine
+        .put_edge_record(&sample_edge("e1", "KNOWS", "n1", "n2"))
+        .unwrap();
+    async_engine.flush().unwrap();
+
+    let mut updated = sample_node("n1", &["Device"]);
+    updated.updated_at_unix_ms += 1;
+    async_engine.put_node_record(&updated).unwrap();
+    async_engine
+        .put_node_record(&sample_node("n3", &["Robot"]))
+        .unwrap();
+    async_engine.delete_node_record("n2").unwrap();
+    async_engine.delete_edge_record("e1").unwrap();
+    async_engine
+        .put_edge_record(&sample_edge("e2", "LIKES", "n3", "n1"))
+        .unwrap();
+
+    assert_eq!(
+        async_engine
+            .get_persisted_all_node_records()
+            .unwrap()
+            .into_iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>(),
+        vec!["n1".to_string(), "n2".to_string()]
+    );
+    assert_eq!(
+        async_engine
+            .all_nodes()
+            .unwrap()
+            .into_iter()
+            .map(|node| (node.id, node.labels))
+            .collect::<Vec<_>>(),
+        vec![
+            ("n1".to_string(), vec!["Device".to_string()]),
+            ("n3".to_string(), vec!["Robot".to_string()]),
+        ]
+    );
+
+    let mut streamed_nodes = Vec::new();
+    let streamed_node_count = async_engine
+        .stream_node_records(|node| {
+            streamed_nodes.push((node.id, node.labels));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(streamed_node_count, 2);
+    assert_eq!(
+        streamed_nodes,
+        vec![
+            ("n1".to_string(), vec!["Device".to_string()]),
+            ("n3".to_string(), vec!["Robot".to_string()]),
+        ]
+    );
+
+    assert_eq!(
+        async_engine
+            .get_persisted_all_edges()
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec!["e1".to_string()]
+    );
+    assert_eq!(
+        async_engine
+            .all_edges()
+            .unwrap()
+            .into_iter()
+            .map(|edge| (edge.id, edge.edge_type, edge.start_node, edge.end_node))
+            .collect::<Vec<_>>(),
+        vec![(
+            "e2".to_string(),
+            "LIKES".to_string(),
+            "n3".to_string(),
+            "n1".to_string(),
+        )]
+    );
+
+    let mut streamed_edges = Vec::new();
+    let streamed_edge_count = async_engine
+        .stream_edge_records(|edge| {
+            streamed_edges.push((edge.id, edge.edge_type, edge.start_node, edge.end_node));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(streamed_edge_count, 1);
+    assert_eq!(
+        streamed_edges,
+        vec![(
+            "e2".to_string(),
+            "LIKES".to_string(),
+            "n3".to_string(),
+            "n1".to_string(),
+        )]
+    );
+
+    async_engine.flush().unwrap();
+    assert_eq!(
+        async_engine
+            .get_persisted_all_node_records()
+            .unwrap()
+            .into_iter()
+            .map(|node| (node.id, node.labels))
+            .collect::<Vec<_>>(),
+        vec![
+            ("n1".to_string(), vec!["Device".to_string()]),
+            ("n3".to_string(), vec!["Robot".to_string()]),
+        ]
+    );
+    assert_eq!(
+        async_engine
+            .get_persisted_all_edges()
+            .unwrap()
+            .into_iter()
+            .map(|edge| (edge.id, edge.edge_type, edge.start_node, edge.end_node))
+            .collect::<Vec<_>>(),
+        vec![(
+            "e2".to_string(),
+            "LIKES".to_string(),
+            "n3".to_string(),
+            "n1".to_string(),
+        )]
+    );
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_prefix_stream_reads_merge_pending_updates_before_flush() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+        }),
+    );
+
+    async_engine
+        .put_node_record(&sample_node("alpha:n1", &["Person"]))
+        .unwrap();
+    async_engine
+        .put_node_record(&sample_node("alpha:n2", &["Person"]))
+        .unwrap();
+    async_engine
+        .put_node_record(&sample_node("beta:n1", &["Person"]))
+        .unwrap();
+    async_engine.flush().unwrap();
+
+    let mut updated = sample_node("alpha:n1", &["Device"]);
+    updated.updated_at_unix_ms += 1;
+    async_engine.put_node_record(&updated).unwrap();
+    async_engine
+        .put_node_record(&sample_node("alpha:n3", &["Robot"]))
+        .unwrap();
+    async_engine.delete_node_record("alpha:n2").unwrap();
+    async_engine
+        .put_node_record(&sample_node("beta:n2", &["Ignored"]))
+        .unwrap();
+
+    let mut streamed_nodes = Vec::new();
+    let streamed_count = async_engine
+        .stream_node_records_by_prefix("alpha:", |node| {
+            streamed_nodes.push((node.id, node.labels));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(streamed_count, 2);
+    assert_eq!(
+        streamed_nodes,
+        vec![
+            ("alpha:n1".to_string(), vec!["Device".to_string()]),
+            ("alpha:n3".to_string(), vec!["Robot".to_string()]),
+        ]
+    );
+
+    async_engine.flush().unwrap();
+
+    let mut persisted_nodes = Vec::new();
+    let persisted_count = async_engine
+        .stream_node_records_by_prefix("alpha:", |node| {
+            persisted_nodes.push((node.id, node.labels));
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(persisted_count, 2);
+    assert_eq!(
+        persisted_nodes,
+        vec![
+            ("alpha:n1".to_string(), vec!["Device".to_string()]),
+            ("alpha:n3".to_string(), vec!["Robot".to_string()]),
+        ]
+    );
+
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_chunk_stream_reads_merge_pending_updates_before_flush() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+        }),
+    );
+
+    async_engine
+        .put_node_record(&sample_node("alpha:n1", &["Person"]))
+        .unwrap();
+    async_engine
+        .put_node_record(&sample_node("alpha:n2", &["Person"]))
+        .unwrap();
+    async_engine
+        .put_node_record(&sample_node("beta:n1", &["Person"]))
+        .unwrap();
+    async_engine.flush().unwrap();
+
+    let mut updated = sample_node("alpha:n1", &["Device"]);
+    updated.updated_at_unix_ms += 1;
+    async_engine.put_node_record(&updated).unwrap();
+    async_engine.delete_node_record("alpha:n2").unwrap();
+    async_engine
+        .put_node_record(&sample_node("gamma:n1", &["Robot"]))
+        .unwrap();
+
+    let mut chunks = Vec::new();
+    let streamed = async_engine
+        .stream_node_record_chunks(2, |chunk| {
+            chunks.push(
+                chunk
+                    .iter()
+                    .map(|node| (node.id.clone(), node.labels.clone()))
+                    .collect::<Vec<_>>(),
+            );
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(streamed, 3);
+    assert_eq!(
+        chunks,
+        vec![
+            vec![
+                ("alpha:n1".to_string(), vec!["Device".to_string()]),
+                ("beta:n1".to_string(), vec!["Person".to_string()]),
+            ],
+            vec![("gamma:n1".to_string(), vec!["Robot".to_string()])],
+        ]
+    );
+
+    let err = async_engine.stream_node_record_chunks(0, |_| Ok(())).unwrap_err();
+    assert!(matches!(err, StorageError::InvalidChunkSize(0)));
+
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_streaming_apis_treat_iteration_stopped_as_normal_completion() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+        }),
+    );
+
+    async_engine
+        .put_node_record(&sample_node("alpha:n1", &["Person"]))
+        .unwrap();
+    async_engine
+        .put_node_record(&sample_node("alpha:n2", &["Person"]))
+        .unwrap();
+    async_engine
+        .put_node_record(&sample_node("beta:n1", &["Person"]))
+        .unwrap();
+    async_engine
+        .put_edge_record(&sample_edge("alpha:e1", "KNOWS", "alpha:n1", "alpha:n2"))
+        .unwrap();
+    async_engine
+        .put_edge_record(&sample_edge("beta:e1", "KNOWS", "beta:n1", "beta:n1"))
+        .unwrap();
+    async_engine.flush().unwrap();
+
+    let mut updated = sample_node("alpha:n1", &["Device"]);
+    updated.updated_at_unix_ms += 1;
+    async_engine.put_node_record(&updated).unwrap();
+    async_engine.delete_node_record("alpha:n2").unwrap();
+    async_engine
+        .put_node_record(&sample_node("gamma:n1", &["Robot"]))
+        .unwrap();
+    async_engine.delete_edge_record("beta:e1").unwrap();
+    async_engine
+        .put_edge_record(&sample_edge("gamma:e1", "LIKES", "gamma:n1", "alpha:n1"))
+        .unwrap();
+
+    let mut node_ids = Vec::new();
+    let streamed = async_engine
+        .stream_node_records(|node| {
+            node_ids.push(node.id);
+            if node_ids.len() == 2 {
+                return Err(StorageError::IterationStopped);
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(streamed, 2);
+    assert_eq!(node_ids, vec!["alpha:n1", "beta:n1"]);
+
+    let mut alpha_ids = Vec::new();
+    let streamed = async_engine
+        .stream_node_records_by_prefix("alpha:", |node| {
+            alpha_ids.push(node.id);
+            Err(StorageError::IterationStopped)
+        })
+        .unwrap();
+    assert_eq!(streamed, 1);
+    assert_eq!(alpha_ids, vec!["alpha:n1"]);
+
+    let mut edge_ids = Vec::new();
+    let streamed = async_engine
+        .stream_edge_records(|edge| {
+            edge_ids.push(edge.id);
+            Err(StorageError::IterationStopped)
+        })
+        .unwrap();
+    assert_eq!(streamed, 1);
+    assert_eq!(edge_ids, vec!["alpha:e1"]);
+
+    let mut chunks = Vec::new();
+    let streamed = async_engine
+        .stream_node_record_chunks(2, |chunk| {
+            chunks.push(chunk.iter().map(|node| node.id.clone()).collect::<Vec<_>>());
+            Err(StorageError::IterationStopped)
+        })
+        .unwrap();
+    assert_eq!(streamed, 2);
+    assert_eq!(chunks, vec![vec!["alpha:n1".to_string(), "beta:n1".to_string()]]);
+
     async_engine.close().unwrap();
 }
 

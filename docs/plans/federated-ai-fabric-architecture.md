@@ -300,6 +300,7 @@ Envelope types:
 Transport requirements:
 
 - Every envelope carries `placement`, `coordinator`, `consistency`, `request_region`, auth/compliance context, query id, deadline, idempotency key, and trace context.
+- Every envelope must also align with [request-cancellation-propagation.md](request-cancellation-propagation.md): carry request id, parent lineage, narrowed deadline, and cancellation identity so HTTP/Bolt/gRPC ingress cancellation fans out across shard reads, writes, traversal expansion, ranked search, hydration, and hedged requests.
 - The router never sends directly to arbitrary server nodes; it sends to nodes selected by topology plans for the target placement.
 - Remote nodes validate that they are eligible participants for the requested placement before executing.
 - Results include responding node id, failed replicas, logical transaction watermark, partial result flag, and repair hints.
@@ -356,7 +357,7 @@ The complete AI fabric mesh needs these packages or modules beyond the current f
 4. Cross-shard traversal: frontier grouping by shard, bridge-edge expansion, shortest-path depth barrier, and path hydration.
 5. Distributed RRF search: lexical/vector/graph fanout, reciprocal-rank merge, policy filtering, and hydration.
 6. Multi-shard writes: idempotent sub-writes, bridge-edge writes, repair records, and failure-mode tests.
-7. Production communication: gRPC remote envelopes for every shard operation, deadline propagation, auth context, trace context, and participant validation.
+7. Production communication: gRPC remote envelopes for every shard operation, request cancellation propagation, deadline propagation, auth context, trace context, and participant validation.
 8. Rebalancing: shard split/move/copy, dual-write or catch-up, cutover, and cleanup.
 
 Current implementation status:

@@ -1,6 +1,6 @@
 use crate::{
-    EdgeRecord, MvccLifecycleDebtKey, MvccLifecycleStatus, MvccPruneOptions, MvccSnapshot,
-    MvccSnapshotLease, NodeRecord, StorageEngine, StorageError,
+    EdgeAdjacencyDirection, EdgeRecord, MvccLifecycleDebtKey, MvccLifecycleStatus,
+    MvccPruneOptions, MvccSnapshot, MvccSnapshotLease, NodeRecord, StorageEngine, StorageError,
 };
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,6 +56,8 @@ struct PendingState {
     edges: BTreeMap<String, Option<EdgeRecord>>,
     node_label_index: BTreeMap<String, BTreeSet<String>>,
     edge_type_index: BTreeMap<String, BTreeSet<String>>,
+    edge_start_index: BTreeMap<String, BTreeSet<String>>,
+    edge_end_index: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl PendingState {
@@ -86,6 +88,8 @@ impl PendingState {
         let edges = mem::take(&mut self.edges).into_iter().collect();
         self.node_label_index.clear();
         self.edge_type_index.clear();
+        self.edge_start_index.clear();
+        self.edge_end_index.clear();
         (nodes, edges)
     }
 
@@ -137,6 +141,20 @@ impl PendingState {
         self.edges.iter()
     }
 
+    fn edge_ids_from_start(&self, node_id: &str) -> Vec<String> {
+        self.edge_start_index
+            .get(node_id)
+            .map(|ids| ids.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn edge_ids_to_end(&self, node_id: &str) -> Vec<String> {
+        self.edge_end_index
+            .get(node_id)
+            .map(|ids| ids.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
     fn index_node(&mut self, node: &NodeRecord) {
         for label in &node.labels {
             self.node_label_index
@@ -171,23 +189,51 @@ impl PendingState {
             .entry(edge.edge_type.clone())
             .or_default()
             .insert(edge.id.clone());
+        self.edge_start_index
+            .entry(edge.start_node.clone())
+            .or_default()
+            .insert(edge.id.clone());
+        self.edge_end_index
+            .entry(edge.end_node.clone())
+            .or_default()
+            .insert(edge.id.clone());
     }
 
     fn remove_edge_index_entry(&mut self, id: &str) {
-        let edge_type = self
+        let edge = self
             .edges
             .get(id)
             .and_then(|pending| pending.as_ref())
-            .map(|edge| edge.edge_type.clone());
-        if let Some(edge_type) = edge_type {
-            let remove_type = if let Some(ids) = self.edge_type_index.get_mut(&edge_type) {
+            .cloned();
+        if let Some(edge) = edge {
+            let remove_type = if let Some(ids) = self.edge_type_index.get_mut(&edge.edge_type) {
                 ids.remove(id);
                 ids.is_empty()
             } else {
                 false
             };
             if remove_type {
-                self.edge_type_index.remove(&edge_type);
+                self.edge_type_index.remove(&edge.edge_type);
+            }
+
+            let remove_start = if let Some(ids) = self.edge_start_index.get_mut(&edge.start_node) {
+                ids.remove(id);
+                ids.is_empty()
+            } else {
+                false
+            };
+            if remove_start {
+                self.edge_start_index.remove(&edge.start_node);
+            }
+
+            let remove_end = if let Some(ids) = self.edge_end_index.get_mut(&edge.end_node) {
+                ids.remove(id);
+                ids.is_empty()
+            } else {
+                false
+            };
+            if remove_end {
+                self.edge_end_index.remove(&edge.end_node);
             }
         }
     }
@@ -282,6 +328,13 @@ enum WorkerRequest {
         label: String,
         reply: Sender<Result<Vec<NodeRecord>, StorageError>>,
     },
+    GetNodeRecordsByPrefix {
+        prefix: String,
+        reply: Sender<Result<Vec<NodeRecord>, StorageError>>,
+    },
+    AllNodeRecords {
+        reply: Sender<Result<Vec<NodeRecord>, StorageError>>,
+    },
     NodeCountByPrefix {
         prefix: String,
         reply: Sender<Result<u64, StorageError>>,
@@ -297,6 +350,15 @@ enum WorkerRequest {
     },
     GetEdgesByType {
         edge_type: String,
+        reply: Sender<Result<Vec<EdgeRecord>, StorageError>>,
+    },
+    AllEdges {
+        reply: Sender<Result<Vec<EdgeRecord>, StorageError>>,
+    },
+    GetAdjacentEdges {
+        node_id: String,
+        direction: EdgeAdjacencyDirection,
+        edge_type: Option<String>,
         reply: Sender<Result<Vec<EdgeRecord>, StorageError>>,
     },
     EdgeCountByPrefix {
@@ -477,6 +539,137 @@ impl AsyncStorageEngine {
         Ok(nodes.into_values().collect())
     }
 
+    pub fn all_nodes(&self) -> Result<Vec<NodeRecord>, StorageError> {
+        let _flush_guard = self.shared.flush_lock.read();
+        let mut nodes = self
+            .get_persisted_all_node_records()?
+            .into_iter()
+            .map(|node| (node.id.clone(), node))
+            .collect::<BTreeMap<_, _>>();
+        let pending = self.shared.pending.lock();
+        for (id, pending_node) in pending.pending_nodes_iter() {
+            match pending_node {
+                Some(node) => {
+                    nodes.insert(id.clone(), node.clone());
+                }
+                None => {
+                    nodes.remove(id);
+                }
+            }
+        }
+        Ok(nodes.into_values().collect())
+    }
+
+    pub fn stream_node_records<F>(&self, mut visit: F) -> Result<u64, StorageError>
+    where
+        F: FnMut(NodeRecord) -> Result<(), StorageError>,
+    {
+        let mut streamed = 0;
+        for node in self.all_nodes()? {
+            match visit(node) {
+                Ok(()) => streamed += 1,
+                Err(StorageError::IterationStopped) => {
+                    streamed += 1;
+                    return Ok(streamed);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(streamed)
+    }
+
+    pub fn stream_node_records_by_prefix<F>(
+        &self,
+        prefix: &str,
+        mut visit: F,
+    ) -> Result<u64, StorageError>
+    where
+        F: FnMut(NodeRecord) -> Result<(), StorageError>,
+    {
+        let _flush_guard = self.shared.flush_lock.read();
+        let mut nodes = self
+            .get_persisted_node_records_by_prefix(prefix)?
+            .into_iter()
+            .map(|node| (node.id.clone(), node))
+            .collect::<BTreeMap<_, _>>();
+        let pending = self.shared.pending.lock();
+        for (id, pending_node) in pending.pending_nodes_iter() {
+            if !id.starts_with(prefix) {
+                continue;
+            }
+            match pending_node {
+                Some(node) => {
+                    nodes.insert(id.clone(), node.clone());
+                }
+                None => {
+                    nodes.remove(id);
+                }
+            }
+        }
+
+        let mut streamed = 0;
+        for node in nodes.into_values() {
+            match visit(node) {
+                Ok(()) => streamed += 1,
+                Err(StorageError::IterationStopped) => {
+                    streamed += 1;
+                    return Ok(streamed);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(streamed)
+    }
+
+    pub fn stream_node_record_chunks<F>(
+        &self,
+        chunk_size: usize,
+        mut visit: F,
+    ) -> Result<u64, StorageError>
+    where
+        F: FnMut(&[NodeRecord]) -> Result<(), StorageError>,
+    {
+        if chunk_size == 0 {
+            return Err(StorageError::InvalidChunkSize(0));
+        }
+
+        let mut chunk = Vec::with_capacity(chunk_size);
+        let mut stop_requested = false;
+        let mut streamed = 0;
+        let result = self.stream_node_records(|node| {
+            chunk.push(node);
+            streamed += 1;
+            if chunk.len() == chunk_size {
+                match visit(&chunk) {
+                    Ok(()) => {
+                        chunk.clear();
+                    }
+                    Err(StorageError::IterationStopped) => {
+                        stop_requested = true;
+                        return Err(StorageError::IterationStopped);
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            Ok(())
+        });
+
+        match result {
+            Ok(_) => {}
+            Err(StorageError::IterationStopped) => {}
+            Err(err) => return Err(err),
+        }
+
+        if !stop_requested && !chunk.is_empty() {
+            match visit(&chunk) {
+                Ok(()) | Err(StorageError::IterationStopped) => {}
+                Err(err) => return Err(err),
+            }
+        }
+
+        Ok(streamed)
+    }
+
     pub fn node_count_by_prefix(&self, prefix: &str) -> Result<u64, StorageError> {
         let _flush_guard = self.shared.flush_lock.read();
         let mut count = self.get_persisted_node_count_by_prefix(prefix)? as i64;
@@ -571,6 +764,109 @@ impl AsyncStorageEngine {
                 edges.remove(id);
             }
         }
+        Ok(edges.into_values().collect())
+    }
+
+    pub fn all_edges(&self) -> Result<Vec<EdgeRecord>, StorageError> {
+        let _flush_guard = self.shared.flush_lock.read();
+        let mut edges = self
+            .get_persisted_all_edges()?
+            .into_iter()
+            .map(|edge| (edge.id.clone(), edge))
+            .collect::<BTreeMap<_, _>>();
+        let pending = self.shared.pending.lock();
+        for (id, pending_edge) in pending.pending_edges_iter() {
+            match pending_edge {
+                Some(edge) => {
+                    edges.insert(id.clone(), edge.clone());
+                }
+                None => {
+                    edges.remove(id);
+                }
+            }
+        }
+        Ok(edges.into_values().collect())
+    }
+
+    pub fn stream_edge_records<F>(&self, mut visit: F) -> Result<u64, StorageError>
+    where
+        F: FnMut(EdgeRecord) -> Result<(), StorageError>,
+    {
+        let mut streamed = 0;
+        for edge in self.all_edges()? {
+            match visit(edge) {
+                Ok(()) => streamed += 1,
+                Err(StorageError::IterationStopped) => {
+                    streamed += 1;
+                    return Ok(streamed);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(streamed)
+    }
+
+    pub fn get_edges_from_node(&self, node_id: &str) -> Result<Vec<EdgeRecord>, StorageError> {
+        self.get_adjacent_edges(node_id, EdgeAdjacencyDirection::Outgoing, None)
+    }
+
+    pub fn get_edges_from_node_by_type(
+        &self,
+        node_id: &str,
+        edge_type: &str,
+    ) -> Result<Vec<EdgeRecord>, StorageError> {
+        self.get_adjacent_edges(node_id, EdgeAdjacencyDirection::Outgoing, Some(edge_type))
+    }
+
+    pub fn get_edges_to_node(&self, node_id: &str) -> Result<Vec<EdgeRecord>, StorageError> {
+        self.get_adjacent_edges(node_id, EdgeAdjacencyDirection::Incoming, None)
+    }
+
+    pub fn get_edges_to_node_by_type(
+        &self,
+        node_id: &str,
+        edge_type: &str,
+    ) -> Result<Vec<EdgeRecord>, StorageError> {
+        self.get_adjacent_edges(node_id, EdgeAdjacencyDirection::Incoming, Some(edge_type))
+    }
+
+    pub fn get_adjacent_edges(
+        &self,
+        node_id: &str,
+        direction: EdgeAdjacencyDirection,
+        edge_type: Option<&str>,
+    ) -> Result<Vec<EdgeRecord>, StorageError> {
+        let _flush_guard = self.shared.flush_lock.read();
+        let mut edges = self
+            .get_persisted_adjacent_edges(node_id, direction, edge_type)?
+            .into_iter()
+            .map(|edge| (edge.id.clone(), edge))
+            .collect::<BTreeMap<_, _>>();
+        let pending = self.shared.pending.lock();
+        let matching_ids = pending_adjacent_edge_ids(&pending, node_id, direction, edge_type)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+
+        for id in &matching_ids {
+            if let Some(Some(edge)) = pending.pending_edge(id) {
+                edges.insert(id.clone(), edge);
+            }
+        }
+
+        let persisted_ids = edges.keys().cloned().collect::<Vec<_>>();
+        for id in persisted_ids {
+            if let Some(pending_edge) = pending.pending_edge(&id) {
+                match pending_edge {
+                    Some(edge) if edge_matches_adjacency(&edge, node_id, direction, edge_type) => {
+                        edges.insert(id, edge);
+                    }
+                    Some(_) | None => {
+                        edges.remove(&id);
+                    }
+                }
+            }
+        }
+
         Ok(edges.into_values().collect())
     }
 
@@ -752,6 +1048,24 @@ impl AsyncStorageEngine {
         self.recv_result(reply_rx)
     }
 
+    pub fn get_persisted_node_records_by_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<NodeRecord>, StorageError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.send_request(WorkerRequest::GetNodeRecordsByPrefix {
+            prefix: prefix.to_string(),
+            reply: reply_tx,
+        })?;
+        self.recv_result(reply_rx)
+    }
+
+    pub fn get_persisted_all_node_records(&self) -> Result<Vec<NodeRecord>, StorageError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.send_request(WorkerRequest::AllNodeRecords { reply: reply_tx })?;
+        self.recv_result(reply_rx)
+    }
+
     pub fn get_persisted_node_count_by_prefix(&self, prefix: &str) -> Result<u64, StorageError> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.send_request(WorkerRequest::NodeCountByPrefix {
@@ -791,6 +1105,28 @@ impl AsyncStorageEngine {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.send_request(WorkerRequest::GetEdgesByType {
             edge_type: edge_type.to_string(),
+            reply: reply_tx,
+        })?;
+        self.recv_result(reply_rx)
+    }
+
+    pub fn get_persisted_all_edges(&self) -> Result<Vec<EdgeRecord>, StorageError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.send_request(WorkerRequest::AllEdges { reply: reply_tx })?;
+        self.recv_result(reply_rx)
+    }
+
+    pub fn get_persisted_adjacent_edges(
+        &self,
+        node_id: &str,
+        direction: EdgeAdjacencyDirection,
+        edge_type: Option<&str>,
+    ) -> Result<Vec<EdgeRecord>, StorageError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.send_request(WorkerRequest::GetAdjacentEdges {
+            node_id: node_id.to_string(),
+            direction,
+            edge_type: edge_type.map(ToOwned::to_owned),
             reply: reply_tx,
         })?;
         self.recv_result(reply_rx)
@@ -840,6 +1176,16 @@ impl AsyncStorageEngine {
     #[cfg(test)]
     pub(crate) fn pending_edge_ids_for_type(&self, edge_type: &str) -> Vec<String> {
         self.shared.pending.lock().edge_ids_for_type(edge_type)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_edge_ids_from_start(&self, node_id: &str) -> Vec<String> {
+        self.shared.pending.lock().edge_ids_from_start(node_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_edge_ids_to_end(&self, node_id: &str) -> Vec<String> {
+        self.shared.pending.lock().edge_ids_to_end(node_id)
     }
 }
 
@@ -900,6 +1246,17 @@ fn handle_request(
         WorkerRequest::GetNodesByLabel { label, reply } => {
             let _ = reply.send(engine.get_nodes_by_label(&label));
         }
+        WorkerRequest::GetNodeRecordsByPrefix { prefix, reply } => {
+            let mut nodes = Vec::new();
+            let result = engine.stream_node_records_by_prefix(&prefix, |node| {
+                nodes.push(node);
+                Ok(())
+            });
+            let _ = reply.send(result.map(|_| nodes));
+        }
+        WorkerRequest::AllNodeRecords { reply } => {
+            let _ = reply.send(engine.all_node_records());
+        }
         WorkerRequest::NodeCountByPrefix { prefix, reply } => {
             let _ = reply.send(engine.node_count_by_prefix(&prefix));
         }
@@ -915,6 +1272,17 @@ fn handle_request(
         }
         WorkerRequest::GetEdgesByType { edge_type, reply } => {
             let _ = reply.send(engine.get_edges_by_type(&edge_type));
+        }
+        WorkerRequest::AllEdges { reply } => {
+            let _ = reply.send(engine.all_edges());
+        }
+        WorkerRequest::GetAdjacentEdges {
+            node_id,
+            direction,
+            edge_type,
+            reply,
+        } => {
+            let _ = reply.send(engine.get_adjacent_edges(&node_id, direction, edge_type.as_deref()));
         }
         WorkerRequest::EdgeCountByPrefix { prefix, reply } => {
             let _ = reply.send(engine.edge_count_by_prefix(&prefix));
@@ -996,4 +1364,47 @@ fn handle_request(
 
 fn namespace_from_id(id: &str) -> Option<&str> {
     id.split_once(':').map(|(namespace, _)| namespace)
+}
+
+fn pending_adjacent_edge_ids(
+    pending: &PendingState,
+    node_id: &str,
+    direction: EdgeAdjacencyDirection,
+    edge_type: Option<&str>,
+) -> Vec<String> {
+    let mut ids = BTreeSet::new();
+    match direction {
+        EdgeAdjacencyDirection::Outgoing => {
+            ids.extend(pending.edge_ids_from_start(node_id));
+        }
+        EdgeAdjacencyDirection::Incoming => {
+            ids.extend(pending.edge_ids_to_end(node_id));
+        }
+        EdgeAdjacencyDirection::Both => {
+            ids.extend(pending.edge_ids_from_start(node_id));
+            ids.extend(pending.edge_ids_to_end(node_id));
+        }
+    }
+    ids.into_iter()
+        .filter(|id| {
+            pending
+                .pending_edge(id)
+                .and_then(|pending_edge| pending_edge)
+                .is_some_and(|edge| edge_matches_adjacency(&edge, node_id, direction, edge_type))
+        })
+        .collect()
+}
+
+fn edge_matches_adjacency(
+    edge: &EdgeRecord,
+    node_id: &str,
+    direction: EdgeAdjacencyDirection,
+    edge_type: Option<&str>,
+) -> bool {
+    let direction_matches = match direction {
+        EdgeAdjacencyDirection::Outgoing => edge.start_node == node_id,
+        EdgeAdjacencyDirection::Incoming => edge.end_node == node_id,
+        EdgeAdjacencyDirection::Both => edge.start_node == node_id || edge.end_node == node_id,
+    };
+    direction_matches && edge_type.is_none_or(|expected| edge.edge_type == expected)
 }

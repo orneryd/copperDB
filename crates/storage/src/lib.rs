@@ -80,6 +80,8 @@ pub enum StorageError {
     EmptyPrefix,
     #[error("invalid chunk size: {0}")]
     InvalidChunkSize(usize),
+    #[error("iteration stopped")]
+    IterationStopped,
     #[error("invalid utf8 in key")]
     InvalidUtf8,
     #[error("mvcc rebuild is blocked by {active_readers} active reader(s)")]
@@ -1195,19 +1197,32 @@ impl StorageEngine {
         }
 
         let mut chunk = Vec::with_capacity(chunk_size);
+        let mut stop_requested = false;
         let mut streamed = 0;
         self.stream_node_records(|node| {
             chunk.push(node);
             streamed += 1;
             if chunk.len() == chunk_size {
-                visit(&chunk)?;
-                chunk.clear();
+                match visit(&chunk) {
+                    Ok(()) => {
+                        chunk.clear();
+                    }
+                    Err(StorageError::IterationStopped) => {
+                        stop_requested = true;
+                        return Err(StorageError::IterationStopped);
+                    }
+                    Err(err) => return Err(err),
+                }
             }
             Ok(())
-        })?;
+        })
+        .or_else(Self::swallow_iteration_stopped)?;
 
-        if !chunk.is_empty() {
-            visit(&chunk)?;
+        if !stop_requested && !chunk.is_empty() {
+            match visit(&chunk) {
+                Ok(()) | Err(StorageError::IterationStopped) => {}
+                Err(err) => return Err(err),
+            }
         }
 
         Ok(streamed)
@@ -1447,8 +1462,14 @@ impl StorageEngine {
             let key_str =
                 std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
             if let Some(edge) = self.get_edge_record(key_str)? {
-                visit(edge)?;
-                streamed += 1;
+                match visit(edge) {
+                    Ok(()) => streamed += 1,
+                    Err(StorageError::IterationStopped) => {
+                        streamed += 1;
+                        return Ok(streamed);
+                    }
+                    Err(err) => return Err(err),
+                }
             }
         }
         Ok(streamed)
@@ -2486,12 +2507,25 @@ impl StorageEngine {
                 std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
             let raw = self.decode_record_bytes(value.as_ref())?;
             if let Some(node) = compat_node_record_from_bytes(key_str, &raw)? {
-                visit(node)?;
-                streamed += 1;
+                match visit(node) {
+                    Ok(()) => streamed += 1,
+                    Err(StorageError::IterationStopped) => {
+                        streamed += 1;
+                        return Ok(streamed);
+                    }
+                    Err(err) => return Err(err),
+                }
             }
         }
         Ok(streamed)
     }
+
+fn swallow_iteration_stopped(err: StorageError) -> Result<u64, StorageError> {
+    match err {
+        StorageError::IterationStopped => Ok(0),
+        other => Err(other),
+    }
+}
 
     fn delete_namespace_metadata(&self, namespace: &str) -> Result<(), StorageError> {
         self.meta.remove(namespace_node_count_key(namespace))?;
