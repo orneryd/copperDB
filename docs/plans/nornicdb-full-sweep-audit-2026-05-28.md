@@ -132,7 +132,7 @@ NornicDB reference areas include `pkg/replication/multi_region.go`, `raft.go`, `
 Drift:
 
 - Multi-region replication and failover promotion are not ported as a first-class copperDB path.
-- Transport security for inter-node replication is still incomplete: copperDB now has an mTLS-capable tonic baseline with server cert/key, client-auth CA, client cert/key, trust CA, and domain wiring plus startup validation, but stronger certificate lifecycle handling, cipher/version policy, and richer token/HMAC auth parity are still not documented as implemented.
+- Transport security for inter-node replication is still incomplete: copperDB now has an mTLS-capable tonic baseline with server cert/key, client-auth CA, client cert/key, trust CA, and domain wiring plus startup validation for required cert or key combinations, active certificate windows, and cert-or-key consistency, but stronger certificate lifecycle handling, cipher/version policy, and richer token/HMAC auth parity are still not documented as implemented.
 - Chaos testing for cross-region latency, jitter, packet loss, partitions, and corruption is missing.
 - Peer metrics garbage collection is missing, which risks unbounded observability cardinality under node churn.
 
@@ -158,7 +158,7 @@ Drift:
 - Vector file store and sparse embedding storage are missing.
 - Decay-filtered search is missing.
 - Qdrant client support exists, but full Qdrant collection/points/snapshot service parity is missing.
-- nornic gRPC has generated transport/adapters, and copperDB now has an engine-owned local replica apply/read handler plus local fabric ranked-search batch and hydration seams that can back the server side, with the `copperdb` binary now able to start that tonic service behind config/CLI gRPC listener settings. A first shared bearer-token metadata auth baseline now exists through `COPPERDB_GRPC_AUTH_TOKEN`, and that token is now resolved through env or a KMS-encrypted startup secret rather than as an out-of-band runtime convention. copperDB now also has an mTLS-capable tonic transport baseline for listener and client paths through config-driven server cert/key, trust CA, client cert/key, client-auth CA, and domain settings plus focused handshake coverage, but stronger secret and certificate distribution or rotation, caller identity forwarding, and broader end-to-end server-side distributed execution parity should remain open.
+- nornic gRPC has generated transport/adapters, and copperDB now has an engine-owned local replica apply/read handler plus local fabric ranked-search batch and hydration seams that can back the server side, with the `copperdb` binary now able to start that tonic service behind config/CLI gRPC listener settings. Internal replica apply/read RPCs now authenticate through the same unified auth core as UI and ingress by requiring an admin JWT when security is enabled and bypassing auth under `--no-auth`, while the ranked-search, hydration, and distributed graph-read data paths forward the original caller bearer token so the receiving node reapplies the existing per-database read gate. The tonic transport baseline is mTLS-capable for listener and client paths through config-driven server cert/key, trust CA, client cert/key, client-auth CA, and domain settings plus focused handshake coverage and startup certificate validity-window and cert-or-key consistency checks, but stronger secret and certificate distribution or rotation, broader cluster-client token generation or rotation handling, write-path caller identity forwarding, and broader end-to-end server-side distributed execution parity should remain open. The Neo4j `tx/commit` distributed write path now builds the real outbound replica transport instead of fabricating in-memory peers, that same Neo4j-compatible routed surface now covers distributed graph-read execution without hanging under the test runtime, and the read path builds the real graph-read gRPC transport with caller-auth forwarding while clustered access-metadata side effects continue through the internal replica channel.
 
 Documentation actions:
 
@@ -213,7 +213,7 @@ NornicDB `pkg/nornicdb` composes storage, search, embeddings, per-DB config, war
 
 Drift:
 
-- Per-database search flags resolver is no longer missing from copperDB engine composition: ranked-search gates, the first local fulltext runtime path, and engine-native local replica/ranked-search/hydration gRPC seams now consume the resolved per-database settings, with the binary able to start the local tonic service through config/CLI listener settings and thread the shared gRPC auth token plus first TLS settings through the same resolved runtime config. Broader search/vector/embedding runtime consumers are still missing.
+- Per-database search flags resolver is no longer missing from copperDB engine composition: ranked-search gates, the first local fulltext runtime path, and engine-native local replica/ranked-search/hydration gRPC seams now consume the resolved per-database settings, with the binary able to start the local tonic service through config/CLI listener settings and thread the first TLS settings through the same resolved runtime config while internal replica auth is handled through the unified auth core instead of a separate shared-token setting. Broader search/vector/embedding runtime consumers are still missing.
 - Search index warmup strategy is missing: `startup` versus `lazy` should be a per-DB effective config value.
 - Embedding enablement/warming/cache/model/dimensions are not engine-composed per database.
 - Auto-index/search/embedding work should default disabled in copperDB, with explicit per-DB opt-in for extra implicit/background work and a CLI kill switch that acts as the hard global stop for all indexing.
@@ -228,7 +228,7 @@ Documentation actions:
 
 ### server
 
-- NornicDB has admin API surfaces for per-DB config keys/effective config and search/vector control. copperDB needs equivalent routes before operators can manage per-DB auto-index/search behavior.
+- NornicDB has admin API surfaces for per-DB config keys/effective config and search/vector control. copperDB now has per-database config admin routes plus effective-config views; remaining server-surface parity is the broader search/vector control plane and other distributed status or repair endpoints backed by engine APIs and auth gates.
 - Distributed/fabric/search/repair status routes should remain open until backed by engine APIs and auth gates.
 
 ### bolt
@@ -265,7 +265,7 @@ Documentation actions:
 5. Expand MVCC/WAL documentation with snapshot-visible indexes, temporal point-in-time lookup, lifecycle pruning, WAL repair, and corruption diagnostics.
 6. Add distributed production-hardening TODOs: multi-region replication, transport security, chaos tests, peer metrics GC, fragment executor, remote fragment execution, distributed transaction context.
 7. Add MVP search runtime TODOs: BM25 fulltext, CPU vector runtime, HNSW/IVFPQ strategy support, vector file store, search persistence/versioning, decay filter, and observability. Defer GPU acceleration and rerank/MMR/local-LLM lifecycle until late-stage parity.
-8. Add protocol/runtime TODOs: Bolt auth/role propagation, server per-DB config routes, plugin-ready builtin function/procedure registration, and streaming import/export conversion utilities. Defer MCP tools, Heimdall governance, GraphQL resolvers, and APOC compatibility until after the core distributed engine works.
+8. Add protocol/runtime TODOs: Bolt auth/role propagation, plugin-ready builtin function/procedure registration, and streaming import/export conversion utilities. copperDB already has server per-DB config routes plus effective-config views; MCP tools, Heimdall governance, GraphQL resolvers, and APOC compatibility remain deferred until after the core distributed engine works.
 
 ## Audit Notes
 
@@ -383,7 +383,7 @@ Source report: architecture layer audit for `replication`, `fabric`, `search`, `
 Replication findings:
 
 1. Multi-region replication architecture is missing as a first-class copperDB path. NornicDB has local Raft cluster per region, async cross-region WAL streaming, primary/failover promotion, and cross-region connection pooling/streaming coordination.
-2. Replication transport security is still incomplete in copperDB. NornicDB `transport_security.go` includes TLS config building, cert/key loading, CA validation, TLS 1.2/1.3 policy, cipher parsing, mTLS client verification, and `AuthSecret` token-based auth with time-skew tolerance; copperDB now has an mTLS-capable tonic baseline plus startup validation for required cert or key combinations, but not full parity.
+2. Replication transport security is still incomplete in copperDB. NornicDB `transport_security.go` includes TLS config building, cert/key loading, CA validation, TLS 1.2/1.3 policy, cipher parsing, mTLS client verification, and `AuthSecret` token-based auth with time-skew tolerance; copperDB now has an mTLS-capable tonic baseline plus startup validation for required cert or key combinations, active certificate windows, and cert-or-key consistency, but not full parity.
 3. Chaos testing infrastructure is missing. NornicDB `chaos_test.go` has chaos configs for cross-region latency/jitter, partition latency, packet loss, corruption, and local/cross-region/global scenarios.
 4. Peer metrics garbage collection is missing. NornicDB `peer_metrics_gc.go` removes stale peer metric entries after topology changes to avoid unbounded metric cardinality.
 
@@ -412,7 +412,7 @@ Qdrant gRPC findings:
 NornicDB gRPC findings:
 
 1. Search service implementation is missing. NornicDB receives distributed `SearchQuery` calls over gRPC, executes local shard search, returns ranked batches, and handles auth forwarding.
-2. gRPC authentication/authorization is still incomplete. NornicDB has auth tests and OIDC token forwarding; copperDB now has a shared bearer-token metadata gate for internal RPCs, but it still must forward caller identity and enforce per-call entitlements before remote operations are fully safe.
+2. gRPC authentication/authorization is still incomplete. NornicDB has auth tests and OIDC token forwarding; copperDB now distinguishes internal replica RPCs from client-facing data-path RPCs by validating admin JWTs through the unified auth core for replica apply/read while forwarding caller tokens and reapplying per-database read enforcement on ranked-search, hydration, and distributed graph-read RPCs, but it still must extend caller identity and entitlement forwarding across the remaining remote operations and broaden cluster-client token handling before remote execution is fully safe.
 
 Distributed engine/server hook finding:
 
@@ -421,7 +421,7 @@ Distributed engine/server hook finding:
 Layer 3 summary table from the agent:
 
 - Multi-region replication: missing in copperDB, complete in NornicDB; blocks geo-distributed failover.
-- Transport security (TLS/mTLS): an mTLS-capable tonic baseline now exists in copperDB, while broader certificate-policy, rotation, and TLS-version or cipher parity remain incomplete relative to NornicDB; this still blocks compliant inter-node deployment.
+- Transport security (TLS/mTLS): an mTLS-capable tonic baseline now exists in copperDB, and startup now rejects inactive gRPC certificate bundles and mismatched configured cert or key pairs before bind, while broader certificate-policy, rotation, and TLS-version or cipher parity remain incomplete relative to NornicDB; this still blocks compliant inter-node deployment.
 - Chaos testing infrastructure: missing in copperDB, complete in NornicDB; weakens failure-mode confidence.
 - Peer metrics GC: missing in copperDB, complete in NornicDB; risks metric-cardinality growth.
 - Fabric fragment routing: data structures only in copperDB, complete in NornicDB; multi-shard queries are non-functional without it.
@@ -437,7 +437,7 @@ Layer 3 summary table from the agent:
 - Qdrant points extended API: missing in copperDB, complete in NornicDB.
 - Qdrant snapshots: missing in copperDB, complete in NornicDB.
 - gRPC search service: missing in copperDB, complete in NornicDB.
-- gRPC authentication and transport: shared bearer-token and mTLS-capable tonic baselines now exist in copperDB, with the shared token resolved through env or a KMS-encrypted startup secret, while caller-forwarded auth, entitlement parity, and fuller secret and certificate lifecycle handling remain incomplete relative to NornicDB.
+- gRPC authentication and transport: internal replica apply/read now validate admin JWTs through the unified auth core when security is enabled and bypass auth under `--no-auth`, ranked-search and hydration forward caller bearer tokens and reapply per-database read auth on the remote node, and config startup now rejects inactive gRPC certificate bundles plus mismatched configured cert or key pairs, while broader caller-forwarded auth, cluster-client token generation and rotation handling, entitlement parity, and fuller secret and certificate lifecycle handling remain incomplete relative to NornicDB.
 
 ### Agent C: Layer 4 Query/Index/Search
 

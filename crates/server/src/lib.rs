@@ -13,22 +13,25 @@ use axum::{
     routing::{delete, get, post, post_service},
     Json, Router,
 };
-use copperdb_auth::{AuthConfig, AuthError, Authenticator, Claims, DatabaseAccessMode};
+use copperdb_auth::{
+    AuthConfig, AuthError, Authenticator, Claims, DatabaseAccessMode, TokenManager,
+};
 use copperdb_buildinfo::{display_version, server_announcement, version};
 use copperdb_config::Config as RuntimeConfig;
-use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig, QueryResult};
+use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig};
 use copperdb_envutil::{get as env_get, get_bool_loose};
 use copperdb_fabric::{FabricReadRequest, FabricReadScope};
 use copperdb_multidb::{DatabaseManager, DatabaseStatus, MultiDbError};
 use copperdb_nornicgrpc::{
-    GrpcError, NornicGrpcHydrationTransport, NornicGrpcRankedSearchTransport,
-    NornicReplicaService, RemoteHydrationClient, RemoteHydrationRequest,
-    RemoteRankedSearchClient, RemoteRankedSearchRequest, RemoteReplicaClient,
-    TonicRemoteHydrationClient, TonicRemoteRankedSearchClient,
+    GrpcAuthValidator, GrpcError, NornicGrpcHydrationTransport, NornicGrpcRankedSearchTransport,
+    NornicGrpcReplicaTransport, NornicReplicaService, RemoteHydrationClient,
+    RemoteHydrationRequest, RemoteRankedSearchClient, RemoteRankedSearchRequest,
+    RemoteReplicaClient, TonicRemoteHydrationClient, TonicRemoteRankedSearchClient,
+    TonicRemoteReplicaClient,
 };
-use copperdb_otel::{classify_cypher_op_type, Telemetry};
+use copperdb_otel::Telemetry;
 use copperdb_replication::{
-    Command, InMemoryReplicaTransport, MemoryStorage, ReplicationStorage, StorageEngineAdapter,
+    Command, ReplicaTransport, ReplicationStorage, StorageEngineAdapter,
 };
 use copperdb_retention::{
     ErasureRequest, LegalHold, Manager as RetentionManager, Policy, RetentionError,
@@ -202,6 +205,11 @@ struct LocalEngineHydrationHandler {
     state: Arc<AppState>,
 }
 
+#[derive(Clone)]
+struct UnifiedClusterAuthValidator {
+    state: Arc<AppState>,
+}
+
 impl LocalEngineReplicaHandler {
     fn new(state: Arc<AppState>) -> Self {
         Self { state }
@@ -247,11 +255,150 @@ impl RemoteReplicaClient for LocalEngineReplicaHandler {
             .read_key(&request.key)
             .map_err(|error| GrpcError::Transport(error.to_string()))
     }
+
+    async fn graph_node(
+        &self,
+        request: copperdb_nornicgrpc::RemoteGraphNodeRequest,
+    ) -> Result<Option<Vec<u8>>, GrpcError> {
+        forwarded_caller_claims(
+            &self.state,
+            request.caller_auth_token.as_deref(),
+            &request.database,
+            false,
+        )?;
+        self.open_replication_storage(&request.database)?
+            .graph_node(&request.node_id)
+            .map_err(|error| GrpcError::Transport(error.to_string()))
+    }
+
+    async fn graph_edges_from_node(
+        &self,
+        request: copperdb_nornicgrpc::RemoteGraphEdgesRequest,
+    ) -> Result<Vec<copperdb_storage::EdgeRecord>, GrpcError> {
+        forwarded_caller_claims(
+            &self.state,
+            request.caller_auth_token.as_deref(),
+            &request.database,
+            false,
+        )?;
+        self.open_replication_storage(&request.database)?
+            .graph_edges_from_node(&request.node_id, request.rel_type.as_deref())
+            .map_err(|error| GrpcError::Transport(error.to_string()))
+    }
+
+    async fn graph_edges_to_node(
+        &self,
+        request: copperdb_nornicgrpc::RemoteGraphEdgesRequest,
+    ) -> Result<Vec<copperdb_storage::EdgeRecord>, GrpcError> {
+        forwarded_caller_claims(
+            &self.state,
+            request.caller_auth_token.as_deref(),
+            &request.database,
+            false,
+        )?;
+        self.open_replication_storage(&request.database)?
+            .graph_edges_to_node(&request.node_id, request.rel_type.as_deref())
+            .map_err(|error| GrpcError::Transport(error.to_string()))
+    }
+
+    async fn graph_nodes_by_label(
+        &self,
+        request: copperdb_nornicgrpc::RemoteGraphNodesByLabelRequest,
+    ) -> Result<Vec<Vec<u8>>, GrpcError> {
+        forwarded_caller_claims(
+            &self.state,
+            request.caller_auth_token.as_deref(),
+            &request.database,
+            false,
+        )?;
+        self.open_replication_storage(&request.database)?
+            .graph_nodes_by_label(&request.label)
+            .map_err(|error| GrpcError::Transport(error.to_string()))
+    }
+
+    async fn graph_nodes_by_property(
+        &self,
+        request: copperdb_nornicgrpc::RemoteGraphNodesByPropertyRequest,
+    ) -> Result<Vec<Vec<u8>>, GrpcError> {
+        forwarded_caller_claims(
+            &self.state,
+            request.caller_auth_token.as_deref(),
+            &request.database,
+            false,
+        )?;
+        self.open_replication_storage(&request.database)?
+            .graph_nodes_by_property(&request.label, &request.property, &request.value)
+            .map_err(|error| GrpcError::Transport(error.to_string()))
+    }
+
+    async fn graph_access_metadata(
+        &self,
+        request: copperdb_nornicgrpc::RemoteGraphAccessMetadataRequest,
+    ) -> Result<Option<copperdb_storage::KnowledgePolicyAccessMetadata>, GrpcError> {
+        forwarded_caller_claims(
+            &self.state,
+            request.caller_auth_token.as_deref(),
+            &request.database,
+            false,
+        )?;
+        self.open_replication_storage(&request.database)?
+            .graph_access_metadata(&request.entity_id)
+            .map_err(|error| GrpcError::Transport(error.to_string()))
+    }
 }
 
 impl LocalEngineRankedSearchHandler {
     fn new(state: Arc<AppState>) -> Self {
         Self { state }
+    }
+}
+
+fn forwarded_caller_claims(
+    state: &AppState,
+    caller_auth_token: Option<&str>,
+    database: &str,
+    write: bool,
+) -> Result<(), GrpcError> {
+    if !state.auth.security_enabled {
+        return Ok(());
+    }
+    let token = caller_auth_token.ok_or_else(|| {
+        GrpcError::Unauthenticated("missing forwarded caller authorization token".into())
+    })?;
+    let claims = state
+        .auth
+        .open_authenticator()
+        .map_err(|error| GrpcError::Transport(error.to_string()))?
+        .validate_token(token)
+        .map_err(|error| GrpcError::Unauthenticated(error.to_string()))?;
+    ensure_database_access(state, &claims, database, write).map_err(|status| match status {
+        StatusCode::UNAUTHORIZED => GrpcError::Unauthenticated("unauthorized caller".into()),
+        StatusCode::FORBIDDEN => GrpcError::PermissionDenied(format!(
+            "caller is not authorized for database {database}"
+        )),
+        other => GrpcError::Transport(format!("unexpected authorization status {other}")),
+    })?;
+    Ok(())
+}
+
+impl GrpcAuthValidator for UnifiedClusterAuthValidator {
+    fn validate(&self, token: &str) -> Result<(), GrpcError> {
+        if !self.state.auth.security_enabled {
+            return Ok(());
+        }
+        let claims = self
+            .state
+            .auth
+            .open_authenticator()
+            .map_err(|error| GrpcError::Transport(error.to_string()))?
+            .validate_token(token)
+            .map_err(|error| GrpcError::Unauthenticated(error.to_string()))?;
+        if claims.roles.iter().any(|role| role.eq_ignore_ascii_case("admin")) {
+            return Ok(());
+        }
+        Err(GrpcError::PermissionDenied(
+            "cluster gRPC authorization requires admin role".into(),
+        ))
     }
 }
 
@@ -261,6 +408,12 @@ impl RemoteRankedSearchClient for LocalEngineRankedSearchHandler {
         &self,
         request: RemoteRankedSearchRequest,
     ) -> Result<copperdb_search::RrfSearchBatch, GrpcError> {
+        forwarded_caller_claims(
+            &self.state,
+            request.caller_auth_token.as_deref(),
+            &request.placement.database,
+            false,
+        )?;
         let engine = open_engine(&self.state, &request.placement.database)
             .map_err(GrpcError::Transport)?;
         engine
@@ -281,6 +434,12 @@ impl RemoteHydrationClient for LocalEngineHydrationHandler {
         &self,
         request: RemoteHydrationRequest,
     ) -> Result<Vec<copperdb_search::RrfHydrationRecord>, GrpcError> {
+        forwarded_caller_claims(
+            &self.state,
+            request.caller_auth_token.as_deref(),
+            &request.placement.database,
+            false,
+        )?;
         let engine = open_engine(&self.state, &request.placement.database)
             .map_err(GrpcError::Transport)?;
         engine
@@ -294,8 +453,10 @@ pub fn build_engine_backed_nornic_replica_service(
     replica_handler: Arc<dyn RemoteReplicaClient>,
 ) -> NornicReplicaService {
     let mut service = NornicReplicaService::new(replica_handler);
-    if let Some(token) = state.runtime_config.server.grpc_auth_token.clone() {
-        service = service.with_auth_token(token);
+    if state.auth.security_enabled {
+        service = service.with_auth_validator(Arc::new(UnifiedClusterAuthValidator {
+            state: Arc::clone(&state),
+        }));
     }
     service
         .with_ranked_search_handler(Arc::new(LocalEngineRankedSearchHandler::new(Arc::clone(
@@ -347,42 +508,6 @@ pub struct HealthResponse {
     pub version: String,
 }
 
-/// Cypher query request body.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct CypherRequest {
-    pub query: String,
-    pub parameters: Option<serde_json::Value>,
-}
-
-/// Cypher query response body.
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct CypherResponse {
-    pub columns: Vec<String>,
-    pub rows: Vec<Vec<serde_json::Value>>,
-    pub errors: Vec<String>,
-    pub stats: Option<serde_json::Value>,
-}
-
-impl CypherResponse {
-    pub fn empty() -> Self {
-        Self {
-            columns: vec![],
-            rows: vec![],
-            errors: vec![],
-            stats: None,
-        }
-    }
-
-    pub fn error(msg: impl Into<String>) -> Self {
-        Self {
-            columns: vec![],
-            rows: vec![],
-            errors: vec![msg.into()],
-            stats: None,
-        }
-    }
-}
-
 /// Build the application router.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let router = Router::new()
@@ -403,7 +528,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/auth/me", get(auth_me_handler))
         .route("/db/{database}", get(database_info_handler))
         .route("/db/{database}/tx/commit", post(neo4j_tx_commit_handler))
-        .route("/db/data/cypher", post(cypher_handler))
         .route(
             "/admin/databases/{database}/config",
             get(get_database_config_handler).put(update_database_config_handler),
@@ -874,13 +998,17 @@ async fn auth_me_handler(
 }
 
 fn authenticated_user(state: &AppState, headers: &HeaderMap) -> Option<Claims> {
-    let token = bearer_token(headers).or_else(|| cookie_token(state, headers))?;
+    let token = authenticated_token(state, headers)?;
     state
         .auth
         .open_authenticator()
         .ok()?
         .validate_token(token)
         .ok()
+}
+
+fn authenticated_token<'a>(state: &AppState, headers: &'a HeaderMap) -> Option<&'a str> {
+    bearer_token(headers).or_else(|| cookie_token(state, headers))
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {
@@ -1117,6 +1245,7 @@ async fn neo4j_tx_commit_handler(
     };
     let roles = roles_for_claims(claims.as_ref());
     let distributed = distributed_cypher_requested(&state, &headers);
+    let caller_auth_token = authenticated_token(&state, &headers).map(str::to_owned);
     let request_region = headers
         .get("x-copperdb-region")
         .and_then(|value| value.to_str().ok())
@@ -1126,15 +1255,40 @@ async fn neo4j_tx_commit_handler(
     let mut errors = Vec::new();
 
     for statement in request.statements {
-        match execute_statement(
-            &state,
-            &database,
-            &statement.statement,
-            statement.parameters.unwrap_or_default(),
-            &roles,
-            distributed,
-            request_region.clone(),
-        ) {
+        let result = if distributed {
+            let state = Arc::clone(&state);
+            let database = database.clone();
+            let roles = roles.clone();
+            let caller_auth_token = caller_auth_token.clone();
+            let request_region = request_region.clone();
+            tokio::task::spawn_blocking(move || {
+                execute_statement(
+                    state,
+                    database,
+                    statement.statement,
+                    statement.parameters.unwrap_or_default(),
+                    roles,
+                    true,
+                    caller_auth_token,
+                    request_region,
+                )
+            })
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|result| result)
+        } else {
+            execute_statement(
+                Arc::clone(&state),
+                database.clone(),
+                statement.statement,
+                statement.parameters.unwrap_or_default(),
+                roles.clone(),
+                false,
+                caller_auth_token.clone(),
+                request_region.clone(),
+            )
+        };
+        match result {
             Ok(result) => results.push(result),
             Err(error) => errors.push(Neo4jError {
                 code: "Neo.ClientError.Statement.ExecutionFailed".into(),
@@ -1147,12 +1301,13 @@ async fn neo4j_tx_commit_handler(
 }
 
 fn execute_statement(
-    state: &AppState,
-    database: &str,
-    statement: &str,
+    state: Arc<AppState>,
+    database: String,
+    statement: String,
     parameters: HashMap<String, serde_json::Value>,
-    roles: &[String],
+    roles: Vec<String>,
     distributed: bool,
+    caller_auth_token: Option<String>,
     request_region: Option<String>,
 ) -> Result<Neo4jResult, String> {
     let normalized = statement.trim();
@@ -1160,55 +1315,61 @@ fn execute_statement(
 
     if database == "system" {
         if upper == "SHOW DATABASES" {
-            return Ok(show_databases_result(state));
+            return Ok(show_databases_result(&state));
         }
         if upper.starts_with("CREATE DATABASE ") {
             let name = parse_database_name(normalized, "CREATE DATABASE ")?;
-            create_database(state, &name)?;
+            create_database(&state, &name)?;
             return Ok(empty_neo4j_result());
         }
         if upper.starts_with("DROP DATABASE ") {
             let name = parse_database_name(normalized, "DROP DATABASE ")?;
-            drop_database(state, &name)?;
+            drop_database(&state, &name)?;
             return Ok(empty_neo4j_result());
         }
         return Err(format!("unsupported system statement: {}", statement));
     }
 
-    if state.db_manager.get(database).is_none() {
-        create_database(state, database)?;
+    if state.db_manager.get(&database).is_none() {
+        create_database(&state, &database)?;
     }
 
-    let engine = open_engine(state, database)?;
+    let engine = open_engine(&state, &database)?;
     let result = if distributed {
-        let placement = PlacementKey::default_for_database(database);
+        let placement = PlacementKey::default_for_database(&database);
         let consistency = ConsistencyLevel::Quorum;
         let request_region = request_region.as_deref();
         let transport = build_local_replica_transport(
+            &state,
             &engine,
             &placement,
             consistency,
             request_region,
+            caller_auth_token.as_deref(),
             statement_requires_write(normalized),
         )?;
-        futures::executor::block_on(async {
-            engine
-                .execute_distributed_as(
-                    normalized,
-                    parameters,
-                    roles,
-                    &placement,
-                    consistency,
-                    request_region,
-                    transport,
-                )
-                .await
-                .map(|outcome| outcome.result)
-                .map_err(|error| error.to_string())
-        })?
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?
+            .block_on(async {
+                engine
+                    .execute_distributed_as(
+                        normalized,
+                        parameters,
+                        &roles,
+                        &placement,
+                        consistency,
+                        request_region,
+                        transport,
+                    )
+                    .await
+                    .map(|outcome| outcome.result)
+                    .map_err(|error| error.to_string())
+            })?
     } else {
         engine
-            .execute_as(normalized, parameters, roles)
+            .execute_as(normalized, parameters, &roles)
             .map_err(|error| error.to_string())?
     };
     Ok(convert_engine_result(result))
@@ -1308,38 +1469,76 @@ fn distributed_cypher_requested(state: &AppState, headers: &HeaderMap) -> bool {
             .unwrap_or(false)
 }
 
-fn cypher_parameters(
-    parameters: Option<serde_json::Value>,
-) -> Result<HashMap<String, serde_json::Value>, String> {
-    match parameters.unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())) {
-        serde_json::Value::Object(map) => Ok(map.into_iter().collect()),
-        _ => Err("parameters must be a JSON object".into()),
-    }
-}
-
 fn build_local_replica_transport(
+    state: &AppState,
     engine: &GraphEngine,
     placement: &PlacementKey,
     consistency: ConsistencyLevel,
     request_region: Option<&str>,
+    caller_auth_token: Option<&str>,
     write: bool,
-) -> Result<Arc<InMemoryReplicaTransport>, String> {
-    let replicas = if write {
-        engine
-            .plan_distributed_write(placement, consistency, request_region)
-            .map_err(|error| error.to_string())?
-            .replicas
-    } else {
-        engine
-            .plan_distributed_read(placement, consistency, request_region)
-            .map_err(|error| error.to_string())?
-            .replicas
-    };
-    let transport = Arc::new(InMemoryReplicaTransport::new());
-    for replica in replicas {
-        transport.register(&replica.node_id, Arc::new(MemoryStorage::new()));
+) -> Result<Arc<dyn ReplicaTransport>, String> {
+    let mut client = TonicRemoteReplicaClient::new();
+    if state.auth.security_enabled {
+        let token = TokenManager::new(state.auth.jwt_secret.clone())
+            .issue("copperdb-cluster", vec!["admin".into()], 300)
+            .map_err(|error| error.to_string())?;
+        client = client.with_auth_token(token);
     }
-    Ok(transport)
+    if !write {
+        if state.auth.security_enabled && caller_auth_token.is_none() {
+            return Err(
+                "distributed server reads require a forwarded caller authorization token"
+                    .into(),
+            );
+        }
+        if let Some(token) = caller_auth_token {
+            client = client.with_caller_auth_token(token.to_owned());
+        }
+    }
+    if state.runtime_config.server.grpc_tls_enabled {
+        client = client.with_tls_enabled(true);
+    }
+    if let Some(domain_name) = state.runtime_config.server.grpc_tls_domain_name.clone() {
+        client = client.with_tls_domain_name(domain_name);
+    }
+    if let Some(ca_cert_path) = state.runtime_config.server.grpc_tls_ca_cert.as_deref() {
+        let ca_cert = std::fs::read_to_string(ca_cert_path)
+            .map_err(|error| format!("failed to read gRPC TLS CA certificate {ca_cert_path}: {error}"))?;
+        client = client.with_tls_ca_certificate_pem(ca_cert);
+    }
+    if let (Some(client_cert_path), Some(client_key_path)) = (
+        state.runtime_config.server.grpc_tls_client_cert.as_deref(),
+        state.runtime_config.server.grpc_tls_client_key.as_deref(),
+    ) {
+        let client_cert = std::fs::read_to_string(client_cert_path).map_err(|error| {
+            format!("failed to read gRPC TLS client certificate {client_cert_path}: {error}")
+        })?;
+        let client_key = std::fs::read_to_string(client_key_path).map_err(|error| {
+            format!("failed to read gRPC TLS client key {client_key_path}: {error}")
+        })?;
+        client = client.with_tls_identity_pem(client_cert, client_key);
+    }
+
+    if write {
+        let plan = engine
+            .plan_distributed_write(placement, consistency, request_region)
+            .map_err(|error| error.to_string())?;
+
+        return Ok(Arc::new(NornicGrpcReplicaTransport::from_write_plan(
+            &plan,
+            Arc::new(client),
+        )));
+    }
+
+    let plan = engine
+        .plan_distributed_read(placement, consistency, request_region)
+        .map_err(|error| error.to_string())?;
+
+    Ok(Arc::new(NornicGrpcReplicaTransport::from_read_plan(
+        &plan,
+        Arc::new(client),
+    )))
 }
 
 fn create_database(state: &AppState, name: &str) -> Result<(), String> {
@@ -1606,10 +1805,11 @@ async fn plan_fabric_database(
 }
 
 fn build_fabric_ranked_search_context(
-    runtime_config: &RuntimeConfig,
+    state: &AppState,
     engine: &GraphEngine,
     fabric: &FabricDatabase,
     hydration_consistency: ConsistencyLevel,
+    caller_auth_token: Option<&str>,
 ) -> Result<
     (
         Vec<copperdb_topology::DistributedSearchPlan>,
@@ -1646,23 +1846,23 @@ fn build_fabric_ranked_search_context(
     }
 
     let mut ranked_client = TonicRemoteRankedSearchClient::new();
-    if let Some(token) = runtime_config.server.grpc_auth_token.clone() {
-        ranked_client = ranked_client.with_auth_token(token);
+    if let Some(token) = caller_auth_token {
+        ranked_client = ranked_client.with_caller_auth_token(token.to_owned());
     }
-    if runtime_config.server.grpc_tls_enabled {
+    if state.runtime_config.server.grpc_tls_enabled {
         ranked_client = ranked_client.with_tls_enabled(true);
     }
-    if let Some(domain_name) = runtime_config.server.grpc_tls_domain_name.clone() {
+    if let Some(domain_name) = state.runtime_config.server.grpc_tls_domain_name.clone() {
         ranked_client = ranked_client.with_tls_domain_name(domain_name);
     }
-    if let Some(ca_cert_path) = runtime_config.server.grpc_tls_ca_cert.as_deref() {
+    if let Some(ca_cert_path) = state.runtime_config.server.grpc_tls_ca_cert.as_deref() {
         let ca_cert = std::fs::read_to_string(ca_cert_path)
             .map_err(|error| format!("failed to read gRPC TLS CA certificate {ca_cert_path}: {error}"))?;
         ranked_client = ranked_client.with_tls_ca_certificate_pem(ca_cert);
     }
     if let (Some(client_cert_path), Some(client_key_path)) = (
-        runtime_config.server.grpc_tls_client_cert.as_deref(),
-        runtime_config.server.grpc_tls_client_key.as_deref(),
+        state.runtime_config.server.grpc_tls_client_cert.as_deref(),
+        state.runtime_config.server.grpc_tls_client_key.as_deref(),
     ) {
         let client_cert = std::fs::read_to_string(client_cert_path).map_err(|error| {
             format!("failed to read gRPC TLS client certificate {client_cert_path}: {error}")
@@ -1673,23 +1873,23 @@ fn build_fabric_ranked_search_context(
         ranked_client = ranked_client.with_tls_identity_pem(client_cert, client_key);
     }
     let mut hydration_client = TonicRemoteHydrationClient::new();
-    if let Some(token) = runtime_config.server.grpc_auth_token.clone() {
-        hydration_client = hydration_client.with_auth_token(token);
+    if let Some(token) = caller_auth_token {
+        hydration_client = hydration_client.with_caller_auth_token(token.to_owned());
     }
-    if runtime_config.server.grpc_tls_enabled {
+    if state.runtime_config.server.grpc_tls_enabled {
         hydration_client = hydration_client.with_tls_enabled(true);
     }
-    if let Some(domain_name) = runtime_config.server.grpc_tls_domain_name.clone() {
+    if let Some(domain_name) = state.runtime_config.server.grpc_tls_domain_name.clone() {
         hydration_client = hydration_client.with_tls_domain_name(domain_name);
     }
-    if let Some(ca_cert_path) = runtime_config.server.grpc_tls_ca_cert.as_deref() {
+    if let Some(ca_cert_path) = state.runtime_config.server.grpc_tls_ca_cert.as_deref() {
         let ca_cert = std::fs::read_to_string(ca_cert_path)
             .map_err(|error| format!("failed to read gRPC TLS CA certificate {ca_cert_path}: {error}"))?;
         hydration_client = hydration_client.with_tls_ca_certificate_pem(ca_cert);
     }
     if let (Some(client_cert_path), Some(client_key_path)) = (
-        runtime_config.server.grpc_tls_client_cert.as_deref(),
-        runtime_config.server.grpc_tls_client_key.as_deref(),
+        state.runtime_config.server.grpc_tls_client_cert.as_deref(),
+        state.runtime_config.server.grpc_tls_client_key.as_deref(),
     ) {
         let client_cert = std::fs::read_to_string(client_cert_path).map_err(|error| {
             format!("failed to read gRPC TLS client certificate {client_cert_path}: {error}")
@@ -1773,6 +1973,7 @@ async fn execute_fabric_ranked_search_admin_service(
     if let Err(status) = authorize_database_access(&state, request.headers(), &database, false) {
         return status.into_response();
     }
+    let caller_auth_token = authenticated_token(&state, request.headers()).map(str::to_owned);
     let body = match axum::body::to_bytes(request.into_body(), 1024 * 1024).await {
         Ok(body) => body,
         Err(error) => {
@@ -1793,7 +1994,14 @@ async fn execute_fabric_ranked_search_admin_service(
                 .into_response();
         }
     };
-    execute_fabric_ranked_search_admin_impl(state, tenant, database, request).await
+    execute_fabric_ranked_search_admin_impl(
+        state,
+        tenant,
+        database,
+        request,
+        caller_auth_token,
+    )
+    .await
 }
 
 async fn execute_fabric_ranked_search_admin_impl(
@@ -1801,6 +2009,7 @@ async fn execute_fabric_ranked_search_admin_impl(
     tenant: String,
     database: String,
     request: FabricRankedSearchRequest,
+    caller_auth_token: Option<String>,
 ) -> Response {
     let hydration_consistency = match parse_consistency_level(
         request.hydration_consistency.as_deref(),
@@ -1859,10 +2068,11 @@ async fn execute_fabric_ranked_search_admin_impl(
         }
         let (search_plans, hydration_coordinators, ranked_transport, hydration_transport) =
             match build_fabric_ranked_search_context(
-                &state.runtime_config,
+                &state,
                 &engine,
                 &fabric,
                 hydration_consistency,
+                caller_auth_token.as_deref(),
             ) {
                 Ok(transports) => transports,
                 Err(error) => {
@@ -1956,128 +2166,6 @@ fn database_status_name(status: DatabaseStatus) -> &'static str {
         DatabaseStatus::Offline => "offline",
         DatabaseStatus::Deleted => "deleted",
     }
-}
-
-/// POST /db/data/cypher — execute a Cypher query (HTTP API).
-async fn cypher_handler(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(body): Json<CypherRequest>,
-) -> impl IntoResponse {
-    let started = std::time::Instant::now();
-    let op_type = classify_cypher_op_type(&body.query);
-    if body.query.trim().is_empty() {
-        let _ = state.telemetry.record_counter(
-            "nornicdb_cypher_queries_total",
-            &[("op_type", "parse_error"), ("database", &state.db_name)],
-        );
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(CypherResponse::error("query must not be empty")),
-        );
-    }
-    let claims = match authorize_database_access(
-        &state,
-        &headers,
-        &state.db_name,
-        statement_requires_write(&body.query),
-    ) {
-        Ok(claims) => claims,
-        Err(status) => return (status, Json(CypherResponse::error(status.to_string()))),
-    };
-    let roles = roles_for_claims(claims.as_ref());
-    let distributed = distributed_cypher_requested(&state, &headers);
-    let request_region = headers
-        .get("x-copperdb-region")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    match execute_http_cypher(&state, &body, &roles, distributed, request_region) {
-        Ok(result) => {
-            let _ = state.telemetry.record_counter(
-                "nornicdb_cypher_queries_total",
-                &[("op_type", op_type), ("database", &state.db_name)],
-            );
-            let _ = state.telemetry.observe_histogram(
-                "nornicdb_cypher_query_duration_seconds",
-                &[("op_type", op_type), ("database", &state.db_name)],
-                started.elapsed().as_secs_f64(),
-            );
-            let rows = result
-                .rows
-                .into_iter()
-                .map(|row| {
-                    result
-                        .columns
-                        .iter()
-                        .map(|column| row.get(column).cloned().unwrap_or(serde_json::Value::Null))
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
-            (
-                StatusCode::OK,
-                Json(CypherResponse {
-                    columns: result.columns,
-                    rows,
-                    errors: vec![],
-                    stats: Some(serde_json::json!({
-                        "execution_time_ms": result.stats.execution_time_ms,
-                    })),
-                }),
-            )
-        }
-        Err(error) => {
-            let _ = state.telemetry.record_counter(
-                "nornicdb_cypher_queries_total",
-                &[("op_type", op_type), ("database", &state.db_name)],
-            );
-            (StatusCode::OK, Json(CypherResponse::error(error)))
-        }
-    }
-}
-
-fn execute_http_cypher(
-    state: &AppState,
-    body: &CypherRequest,
-    roles: &[String],
-    distributed: bool,
-    request_region: Option<String>,
-) -> Result<QueryResult, String> {
-    let parameters = cypher_parameters(body.parameters.clone())?;
-    let engine = open_engine(state, &state.db_name)?;
-    if !distributed {
-        return engine
-            .execute_as(&body.query, parameters, roles)
-            .map_err(|error| error.to_string());
-    }
-
-    let placement = PlacementKey::default_for_database(&state.db_name);
-    let consistency = ConsistencyLevel::Quorum;
-    let request_region = request_region.as_deref();
-    let transport = build_local_replica_transport(
-        &engine,
-        &placement,
-        consistency,
-        request_region,
-        statement_requires_write(&body.query),
-    )?;
-    let query = body.query.clone();
-    let roles = roles.to_vec();
-    let request_region = request_region.map(str::to_owned);
-    futures::executor::block_on(async move {
-        engine
-            .execute_distributed_as(
-                &query,
-                parameters,
-                &roles,
-                &placement,
-                consistency,
-                request_region.as_deref(),
-                transport,
-            )
-            .await
-            .map(|outcome| outcome.result)
-            .map_err(|error| error.to_string())
-    })
 }
 
 // ─── Retention policy handlers ────────────────────────────────────────────────

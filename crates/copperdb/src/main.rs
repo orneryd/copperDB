@@ -5,12 +5,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use axum::Router;
-use base64::Engine;
 use clap::Parser;
 use copperdb_bolt::server::BoltServer;
 use copperdb_buildinfo::display_version;
-use copperdb_config::{load_with_precedence, Config, ConfigOverrides};
-use copperdb_kms::{new_provider, DecryptOptions, ProviderFactoryConfig};
+use copperdb_config::{load_with_precedence, ConfigOverrides};
 use copperdb_lifecycle::{BoxError, Component, Supervisor};
 use copperdb_otel::Telemetry;
 use copperdb_server::{build_local_nornic_replica_service, build_router, AppState};
@@ -25,43 +23,6 @@ fn ensure_tls_crypto_provider() {
     INSTALL.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
-}
-
-fn kms_master_key_from_env() -> Result<Vec<u8>> {
-    let raw = std::env::var("COPPERDB_KMS_MASTER_KEY_HEX")
-        .context("COPPERDB_KMS_MASTER_KEY_HEX must be set when resolving KMS-backed gRPC secrets")?;
-    hex::decode(raw.trim()).context("failed to decode COPPERDB_KMS_MASTER_KEY_HEX as hex")
-}
-
-async fn resolve_grpc_auth_token(config: &mut Config) -> Result<()> {
-    if config.server.grpc_auth_token.is_some() {
-        return Ok(());
-    }
-    let Some(ciphertext_b64) = config.server.grpc_auth_token_kms_ciphertext.as_deref() else {
-        return Ok(());
-    };
-    let key_uri = config
-        .server
-        .grpc_auth_token_kms_key_uri
-        .clone()
-        .context("server.grpc_auth_token_kms_key_uri must be set when using a KMS-encrypted gRPC auth token")?;
-    let ciphertext = base64::engine::general_purpose::STANDARD
-        .decode(ciphertext_b64.trim())
-        .context("failed to decode server.grpc_auth_token_kms_ciphertext as base64")?;
-    let provider = new_provider(ProviderFactoryConfig {
-        provider: config.encryption.provider.clone(),
-        key_uri,
-        master_key: kms_master_key_from_env()?,
-        audit_signing_key: None,
-    })
-    .context("failed to initialize KMS provider for gRPC auth token resolution")?;
-    let plaintext = provider
-        .decrypt_data_key(&ciphertext, DecryptOptions { key_uri: None })
-        .await
-        .context("failed to decrypt KMS-backed gRPC auth token")?;
-    let token = String::from_utf8(plaintext).context("decrypted gRPC auth token is not valid UTF-8")?;
-    config.server.grpc_auth_token = Some(token);
-    Ok(())
 }
 
 #[derive(Debug, Parser)]
@@ -79,9 +40,6 @@ struct Cli {
 
     #[arg(long)]
     grpc_address: Option<String>,
-
-    #[arg(long)]
-    grpc_auth_token: Option<String>,
 
     #[arg(long)]
     grpc_tls_enabled: bool,
@@ -352,11 +310,7 @@ async fn main() -> Result<()> {
 }
 
 async fn resolve_startup_config(cli: &Cli) -> Result<StartupConfig> {
-    let mut config = load_with_precedence(
-        cli.config.as_deref(),
-        &cli_config_overrides(cli),
-    )?;
-    resolve_grpc_auth_token(&mut config).await?;
+    let config = load_with_precedence(cli.config.as_deref(), &cli_config_overrides(cli))?;
     config.validate()?;
     let config = Arc::new(config);
     let listeners = config.listener_config();
@@ -391,9 +345,6 @@ fn cli_config_overrides(cli: &Cli) -> ConfigOverrides {
         http_address: cli.http_address.clone(),
         bolt_address: cli.bolt_address.clone(),
         grpc_address: cli.grpc_address.clone(),
-        grpc_auth_token: cli.grpc_auth_token.clone(),
-        grpc_auth_token_kms_ciphertext: None,
-        grpc_auth_token_kms_key_uri: None,
         grpc_tls_enabled: cli.grpc_tls_enabled.then_some(true),
         grpc_tls_cert: cli.grpc_tls_cert.clone(),
         grpc_tls_key: cli.grpc_tls_key.clone(),

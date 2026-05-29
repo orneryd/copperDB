@@ -5,6 +5,12 @@ package copperdb.nornic.v1;
 service NornicReplica {
   rpc ApplyReplica(RemoteReplicaApplyRequest) returns (RemoteReplicaApplyResponse);
   rpc ReadReplica(RemoteReplicaReadRequest) returns (RemoteReplicaReadResponse);
+  rpc GraphNode(RemoteGraphNodeRequest) returns (RemoteGraphNodeResponse);
+  rpc GraphEdgesFromNode(RemoteGraphEdgesRequest) returns (RemoteGraphEdgesResponse);
+  rpc GraphEdgesToNode(RemoteGraphEdgesRequest) returns (RemoteGraphEdgesResponse);
+  rpc GraphNodesByLabel(RemoteGraphNodesByLabelRequest) returns (RemoteGraphNodesResponse);
+  rpc GraphNodesByProperty(RemoteGraphNodesByPropertyRequest) returns (RemoteGraphNodesResponse);
+  rpc GraphAccessMetadata(RemoteGraphAccessMetadataRequest) returns (RemoteGraphAccessMetadataResponse);
   rpc SearchRanked(RemoteRankedSearchRequest) returns (RemoteRankedSearchResponse);
   rpc HydrateEntities(RemoteHydrationRequest) returns (RemoteHydrationResponse);
 }
@@ -26,6 +32,63 @@ message RemoteReplicaReadRequest {
 message RemoteReplicaReadResponse {
   bool found = 1;
   bytes value = 2;
+}
+
+message RemoteGraphNodeRequest {
+  string target_node = 1;
+  string target_addr = 2;
+  string database = 3;
+  string node_id = 4;
+}
+
+message RemoteGraphNodeResponse {
+  bool found = 1;
+  bytes value = 2;
+}
+
+message RemoteGraphEdgesRequest {
+  string target_node = 1;
+  string target_addr = 2;
+  string database = 3;
+  string node_id = 4;
+  string rel_type = 5;
+  bool has_rel_type = 6;
+}
+
+message RemoteGraphEdgesResponse {
+  bytes edges_json = 1;
+}
+
+message RemoteGraphNodesByLabelRequest {
+  string target_node = 1;
+  string target_addr = 2;
+  string database = 3;
+  string label = 4;
+}
+
+message RemoteGraphNodesByPropertyRequest {
+  string target_node = 1;
+  string target_addr = 2;
+  string database = 3;
+  string label = 4;
+  string property = 5;
+  bytes value_json = 6;
+}
+
+message RemoteGraphNodesResponse {
+  repeated bytes values = 1;
+}
+
+message RemoteGraphAccessMetadataRequest {
+  string target_node = 1;
+  string target_addr = 2;
+  string database = 3;
+  string entity_id = 4;
+}
+
+message RemoteGraphAccessMetadataResponse {
+  bool found = 1;
+  bytes metadata_json = 2;
 }
 
 message RemoteRankedSearchRequest {

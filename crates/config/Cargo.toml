@@ -16,6 +16,10 @@ toml.workspace = true
 config.workspace = true
 clap.workspace = true
 copperdb-envutil = { workspace = true }
+rustls = { workspace = true, features = ["ring"] }
+x509-parser.workspace = true
 
 [dev-dependencies]
+rcgen.workspace = true
 tempfile.workspace = true
+time.workspace = true

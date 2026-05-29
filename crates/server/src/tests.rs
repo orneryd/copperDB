@@ -1,31 +1,6 @@
     use super::*;
 
     #[test]
-    fn test_cypher_request_serialization() {
-        let req = CypherRequest {
-            query: "MATCH (n) RETURN n".into(),
-            parameters: Some(serde_json::json!({"id": 1})),
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        let decoded: CypherRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.query, req.query);
-    }
-
-    #[test]
-    fn test_cypher_response_serialization() {
-        let resp = CypherResponse {
-            columns: vec!["n".into()],
-            rows: vec![vec![serde_json::json!({"id": 1})]],
-            errors: vec![],
-            stats: None,
-        };
-        let json = serde_json::to_string(&resp).unwrap();
-        let decoded: CypherResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.columns, vec!["n"]);
-        assert_eq!(decoded.rows.len(), 1);
-    }
-
-    #[test]
     fn test_health_response_serialization() {
         let hr = HealthResponse {
             status: "ok".into(),
@@ -36,36 +11,218 @@
         assert_eq!(decoded, hr);
     }
 
-    #[test]
-    fn test_cypher_response_empty() {
-        let r = CypherResponse::empty();
-        assert!(r.columns.is_empty());
-        assert!(r.rows.is_empty());
-        assert!(r.errors.is_empty());
-    }
-
-    #[test]
-    fn test_cypher_response_error() {
-        let r = CypherResponse::error("syntax error");
-        assert_eq!(r.errors, vec!["syntax error"]);
-    }
-
-    #[test]
-    fn test_cypher_request_no_params() {
-        let req = CypherRequest {
-            query: "CREATE (n:Test) RETURN n".into(),
-            parameters: None,
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        let decoded: CypherRequest = serde_json::from_str(&json).unwrap();
-        assert!(decoded.parameters.is_none());
-    }
-
     #[tokio::test]
     async fn test_router_builds() {
         let state = Arc::new(AppState::default());
         let _app = build_router(state);
-        // Just verify the router builds without panicking
+    }
+
+    #[test]
+    fn distributed_write_transport_builds_with_generated_cluster_auth() {
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementRecord};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_path = temp_dir
+            .path()
+            .join("clinic")
+            .to_string_lossy()
+            .into_owned();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("clinic", storage_path.clone()).unwrap();
+        let mut state = AppState {
+            db_name: "clinic".into(),
+            db_manager,
+            ..Default::default()
+        };
+        state.auth = AuthState::from_storage_path(
+            unique_auth_path(),
+            true,
+            true,
+            "admin".into(),
+            "password".into(),
+            "test-secret".into(),
+        )
+        .unwrap();
+
+        let placement = PlacementKey::default_for_database("clinic");
+        let engine = GraphEngine::open(EngineConfig {
+            data_dir: storage_path,
+            default_database: "clinic".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        for (node_id, addr) in [
+            ("node-1", "127.0.0.1:50051"),
+            ("node-2", "127.0.0.1:50052"),
+            ("node-3", "127.0.0.1:50053"),
+        ] {
+            engine
+                .storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, addr)
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        engine
+            .storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into(), "node-3".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        assert!(
+            build_local_replica_transport(
+                &state,
+                &engine,
+                &placement,
+                ConsistencyLevel::Quorum,
+                None,
+                None,
+                true,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn distributed_read_transport_builds_with_forwarded_caller_auth() {
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementRecord};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_path = temp_dir
+            .path()
+            .join("clinic")
+            .to_string_lossy()
+            .into_owned();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("clinic", storage_path.clone()).unwrap();
+        let mut state = AppState {
+            db_name: "clinic".into(),
+            db_manager,
+            ..Default::default()
+        };
+        state.auth.security_enabled = true;
+
+        let placement = PlacementKey::default_for_database("clinic");
+        let engine = GraphEngine::open(EngineConfig {
+            data_dir: storage_path,
+            default_database: "clinic".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        for (node_id, addr) in [
+            ("node-1", "127.0.0.1:50051"),
+            ("node-2", "127.0.0.1:50052"),
+        ] {
+            engine
+                .storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, addr)
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        engine
+            .storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        assert!(
+            build_local_replica_transport(
+                &state,
+                &engine,
+                &placement,
+                ConsistencyLevel::Quorum,
+                None,
+                Some("viewer-token"),
+                false,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn distributed_read_transport_requires_forwarded_caller_auth_when_security_enabled() {
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementRecord};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_path = temp_dir
+            .path()
+            .join("clinic")
+            .to_string_lossy()
+            .into_owned();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("clinic", storage_path.clone()).unwrap();
+        let mut state = AppState {
+            db_name: "clinic".into(),
+            db_manager,
+            ..Default::default()
+        };
+
+        let placement = PlacementKey::default_for_database("clinic");
+        let engine = GraphEngine::open(EngineConfig {
+            data_dir: storage_path,
+            default_database: "clinic".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        for (node_id, addr) in [
+            ("node-1", "127.0.0.1:50051"),
+            ("node-2", "127.0.0.1:50052"),
+        ] {
+            engine
+                .storage()
+                .register_topology_peer(
+                    &MeshPeer::new(node_id, addr)
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+        }
+        engine
+            .storage()
+            .register_topology_placement(&PlacementRecord {
+                key: placement.clone(),
+                primary_node: "node-1".into(),
+                replica_nodes: vec!["node-2".into()],
+                search_nodes: vec![],
+                hyperscaler_profile: None,
+                min_write_replicas: 1,
+                search_fanout: 1,
+            })
+            .unwrap();
+
+        state.auth.security_enabled = true;
+        let error = match build_local_replica_transport(
+            &state,
+            &engine,
+            &placement,
+            ConsistencyLevel::Quorum,
+            None,
+            None,
+            false,
+        ) {
+            Ok(_) => panic!("distributed reads should require forwarded caller auth"),
+            Err(error) => error,
+        };
+        assert!(error.contains("forwarded caller authorization token"));
     }
 
     #[tokio::test]
@@ -111,100 +268,6 @@
         let root: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
         assert_eq!(root["server"], copperdb_buildinfo::server_announcement());
-    }
-
-    #[tokio::test]
-    async fn database_config_admin_round_trips_overrides_and_effective_view() {
-        use axum::body::Body;
-        use axum::http::{header, Method, Request, StatusCode};
-        use tower::ServiceExt;
-
-        let temp_dir = tempfile::tempdir().unwrap();
-        let storage_path = temp_dir
-            .path()
-            .join("clinic")
-            .to_string_lossy()
-            .into_owned();
-        let db_manager = Arc::new(DatabaseManager::new());
-        db_manager.create("clinic", storage_path).unwrap();
-
-        let mut runtime_config = copperdb_config::Config::default();
-        runtime_config.cli_overrides.insert(
-            "COPPERDB_SEARCH_VECTOR_ENABLED".into(),
-            "false".into(),
-        );
-
-        let mut state = AppState {
-            db_name: "clinic".into(),
-            db_manager,
-            runtime_config: Arc::new(runtime_config),
-            ..Default::default()
-        };
-        state.auth.security_enabled = false;
-
-        let app = build_router(Arc::new(state));
-        let put_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::PUT)
-                    .uri("/admin/databases/clinic/config")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "overrides": {
-                                "COPPERDB_SEARCH_BM25_ENABLED": "true",
-                                "COPPERDB_SEARCH_VECTOR_ENABLED": "true"
-                            }
-                        })
-                        .to_string(),
-                    ))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(put_response.status(), StatusCode::OK);
-
-        let get_response = app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/admin/databases/clinic/config")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(get_response.status(), StatusCode::OK);
-        let get_body = axum::body::to_bytes(get_response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        let overrides_json: serde_json::Value = serde_json::from_slice(&get_body).unwrap();
-        assert_eq!(
-            overrides_json["overrides"]["COPPERDB_SEARCH_BM25_ENABLED"],
-            "true"
-        );
-        assert_eq!(
-            overrides_json["allowedKeys"].as_array().unwrap().len(),
-            13
-        );
-
-        let effective_response = app
-            .oneshot(
-                Request::builder()
-                    .uri("/admin/databases/clinic/config/effective")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(effective_response.status(), StatusCode::OK);
-        let effective_body = axum::body::to_bytes(effective_response.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        let effective_json: serde_json::Value = serde_json::from_slice(&effective_body).unwrap();
-        assert_eq!(effective_json["effective"]["bm25_enabled"], true);
-        assert_eq!(effective_json["effective"]["vector_enabled"], false);
     }
 
     #[tokio::test]
@@ -342,11 +405,16 @@
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/db/data/cypher")
+                    .uri("/db/copperdb/tx/commit")
                     .header(header::AUTHORIZATION, format!("Bearer {token}"))
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
-                        serde_json::json!({"query":"CREATE (n:Denied {v: 1})"}).to_string(),
+                        serde_json::json!({
+                            "statements": [
+                                {"statement": "CREATE (n:Denied {v: 1})"}
+                            ]
+                        })
+                        .to_string(),
                     ))
                     .unwrap(),
             )
@@ -357,20 +425,89 @@
     }
 
     #[tokio::test]
-    async fn http_cypher_can_opt_into_distributed_engine_routing() {
+    async fn neo4j_commit_can_opt_into_distributed_engine_routing() {
+        use async_trait::async_trait;
         use axum::body::Body;
         use axum::http::{header, Request, StatusCode};
+        use copperdb_nornicgrpc::{
+            GrpcError, NornicReplicaService, RemoteReplicaApplyRequest, RemoteReplicaClient,
+            RemoteReplicaReadRequest,
+        };
+        use copperdb_replication::Command;
         use copperdb_topology::{MeshPeer, NodeCapability, PlacementRecord};
+        use tonic::transport::Server;
         use tower::ServiceExt;
 
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage_path = temp_dir
+        let local_storage_path = temp_dir
             .path()
-            .join("clinic")
+            .join("clinic-local")
             .to_string_lossy()
             .into_owned();
+
+        #[derive(Clone, Default)]
+        struct RecordingReplicaClient {
+            applied: Arc<std::sync::Mutex<Vec<RemoteReplicaApplyRequest>>>,
+        }
+
+        #[async_trait]
+        impl RemoteReplicaClient for RecordingReplicaClient {
+            async fn apply_replica(
+                &self,
+                request: RemoteReplicaApplyRequest,
+            ) -> Result<(), GrpcError> {
+                self.applied.lock().unwrap().push(request);
+                Ok(())
+            }
+
+            async fn read_replica(
+                &self,
+                _request: RemoteReplicaReadRequest,
+            ) -> Result<Option<Vec<u8>>, GrpcError> {
+                Ok(None)
+            }
+        }
+
+        let spawn_replica = || {
+            let client = RecordingReplicaClient::default();
+            let applied = Arc::clone(&client.applied);
+            let service = NornicReplicaService::new(Arc::new(client));
+            let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let grpc_addr = reserved.local_addr().unwrap();
+            drop(reserved);
+            let server = tokio::spawn(async move {
+                Server::builder()
+                    .add_service(service.into_server())
+                    .serve(grpc_addr)
+                    .await
+                    .unwrap();
+            });
+            (grpc_addr, server, applied)
+        };
+
+        let wait_for_listener = |addr: std::net::SocketAddr| async move {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for replica listener {addr}"
+                );
+                tokio::task::yield_now().await;
+            }
+        };
+
+        let (node_one_addr, node_one_server, node_one_applied) = spawn_replica();
+        let (node_two_addr, node_two_server, node_two_applied) = spawn_replica();
+        let (node_three_addr, node_three_server, node_three_applied) = spawn_replica();
+        wait_for_listener(node_one_addr).await;
+        wait_for_listener(node_two_addr).await;
+        wait_for_listener(node_three_addr).await;
+
         let db_manager = Arc::new(DatabaseManager::new());
-        db_manager.create("clinic", storage_path.clone()).unwrap();
+        db_manager.create("clinic", local_storage_path.clone()).unwrap();
         let mut state = AppState {
             db_name: "clinic".into(),
             db_manager,
@@ -381,21 +518,35 @@
         let placement = PlacementKey::default_for_database("clinic");
         {
             let engine = GraphEngine::open(EngineConfig {
-                data_dir: storage_path,
+                data_dir: local_storage_path.clone(),
                 default_database: "clinic".into(),
                 ..Default::default()
             })
             .unwrap();
-            for node_id in ["node-1", "node-2", "node-3"] {
-                engine
-                    .storage()
-                    .register_topology_peer(
-                        &MeshPeer::new(node_id, format!("{node_id}.mesh.local:9000"))
-                            .with_capability(NodeCapability::Storage)
-                            .with_capability(NodeCapability::Coordinator),
-                    )
-                    .unwrap();
-            }
+            engine
+                .storage()
+                .register_topology_peer(
+                    &MeshPeer::new("node-1", node_one_addr.to_string())
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+            engine
+                .storage()
+                .register_topology_peer(
+                    &MeshPeer::new("node-2", node_two_addr.to_string())
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+            engine
+                .storage()
+                .register_topology_peer(
+                    &MeshPeer::new("node-3", node_three_addr.to_string())
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
             engine
                 .storage()
                 .register_topology_placement(&PlacementRecord {
@@ -411,29 +562,383 @@
         }
 
         let app = build_router(Arc::new(state));
-        let response = app
-            .oneshot(
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            app.oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/db/data/cypher")
+                    .uri("/db/clinic/tx/commit")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header("x-copperdb-distributed", "true")
                     .body(Body::from(
-                        serde_json::json!({"query":"CREATE (n:DistributedHttp {v: 1})"})
-                            .to_string(),
+                        serde_json::json!({
+                            "statements": [
+                                {"statement": "CREATE (n:DistributedCommit {v: 1})"}
+                            ]
+                        })
+                        .to_string(),
                     ))
                     .unwrap(),
-            )
-            .await
-            .unwrap();
+            ),
+        )
+        .await
+        .expect("distributed Neo4j commit request timed out")
+        .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
             .unwrap();
-        let decoded: CypherResponse = serde_json::from_slice(&body).unwrap();
-        assert!(decoded.errors.is_empty(), "{:?}", decoded.errors);
-        assert!(decoded.stats.is_some());
+        let decoded: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(decoded["errors"], serde_json::json!([]));
+        assert_eq!(decoded["results"].as_array().map(Vec::len), Some(1));
+
+        node_one_server.abort();
+        node_two_server.abort();
+        node_three_server.abort();
+        tokio::task::yield_now().await;
+
+        let primary_engine = GraphEngine::open(EngineConfig {
+            data_dir: local_storage_path,
+            default_database: "clinic".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let primary_count = primary_engine
+            .execute_as(
+                "MATCH (n:DistributedCommit) RETURN count(n) AS c",
+                HashMap::new(),
+                &[],
+            )
+            .unwrap();
+        assert_eq!(primary_count.rows[0]["c"].as_i64(), Some(1));
+
+        for applied in [node_one_applied, node_two_applied, node_three_applied] {
+            let applied = applied.lock().unwrap();
+            assert_eq!(applied.len(), 1);
+            match &applied[0].command {
+                Command::CypherMutation {
+                    database,
+                    query,
+                    params,
+                } => {
+                    assert_eq!(database, "clinic");
+                    assert_eq!(query, "CREATE (n:DistributedCommit {v: 1})");
+                    assert_eq!(params, &serde_json::json!({}));
+                }
+                other => panic!("unexpected replicated command: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn neo4j_commit_can_opt_into_distributed_graph_read_routing() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use copperdb_nornicgrpc::{
+            NornicReplicaService, RemoteGraphNodesByPropertyRequest, RemoteReplicaClient,
+            TonicRemoteReplicaClient,
+        };
+        use copperdb_storage::{EdgeRecord, IndexDefinition, IndexEntityType, IndexKind, NodeRecord};
+        use copperdb_topology::{MeshPeer, NodeCapability, PlacementRecord};
+        use tonic::transport::Server;
+        use tower::ServiceExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let local_storage_path = temp_dir
+            .path()
+            .join("clinic-local")
+            .to_string_lossy()
+            .into_owned();
+
+        let wait_for_listener = |addr: std::net::SocketAddr| async move {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for replica listener {addr}"
+                );
+                tokio::task::yield_now().await;
+            }
+        };
+
+        let spawn_graph_replica = |storage_path: String| {
+            let db_manager = Arc::new(DatabaseManager::new());
+            db_manager.create("clinic", storage_path).unwrap();
+            let mut state = AppState {
+                db_name: "clinic".into(),
+                db_manager,
+                distributed_cypher_enabled: false,
+                ..Default::default()
+            };
+            state.auth.security_enabled = false;
+            let state = Arc::new(state);
+            let handler = Arc::new(LocalEngineReplicaHandler::new(state));
+            let service = NornicReplicaService::new(handler);
+            let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let grpc_addr = reserved.local_addr().unwrap();
+            drop(reserved);
+            let server = tokio::spawn(async move {
+                Server::builder()
+                    .add_service(service.into_server())
+                    .serve(grpc_addr)
+                    .await
+                    .unwrap();
+            });
+            (grpc_addr, server)
+        };
+
+        let peer_one_path = temp_dir
+            .path()
+            .join("clinic-peer-one")
+            .to_string_lossy()
+            .into_owned();
+        let peer_two_path = temp_dir
+            .path()
+            .join("clinic-peer-two")
+            .to_string_lossy()
+            .into_owned();
+        let peer_three_path = temp_dir
+            .path()
+            .join("clinic-peer-three")
+            .to_string_lossy()
+            .into_owned();
+
+        let peer_one = StorageEngine::open(&peer_one_path).unwrap();
+        peer_one
+            .persist_index_definition(&IndexDefinition {
+                name: "node_name".into(),
+                entity_type: IndexEntityType::Node,
+                kind: IndexKind::Range,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_one
+            .put_node_record(&NodeRecord {
+                id: "Node:A".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([(
+                    "name".into(),
+                    serde_json::Value::String("a".into()),
+                )]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_one
+            .put_edge_record(&EdgeRecord {
+                id: "edge:a-b".into(),
+                start_node: "Node:A".into(),
+                end_node: "Node:B".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_two = StorageEngine::open(&peer_two_path).unwrap();
+        peer_two
+            .persist_index_definition(&IndexDefinition {
+                name: "node_name".into(),
+                entity_type: IndexEntityType::Node,
+                kind: IndexKind::Range,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_two
+            .put_node_record(&NodeRecord {
+                id: "Node:B".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([(
+                    "name".into(),
+                    serde_json::Value::String("b".into()),
+                )]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        peer_two
+            .put_edge_record(&EdgeRecord {
+                id: "edge:b-d".into(),
+                start_node: "Node:B".into(),
+                end_node: "Node:D".into(),
+                edge_type: "LINK".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let peer_three = StorageEngine::open(&peer_three_path).unwrap();
+        peer_three
+            .persist_index_definition(&IndexDefinition {
+                name: "node_name".into(),
+                entity_type: IndexEntityType::Node,
+                kind: IndexKind::Range,
+                label: "Node".into(),
+                properties: vec!["name".into()],
+            })
+            .unwrap();
+        peer_three
+            .put_node_record(&NodeRecord {
+                id: "Node:D".into(),
+                labels: vec!["Node".into()],
+                properties: BTreeMap::from([(
+                    "name".into(),
+                    serde_json::Value::String("d".into()),
+                )]),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        drop(peer_one);
+        drop(peer_two);
+        drop(peer_three);
+
+        let (node_one_addr, node_one_server) = spawn_graph_replica(peer_one_path);
+        let (node_two_addr, node_two_server) = spawn_graph_replica(peer_two_path);
+        let (node_three_addr, node_three_server) = spawn_graph_replica(peer_three_path);
+        wait_for_listener(node_one_addr).await;
+        wait_for_listener(node_two_addr).await;
+        wait_for_listener(node_three_addr).await;
+        assert_eq!(
+            TonicRemoteReplicaClient::new()
+                .graph_nodes_by_property(RemoteGraphNodesByPropertyRequest {
+                    target_node: "node-1".into(),
+                    target_addr: node_one_addr.to_string(),
+                    database: "clinic".into(),
+                    label: "Node".into(),
+                    property: "name".into(),
+                    value: serde_json::Value::String("a".into()),
+                    caller_auth_token: None,
+                })
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("clinic", local_storage_path.clone()).unwrap();
+        let mut state = AppState {
+            db_name: "clinic".into(),
+            db_manager,
+            distributed_cypher_enabled: false,
+            ..Default::default()
+        };
+        state.auth.security_enabled = false;
+        let placement = PlacementKey::default_for_database("clinic");
+        {
+            let engine = GraphEngine::open(EngineConfig {
+                data_dir: local_storage_path,
+                default_database: "clinic".into(),
+                ..Default::default()
+            })
+            .unwrap();
+            engine
+                .storage()
+                .register_topology_peer(
+                    &MeshPeer::new("node-1", node_one_addr.to_string())
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+            engine
+                .storage()
+                .register_topology_peer(
+                    &MeshPeer::new("node-2", node_two_addr.to_string())
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+            engine
+                .storage()
+                .register_topology_peer(
+                    &MeshPeer::new("node-3", node_three_addr.to_string())
+                        .with_capability(NodeCapability::Storage)
+                        .with_capability(NodeCapability::Coordinator),
+                )
+                .unwrap();
+            engine
+                .storage()
+                .register_topology_placement(&PlacementRecord {
+                    key: placement,
+                    primary_node: "node-1".into(),
+                    replica_nodes: vec!["node-2".into(), "node-3".into()],
+                    search_nodes: vec![],
+                    hyperscaler_profile: None,
+                    min_write_replicas: 1,
+                    search_fanout: 1,
+                })
+                .unwrap();
+        }
+
+        let app = build_router(Arc::new(state));
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/db/clinic/tx/commit")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header("x-copperdb-distributed", "true")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "statements": [
+                                {
+                                    "statement": "MATCH p = shortestPath((a:Node {name: 'a'})-[:LINK*]->(d:Node {name: 'd'})) RETURN length(p) AS hops, p AS shortest"
+                                }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            ),
+        )
+        .await
+        .expect("distributed Neo4j read request timed out")
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let decoded: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(decoded["errors"], serde_json::json!([]));
+        assert_eq!(decoded["results"].as_array().map(Vec::len), Some(1));
+        assert_eq!(decoded["results"][0]["columns"], serde_json::json!(["hops", "shortest"]));
+        let row = decoded["results"][0]["data"][0]["row"]
+            .as_array()
+            .expect("expected Neo4j row array");
+        assert_eq!(row[0].as_i64(), Some(2));
+        let path = row[1]
+            .as_object()
+            .expect("expected shortest path object");
+        let nodes = path
+            .get("nodes")
+            .and_then(serde_json::Value::as_array)
+            .expect("expected shortest path nodes");
+        let names = nodes
+            .iter()
+            .map(|node| {
+                node.get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["a", "b", "d"]);
+
+        node_one_server.abort();
+        node_two_server.abort();
+        node_three_server.abort();
+        tokio::task::yield_now().await;
     }
 
     #[tokio::test]
@@ -981,6 +1486,7 @@
                             fields: vec!["bio".into()],
                             limit: 10,
                         },
+                        caller_auth_token: None,
                     })
                     .unwrap(),
                 ))
@@ -1008,6 +1514,7 @@
                         target_addr: "127.0.0.1:50051".into(),
                         placement,
                         global_ids: vec![batch.hits[0].global_id.clone()],
+                        caller_auth_token: None,
                     })
                     .unwrap(),
                 ))
@@ -1080,6 +1587,7 @@
                         fields: vec!["bio".into()],
                         limit: 10,
                     },
+                    caller_auth_token: None,
                 })
                 .unwrap(),
             ))
@@ -1090,6 +1598,169 @@
         assert!(error
             .message()
             .contains("fulltext search is disabled for this database"));
+    }
+
+    #[tokio::test]
+    async fn engine_backed_ranked_search_requires_forwarded_caller_authorization() {
+        use copperdb_nornicgrpc::proto::nornic_replica_server::NornicReplica;
+        use copperdb_nornicgrpc::{
+            proto, RemoteRankedSearchRequest, RemoteReplicaApplyRequest,
+            RemoteReplicaReadRequest,
+        };
+        use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind, NodeRecord};
+        use copperdb_topology::PlacementKey;
+        use tonic::{Code, metadata::MetadataValue, Request};
+
+        struct NoopReplicaClient;
+
+        #[async_trait::async_trait]
+        impl RemoteReplicaClient for NoopReplicaClient {
+            async fn apply_replica(
+                &self,
+                _request: RemoteReplicaApplyRequest,
+            ) -> Result<(), GrpcError> {
+                Ok(())
+            }
+
+            async fn read_replica(
+                &self,
+                _request: RemoteReplicaReadRequest,
+            ) -> Result<Option<Vec<u8>>, GrpcError> {
+                Ok(None)
+            }
+        }
+
+        let auth_path = unique_auth_path();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let copper_path = temp_dir.path().join("copper").to_string_lossy().into_owned();
+        let secret_path = temp_dir.path().join("secret").to_string_lossy().into_owned();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("copper", copper_path.clone()).unwrap();
+        db_manager.create("secret", secret_path).unwrap();
+        db_manager
+            .set_config_overrides(
+                "copper",
+                std::collections::BTreeMap::from([(
+                    "COPPERDB_SEARCH_BM25_ENABLED".into(),
+                    "true".into(),
+                )]),
+            )
+            .unwrap();
+
+        let mut state = AppState {
+            db_name: "copper".into(),
+            db_manager,
+            ..Default::default()
+        };
+        state.auth = AuthState::from_storage_path(
+            auth_path,
+            true,
+            true,
+            "admin".into(),
+            "password".into(),
+            "test-secret".into(),
+        )
+        .unwrap();
+        {
+            let auth = state.auth.open_authenticator().unwrap();
+            auth.allowlist
+                .save_role_databases(copperdb_auth::ROLE_VIEWER, vec!["copper".into()])
+                .unwrap();
+            auth.privileges
+                .save_privilege(copperdb_auth::ROLE_VIEWER, "copper", true, false)
+                .unwrap();
+            auth.privileges
+                .save_privilege(copperdb_auth::ROLE_VIEWER, "secret", false, false)
+                .unwrap();
+            auth.create_user(
+                "viewer",
+                "password",
+                vec![copperdb_auth::ROLE_VIEWER.into()],
+            )
+            .unwrap();
+        }
+
+        {
+            let engine = open_engine(&state, "copper").unwrap();
+            engine
+                .storage()
+                .persist_index_definition(&IndexDefinition {
+                    name: "person_bio_fulltext_idx".into(),
+                    entity_type: IndexEntityType::Node,
+                    label: "Person".into(),
+                    properties: vec!["bio".into()],
+                    kind: IndexKind::FullText,
+                })
+                .unwrap();
+            engine
+                .storage()
+                .put_node_record(&NodeRecord {
+                    id: "person:1".into(),
+                    labels: vec!["Person".into()],
+                    properties: BTreeMap::from([(
+                        "bio".into(),
+                        serde_json::Value::String(
+                            "Alice builds reliable graph systems".into(),
+                        ),
+                    )]),
+                    created_at_unix_ms: 10,
+                    updated_at_unix_ms: 20,
+                })
+                .unwrap();
+        }
+
+        let viewer_token = state
+            .auth
+            .open_authenticator()
+            .unwrap()
+            .authenticate("viewer", "password")
+            .unwrap()
+            .0
+            .access_token;
+        let service = build_engine_backed_nornic_replica_service(
+            Arc::new(state),
+            Arc::new(NoopReplicaClient),
+        );
+
+        let make_request = |database: &str| {
+            Request::new(
+                proto::RemoteRankedSearchRequest::try_from(RemoteRankedSearchRequest {
+                    target_node: "search-a".into(),
+                    target_addr: "127.0.0.1:50051".into(),
+                    placement: PlacementKey::new("default", database, "primary"),
+                    query: SearchQuery::FullText {
+                        query: "graph".into(),
+                        fields: vec!["bio".into()],
+                        limit: 10,
+                    },
+                    caller_auth_token: None,
+                })
+                .unwrap(),
+            )
+        };
+
+        let missing_forwarded = make_request("copper");
+        let missing_error = service.search_ranked(missing_forwarded).await.unwrap_err();
+        assert_eq!(missing_error.code(), Code::Unauthenticated);
+
+        let mut allowed = make_request("copper");
+        allowed.metadata_mut().insert(
+            "x-copperdb-caller-authorization",
+            MetadataValue::try_from(format!("Bearer {viewer_token}")).unwrap(),
+        );
+        let batch = copperdb_search::RrfSearchBatch::try_from(
+            service.search_ranked(allowed).await.unwrap().into_inner(),
+        )
+        .unwrap();
+        assert_eq!(batch.hits.len(), 1);
+
+        let mut denied = make_request("secret");
+        denied.metadata_mut().insert(
+            "x-copperdb-caller-authorization",
+            MetadataValue::try_from(format!("Bearer {viewer_token}")).unwrap(),
+        );
+        let denied_error = service.search_ranked(denied).await.unwrap_err();
+        assert_eq!(denied_error.code(), Code::PermissionDenied);
     }
 
     #[tokio::test]
@@ -1147,48 +1818,28 @@
     }
 
     #[tokio::test]
-    async fn local_replica_service_uses_runtime_config_grpc_auth_token() {
+    async fn local_replica_service_bypasses_cluster_auth_when_security_disabled() {
         use copperdb_nornicgrpc::proto::nornic_replica_server::NornicReplica;
         use copperdb_nornicgrpc::{proto, RemoteReplicaApplyRequest, RemoteReplicaReadRequest};
         use copperdb_replication::Command;
-        use tonic::metadata::MetadataValue;
-        use tonic::{Code, Request};
+        use tonic::Request;
 
         let temp_dir = tempfile::tempdir().unwrap();
         let storage_path = temp_dir.path().join("copper").to_string_lossy().into_owned();
         let db_manager = Arc::new(DatabaseManager::new());
         db_manager.create("copper", storage_path).unwrap();
 
-        let mut runtime_config = RuntimeConfig::default();
-        runtime_config.server.grpc_auth_token = Some("shared-secret".into());
-
         let mut state = AppState {
             db_name: "copper".into(),
             db_manager,
-            runtime_config: Arc::new(runtime_config),
             ..Default::default()
         };
         state.auth.security_enabled = false;
 
         let service = build_local_nornic_replica_service(Arc::new(state));
 
-        let error = service
+        service
             .apply_replica(Request::new(
-                proto::RemoteReplicaApplyRequest::try_from(RemoteReplicaApplyRequest {
-                    target_node: "node-a".into(),
-                    target_addr: "127.0.0.1:50051".into(),
-                    command: Command::Put {
-                        key: b"replica-key".to_vec(),
-                        value: b"replica-value".to_vec(),
-                    },
-                })
-                .unwrap(),
-            ))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), Code::Unauthenticated);
-
-        let mut apply_request = Request::new(
             proto::RemoteReplicaApplyRequest::try_from(RemoteReplicaApplyRequest {
                 target_node: "node-a".into(),
                 target_addr: "127.0.0.1:50051".into(),
@@ -1198,30 +1849,108 @@
                 },
             })
             .unwrap(),
-        );
-        apply_request.metadata_mut().insert(
-            "authorization",
-            MetadataValue::try_from("Bearer shared-secret").unwrap(),
-        );
-        service.apply_replica(apply_request).await.unwrap();
+        ))
+            .await
+            .unwrap();
 
-        let mut read_request = Request::new(proto::RemoteReplicaReadRequest::from(
+        let read_request = Request::new(proto::RemoteReplicaReadRequest::from(
             RemoteReplicaReadRequest {
                 target_node: "node-a".into(),
                 target_addr: "127.0.0.1:50051".into(),
                 key: b"replica-key".to_vec(),
             },
         ));
-        read_request.metadata_mut().insert(
-            "authorization",
-            MetadataValue::try_from("Bearer shared-secret").unwrap(),
-        );
 
         let response = service.read_replica(read_request).await.unwrap().into_inner();
         assert_eq!(
             Option::<Vec<u8>>::from(response),
             Some(b"replica-value".to_vec())
         );
+    }
+
+    #[tokio::test]
+    async fn local_replica_service_requires_admin_jwt_when_security_enabled() {
+        use copperdb_nornicgrpc::proto::nornic_replica_server::NornicReplica;
+        use copperdb_nornicgrpc::{proto, RemoteReplicaApplyRequest};
+        use copperdb_replication::Command;
+        use tonic::metadata::MetadataValue;
+        use tonic::{Code, Request};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage_path = temp_dir.path().join("copper").to_string_lossy().into_owned();
+        let auth_path = unique_auth_path();
+        let db_manager = Arc::new(DatabaseManager::new());
+        db_manager.create("copper", storage_path).unwrap();
+
+        let mut state = AppState {
+            db_name: "copper".into(),
+            db_manager,
+            ..Default::default()
+        };
+        state.auth = AuthState::from_storage_path(
+            auth_path,
+            true,
+            true,
+            "admin".into(),
+            "password".into(),
+            "test-secret".into(),
+        )
+        .unwrap();
+
+        let (admin_token, viewer_token) = {
+            let auth = state.auth.open_authenticator().unwrap();
+            auth.create_user(
+                "viewer",
+                "password",
+                vec![copperdb_auth::ROLE_VIEWER.into()],
+            )
+            .unwrap();
+            let admin_token = auth
+                .authenticate("admin", "password")
+                .unwrap()
+                .0
+                .access_token;
+            let viewer_token = auth
+                .authenticate("viewer", "password")
+                .unwrap()
+                .0
+                .access_token;
+            (admin_token, viewer_token)
+        };
+
+        let service = build_local_nornic_replica_service(Arc::new(state));
+
+        let make_apply_request = || {
+            Request::new(
+                proto::RemoteReplicaApplyRequest::try_from(RemoteReplicaApplyRequest {
+                    target_node: "node-a".into(),
+                    target_addr: "127.0.0.1:50051".into(),
+                    command: Command::Put {
+                        key: b"replica-key".to_vec(),
+                        value: b"replica-value".to_vec(),
+                    },
+                })
+                .unwrap(),
+            )
+        };
+
+        let missing_error = service.apply_replica(make_apply_request()).await.unwrap_err();
+        assert_eq!(missing_error.code(), Code::Unauthenticated);
+
+        let mut viewer_request = make_apply_request();
+        viewer_request.metadata_mut().insert(
+            "authorization",
+            MetadataValue::try_from(format!("Bearer {viewer_token}")).unwrap(),
+        );
+        let viewer_error = service.apply_replica(viewer_request).await.unwrap_err();
+        assert_eq!(viewer_error.code(), Code::PermissionDenied);
+
+        let mut admin_request = make_apply_request();
+        admin_request.metadata_mut().insert(
+            "authorization",
+            MetadataValue::try_from(format!("Bearer {admin_token}")).unwrap(),
+        );
+        service.apply_replica(admin_request).await.unwrap();
     }
 
     #[tokio::test]
@@ -2215,12 +2944,13 @@
 
         let reader_roles = vec!["reader".to_string()];
         let err = match execute_statement(
-            &state,
-            "clinic",
-            "CREATE (n:Patient {name: 'Alice'})",
+            Arc::new(state.clone()),
+            "clinic".into(),
+            "CREATE (n:Patient {name: 'Alice'})".into(),
             HashMap::new(),
-            &reader_roles,
+            reader_roles.clone(),
             false,
+            None,
             None,
         ) {
             Ok(_) => panic!("reader role should be denied by compliance policy"),
@@ -2230,12 +2960,13 @@
 
         let doctor_roles = vec!["doctor".to_string()];
         execute_statement(
-            &state,
-            "clinic",
-            "CREATE (n:Patient {name: 'Alice'})",
+            Arc::new(state),
+            "clinic".into(),
+            "CREATE (n:Patient {name: 'Alice'})".into(),
             HashMap::new(),
-            &doctor_roles,
+            doctor_roles,
             false,
+            None,
             None,
         )
         .unwrap();

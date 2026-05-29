@@ -167,9 +167,12 @@ aws-sdk-kms = "1.105.0"
 oauth2 = "5.0.0"
 tempfile = "3.27.0"
 url = "2.5.4"
+time = "0.3.44"
 
 # TLS setup
 rustls = "0.23.40"
+x509-parser = "0.18.1"
+rcgen = "0.14.5"
 
 # Inter-crate dependencies within this workspace
 copperdb-util = { path = "crates/util" }

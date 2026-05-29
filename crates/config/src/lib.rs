@@ -4,11 +4,16 @@
 //! Supports YAML/TOML configuration files, environment variable overrides,
 //! and a strongly-typed configuration struct for the database engine.
 
+use rustls::pki_types::{
+    CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer,
+};
+use rustls::sign::CertifiedKey;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 use thiserror::Error;
+use x509_parser::pem::Pem;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -28,6 +33,16 @@ pub enum ConfigError {
     InvalidPerDatabaseOverrideKey(String),
     #[error("invalid value '{value}' for per-database override {key}")]
     InvalidPerDatabaseOverrideValue { key: String, value: String },
+    #[error("invalid certificate at {path}: {message}")]
+    InvalidCertificate { path: String, message: String },
+    #[error("invalid private key at {path}: {message}")]
+    InvalidPrivateKey { path: String, message: String },
+    #[error("invalid TLS identity for {cert_path} and {key_path}: {message}")]
+    InvalidTlsIdentity {
+        cert_path: String,
+        key_path: String,
+        message: String,
+    },
 }
 
 pub const ENV_CONFIG_PATH: &str = "COPPERDB_CONFIG";
@@ -38,9 +53,6 @@ pub struct ConfigOverrides {
     pub http_address: Option<String>,
     pub bolt_address: Option<String>,
     pub grpc_address: Option<String>,
-    pub grpc_auth_token: Option<String>,
-    pub grpc_auth_token_kms_ciphertext: Option<String>,
-    pub grpc_auth_token_kms_key_uri: Option<String>,
     pub grpc_tls_enabled: Option<bool>,
     pub grpc_tls_cert: Option<String>,
     pub grpc_tls_key: Option<String>,
@@ -156,23 +168,36 @@ impl Config {
                         .into(),
                 ));
             }
-        }
-        if self.server.grpc_auth_token.is_some()
-            && self.server.grpc_auth_token_kms_ciphertext.is_some()
-        {
-            return Err(ConfigError::InvalidPerDatabaseOverrideValue {
-                key: "server.grpc_auth_token".into(),
-                value: "set either plain gRPC auth token or KMS-encrypted gRPC auth token, not both"
-                    .into(),
-            });
-        }
-        if self.server.grpc_auth_token_kms_ciphertext.is_some()
-            && self.server.grpc_auth_token_kms_key_uri.is_none()
-        {
-            return Err(ConfigError::MissingField(
-                "server.grpc_auth_token_kms_key_uri must be set when using a KMS-encrypted gRPC auth token"
-                    .into(),
-            ));
+            validate_certificate_bundle(
+                self.server.grpc_tls_cert.as_deref().unwrap_or_default(),
+                "server.grpc_tls_cert",
+            )?;
+            validate_certificate_key_pair(
+                self.server.grpc_tls_cert.as_deref().unwrap_or_default(),
+                self.server.grpc_tls_key.as_deref().unwrap_or_default(),
+                "server.grpc_tls_cert",
+                "server.grpc_tls_key",
+            )?;
+            if let Some(path) = self.server.grpc_tls_ca_cert.as_deref() {
+                validate_certificate_bundle(path, "server.grpc_tls_ca_cert")?;
+            }
+            if let Some(path) = self.server.grpc_tls_client_cert.as_deref() {
+                validate_certificate_bundle(path, "server.grpc_tls_client_cert")?;
+            }
+            if let (Some(cert_path), Some(key_path)) = (
+                self.server.grpc_tls_client_cert.as_deref(),
+                self.server.grpc_tls_client_key.as_deref(),
+            ) {
+                validate_certificate_key_pair(
+                    cert_path,
+                    key_path,
+                    "server.grpc_tls_client_cert",
+                    "server.grpc_tls_client_key",
+                )?;
+            }
+            if let Some(path) = self.server.grpc_tls_client_auth_ca_cert.as_deref() {
+                validate_certificate_bundle(path, "server.grpc_tls_client_auth_ca_cert")?;
+            }
         }
         Ok(())
     }
@@ -203,6 +228,91 @@ impl Config {
             static_dir: self.server.static_dir.clone(),
         }
     }
+}
+
+fn validate_certificate_bundle(path: &str, label: &str) -> Result<(), ConfigError> {
+    for cert in load_certificate_chain(path, label)? {
+        let cert = x509_parser::parse_x509_certificate(cert.as_ref())
+            .map_err(|error| ConfigError::InvalidCertificate {
+                path: label.into(),
+                message: error.to_string(),
+            })?
+            .1;
+        if !cert.validity().is_valid() {
+            return Err(ConfigError::InvalidCertificate {
+                path: label.into(),
+                message: format!(
+                    "certificate validity window is not active (not_before={}, not_after={})",
+                    cert.validity().not_before,
+                    cert.validity().not_after
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_certificate_key_pair(
+    cert_path: &str,
+    key_path: &str,
+    cert_label: &str,
+    key_label: &str,
+) -> Result<(), ConfigError> {
+    let cert_chain = load_certificate_chain(cert_path, cert_label)?;
+    let private_key = load_private_key(key_path, key_label)?;
+    let provider = rustls::crypto::ring::default_provider();
+    CertifiedKey::from_der(cert_chain, private_key, &provider).map_err(|error| {
+        ConfigError::InvalidTlsIdentity {
+            cert_path: cert_label.into(),
+            key_path: key_label.into(),
+            message: error.to_string(),
+        }
+    })?;
+    Ok(())
+}
+
+fn load_certificate_chain(path: &str, label: &str) -> Result<Vec<CertificateDer<'static>>, ConfigError> {
+    let pem = std::fs::read(path).map_err(ConfigError::Io)?;
+    let mut certs = Vec::new();
+    for block in Pem::iter_from_buffer(&pem) {
+        let block = block.map_err(|error| ConfigError::InvalidCertificate {
+            path: label.into(),
+            message: error.to_string(),
+        })?;
+        if block.label == "CERTIFICATE" {
+            certs.push(CertificateDer::from(block.contents));
+        }
+    }
+    if certs.is_empty() {
+        return Err(ConfigError::InvalidCertificate {
+            path: label.into(),
+            message: "no CERTIFICATE PEM blocks found".into(),
+        });
+    }
+    Ok(certs)
+}
+
+fn load_private_key(path: &str, label: &str) -> Result<PrivateKeyDer<'static>, ConfigError> {
+    let pem = std::fs::read(path).map_err(ConfigError::Io)?;
+    for block in Pem::iter_from_buffer(&pem) {
+        let block = block.map_err(|error| ConfigError::InvalidPrivateKey {
+            path: label.into(),
+            message: error.to_string(),
+        })?;
+        let key = match block.label.as_str() {
+            "PRIVATE KEY" => Some(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(block.contents))),
+            "RSA PRIVATE KEY" => Some(PrivateKeyDer::Pkcs1(PrivatePkcs1KeyDer::from(block.contents))),
+            "EC PRIVATE KEY" => Some(PrivateKeyDer::Sec1(PrivateSec1KeyDer::from(block.contents))),
+            _ => None,
+        };
+        if let Some(key) = key {
+            return Ok(key);
+        }
+    }
+    Err(ConfigError::InvalidPrivateKey {
+        path: label.into(),
+        message: "no supported PRIVATE KEY PEM blocks found".into(),
+    })
 }
 
 impl Default for Config {
@@ -236,12 +346,6 @@ pub struct ServerConfig {
     pub bolt_address: Option<String>,
     /// Dedicated gRPC bind address override.
     pub grpc_address: Option<String>,
-    /// Shared bearer token required for internal gRPC RPCs when set.
-    pub grpc_auth_token: Option<String>,
-    /// Base64 ciphertext for a KMS-encrypted shared gRPC bearer token.
-    pub grpc_auth_token_kms_ciphertext: Option<String>,
-    /// KMS key URI used to decrypt the shared gRPC bearer token.
-    pub grpc_auth_token_kms_key_uri: Option<String>,
     /// Enable TLS for the internal gRPC listener and clients.
     pub grpc_tls_enabled: bool,
     /// PEM certificate path for the internal gRPC listener.
@@ -287,9 +391,6 @@ impl Default for ServerConfig {
             http_address: None,
             bolt_address: None,
             grpc_address: None,
-            grpc_auth_token: None,
-            grpc_auth_token_kms_ciphertext: None,
-            grpc_auth_token_kms_key_uri: None,
             grpc_tls_enabled: false,
             grpc_tls_cert: None,
             grpc_tls_key: None,
@@ -794,15 +895,6 @@ pub fn apply_env_overrides_from(config: &mut Config, env: &BTreeMap<String, Stri
     set_if_present(env_nonempty(env, "COPPERDB_GRPC_ADDRESS"), |value| {
         config.server.grpc_address = Some(value)
     });
-    set_if_present(env_nonempty(env, "COPPERDB_GRPC_AUTH_TOKEN"), |value| {
-        config.server.grpc_auth_token = Some(value)
-    });
-    set_if_present(env_nonempty(env, "COPPERDB_GRPC_AUTH_TOKEN_KMS_CIPHERTEXT"), |value| {
-        config.server.grpc_auth_token_kms_ciphertext = Some(value)
-    });
-    set_if_present(env_nonempty(env, "COPPERDB_GRPC_AUTH_TOKEN_KMS_KEY_URI"), |value| {
-        config.server.grpc_auth_token_kms_key_uri = Some(value)
-    });
     set_if_present(parse_env_bool(env, "COPPERDB_GRPC_TLS_ENABLED"), |value| {
         config.server.grpc_tls_enabled = value
     });
@@ -915,15 +1007,6 @@ pub fn apply_overrides(config: &mut Config, overrides: &ConfigOverrides) {
     }
     if let Some(address) = &overrides.grpc_address {
         config.server.grpc_address = Some(address.clone());
-    }
-    if let Some(token) = &overrides.grpc_auth_token {
-        config.server.grpc_auth_token = Some(token.clone());
-    }
-    if let Some(ciphertext) = &overrides.grpc_auth_token_kms_ciphertext {
-        config.server.grpc_auth_token_kms_ciphertext = Some(ciphertext.clone());
-    }
-    if let Some(key_uri) = &overrides.grpc_auth_token_kms_key_uri {
-        config.server.grpc_auth_token_kms_key_uri = Some(key_uri.clone());
     }
     if let Some(enabled) = overrides.grpc_tls_enabled {
         config.server.grpc_tls_enabled = enabled;
@@ -1187,6 +1270,34 @@ pub fn load_from_env() -> Result<Config, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::{CertificateParams, KeyPair};
+    use std::path::PathBuf;
+    use time::{Duration, OffsetDateTime};
+
+    fn valid_test_config() -> Config {
+        let mut cfg = Config::default();
+        cfg.auth.jwt_secret = "test-secret".into();
+        cfg
+    }
+
+    fn write_cert_and_key(
+        dir: &tempfile::TempDir,
+        cert_name: &str,
+        key_name: &str,
+        not_before: OffsetDateTime,
+        not_after: OffsetDateTime,
+    ) -> (PathBuf, PathBuf) {
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec!["localhost".into()]).unwrap();
+        params.not_before = not_before;
+        params.not_after = not_after;
+        let cert = params.self_signed(&key).unwrap();
+        let cert_path = dir.path().join(cert_name);
+        let key_path = dir.path().join(key_name);
+        std::fs::write(&cert_path, cert.pem()).unwrap();
+        std::fs::write(&key_path, key.serialize_pem()).unwrap();
+        (cert_path, key_path)
+    }
 
     #[test]
     fn test_default_config() {
@@ -1214,6 +1325,133 @@ mod tests {
     fn test_validate_rejects_empty_jwt_secret() {
         let cfg = Config::default();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_expired_grpc_tls_certificate() {
+        let temp = tempfile::tempdir().unwrap();
+        let (cert_path, key_path) = write_cert_and_key(
+            &temp,
+            "expired-cert.pem",
+            "server.key",
+            OffsetDateTime::from_unix_timestamp(1_000).unwrap(),
+            OffsetDateTime::from_unix_timestamp(2_000).unwrap(),
+        );
+
+        let mut cfg = valid_test_config();
+        cfg.server.grpc_tls_enabled = true;
+        cfg.server.grpc_tls_cert = Some(cert_path.to_string_lossy().into_owned());
+        cfg.server.grpc_tls_key = Some(key_path.to_string_lossy().into_owned());
+
+        assert!(matches!(
+            cfg.validate(),
+            Err(ConfigError::InvalidCertificate { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_future_grpc_client_certificate() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = OffsetDateTime::now_utc();
+        let (server_cert_path, key_path) = write_cert_and_key(
+            &temp,
+            "server-cert.pem",
+            "server.key",
+            now - Duration::days(1),
+            now + Duration::days(30),
+        );
+        let (client_cert_path, client_key_path) = write_cert_and_key(
+            &temp,
+            "future-client-cert.pem",
+            "client.key",
+            now + Duration::days(2),
+            now + Duration::days(30),
+        );
+
+        let mut cfg = valid_test_config();
+        cfg.server.grpc_tls_enabled = true;
+        cfg.server.grpc_tls_cert = Some(server_cert_path.to_string_lossy().into_owned());
+        cfg.server.grpc_tls_key = Some(key_path.to_string_lossy().into_owned());
+        cfg.server.grpc_tls_client_cert = Some(client_cert_path.to_string_lossy().into_owned());
+        cfg.server.grpc_tls_client_key = Some(client_key_path.to_string_lossy().into_owned());
+        cfg.server.grpc_tls_client_auth_ca_cert = Some(
+            server_cert_path.to_string_lossy().into_owned(),
+        );
+
+        assert!(matches!(
+            cfg.validate(),
+            Err(ConfigError::InvalidCertificate { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_mismatched_grpc_tls_server_key_pair() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = OffsetDateTime::now_utc();
+        let (server_cert_path, _) = write_cert_and_key(
+            &temp,
+            "server-cert.pem",
+            "server.key",
+            now - Duration::days(1),
+            now + Duration::days(30),
+        );
+        let (_, other_key_path) = write_cert_and_key(
+            &temp,
+            "other-cert.pem",
+            "other.key",
+            now - Duration::days(1),
+            now + Duration::days(30),
+        );
+
+        let mut cfg = valid_test_config();
+        cfg.server.grpc_tls_enabled = true;
+        cfg.server.grpc_tls_cert = Some(server_cert_path.to_string_lossy().into_owned());
+        cfg.server.grpc_tls_key = Some(other_key_path.to_string_lossy().into_owned());
+
+        assert!(matches!(
+            cfg.validate(),
+            Err(ConfigError::InvalidTlsIdentity { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_mismatched_grpc_tls_client_key_pair() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = OffsetDateTime::now_utc();
+        let (server_cert_path, server_key_path) = write_cert_and_key(
+            &temp,
+            "server-cert.pem",
+            "server.key",
+            now - Duration::days(1),
+            now + Duration::days(30),
+        );
+        let (client_cert_path, _) = write_cert_and_key(
+            &temp,
+            "client-cert.pem",
+            "client.key",
+            now - Duration::days(1),
+            now + Duration::days(30),
+        );
+        let (_, other_client_key_path) = write_cert_and_key(
+            &temp,
+            "other-client-cert.pem",
+            "other-client.key",
+            now - Duration::days(1),
+            now + Duration::days(30),
+        );
+
+        let mut cfg = valid_test_config();
+        cfg.server.grpc_tls_enabled = true;
+        cfg.server.grpc_tls_cert = Some(server_cert_path.to_string_lossy().into_owned());
+        cfg.server.grpc_tls_key = Some(server_key_path.to_string_lossy().into_owned());
+        cfg.server.grpc_tls_client_cert = Some(client_cert_path.to_string_lossy().into_owned());
+        cfg.server.grpc_tls_client_key = Some(other_client_key_path.to_string_lossy().into_owned());
+        cfg.server.grpc_tls_client_auth_ca_cert = Some(server_cert_path.to_string_lossy().into_owned());
+
+        assert!(matches!(
+            cfg.validate(),
+            Err(ConfigError::InvalidTlsIdentity { .. })
+        ));
     }
 
     #[test]
@@ -1247,10 +1485,6 @@ server:
         let mut env = BTreeMap::new();
         env.insert("COPPERDB_HTTP_PORT".to_string(), "8100".to_string());
         env.insert("COPPERDB_GRPC_PORT".to_string(), "9101".to_string());
-        env.insert(
-            "COPPERDB_GRPC_AUTH_TOKEN".to_string(),
-            "env-shared-secret".to_string(),
-        );
         env.insert("COPPERDB_GRPC_TLS_ENABLED".to_string(), "true".to_string());
         env.insert(
             "COPPERDB_GRPC_TLS_DOMAIN_NAME".to_string(),
@@ -1260,7 +1494,6 @@ server:
 
         let cli = ConfigOverrides {
             bolt_port: Some(9100),
-            grpc_auth_token: Some("cli-shared-secret".into()),
             grpc_tls_domain_name: Some("cli.mesh.local".into()),
             grpc_tls_client_auth_optional: Some(true),
             grpc_enabled: Some(true),
@@ -1272,7 +1505,6 @@ server:
         assert_eq!(cfg.server.http_port, 8100);
         assert_eq!(cfg.server.bolt_port, 9100);
         assert_eq!(cfg.server.grpc_port, 9101);
-        assert_eq!(cfg.server.grpc_auth_token.as_deref(), Some("cli-shared-secret"));
         assert!(cfg.server.grpc_tls_enabled);
         assert_eq!(
             cfg.server.grpc_tls_domain_name.as_deref(),
