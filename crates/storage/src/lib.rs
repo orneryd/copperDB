@@ -7,6 +7,7 @@
 use bytes::Bytes;
 use copperdb_encryption::{EnvelopeConfig, EnvelopeEncryptor};
 use copperdb_kms::KeyProvider;
+use copperdb_util::{RequestCancellation, RequestCancelled};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use sled::{Db, Tree};
@@ -51,6 +52,7 @@ const META_SCHEMA_NAMESPACE_INDEX_PREFIX: &[u8] = b"schema_index_ns/";
 const META_NAMESPACE_NODE_COUNT_PREFIX: &[u8] = b"namespace_node_count/";
 const META_NAMESPACE_EDGE_COUNT_PREFIX: &[u8] = b"namespace_edge_count/";
 const META_NAMESPACE_LABEL_COUNT_PREFIX: &[u8] = b"namespace_label_count/";
+const META_PENDING_EMBEDDING_PREFIX: &[u8] = b"pending_embedding/";
 const META_KP_DECAY_PROFILE_PREFIX: &[u8] = b"kp_decay_profile/";
 const META_KP_DECAY_BINDING_PREFIX: &[u8] = b"kp_decay_binding/";
 const META_KP_PROMOTION_PROFILE_PREFIX: &[u8] = b"kp_promotion_profile/";
@@ -82,6 +84,8 @@ pub enum StorageError {
     InvalidChunkSize(usize),
     #[error("iteration stopped")]
     IterationStopped,
+    #[error(transparent)]
+    RequestCancelled(#[from] RequestCancelled),
     #[error("invalid utf8 in key")]
     InvalidUtf8,
     #[error("mvcc rebuild is blocked by {active_readers} active reader(s)")]
@@ -711,9 +715,72 @@ pub struct NodeRecord {
     pub id: String,
     pub labels: Vec<String>,
     pub properties: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub named_embeddings: BTreeMap<String, Vec<f32>>,
+    #[serde(default)]
+    pub chunk_embeddings: Vec<Vec<f32>>,
+    #[serde(default)]
+    pub embed_meta: NodeEmbeddingMetadata,
     pub created_at_unix_ms: i64,
     pub updated_at_unix_ms: i64,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct NodeEmbeddingMetadata {
+    #[serde(default)]
+    pub embedding_model: Option<String>,
+    #[serde(default)]
+    pub embedding_dimensions: Option<usize>,
+    #[serde(default)]
+    pub has_embedding: Option<bool>,
+    #[serde(default)]
+    pub embedded_at: Option<String>,
+    #[serde(default)]
+    pub has_chunks: Option<bool>,
+    #[serde(default)]
+    pub chunk_count: Option<usize>,
+}
+
+impl NodeEmbeddingMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.embedding_model.is_none()
+            && self.embedding_dimensions.is_none()
+            && self.has_embedding.is_none()
+            && self.embedded_at.is_none()
+            && self.has_chunks.is_none()
+            && self.chunk_count.is_none()
+    }
+
+    fn clear_materialized_state(&mut self) {
+        self.embedding_model = None;
+        self.embedding_dimensions = None;
+        self.has_embedding = None;
+        self.embedded_at = None;
+    }
+}
+
+impl NodeRecord {
+    pub fn needs_embedding(&self) -> bool {
+        node_record_needs_embedding(self)
+    }
+
+    pub fn has_materialized_embedding(&self) -> bool {
+        node_record_has_materialized_embedding(self)
+    }
+
+    pub fn default_embedding(&self) -> Option<&[f32]> {
+        self.named_embeddings
+            .get(DEFAULT_NAMED_EMBEDDING)
+            .map(Vec::as_slice)
+    }
+
+    pub fn set_default_embedding(&mut self, embedding: Vec<f32>) {
+        self.named_embeddings
+            .insert(DEFAULT_NAMED_EMBEDDING.to_string(), embedding);
+    }
+}
+
+const DEFAULT_NAMED_EMBEDDING: &str = "default";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EdgeRecord {
@@ -724,6 +791,47 @@ pub struct EdgeRecord {
     pub properties: BTreeMap<String, serde_json::Value>,
     pub created_at_unix_ms: i64,
     pub updated_at_unix_ms: i64,
+}
+
+pub type NodeEventCallback = Arc<dyn Fn(NodeRecord) + Send + Sync + 'static>;
+pub type NodeDeleteCallback = Arc<dyn Fn(String) + Send + Sync + 'static>;
+pub type EdgeEventCallback = Arc<dyn Fn(EdgeRecord) + Send + Sync + 'static>;
+pub type EdgeDeleteCallback = Arc<dyn Fn(String) + Send + Sync + 'static>;
+
+pub fn node_record_needs_embedding(node: &NodeRecord) -> bool {
+    if node
+        .labels
+        .iter()
+        .any(|label| label.starts_with('_') && !label.is_empty())
+    {
+        return false;
+    }
+    if node.properties.contains_key("embedding_skipped") {
+        return false;
+    }
+    if node_record_has_materialized_embedding(node) {
+        return false;
+    }
+    true
+}
+
+pub fn node_record_has_materialized_embedding(node: &NodeRecord) -> bool {
+    node.named_embeddings
+        .values()
+        .any(|embedding| !embedding.is_empty())
+        || node
+            .chunk_embeddings
+            .iter()
+            .any(|embedding| !embedding.is_empty())
+}
+
+pub trait StorageEventNotifier {
+    fn on_node_created(&self, callback: NodeEventCallback);
+    fn on_node_updated(&self, callback: NodeEventCallback);
+    fn on_node_deleted(&self, callback: NodeDeleteCallback);
+    fn on_edge_created(&self, callback: EdgeEventCallback);
+    fn on_edge_updated(&self, callback: EdgeEventCallback);
+    fn on_edge_deleted(&self, callback: EdgeDeleteCallback);
 }
 
 /// A single opened copperdb storage instance.
@@ -1070,6 +1178,7 @@ impl StorageEngine {
         self.index_node_labels(node)?;
         self.index_node_properties(node)?;
         self.apply_node_stats_delta(node, 1)?;
+        self.update_pending_embedding_index(node)?;
         self.mvcc.put_node_record(node)?;
         Ok(())
     }
@@ -1088,6 +1197,7 @@ impl StorageEngine {
             self.unindex_node_labels(&existing)?;
             self.unindex_node_properties(&existing)?;
             self.apply_node_stats_delta(&existing, -1)?;
+            self.mark_node_embedded(id)?;
             self.nodes.remove(id.as_bytes())?;
             self.mvcc.delete_node_record(id)?;
         }
@@ -1166,11 +1276,139 @@ impl StorageEngine {
         Ok(out)
     }
 
+    pub fn find_node_needing_embedding(&self) -> Result<Option<NodeRecord>, StorageError> {
+        for entry in self.meta.scan_prefix(META_PENDING_EMBEDDING_PREFIX) {
+            let (key, _) = entry?;
+            let Some(node_id) = pending_embedding_id_from_key(key.as_ref()) else {
+                continue;
+            };
+            match self.get_node_record(&node_id)? {
+                Some(node) if node.needs_embedding() => return Ok(Some(node)),
+                Some(_) | None => self.mark_node_embedded(&node_id)?,
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn mark_node_embedded(&self, id: &str) -> Result<(), StorageError> {
+        self.meta.remove(pending_embedding_key(id))?;
+        Ok(())
+    }
+
+    pub fn add_to_pending_embeddings(&self, id: &str) -> Result<(), StorageError> {
+        let Some(node) = self.get_node_record(id)? else {
+            return Ok(());
+        };
+        self.update_pending_embedding_index(&node)
+    }
+
+    pub fn pending_embeddings_count(&self) -> Result<usize, StorageError> {
+        let mut count = 0;
+        for entry in self.meta.scan_prefix(META_PENDING_EMBEDDING_PREFIX) {
+            entry?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    pub fn refresh_pending_embeddings_index(&self) -> Result<usize, StorageError> {
+        let valid_ids = self
+            .all_node_records()?
+            .into_iter()
+            .filter(|node| node.needs_embedding())
+            .map(|node| node.id)
+            .collect::<BTreeSet<_>>();
+
+        let keys = self
+            .meta
+            .scan_prefix(META_PENDING_EMBEDDING_PREFIX)
+            .map(|entry| {
+                entry
+                    .map(|(key, _)| key.to_vec())
+                    .map_err(StorageError::from)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for key in keys {
+            self.meta.remove(key)?;
+        }
+        for id in &valid_ids {
+            self.meta.insert(pending_embedding_key(id), [])?;
+        }
+        Ok(valid_ids.len())
+    }
+
+    pub fn pending_embedding_ids(&self) -> Result<Vec<String>, StorageError> {
+        let mut ids = Vec::new();
+        for entry in self.meta.scan_prefix(META_PENDING_EMBEDDING_PREFIX) {
+            let (key, _) = entry?;
+            if let Some(id) = pending_embedding_id_from_key(key.as_ref()) {
+                ids.push(id);
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    pub fn clear_all_embeddings(&self) -> Result<usize, StorageError> {
+        self.clear_all_embeddings_for_prefix("")
+    }
+
+    pub fn clear_all_embeddings_for_prefix(&self, prefix: &str) -> Result<usize, StorageError> {
+        let nodes_to_clear = self
+            .all_node_records()?
+            .into_iter()
+            .filter(|node| prefix.is_empty() || node.id.starts_with(prefix))
+            .filter(|node| node.has_materialized_embedding())
+            .collect::<Vec<_>>();
+
+        let mut cleared = 0;
+        for mut node in nodes_to_clear {
+            node.named_embeddings.clear();
+            node.chunk_embeddings.clear();
+            node.embed_meta.clear_materialized_state();
+            self.put_node_record(&node)?;
+            cleared += 1;
+        }
+
+        Ok(cleared)
+    }
+
+    pub fn update_node_embedding(&self, node: &NodeRecord) -> Result<(), StorageError> {
+        let mut existing = self
+            .get_node_record(&node.id)?
+            .ok_or_else(|| StorageError::NotFound(node.id.clone()))?;
+        existing.named_embeddings = node.named_embeddings.clone();
+        existing.chunk_embeddings = node.chunk_embeddings.clone();
+        existing.embed_meta = node.embed_meta.clone();
+        existing.updated_at_unix_ms = existing.updated_at_unix_ms.max(node.updated_at_unix_ms);
+        self.put_node_record(&existing)
+    }
+
+    fn update_pending_embedding_index(&self, node: &NodeRecord) -> Result<(), StorageError> {
+        if node.needs_embedding() {
+            self.meta.insert(pending_embedding_key(&node.id), [])?;
+        } else {
+            self.meta.remove(pending_embedding_key(&node.id))?;
+        }
+        Ok(())
+    }
+
     pub fn stream_node_records<F>(&self, visit: F) -> Result<u64, StorageError>
     where
         F: FnMut(NodeRecord) -> Result<(), StorageError>,
     {
-        self.stream_node_records_from_entries(self.nodes.iter(), visit)
+        self.stream_node_records_with_cancellation(&RequestCancellation::new(), visit)
+    }
+
+    pub fn stream_node_records_with_cancellation<F>(
+        &self,
+        cancel: &RequestCancellation,
+        visit: F,
+    ) -> Result<u64, StorageError>
+    where
+        F: FnMut(NodeRecord) -> Result<(), StorageError>,
+    {
+        self.stream_node_records_from_entries(self.nodes.iter(), cancel, visit)
     }
 
     pub fn stream_node_records_by_prefix<F>(
@@ -1181,12 +1419,48 @@ impl StorageEngine {
     where
         F: FnMut(NodeRecord) -> Result<(), StorageError>,
     {
-        self.stream_node_records_from_entries(self.nodes.scan_prefix(prefix.as_bytes()), visit)
+        self.stream_node_records_by_prefix_with_cancellation(
+            prefix,
+            &RequestCancellation::new(),
+            visit,
+        )
+    }
+
+    pub fn stream_node_records_by_prefix_with_cancellation<F>(
+        &self,
+        prefix: &str,
+        cancel: &RequestCancellation,
+        visit: F,
+    ) -> Result<u64, StorageError>
+    where
+        F: FnMut(NodeRecord) -> Result<(), StorageError>,
+    {
+        self.stream_node_records_from_entries(
+            self.nodes.scan_prefix(prefix.as_bytes()),
+            cancel,
+            visit,
+        )
     }
 
     pub fn stream_node_record_chunks<F>(
         &self,
         chunk_size: usize,
+        visit: F,
+    ) -> Result<u64, StorageError>
+    where
+        F: FnMut(&[NodeRecord]) -> Result<(), StorageError>,
+    {
+        self.stream_node_record_chunks_with_cancellation(
+            chunk_size,
+            &RequestCancellation::new(),
+            visit,
+        )
+    }
+
+    pub fn stream_node_record_chunks_with_cancellation<F>(
+        &self,
+        chunk_size: usize,
+        cancel: &RequestCancellation,
         mut visit: F,
     ) -> Result<u64, StorageError>
     where
@@ -1199,10 +1473,11 @@ impl StorageEngine {
         let mut chunk = Vec::with_capacity(chunk_size);
         let mut stop_requested = false;
         let mut streamed = 0;
-        self.stream_node_records(|node| {
+        self.stream_node_records_with_cancellation(cancel, |node| {
             chunk.push(node);
             streamed += 1;
             if chunk.len() == chunk_size {
+                cancel.check_cancelled()?;
                 match visit(&chunk) {
                     Ok(()) => {
                         chunk.clear();
@@ -1219,6 +1494,7 @@ impl StorageEngine {
         .or_else(Self::swallow_iteration_stopped)?;
 
         if !stop_requested && !chunk.is_empty() {
+            cancel.check_cancelled()?;
             match visit(&chunk) {
                 Ok(()) | Err(StorageError::IterationStopped) => {}
                 Err(err) => return Err(err),
@@ -1452,12 +1728,24 @@ impl StorageEngine {
         Ok(out)
     }
 
-    pub fn stream_edge_records<F>(&self, mut visit: F) -> Result<u64, StorageError>
+    pub fn stream_edge_records<F>(&self, visit: F) -> Result<u64, StorageError>
+    where
+        F: FnMut(EdgeRecord) -> Result<(), StorageError>,
+    {
+        self.stream_edge_records_with_cancellation(&RequestCancellation::new(), visit)
+    }
+
+    pub fn stream_edge_records_with_cancellation<F>(
+        &self,
+        cancel: &RequestCancellation,
+        mut visit: F,
+    ) -> Result<u64, StorageError>
     where
         F: FnMut(EdgeRecord) -> Result<(), StorageError>,
     {
         let mut streamed = 0;
         for entry in self.edges.iter() {
+            cancel.check_cancelled()?;
             let (key, _) = entry?;
             let key_str =
                 std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
@@ -2492,6 +2780,7 @@ impl StorageEngine {
     fn stream_node_records_from_entries<F, I, K, V>(
         &self,
         iter: I,
+        cancel: &RequestCancellation,
         mut visit: F,
     ) -> Result<u64, StorageError>
     where
@@ -2502,6 +2791,7 @@ impl StorageEngine {
     {
         let mut streamed = 0;
         for entry in iter {
+            cancel.check_cancelled()?;
             let (key, value) = entry?;
             let key_str =
                 std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
@@ -2520,12 +2810,12 @@ impl StorageEngine {
         Ok(streamed)
     }
 
-fn swallow_iteration_stopped(err: StorageError) -> Result<u64, StorageError> {
-    match err {
-        StorageError::IterationStopped => Ok(0),
-        other => Err(other),
+    fn swallow_iteration_stopped(err: StorageError) -> Result<u64, StorageError> {
+        match err {
+            StorageError::IterationStopped => Ok(0),
+            other => Err(other),
+        }
     }
-}
 
     fn delete_namespace_metadata(&self, namespace: &str) -> Result<(), StorageError> {
         self.meta.remove(namespace_node_count_key(namespace))?;
@@ -2624,6 +2914,20 @@ fn namespace_label_count_prefix(namespace: &str) -> Vec<u8> {
         b"/",
     ]
     .concat()
+}
+
+fn pending_embedding_key(node_id: &str) -> Vec<u8> {
+    [
+        META_PENDING_EMBEDDING_PREFIX,
+        escape_index_component(node_id).as_bytes(),
+    ]
+    .concat()
+}
+
+fn pending_embedding_id_from_key(key: &[u8]) -> Option<String> {
+    let suffix = key.strip_prefix(META_PENDING_EMBEDDING_PREFIX)?;
+    let decoded = hex::decode(std::str::from_utf8(suffix).ok()?).ok()?;
+    String::from_utf8(decoded).ok()
 }
 
 fn label_index_key(label: &str, node_id: &str) -> String {
@@ -3119,26 +3423,8 @@ fn promotion_policy_target_key(policy: &PromotionPolicySchema) -> String {
 }
 
 fn compat_node_record_from_bytes(id: &str, raw: &[u8]) -> Result<Option<NodeRecord>, StorageError> {
-    if let Ok(record) = rmp_serde::from_slice::<NodeRecord>(raw) {
-        return Ok(Some(record));
-    }
-
-    let mut props = match rmp_serde::from_slice::<BTreeMap<String, serde_json::Value>>(raw) {
-        Ok(props) => props,
-        Err(_) => return Ok(None),
-    };
-
-    let labels = legacy_node_labels(id, props.get("_labels"));
-    props.remove("_labels");
-    props.remove("_id");
-
-    Ok(Some(NodeRecord {
-        id: id.to_string(),
-        labels,
-        properties: props,
-        created_at_unix_ms: 0,
-        updated_at_unix_ms: 0,
-    }))
+    let _ = id;
+    Ok(rmp_serde::from_slice::<NodeRecord>(raw).ok())
 }
 
 fn node_record_to_legacy_props(node: &NodeRecord) -> BTreeMap<String, serde_json::Value> {
@@ -3158,38 +3444,6 @@ fn node_record_to_legacy_props(node: &NodeRecord) -> BTreeMap<String, serde_json
         ),
     );
     props
-}
-
-fn legacy_node_labels(id: &str, stored_labels: Option<&serde_json::Value>) -> Vec<String> {
-    if let Some(serde_json::Value::Array(labels)) = stored_labels {
-        let parsed = labels
-            .iter()
-            .filter_map(|label| label.as_str().map(str::to_string))
-            .collect::<Vec<_>>();
-        if !parsed.is_empty() {
-            return parsed;
-        }
-    }
-
-    if let Some(serde_json::Value::String(label)) = stored_labels {
-        if !label.is_empty() {
-            return vec![label.clone()];
-        }
-    }
-
-    derived_label_from_id(id).into_iter().collect()
-}
-
-fn derived_label_from_id(id: &str) -> Option<String> {
-    let namespace = id
-        .split_once(':')
-        .map(|(namespace, _)| namespace)
-        .unwrap_or(id);
-    let mut chars = namespace.chars();
-    let first = chars.next()?;
-    let mut label = first.to_uppercase().collect::<String>();
-    label.push_str(chars.as_str());
-    Some(label)
 }
 
 fn namespace_from_str(id: &str) -> Option<&str> {

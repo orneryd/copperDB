@@ -208,6 +208,10 @@ fn test_local_fulltext_search_uses_catalogued_fulltext_index() {
                     ]),
                 ),
             ]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 1,
             updated_at_unix_ms: 1,
         })
@@ -220,6 +224,10 @@ fn test_local_fulltext_search_uses_catalogued_fulltext_index() {
                 "bio".into(),
                 Value::String("Bob writes storage engines".into()),
             )]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 2,
             updated_at_unix_ms: 2,
         })
@@ -1347,6 +1355,10 @@ fn engine_persists_and_plans_fabric_database_shards() {
                 "bio".into(),
                 Value::String("Alice builds reliable graph systems".into()),
             )]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 10,
             updated_at_unix_ms: 20,
         })

@@ -22,6 +22,7 @@ use copperdb_storage::{
     PromotionOnAccessMutationKindSchema, PromotionOnAccessMutationSchema, PromotionPolicySchema,
     PromotionProfileSchema, PromotionWhenClauseSchema, StorageEngine,
 };
+use copperdb_util::{RequestCancelled, RequestContext};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -45,6 +46,8 @@ pub enum EvalError {
     FilterError(String),
     #[error("serialization error: {0}")]
     SerializationError(String),
+    #[error(transparent)]
+    RequestCancelled(#[from] RequestCancelled),
 }
 
 impl From<copperdb_storage::StorageError> for EvalError {
@@ -560,6 +563,9 @@ fn node_record_from_props(props: &HashMap<String, Value>) -> Result<NodeRecord, 
         id: id.to_string(),
         labels,
         properties,
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: Vec::new(),
+        embed_meta: Default::default(),
         created_at_unix_ms: 0,
         updated_at_unix_ms: 0,
     })

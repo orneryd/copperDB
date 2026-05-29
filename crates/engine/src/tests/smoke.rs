@@ -91,6 +91,10 @@ async fn engine_routes_distributed_where_filtered_prefix_match_path() {
                 id: id.into(),
                 labels: vec![label.into()],
                 properties,
+
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
                 created_at_unix_ms: 0,
                 updated_at_unix_ms: 0,
             })
@@ -222,6 +226,10 @@ async fn engine_routes_distributed_with_prefix_match_path() {
                 id: id.into(),
                 labels: vec![label.into()],
                 properties,
+
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
                 created_at_unix_ms: 0,
                 updated_at_unix_ms: 0,
             })
@@ -340,6 +348,10 @@ async fn engine_routes_distributed_optional_prefix_miss_match_path() {
                 id: id.into(),
                 labels: vec![label.into()],
                 properties,
+
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
                 created_at_unix_ms: 0,
                 updated_at_unix_ms: 0,
             })
@@ -468,6 +480,10 @@ async fn engine_routes_distributed_edge_variable_filtered_prefix_optional_path()
                 id: id.into(),
                 labels: vec![label.into()],
                 properties,
+
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
                 created_at_unix_ms: 0,
                 updated_at_unix_ms: 0,
             })

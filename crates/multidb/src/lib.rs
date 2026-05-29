@@ -294,6 +294,9 @@ fn database_to_node(database: &Database) -> Result<NodeRecord, MultiDbError> {
         id: database_node_id(&database.name),
         labels: vec![DATABASE_LABEL.into()],
         properties,
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: Vec::new(),
+        embed_meta: Default::default(),
         created_at_unix_ms: now_unix_ms(),
         updated_at_unix_ms: now_unix_ms(),
     })
@@ -322,6 +325,9 @@ fn database_config_to_node(
         id: database_config_node_id(name),
         labels: vec![DATABASE_CONFIG_LABEL.into()],
         properties,
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: Vec::new(),
+        embed_meta: Default::default(),
         created_at_unix_ms: now_unix_ms(),
         updated_at_unix_ms: now_unix_ms(),
     })

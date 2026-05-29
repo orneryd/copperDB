@@ -1216,6 +1216,9 @@ fn stored_user_to_node(user: &StoredUser) -> Result<NodeRecord, AuthError> {
         id: format!("{USER_PREFIX}{}", user.username),
         labels: vec![USER_LABEL.into(), SYSTEM_LABEL.into()],
         properties,
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: Vec::new(),
+        embed_meta: Default::default(),
         created_at_unix_ms: user.created_at_unix_ms,
         updated_at_unix_ms: user.updated_at_unix_ms,
     })
@@ -1235,6 +1238,9 @@ fn simple_system_node(id: &str, label: &str, properties: BTreeMap<String, Value>
         id: id.into(),
         labels: vec![label.into(), SYSTEM_LABEL.into()],
         properties,
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: Vec::new(),
+        embed_meta: Default::default(),
         created_at_unix_ms: now,
         updated_at_unix_ms: now,
     }

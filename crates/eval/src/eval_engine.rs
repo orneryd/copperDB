@@ -1,3 +1,9 @@
+use std::cell::RefCell;
+
+thread_local! {
+    static CURRENT_REQUEST_CONTEXT: RefCell<Option<RequestContext>> = const { RefCell::new(None) };
+}
+
 use super::*;
 impl EvalEngine {
     pub fn new(storage: Arc<StorageEngine>) -> Self {
@@ -162,12 +168,47 @@ impl EvalEngine {
         query: &Query,
         params: &HashMap<String, Value>,
     ) -> Result<EvalResult, EvalError> {
+        let request_context = RequestContext::detached();
+        self.execute_with_context(&request_context, query, params)
+    }
+
+    pub fn execute_with_context(
+        &self,
+        request_context: &RequestContext,
+        query: &Query,
+        params: &HashMap<String, Value>,
+    ) -> Result<EvalResult, EvalError> {
         self.hot_path_trace.reset();
-        self.with_access_buffer(|| self.execute_inner(query, params))
+        self.with_request_context(request_context, || {
+            self.with_access_buffer(|| self.execute_inner(request_context, query, params))
+        })
+    }
+
+    fn with_request_context<T>(
+        &self,
+        request_context: &RequestContext,
+        run: impl FnOnce() -> Result<T, EvalError>,
+    ) -> Result<T, EvalError> {
+        CURRENT_REQUEST_CONTEXT.with(|slot| {
+            let previous = slot.replace(Some(request_context.clone()));
+            let result = run();
+            slot.replace(previous);
+            result
+        })
+    }
+
+    fn check_current_request_context() -> Result<(), EvalError> {
+        CURRENT_REQUEST_CONTEXT.with(|slot| {
+            if let Some(request_context) = slot.borrow().as_ref() {
+                request_context.check_active()?;
+            }
+            Ok(())
+        })
     }
 
     fn execute_inner(
         &self,
+        request_context: &RequestContext,
         query: &Query,
         params: &HashMap<String, Value>,
     ) -> Result<EvalResult, EvalError> {
@@ -179,6 +220,7 @@ impl EvalEngine {
 
         let mut clause_index = 0;
         while clause_index < query.clauses.len() {
+            request_context.check_active()?;
             let clause = &query.clauses[clause_index];
             let next_where_expression =
                 query
@@ -872,7 +914,15 @@ impl EvalEngine {
         params: &HashMap<String, Value>,
         pattern_info: &PatternInfo,
     ) -> Result<EvalResult, EvalError> {
-        self.execute_with_routes(query, params, pattern_info, None, None)
+        let request_context = RequestContext::detached();
+        self.execute_with_routes_with_context(
+            &request_context,
+            query,
+            params,
+            pattern_info,
+            None,
+            None,
+        )
     }
 
     pub fn execute_with_routes(
@@ -883,11 +933,36 @@ impl EvalEngine {
         compound_match: Option<&ShapeMatch>,
         pipeline_clauses: Option<&[PipelineClause]>,
     ) -> Result<EvalResult, EvalError> {
+        let request_context = RequestContext::detached();
+        self.execute_with_routes_with_context(
+            &request_context,
+            query,
+            params,
+            pattern_info,
+            compound_match,
+            pipeline_clauses,
+        )
+    }
+
+    pub fn execute_with_routes_with_context(
+        &self,
+        request_context: &RequestContext,
+        query: &Query,
+        params: &HashMap<String, Value>,
+        pattern_info: &PatternInfo,
+        compound_match: Option<&ShapeMatch>,
+        pipeline_clauses: Option<&[PipelineClause]>,
+    ) -> Result<EvalResult, EvalError> {
         self.hot_path_trace.reset();
         self.with_access_buffer(|| {
+            request_context.check_active()?;
             match pattern_info.pattern {
                 QueryPattern::SimpleMatchLimit if self.can_execute_simple_match_limit(query) => {
-                    return self.execute_simple_match_limit_optimized(query, params);
+                    return self.execute_simple_match_limit_optimized(
+                        request_context,
+                        query,
+                        params,
+                    );
                 }
                 QueryPattern::MutualRelationship if self.can_execute_simple_match_return(query) => {
                     return self.execute_mutual_relationship_optimized(query, pattern_info);
@@ -918,7 +993,7 @@ impl EvalEngine {
                 }
             }
 
-            self.execute_inner(query, params)
+            self.execute_inner(request_context, query, params)
         })
     }
 
@@ -979,12 +1054,13 @@ impl EvalEngine {
 
     fn execute_simple_match_limit_optimized(
         &self,
+        request_context: &RequestContext,
         query: &Query,
         params: &HashMap<String, Value>,
     ) -> Result<EvalResult, EvalError> {
         self.hot_path_trace.mark_simple_match_limit_fast_path();
         let Some(Clause::Match(match_clause)) = query.clauses.first() else {
-            return self.execute_inner(query, params);
+            return self.execute_inner(request_context, query, params);
         };
         let ret = return_clause(query)?;
         let limit = ret.limit.unwrap_or(0).max(0) as usize;
@@ -1012,6 +1088,7 @@ impl EvalEngine {
         let resolver = self.knowledge_policy_resolver()?;
         let mut rows = Vec::with_capacity(limit);
         for node in self.storage.get_nodes_by_label(primary_label)? {
+            request_context.check_active()?;
             if !node_pattern
                 .labels
                 .iter()
@@ -2493,6 +2570,7 @@ impl EvalEngine {
         visited.insert((start_id.clone(), 0_u32));
 
         while let Some((current_id, depth, path_node_ids, path_edges)) = frontier.pop_front() {
+            Self::check_current_request_context()?;
             if depth >= min_hops {
                 let end_props = if depth == 0 {
                     Some(current_node_props.clone())

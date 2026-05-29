@@ -5,6 +5,7 @@
 //! vector similarity search via copperdb-vectorspace.
 
 use async_trait::async_trait;
+use copperdb_util::{RequestCancelled, RequestContext};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -28,6 +29,8 @@ pub enum SearchError {
     Topology(String),
     #[error("transport error: {0}")]
     Transport(String),
+    #[error(transparent)]
+    RequestCancelled(#[from] RequestCancelled),
 }
 
 /// A search result with relevance score.
@@ -485,6 +488,7 @@ pub trait RankedSearchTransport: Send + Sync {
         placement: &PlacementKey,
         query: &SearchQuery,
         read_fence: Option<LogicalTransactionId>,
+        request_context: Option<&RequestContext>,
     ) -> Result<RrfSearchBatch, SearchError>;
 }
 
@@ -496,6 +500,7 @@ pub trait HydrationTransport: Send + Sync {
         placement: &PlacementKey,
         global_ids: &[FabricGlobalId],
         read_fence: Option<LogicalTransactionId>,
+        request_context: Option<&RequestContext>,
     ) -> Result<Vec<RrfHydrationRecord>, SearchError>;
 }
 
@@ -561,6 +566,7 @@ impl RankedSearchTransport for InMemorySearchTransport {
         _placement: &PlacementKey,
         _query: &SearchQuery,
         _read_fence: Option<LogicalTransactionId>,
+        _request_context: Option<&RequestContext>,
     ) -> Result<RrfSearchBatch, SearchError> {
         self.node_ranked_results
             .read()
@@ -579,6 +585,7 @@ impl HydrationTransport for InMemorySearchTransport {
         _placement: &PlacementKey,
         global_ids: &[FabricGlobalId],
         _read_fence: Option<LogicalTransactionId>,
+        _request_context: Option<&RequestContext>,
     ) -> Result<Vec<RrfHydrationRecord>, SearchError> {
         let requested = global_ids
             .iter()
@@ -699,9 +706,44 @@ impl DistributedRankedSearchExecutor {
         collect_planned_fabric_ranked_batches(plans, query, read_fence, self.transport.clone())
             .await
     }
+
+    pub async fn collect_planned_with_context(
+        &self,
+        request_context: &RequestContext,
+        plans: Vec<DistributedSearchPlan>,
+        query: SearchQuery,
+        read_fence: Option<LogicalTransactionId>,
+    ) -> Result<FabricRankedBatchCollection, SearchError> {
+        collect_planned_fabric_ranked_batches_with_context(
+            request_context,
+            plans,
+            query,
+            read_fence,
+            self.transport.clone(),
+        )
+        .await
+    }
 }
 
 pub async fn collect_planned_fabric_ranked_batches(
+    plans: Vec<DistributedSearchPlan>,
+    query: SearchQuery,
+    read_fence: Option<LogicalTransactionId>,
+    transport: Arc<dyn RankedSearchTransport>,
+) -> Result<FabricRankedBatchCollection, SearchError> {
+    let request_context = RequestContext::detached();
+    collect_planned_fabric_ranked_batches_with_context(
+        &request_context,
+        plans,
+        query,
+        read_fence,
+        transport,
+    )
+    .await
+}
+
+pub async fn collect_planned_fabric_ranked_batches_with_context(
+    request_context: &RequestContext,
     plans: Vec<DistributedSearchPlan>,
     query: SearchQuery,
     read_fence: Option<LogicalTransactionId>,
@@ -712,9 +754,17 @@ pub async fn collect_planned_fabric_ranked_batches(
     let mut batches = Vec::new();
 
     for plan in plans {
+        request_context.check_active()?;
         for peer in &plan.fanout {
+            request_context.check_active()?;
             match transport
-                .search_ranked_node(&peer.node_id, &plan.placement, &query, read_fence)
+                .search_ranked_node(
+                    &peer.node_id,
+                    &plan.placement,
+                    &query,
+                    read_fence,
+                    Some(request_context),
+                )
                 .await
             {
                 Ok(batch) => {
@@ -743,12 +793,22 @@ pub async fn collect_fabric_hydration_records(
     requests: Vec<FabricHydrationRequest>,
     transport: Arc<dyn HydrationTransport>,
 ) -> Result<FabricHydrationCollection, SearchError> {
+    let request_context = RequestContext::detached();
+    collect_fabric_hydration_records_with_context(&request_context, requests, transport).await
+}
+
+pub async fn collect_fabric_hydration_records_with_context(
+    request_context: &RequestContext,
+    requests: Vec<FabricHydrationRequest>,
+    transport: Arc<dyn HydrationTransport>,
+) -> Result<FabricHydrationCollection, SearchError> {
     let mut responded_nodes = Vec::new();
     let mut failed_nodes = Vec::new();
     let mut records = Vec::new();
     let mut requested_ids = Vec::new();
 
     for request in requests {
+        request_context.check_active()?;
         requested_ids.extend(request.global_ids.iter().cloned());
         match transport
             .hydrate_node(
@@ -756,6 +816,7 @@ pub async fn collect_fabric_hydration_records(
                 &request.placement,
                 &request.global_ids,
                 request.read_fence,
+                Some(request_context),
             )
             .await
         {

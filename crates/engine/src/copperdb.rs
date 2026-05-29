@@ -1,4 +1,5 @@
 use super::*;
+use copperdb_util::RequestContext;
 impl CopperDb {
     fn ensure_ranked_search_query_enabled(&self, query: &SearchQuery) -> Result<(), CopperDbError> {
         match query {
@@ -68,6 +69,16 @@ impl CopperDb {
         placement: &PlacementKey,
         query: &SearchQuery,
     ) -> Result<RrfSearchBatch, CopperDbError> {
+        let request_context = RequestContext::detached();
+        self.search_fabric_ranked_batch_locally_with_context(&request_context, placement, query)
+    }
+
+    pub fn search_fabric_ranked_batch_locally_with_context(
+        &self,
+        request_context: &RequestContext,
+        placement: &PlacementKey,
+        query: &SearchQuery,
+    ) -> Result<RrfSearchBatch, CopperDbError> {
         self.ensure_ranked_search_query_enabled(query)?;
 
         match query {
@@ -87,6 +98,7 @@ impl CopperDb {
                 let mut hits = Vec::new();
 
                 for label in labels {
+                    request_context.check_active()?;
                     let matched_properties =
                         matched_fulltext_properties(&index_definitions, &label, fields);
                     if matched_properties.is_empty() {
@@ -146,8 +158,18 @@ impl CopperDb {
         &self,
         global_ids: &[FabricGlobalId],
     ) -> Result<Vec<RrfHydrationRecord>, CopperDbError> {
+        let request_context = RequestContext::detached();
+        self.hydrate_fabric_entities_locally_with_context(&request_context, global_ids)
+    }
+
+    pub fn hydrate_fabric_entities_locally_with_context(
+        &self,
+        request_context: &RequestContext,
+        global_ids: &[FabricGlobalId],
+    ) -> Result<Vec<RrfHydrationRecord>, CopperDbError> {
         let mut records = Vec::new();
         for global_id in global_ids {
+            request_context.check_active()?;
             if global_id.entity_kind != "node" {
                 continue;
             }
@@ -205,12 +227,24 @@ impl CopperDb {
         cypher: &str,
         params: HashMap<String, Value>,
     ) -> Result<QueryResult, CopperDbError> {
-        self.execute_as(cypher, params, &["admin".to_string()])
+        let request_context = RequestContext::detached();
+        self.execute_as_with_context(&request_context, cypher, params, &["admin".to_string()])
     }
 
     /// Execute a Cypher query as a caller with the provided normalized role names.
     pub fn execute_as(
         &self,
+        cypher: &str,
+        params: HashMap<String, Value>,
+        roles: &[String],
+    ) -> Result<QueryResult, CopperDbError> {
+        let request_context = RequestContext::detached();
+        self.execute_as_with_context(&request_context, cypher, params, roles)
+    }
+
+    pub fn execute_as_with_context(
+        &self,
+        request_context: &RequestContext,
         cypher: &str,
         params: HashMap<String, Value>,
         roles: &[String],
@@ -261,7 +295,8 @@ impl CopperDb {
         let pattern_info = detect_query_pattern(cypher);
         let (compound_shape, compound_ok) = match_compound_query_shape(cypher);
         let (pipeline_clauses, pipeline_ok) = can_execute_as_pipeline(cypher);
-        let eval_result = match self.eval.execute_with_routes(
+        let eval_result = match self.eval.execute_with_routes_with_context(
+            request_context,
             &parsed,
             &params,
             &pattern_info,
@@ -587,12 +622,43 @@ impl CopperDb {
         read_fence: Option<LogicalTransactionId>,
         transport: Arc<dyn RankedSearchTransport>,
     ) -> Result<FabricRankedSearchExecution, CopperDbError> {
+        let request_context = RequestContext::detached();
+        self.execute_fabric_ranked_search_with_transport_and_context(
+            &request_context,
+            database,
+            query,
+            hydration,
+            config,
+            policy,
+            read_fence,
+            transport,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_fabric_ranked_search_with_transport_and_context(
+        &self,
+        request_context: &RequestContext,
+        database: &FabricDatabase,
+        query: SearchQuery,
+        hydration: Vec<RrfHydrationRecord>,
+        config: RrfConfig,
+        policy: RrfSearchPolicy,
+        read_fence: Option<LogicalTransactionId>,
+        transport: Arc<dyn RankedSearchTransport>,
+    ) -> Result<FabricRankedSearchExecution, CopperDbError> {
         self.ensure_ranked_search_query_enabled(&query)?;
         let plans = self.plan_fabric_searches(database)?;
-        let collected =
-            collect_planned_fabric_ranked_batches(plans.clone(), query, read_fence, transport)
-                .await
-                .map_err(|error| CopperDbError::Replication(error.to_string()))?;
+        let collected = collect_planned_fabric_ranked_batches_with_context(
+            request_context,
+            plans.clone(),
+            query,
+            read_fence,
+            transport,
+        )
+        .await
+        .map_err(|error| CopperDbError::Replication(error.to_string()))?;
         let mut execution = execute_planned_fabric_ranked_search(
             plans,
             collected.batches,
@@ -612,8 +678,28 @@ impl CopperDb {
         read_fence: Option<LogicalTransactionId>,
         transport: Arc<dyn HydrationTransport>,
     ) -> Result<Vec<RrfHydrationRecord>, CopperDbError> {
+        let request_context = RequestContext::detached();
+        self.fetch_fabric_ranked_hydration_with_transport_and_context(
+            &request_context,
+            outcome,
+            consistency,
+            read_fence,
+            transport,
+        )
+        .await
+    }
+
+    pub async fn fetch_fabric_ranked_hydration_with_transport_and_context(
+        &self,
+        request_context: &RequestContext,
+        outcome: &RrfSearchOutcome,
+        consistency: ConsistencyLevel,
+        read_fence: Option<LogicalTransactionId>,
+        transport: Arc<dyn HydrationTransport>,
+    ) -> Result<Vec<RrfHydrationRecord>, CopperDbError> {
         let mut by_placement: BTreeMap<PlacementKey, Vec<_>> = BTreeMap::new();
         for hit in &outcome.results {
+            request_context.check_active()?;
             by_placement
                 .entry(hit.global_id.placement.clone())
                 .or_default()
@@ -631,9 +717,10 @@ impl CopperDb {
             });
         }
 
-        let collected = collect_fabric_hydration_records(requests, transport)
-            .await
-            .map_err(|error| CopperDbError::Replication(error.to_string()))?;
+        let collected =
+            collect_fabric_hydration_records_with_context(request_context, requests, transport)
+                .await
+                .map_err(|error| CopperDbError::Replication(error.to_string()))?;
         Ok(collected.records)
     }
 
@@ -649,9 +736,38 @@ impl CopperDb {
         ranked_transport: Arc<dyn RankedSearchTransport>,
         hydration_transport: Arc<dyn HydrationTransport>,
     ) -> Result<FabricRankedSearchExecution, CopperDbError> {
+        let request_context = RequestContext::detached();
+        self.execute_fabric_ranked_search_with_full_transport_and_context(
+            &request_context,
+            database,
+            query,
+            hydration_consistency,
+            config,
+            policy,
+            read_fence,
+            ranked_transport,
+            hydration_transport,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_fabric_ranked_search_with_full_transport_and_context(
+        &self,
+        request_context: &RequestContext,
+        database: &FabricDatabase,
+        query: SearchQuery,
+        hydration_consistency: ConsistencyLevel,
+        config: RrfConfig,
+        policy: RrfSearchPolicy,
+        read_fence: Option<LogicalTransactionId>,
+        ranked_transport: Arc<dyn RankedSearchTransport>,
+        hydration_transport: Arc<dyn HydrationTransport>,
+    ) -> Result<FabricRankedSearchExecution, CopperDbError> {
         self.ensure_ranked_search_query_enabled(&query)?;
         let plans = self.plan_fabric_searches(database)?;
-        let collected = collect_planned_fabric_ranked_batches(
+        let collected = collect_planned_fabric_ranked_batches_with_context(
+            request_context,
             plans.clone(),
             query,
             read_fence,
@@ -661,7 +777,8 @@ impl CopperDb {
         .map_err(|error| CopperDbError::Replication(error.to_string()))?;
         let merged = merge_rrf_search_batches(collected.batches.clone(), config);
         let hydration = self
-            .fetch_fabric_ranked_hydration_with_transport(
+            .fetch_fabric_ranked_hydration_with_transport_and_context(
+                request_context,
                 &merged,
                 hydration_consistency,
                 read_fence,
@@ -1568,6 +1685,9 @@ fn distributed_node_record(node: &Value) -> Option<copperdb_storage::NodeRecord>
         id,
         labels,
         properties,
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: Vec::new(),
+        embed_meta: Default::default(),
         created_at_unix_ms,
         updated_at_unix_ms,
     })

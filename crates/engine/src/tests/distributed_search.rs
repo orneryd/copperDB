@@ -713,6 +713,10 @@ async fn engine_routes_distributed_shortest_path_query_through_mesh_bfs() {
             id: "Node:A".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 123,
             updated_at_unix_ms: 456,
         })
@@ -744,6 +748,10 @@ async fn engine_routes_distributed_shortest_path_query_through_mesh_bfs() {
             id: "Node:B".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), Value::String("b".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -789,6 +797,10 @@ async fn engine_routes_distributed_shortest_path_query_through_mesh_bfs() {
             id: "Node:D".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), Value::String("d".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -903,6 +915,10 @@ async fn engine_routes_distributed_shortest_path_query_with_property_endpoints()
             id: "Node:A".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -934,6 +950,10 @@ async fn engine_routes_distributed_shortest_path_query_with_property_endpoints()
             id: "Node:B".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), Value::String("b".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -965,6 +985,10 @@ async fn engine_routes_distributed_shortest_path_query_with_property_endpoints()
             id: "Node:D".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), Value::String("d".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -1077,6 +1101,10 @@ async fn engine_routes_distributed_single_node_path_query() {
             id: "Node:A".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 123,
             updated_at_unix_ms: 456,
         })
@@ -1163,6 +1191,10 @@ async fn engine_distributed_single_node_path_suppresses_stale_remote_node() {
         id: "memory:stale".into(),
         labels: vec!["MemoryEpisode".into()],
         properties: BTreeMap::from([("name".into(), Value::String("stale".into()))]),
+
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: Vec::new(),
+        embed_meta: Default::default(),
         created_at_unix_ms: 0,
         updated_at_unix_ms: 0,
     })
@@ -1231,6 +1263,10 @@ async fn engine_distributed_single_node_path_persists_remote_on_access_metadata(
         id: "memory:access".into(),
         labels: vec!["MemoryEpisode".into()],
         properties: BTreeMap::from([("name".into(), Value::String("access".into()))]),
+
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: Vec::new(),
+        embed_meta: Default::default(),
         created_at_unix_ms: 123,
         updated_at_unix_ms: 123,
     })
@@ -1312,6 +1348,10 @@ async fn engine_routes_distributed_single_hop_path_query_with_edge_properties() 
             id: "Node:A".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -1343,6 +1383,10 @@ async fn engine_routes_distributed_single_hop_path_query_with_edge_properties() 
             id: "Node:B".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), Value::String("b".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -1435,6 +1479,10 @@ async fn engine_distributed_direct_path_suppresses_stale_remote_edge() {
         id: "Node:A".into(),
         labels: vec!["Node".into()],
         properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
+
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: Vec::new(),
+        embed_meta: Default::default(),
         created_at_unix_ms: 123,
         updated_at_unix_ms: 123,
     })
@@ -1443,6 +1491,10 @@ async fn engine_distributed_direct_path_suppresses_stale_remote_edge() {
         id: "Node:B".into(),
         labels: vec!["Node".into()],
         properties: BTreeMap::from([("name".into(), Value::String("b".into()))]),
+
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: Vec::new(),
+        embed_meta: Default::default(),
         created_at_unix_ms: 123,
         updated_at_unix_ms: 123,
     })

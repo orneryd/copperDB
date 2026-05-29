@@ -690,6 +690,7 @@ async fn ranked_search_transport_sends_requests_to_target_endpoint() {
                 limit: 10,
             },
             None,
+            None,
         )
         .await
         .unwrap();
@@ -748,7 +749,7 @@ async fn hydration_transport_sends_requests_to_target_endpoint() {
 
     let transport = NornicGrpcHydrationTransport::from_read_plan(&plan, client.clone());
     let records = transport
-        .hydrate_node("node-a", &placement, std::slice::from_ref(&doc), None)
+        .hydrate_node("node-a", &placement, std::slice::from_ref(&doc), None, None)
         .await
         .unwrap();
 
@@ -774,6 +775,7 @@ fn generated_proto_converts_ranked_search_messages() {
         },
         read_fence: None,
         caller_auth_token: None,
+        request_context: None,
     };
     let batch = RrfSearchBatch {
         shard: PlacementKey::new("default", "copper", "primary"),
@@ -807,6 +809,7 @@ fn generated_proto_converts_hydration_messages() {
         )],
         read_fence: None,
         caller_auth_token: None,
+        request_context: None,
     };
     let records = vec![RrfHydrationRecord {
         global_id: FabricGlobalId::new(
@@ -859,6 +862,7 @@ async fn generated_replica_service_handles_ranked_search_rpc() {
                 },
                 read_fence: None,
                 caller_auth_token: None,
+                request_context: None,
             })
             .unwrap(),
         ))
@@ -895,6 +899,7 @@ async fn generated_replica_service_handles_hydration_rpc() {
                 global_ids: vec![FabricGlobalId::new(placement.clone(), "node", "a")],
                 read_fence: None,
                 caller_auth_token: None,
+                request_context: None,
             })
             .unwrap(),
         ))
@@ -989,6 +994,7 @@ async fn tonic_ranked_search_client_forwards_caller_auth_token() {
             },
             read_fence: None,
             caller_auth_token: None,
+            request_context: None,
         })
         .await
         .unwrap();
@@ -1114,6 +1120,7 @@ async fn tonic_ranked_search_client_connects_over_tls() {
             },
             read_fence: None,
             caller_auth_token: None,
+            request_context: None,
         })
         .await
         .unwrap();

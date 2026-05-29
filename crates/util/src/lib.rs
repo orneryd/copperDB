@@ -5,6 +5,9 @@
 
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -26,6 +29,142 @@ pub enum UtilError {
     InvalidMsgpackPayloadSize(i64),
     #[error("msgpack payload exceeds decode limit ({size} > {limit} bytes)")]
     MsgpackPayloadTooLarge { size: i64, limit: i64 },
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+#[error("request cancelled")]
+pub struct RequestCancelled;
+
+#[derive(Debug, Clone, Default)]
+pub struct RequestCancellation {
+    inner: Arc<AtomicBool>,
+}
+
+impl RequestCancellation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.inner.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.load(Ordering::SeqCst)
+    }
+
+    pub fn check_cancelled(&self) -> Result<(), RequestCancelled> {
+        if self.is_cancelled() {
+            Err(RequestCancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestContextMetadata {
+    pub request_id: String,
+    pub deadline_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestContext {
+    request_id: String,
+    deadline: Option<SystemTime>,
+    cancellation: RequestCancellation,
+}
+
+#[derive(Debug)]
+pub struct RequestContextGuard {
+    cancellation: RequestCancellation,
+}
+
+impl Drop for RequestContextGuard {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}
+
+impl RequestContext {
+    pub fn root(deadline: Option<SystemTime>) -> (Self, RequestContextGuard) {
+        let cancellation = RequestCancellation::new();
+        (
+            Self {
+                request_id: new_id(),
+                deadline,
+                cancellation: cancellation.clone(),
+            },
+            RequestContextGuard { cancellation },
+        )
+    }
+
+    pub fn detached() -> Self {
+        Self {
+            request_id: new_id(),
+            deadline: None,
+            cancellation: RequestCancellation::new(),
+        }
+    }
+
+    pub fn from_metadata(metadata: RequestContextMetadata) -> (Self, RequestContextGuard) {
+        let cancellation = RequestCancellation::new();
+        (
+            Self {
+                request_id: metadata.request_id,
+                deadline: metadata
+                    .deadline_unix_ms
+                    .map(|millis| UNIX_EPOCH + Duration::from_millis(millis)),
+                cancellation: cancellation.clone(),
+            },
+            RequestContextGuard { cancellation },
+        )
+    }
+
+    pub fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
+    pub fn deadline(&self) -> Option<SystemTime> {
+        self.deadline
+    }
+
+    pub fn metadata(&self) -> RequestContextMetadata {
+        RequestContextMetadata {
+            request_id: self.request_id.clone(),
+            deadline_unix_ms: self.deadline.and_then(system_time_to_unix_ms),
+        }
+    }
+
+    pub fn cancellation(&self) -> &RequestCancellation {
+        &self.cancellation
+    }
+
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    pub fn check_active(&self) -> Result<(), RequestCancelled> {
+        self.cancellation.check_cancelled()?;
+        if self
+            .deadline
+            .is_some_and(|deadline| SystemTime::now() >= deadline)
+        {
+            return Err(RequestCancelled);
+        }
+        Ok(())
+    }
+}
+
+fn system_time_to_unix_ms(value: SystemTime) -> Option<u64> {
+    value
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
 }
 
 /// Generate a new random UUID v4.
@@ -191,5 +330,42 @@ mod tests {
         assert_eq!(merged["a"], 1);
         assert_eq!(merged["b"], 3);
         assert_eq!(merged["c"], 4);
+    }
+
+    #[test]
+    fn request_cancellation_is_shared_across_clones() {
+        let cancel = RequestCancellation::new();
+        let other = cancel.clone();
+
+        assert!(!cancel.is_cancelled());
+        assert!(other.check_cancelled().is_ok());
+
+        cancel.cancel();
+
+        assert!(cancel.is_cancelled());
+        assert_eq!(other.check_cancelled(), Err(RequestCancelled));
+    }
+
+    #[test]
+    fn request_context_guard_cancels_on_drop() {
+        let (context, guard) = RequestContext::root(None);
+        assert!(context.check_active().is_ok());
+
+        drop(guard);
+
+        assert_eq!(context.check_active(), Err(RequestCancelled));
+    }
+
+    #[test]
+    fn request_context_round_trips_metadata() {
+        let deadline = SystemTime::now() + Duration::from_secs(123);
+        let (context, _guard) = RequestContext::root(Some(deadline));
+        let metadata = context.metadata();
+
+        let (reconstructed, _reconstructed_guard) = RequestContext::from_metadata(metadata);
+
+        assert_eq!(reconstructed.request_id(), context.request_id());
+        assert_eq!(reconstructed.metadata(), context.metadata());
+        assert!(reconstructed.check_active().is_ok());
     }
 }

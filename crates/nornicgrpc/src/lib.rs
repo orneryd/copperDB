@@ -22,6 +22,7 @@ use copperdb_topology::{
     ConsistencyLevel, DistributedReadPlan, DistributedSearchPlan, DistributedWriteMode,
     DistributedWritePlan, FabricGlobalId, LogicalTransactionId, PlacementKey,
 };
+use copperdb_util::{RequestCancelled, RequestContext, RequestContextMetadata};
 use serde_json::Value;
 
 pub mod proto {
@@ -30,6 +31,8 @@ pub mod proto {
 
 const GRPC_AUTH_HEADER: &str = "authorization";
 const GRPC_CALLER_AUTH_HEADER: &str = "x-copperdb-caller-authorization";
+const GRPC_REQUEST_ID_HEADER: &str = "x-copperdb-request-id";
+const GRPC_REQUEST_DEADLINE_MS_HEADER: &str = "x-copperdb-request-deadline-ms";
 
 pub trait GrpcAuthValidator: Send + Sync {
     fn validate(&self, token: &str) -> Result<(), GrpcError>;
@@ -113,6 +116,60 @@ fn request_with_auth_headers<T>(
     Ok(request)
 }
 
+fn request_context_from_metadata<T>(
+    request: &Request<T>,
+) -> Result<Option<RequestContextMetadata>, Status> {
+    let Some(request_id) = request.metadata().get(GRPC_REQUEST_ID_HEADER) else {
+        return Ok(None);
+    };
+    let request_id = request_id
+        .to_str()
+        .map_err(|_| Status::invalid_argument("invalid request id metadata"))?
+        .trim()
+        .to_string();
+    if request_id.is_empty() {
+        return Err(Status::invalid_argument("empty request id metadata"));
+    }
+
+    let deadline_unix_ms = match request.metadata().get(GRPC_REQUEST_DEADLINE_MS_HEADER) {
+        Some(value) => Some(
+            value
+                .to_str()
+                .map_err(|_| Status::invalid_argument("invalid request deadline metadata"))?
+                .parse::<u64>()
+                .map_err(|_| Status::invalid_argument("invalid request deadline metadata"))?,
+        ),
+        None => None,
+    };
+
+    Ok(Some(RequestContextMetadata {
+        request_id,
+        deadline_unix_ms,
+    }))
+}
+
+fn attach_request_context_metadata<T>(
+    request: &mut Request<T>,
+    request_context: Option<&RequestContextMetadata>,
+) -> Result<(), GrpcError> {
+    let Some(request_context) = request_context else {
+        return Ok(());
+    };
+    request.metadata_mut().insert(
+        GRPC_REQUEST_ID_HEADER,
+        MetadataValue::try_from(request_context.request_id.as_str())
+            .map_err(|error| GrpcError::Encoding(error.to_string()))?,
+    );
+    if let Some(deadline_unix_ms) = request_context.deadline_unix_ms {
+        request.metadata_mut().insert(
+            GRPC_REQUEST_DEADLINE_MS_HEADER,
+            MetadataValue::try_from(deadline_unix_ms.to_string().as_str())
+                .map_err(|error| GrpcError::Encoding(error.to_string()))?,
+        );
+    }
+    Ok(())
+}
+
 fn encode_read_fence(read_fence: Option<LogicalTransactionId>) -> String {
     read_fence
         .map(|value| value.stable_id())
@@ -155,6 +212,7 @@ fn decode_read_fence(read_fence: &str) -> Result<Option<LogicalTransactionId>, G
 
 fn status_from_grpc_error(error: GrpcError) -> Status {
     match error {
+        GrpcError::RequestCancelled(_) => Status::cancelled(error.to_string()),
         GrpcError::Unauthenticated(message) => Status::unauthenticated(message),
         GrpcError::PermissionDenied(message) => Status::permission_denied(message),
         other => Status::internal(other.to_string()),
@@ -171,6 +229,8 @@ pub enum GrpcError {
     Unauthenticated(String),
     #[error("gRPC permission denied: {0}")]
     PermissionDenied(String),
+    #[error(transparent)]
+    RequestCancelled(#[from] RequestCancelled),
     #[error("server not started")]
     NotStarted,
 }
@@ -412,6 +472,7 @@ pub struct RemoteRankedSearchRequest {
     pub query: SearchQuery,
     pub read_fence: Option<LogicalTransactionId>,
     pub caller_auth_token: Option<String>,
+    pub request_context: Option<RequestContextMetadata>,
 }
 
 #[async_trait]
@@ -435,6 +496,7 @@ pub struct RemoteHydrationRequest {
     pub global_ids: Vec<FabricGlobalId>,
     pub read_fence: Option<LogicalTransactionId>,
     pub caller_auth_token: Option<String>,
+    pub request_context: Option<RequestContextMetadata>,
 }
 
 #[async_trait]
@@ -672,10 +734,12 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
         request: Request<proto::RemoteRankedSearchRequest>,
     ) -> Result<Response<proto::RemoteRankedSearchResponse>, Status> {
         let caller_auth_token = caller_auth_token_from_metadata(&request)?;
+        let request_context = request_context_from_metadata(&request)?;
         let request = RemoteRankedSearchRequest::try_from(request.into_inner())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let request = RemoteRankedSearchRequest {
             caller_auth_token,
+            request_context,
             ..request
         };
         let response = self
@@ -693,10 +757,12 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
         request: Request<proto::RemoteHydrationRequest>,
     ) -> Result<Response<proto::RemoteHydrationResponse>, Status> {
         let caller_auth_token = caller_auth_token_from_metadata(&request)?;
+        let request_context = request_context_from_metadata(&request)?;
         let request = RemoteHydrationRequest::try_from(request.into_inner())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let request = RemoteHydrationRequest {
             caller_auth_token,
+            request_context,
             ..request
         };
         let response = self
@@ -1104,6 +1170,12 @@ impl RemoteRankedSearchClient for TonicRemoteRankedSearchClient {
         request: RemoteRankedSearchRequest,
     ) -> Result<RrfSearchBatch, GrpcError> {
         let target_addr = request.target_addr.clone();
+        let request_context = request.request_context.clone();
+        let mut request = request_with_auth_headers(
+            proto::RemoteRankedSearchRequest::try_from(request)?,
+            self.caller_auth_token.as_deref(),
+        )?;
+        attach_request_context_metadata(&mut request, request_context.as_ref())?;
         let response = TonicRemoteReplicaClient {
             auth_token: None,
             caller_auth_token: None,
@@ -1114,12 +1186,15 @@ impl RemoteRankedSearchClient for TonicRemoteRankedSearchClient {
         }
         .connect(&target_addr)
         .await?
-        .search_ranked(request_with_auth_headers(
-            proto::RemoteRankedSearchRequest::try_from(request)?,
-            self.caller_auth_token.as_deref(),
-        )?)
+        .search_ranked(request)
         .await
-        .map_err(|error| GrpcError::Transport(error.to_string()))?
+        .map_err(|error| {
+            if error.code() == tonic::Code::Cancelled {
+                GrpcError::RequestCancelled(RequestCancelled)
+            } else {
+                GrpcError::Transport(error.to_string())
+            }
+        })?
         .into_inner();
         RrfSearchBatch::try_from(response)
     }
@@ -1132,6 +1207,12 @@ impl RemoteHydrationClient for TonicRemoteHydrationClient {
         request: RemoteHydrationRequest,
     ) -> Result<Vec<RrfHydrationRecord>, GrpcError> {
         let target_addr = request.target_addr.clone();
+        let request_context = request.request_context.clone();
+        let mut request = request_with_auth_headers(
+            proto::RemoteHydrationRequest::try_from(request)?,
+            self.caller_auth_token.as_deref(),
+        )?;
+        attach_request_context_metadata(&mut request, request_context.as_ref())?;
         let response = TonicRemoteReplicaClient {
             auth_token: None,
             caller_auth_token: None,
@@ -1142,12 +1223,15 @@ impl RemoteHydrationClient for TonicRemoteHydrationClient {
         }
         .connect(&target_addr)
         .await?
-        .hydrate_entities(request_with_auth_headers(
-            proto::RemoteHydrationRequest::try_from(request)?,
-            self.caller_auth_token.as_deref(),
-        )?)
+        .hydrate_entities(request)
         .await
-        .map_err(|error| GrpcError::Transport(error.to_string()))?
+        .map_err(|error| {
+            if error.code() == tonic::Code::Cancelled {
+                GrpcError::RequestCancelled(RequestCancelled)
+            } else {
+                GrpcError::Transport(error.to_string())
+            }
+        })?
         .into_inner();
         Vec::<RrfHydrationRecord>::try_from(response)
     }
@@ -1431,6 +1515,7 @@ impl RankedSearchTransport for NornicGrpcRankedSearchTransport {
         placement: &PlacementKey,
         query: &SearchQuery,
         read_fence: Option<LogicalTransactionId>,
+        request_context: Option<&RequestContext>,
     ) -> Result<RrfSearchBatch, SearchError> {
         self.client
             .search_ranked(RemoteRankedSearchRequest {
@@ -1440,6 +1525,7 @@ impl RankedSearchTransport for NornicGrpcRankedSearchTransport {
                 query: query.clone(),
                 read_fence,
                 caller_auth_token: None,
+                request_context: request_context.map(RequestContext::metadata),
             })
             .await
             .map_err(|error| SearchError::Transport(error.to_string()))
@@ -1454,6 +1540,7 @@ impl HydrationTransport for NornicGrpcHydrationTransport {
         placement: &PlacementKey,
         global_ids: &[FabricGlobalId],
         read_fence: Option<LogicalTransactionId>,
+        request_context: Option<&RequestContext>,
     ) -> Result<Vec<RrfHydrationRecord>, SearchError> {
         self.client
             .hydrate_entities(RemoteHydrationRequest {
@@ -1463,6 +1550,7 @@ impl HydrationTransport for NornicGrpcHydrationTransport {
                 global_ids: global_ids.to_vec(),
                 read_fence,
                 caller_auth_token: None,
+                request_context: request_context.map(RequestContext::metadata),
             })
             .await
             .map_err(|error| SearchError::Transport(error.to_string()))
@@ -1835,6 +1923,7 @@ impl TryFrom<proto::RemoteRankedSearchRequest> for RemoteRankedSearchRequest {
                 .map_err(|error| GrpcError::Encoding(error.to_string()))?,
             read_fence: decode_read_fence(&request.read_fence)?,
             caller_auth_token: None,
+            request_context: None,
         })
     }
 }
@@ -1888,6 +1977,7 @@ impl TryFrom<proto::RemoteHydrationRequest> for RemoteHydrationRequest {
                 .map_err(|error| GrpcError::Encoding(error.to_string()))?,
             read_fence: decode_read_fence(&request.read_fence)?,
             caller_auth_token: None,
+            request_context: None,
         })
     }
 }

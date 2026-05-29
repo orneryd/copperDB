@@ -24,6 +24,9 @@
                 id: id.to_string(),
                 labels: labels.iter().map(|label| (*label).to_string()).collect(),
                 properties: properties.into_iter().collect(),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
                 created_at_unix_ms: 0,
                 updated_at_unix_ms: 0,
             })

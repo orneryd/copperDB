@@ -3,6 +3,7 @@ use crate::{
     MvccPruneOptions, MvccSnapshot, MvccSnapshotLease, NamespaceSchema, NodeRecord, StorageEngine,
     StorageError,
 };
+use copperdb_util::RequestCancellation;
 
 pub struct NamespacedStorageEngine<'a> {
     inner: &'a StorageEngine,
@@ -61,6 +62,12 @@ impl<'a> NamespacedStorageEngine<'a> {
 
     pub fn delete_node_record(&self, id: &str) -> Result<(), StorageError> {
         self.inner.delete_node_record(&self.prefix_id(id))
+    }
+
+    pub fn update_node_embedding(&self, node: &NodeRecord) -> Result<(), StorageError> {
+        let mut namespaced = node.clone();
+        namespaced.id = self.prefix_id(&namespaced.id);
+        self.inner.update_node_embedding(&namespaced)
     }
 
     pub fn put_edge_record(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
@@ -183,6 +190,49 @@ impl<'a> NamespacedStorageEngine<'a> {
         Ok(nodes)
     }
 
+    pub fn find_node_needing_embedding(&self) -> Result<Option<NodeRecord>, StorageError> {
+        for id in self.inner.pending_embedding_ids()? {
+            if !self.in_namespace(&id) {
+                continue;
+            }
+            let Some(node) = self.inner.get_node_record(&id)? else {
+                self.inner.mark_node_embedded(&id)?;
+                continue;
+            };
+            if node.needs_embedding() {
+                return Ok(Some(self.to_user_node(node)));
+            }
+            self.inner.mark_node_embedded(&id)?;
+        }
+        Ok(None)
+    }
+
+    pub fn refresh_pending_embeddings_index(&self) -> Result<usize, StorageError> {
+        self.inner.refresh_pending_embeddings_index()?;
+        self.pending_embeddings_count()
+    }
+
+    pub fn mark_node_embedded(&self, id: &str) -> Result<(), StorageError> {
+        self.inner.mark_node_embedded(&self.prefix_id(id))
+    }
+
+    pub fn add_to_pending_embeddings(&self, id: &str) -> Result<(), StorageError> {
+        self.inner.add_to_pending_embeddings(&self.prefix_id(id))
+    }
+
+    pub fn pending_embeddings_count(&self) -> Result<usize, StorageError> {
+        Ok(self
+            .inner
+            .pending_embedding_ids()?
+            .into_iter()
+            .filter(|id| self.in_namespace(id))
+            .count())
+    }
+
+    pub fn clear_all_embeddings(&self) -> Result<usize, StorageError> {
+        self.inner.clear_all_embeddings_for_prefix(&self.prefix)
+    }
+
     pub fn all_edges(&self) -> Result<Vec<EdgeRecord>, StorageError> {
         let mut edges = Vec::new();
         self.stream_edge_records(|edge| {
@@ -192,26 +242,51 @@ impl<'a> NamespacedStorageEngine<'a> {
         Ok(edges)
     }
 
-    pub fn stream_node_records<F>(&self, mut visit: F) -> Result<u64, StorageError>
+    pub fn stream_node_records<F>(&self, visit: F) -> Result<u64, StorageError>
+    where
+        F: FnMut(NodeRecord) -> Result<(), StorageError>,
+    {
+        self.stream_node_records_with_cancellation(&RequestCancellation::new(), visit)
+    }
+
+    pub fn stream_node_records_with_cancellation<F>(
+        &self,
+        cancel: &RequestCancellation,
+        mut visit: F,
+    ) -> Result<u64, StorageError>
     where
         F: FnMut(NodeRecord) -> Result<(), StorageError>,
     {
         self.inner
-            .stream_node_records_by_prefix(&self.prefix, |node| visit(self.to_user_node(node)))
+            .stream_node_records_by_prefix_with_cancellation(&self.prefix, cancel, |node| {
+                visit(self.to_user_node(node))
+            })
     }
 
-    pub fn stream_edge_records<F>(&self, mut visit: F) -> Result<u64, StorageError>
+    pub fn stream_edge_records<F>(&self, visit: F) -> Result<u64, StorageError>
+    where
+        F: FnMut(EdgeRecord) -> Result<(), StorageError>,
+    {
+        self.stream_edge_records_with_cancellation(&RequestCancellation::new(), visit)
+    }
+
+    pub fn stream_edge_records_with_cancellation<F>(
+        &self,
+        cancel: &RequestCancellation,
+        mut visit: F,
+    ) -> Result<u64, StorageError>
     where
         F: FnMut(EdgeRecord) -> Result<(), StorageError>,
     {
         let mut streamed = 0;
-        self.inner.stream_edge_records(|edge| {
-            if !self.in_namespace(&edge.id) {
-                return Ok(());
-            }
-            streamed += 1;
-            visit(self.to_user_edge(edge))
-        })?;
+        self.inner
+            .stream_edge_records_with_cancellation(cancel, |edge| {
+                if !self.in_namespace(&edge.id) {
+                    return Ok(());
+                }
+                streamed += 1;
+                visit(self.to_user_edge(edge))
+            })?;
         Ok(streamed)
     }
 

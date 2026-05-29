@@ -1,5 +1,6 @@
 use super::*;
 use copperdb_kms::{LocalKms, LocalKmsConfig};
+use copperdb_util::RequestCancellation;
 use serde_json::json;
 use std::fs;
 use std::thread;
@@ -17,6 +18,9 @@ fn sample_node(id: &str, labels: &[&str]) -> NodeRecord {
             ("name".to_string(), json!("alice")),
             ("score".to_string(), json!(42)),
         ]),
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: Vec::new(),
+        embed_meta: NodeEmbeddingMetadata::default(),
         created_at_unix_ms: 1000,
         updated_at_unix_ms: 2000,
     }
@@ -98,6 +102,29 @@ fn raw_node_edge_round_trip() {
 
     assert!(engine.get_node("node:1").unwrap().is_none());
     assert!(engine.get_edge("edge:1").unwrap().is_none());
+}
+
+#[test]
+fn property_backed_legacy_node_payloads_are_not_decoded_as_typed_nodes() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let raw_props = BTreeMap::from([
+        ("_id".to_string(), json!("legacy:n1")),
+        ("_labels".to_string(), json!(["File"])),
+        ("content".to_string(), json!("legacy content")),
+        ("embedding".to_string(), json!([0.1, 0.2, 0.3])),
+        ("has_embedding".to_string(), json!(true)),
+        ("embedding_model".to_string(), json!("legacy-model")),
+    ]);
+
+    engine
+        .put_node("legacy:n1", &rmp_serde::to_vec(&raw_props).unwrap())
+        .unwrap();
+
+    assert!(engine.get_node_record("legacy:n1").unwrap().is_none());
+    assert_eq!(
+        engine.get_node("legacy:n1").unwrap(),
+        Some(rmp_serde::to_vec(&raw_props).unwrap())
+    );
 }
 
 #[test]
@@ -676,7 +703,79 @@ fn streaming_apis_treat_iteration_stopped_as_normal_completion() {
         })
         .unwrap();
     assert_eq!(streamed, 2);
-    assert_eq!(chunks, vec![vec!["alpha:n1".to_string(), "alpha:n2".to_string()]]);
+    assert_eq!(
+        chunks,
+        vec![vec!["alpha:n1".to_string(), "alpha:n2".to_string()]]
+    );
+}
+
+#[test]
+fn streaming_apis_surface_external_cancellation() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    for node in [
+        sample_node("alpha:n1", &["Person"]),
+        sample_node("alpha:n2", &["Person"]),
+        sample_node("beta:n1", &["Person"]),
+    ] {
+        engine.put_node_record(&node).unwrap();
+    }
+    for edge in [
+        sample_edge("alpha:e1", "KNOWS", "alpha:n1", "alpha:n2"),
+        sample_edge("beta:e1", "KNOWS", "beta:n1", "beta:n1"),
+    ] {
+        engine.put_edge_record(&edge).unwrap();
+    }
+
+    let cancel = RequestCancellation::new();
+    let mut node_ids = Vec::new();
+    let err = engine
+        .stream_node_records_with_cancellation(&cancel, |node| {
+            node_ids.push(node.id);
+            cancel.cancel();
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(matches!(err, StorageError::RequestCancelled(_)));
+    assert_eq!(node_ids, vec!["alpha:n1"]);
+
+    let cancel = RequestCancellation::new();
+    let mut alpha_ids = Vec::new();
+    let err = engine
+        .stream_node_records_by_prefix_with_cancellation("alpha:", &cancel, |node| {
+            alpha_ids.push(node.id);
+            cancel.cancel();
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(matches!(err, StorageError::RequestCancelled(_)));
+    assert_eq!(alpha_ids, vec!["alpha:n1"]);
+
+    let cancel = RequestCancellation::new();
+    let mut edge_ids = Vec::new();
+    let err = engine
+        .stream_edge_records_with_cancellation(&cancel, |edge| {
+            edge_ids.push(edge.id);
+            cancel.cancel();
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(matches!(err, StorageError::RequestCancelled(_)));
+    assert_eq!(edge_ids, vec!["alpha:e1"]);
+
+    let cancel = RequestCancellation::new();
+    let mut chunks = Vec::new();
+    let err = engine
+        .stream_node_record_chunks_with_cancellation(2, &cancel, |chunk| {
+            chunks.push(chunk.iter().map(|node| node.id.clone()).collect::<Vec<_>>());
+            cancel.cancel();
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(matches!(err, StorageError::RequestCancelled(_)));
+    assert_eq!(
+        chunks,
+        vec![vec!["alpha:n1".to_string(), "alpha:n2".to_string()]]
+    );
 }
 
 #[test]
@@ -843,6 +942,139 @@ fn namespaced_storage_engine_streams_schema_and_deletes_within_namespace() {
     assert_eq!(tenant_a.schema().unwrap(), NamespaceSchema::default());
     assert_eq!(tenant_b.all_nodes().unwrap().len(), 1);
     assert_eq!(tenant_b.all_edges().unwrap().len(), 1);
+}
+
+#[test]
+fn namespaced_storage_engine_scopes_pending_embedding_helpers() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let tenant_a = engine.for_namespace("tenant_a");
+    let tenant_b = engine.for_namespace("tenant_b");
+
+    let mut tenant_a_n1 = sample_node("n1", &["File"]);
+    tenant_a_n1
+        .properties
+        .insert("content".to_string(), json!("tenant a file"));
+    let mut tenant_b_n1 = sample_node("n1", &["File"]);
+    tenant_b_n1
+        .properties
+        .insert("content".to_string(), json!("tenant b file"));
+
+    tenant_a.put_node_record(&tenant_a_n1).unwrap();
+    tenant_b.put_node_record(&tenant_b_n1).unwrap();
+
+    assert_eq!(tenant_a.pending_embeddings_count().unwrap(), 1);
+    assert_eq!(tenant_b.pending_embeddings_count().unwrap(), 1);
+    assert_eq!(
+        tenant_a.find_node_needing_embedding().unwrap().unwrap().id,
+        "n1"
+    );
+    assert_eq!(
+        tenant_b.find_node_needing_embedding().unwrap().unwrap().id,
+        "n1"
+    );
+
+    tenant_a.mark_node_embedded("n1").unwrap();
+    assert_eq!(tenant_a.pending_embeddings_count().unwrap(), 0);
+    assert_eq!(tenant_b.pending_embeddings_count().unwrap(), 1);
+    assert!(tenant_a.find_node_needing_embedding().unwrap().is_none());
+
+    tenant_a.add_to_pending_embeddings("n1").unwrap();
+    assert_eq!(tenant_a.pending_embeddings_count().unwrap(), 1);
+
+    engine.mark_node_embedded("tenant_a:n1").unwrap();
+    engine.mark_node_embedded("tenant_b:n1").unwrap();
+    assert_eq!(tenant_a.pending_embeddings_count().unwrap(), 0);
+    assert_eq!(tenant_b.pending_embeddings_count().unwrap(), 0);
+
+    assert_eq!(tenant_a.refresh_pending_embeddings_index().unwrap(), 1);
+    assert_eq!(tenant_b.refresh_pending_embeddings_index().unwrap(), 1);
+    assert_eq!(tenant_a.pending_embeddings_count().unwrap(), 1);
+    assert_eq!(tenant_b.pending_embeddings_count().unwrap(), 1);
+}
+
+#[test]
+fn namespaced_storage_engine_clear_all_embeddings_only_requeues_that_namespace() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let tenant_a = engine.for_namespace("tenant_a");
+    let tenant_b = engine.for_namespace("tenant_b");
+
+    let mut tenant_a_n1 = sample_node("n1", &["File"]);
+    tenant_a_n1
+        .properties
+        .insert("content".to_string(), json!("tenant a file"));
+    tenant_a_n1.set_default_embedding(vec![0.1, 0.2, 0.3]);
+    tenant_a_n1.embed_meta.has_embedding = Some(true);
+    let mut tenant_b_n1 = sample_node("n1", &["File"]);
+    tenant_b_n1
+        .properties
+        .insert("content".to_string(), json!("tenant b file"));
+    tenant_b_n1.set_default_embedding(vec![0.4, 0.5, 0.6]);
+    tenant_b_n1.embed_meta.has_embedding = Some(true);
+
+    tenant_a.put_node_record(&tenant_a_n1).unwrap();
+    tenant_b.put_node_record(&tenant_b_n1).unwrap();
+
+    let cleared = tenant_a.clear_all_embeddings().unwrap();
+    assert_eq!(cleared, 1);
+    assert_eq!(tenant_a.pending_embeddings_count().unwrap(), 1);
+    assert_eq!(tenant_b.pending_embeddings_count().unwrap(), 0);
+
+    let tenant_a_after = tenant_a.get_node_record("n1").unwrap().unwrap();
+    assert!(tenant_a_after.named_embeddings.is_empty());
+    assert!(tenant_a_after.chunk_embeddings.is_empty());
+    assert!(tenant_a_after.embed_meta.has_embedding.is_none());
+    let tenant_b_after = tenant_b.get_node_record("n1").unwrap().unwrap();
+    assert_eq!(
+        tenant_b_after.default_embedding(),
+        Some(&[0.4, 0.5, 0.6][..])
+    );
+    assert_eq!(tenant_b_after.embed_meta.has_embedding, Some(true));
+}
+
+#[test]
+fn namespaced_storage_engine_streaming_surfaces_external_cancellation() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let tenant = engine.for_namespace("tenant_a");
+
+    tenant
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+    tenant
+        .put_node_record(&sample_node("n2", &["Person"]))
+        .unwrap();
+    tenant
+        .put_node_record(&sample_node("n3", &["Person"]))
+        .unwrap();
+    tenant
+        .put_edge_record(&sample_edge("e1", "KNOWS", "n1", "n2"))
+        .unwrap();
+    tenant
+        .put_edge_record(&sample_edge("e2", "KNOWS", "n2", "n3"))
+        .unwrap();
+
+    let cancel = RequestCancellation::new();
+    let mut node_ids = Vec::new();
+    let err = tenant
+        .stream_node_records_with_cancellation(&cancel, |node| {
+            node_ids.push(node.id);
+            cancel.cancel();
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(matches!(err, StorageError::RequestCancelled(_)));
+    assert_eq!(node_ids, vec!["n1"]);
+
+    let cancel = RequestCancellation::new();
+    let mut edge_ids = Vec::new();
+    let err = tenant
+        .stream_edge_records_with_cancellation(&cancel, |edge| {
+            edge_ids.push(edge.id);
+            cancel.cancel();
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(matches!(err, StorageError::RequestCancelled(_)));
+    assert_eq!(edge_ids, vec!["e1"]);
 }
 
 #[test]
@@ -1131,6 +1363,7 @@ fn async_storage_engine_buffers_structured_node_writes_until_flush() {
         StorageEngine::open_temporary().unwrap(),
         Some(AsyncStorageConfig {
             flush_interval_ms: 60_000,
+            ..Default::default()
         }),
     );
 
@@ -1166,6 +1399,7 @@ fn async_storage_engine_background_flush_persists_pending_writes() {
         StorageEngine::open_temporary().unwrap(),
         Some(AsyncStorageConfig {
             flush_interval_ms: 10,
+            ..Default::default()
         }),
     );
 
@@ -1194,11 +1428,549 @@ fn async_storage_engine_background_flush_persists_pending_writes() {
 }
 
 #[test]
+fn async_storage_engine_adaptive_flush_uses_min_interval_instead_of_flush_interval() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+            adaptive_flush: true,
+            min_flush_interval_ms: 10,
+            max_flush_interval_ms: 10,
+            target_flush_size: 1,
+            ..Default::default()
+        }),
+    );
+
+    async_engine
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+
+    wait_until(
+        || {
+            async_engine
+                .get_persisted_node_record("n1")
+                .unwrap()
+                .is_some()
+        },
+        Duration::from_secs(1),
+    );
+
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_find_node_needing_embedding_skips_pending_embedding_update() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+            ..Default::default()
+        }),
+    );
+
+    let mut first = sample_node("n1", &["File"]);
+    first
+        .properties
+        .insert("content".to_string(), json!("first file"));
+    let mut second = sample_node("n2", &["File"]);
+    second
+        .properties
+        .insert("content".to_string(), json!("second file"));
+
+    async_engine.put_node_record(&first).unwrap();
+    async_engine.put_node_record(&second).unwrap();
+    async_engine.flush().unwrap();
+
+    assert_eq!(
+        async_engine
+            .find_node_needing_embedding()
+            .unwrap()
+            .unwrap()
+            .id,
+        "n1"
+    );
+
+    first.set_default_embedding(vec![0.1, 0.2, 0.3]);
+    first.embed_meta.has_embedding = Some(true);
+    first.updated_at_unix_ms += 1;
+    async_engine.put_node_record(&first).unwrap();
+
+    assert_eq!(
+        async_engine
+            .find_node_needing_embedding()
+            .unwrap()
+            .unwrap()
+            .id,
+        "n2"
+    );
+
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_find_node_needing_embedding_skips_pending_delete() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+            ..Default::default()
+        }),
+    );
+
+    let mut first = sample_node("n1", &["File"]);
+    first
+        .properties
+        .insert("content".to_string(), json!("first file"));
+    let mut second = sample_node("n2", &["File"]);
+    second
+        .properties
+        .insert("content".to_string(), json!("second file"));
+
+    async_engine.put_node_record(&first).unwrap();
+    async_engine.put_node_record(&second).unwrap();
+    async_engine.flush().unwrap();
+
+    async_engine.delete_node_record("n1").unwrap();
+
+    assert_eq!(
+        async_engine
+            .find_node_needing_embedding()
+            .unwrap()
+            .unwrap()
+            .id,
+        "n2"
+    );
+
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_pending_embeddings_queue_tracks_mark_and_requeue() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+            ..Default::default()
+        }),
+    );
+
+    let mut node = sample_node("n1", &["File"]);
+    node.properties
+        .insert("content".to_string(), json!("needs embedding"));
+    async_engine.put_node_record(&node).unwrap();
+
+    assert_eq!(async_engine.pending_embeddings_count(), 1);
+    assert_eq!(
+        async_engine
+            .find_node_needing_embedding()
+            .unwrap()
+            .unwrap()
+            .id,
+        "n1"
+    );
+
+    async_engine.mark_node_embedded("n1");
+    assert_eq!(async_engine.pending_embeddings_count(), 0);
+    assert!(async_engine
+        .find_node_needing_embedding()
+        .unwrap()
+        .is_none());
+
+    async_engine.add_to_pending_embeddings("n1").unwrap();
+    assert_eq!(async_engine.pending_embeddings_count(), 1);
+    assert_eq!(
+        async_engine
+            .find_node_needing_embedding()
+            .unwrap()
+            .unwrap()
+            .id,
+        "n1"
+    );
+
+    node.set_default_embedding(vec![0.1, 0.2, 0.3]);
+    node.embed_meta.has_embedding = Some(true);
+    node.updated_at_unix_ms += 1;
+    async_engine.put_node_record(&node).unwrap();
+
+    assert_eq!(async_engine.pending_embeddings_count(), 0);
+    async_engine.add_to_pending_embeddings("n1").unwrap();
+    assert_eq!(async_engine.pending_embeddings_count(), 0);
+
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_pending_embeddings_refresh_rebuilds_from_current_state() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+            ..Default::default()
+        }),
+    );
+
+    let mut first = sample_node("n1", &["File"]);
+    first
+        .properties
+        .insert("content".to_string(), json!("needs embedding"));
+    let mut second = sample_node("n2", &["File"]);
+    second
+        .properties
+        .insert("embedding_skipped".to_string(), json!("no content"));
+    let mut third = sample_node("n3", &["File"]);
+    third.set_default_embedding(vec![0.1, 0.2]);
+    third.embed_meta.has_embedding = Some(true);
+
+    async_engine.put_node_record(&first).unwrap();
+    async_engine.put_node_record(&second).unwrap();
+    async_engine.put_node_record(&third).unwrap();
+
+    async_engine.mark_node_embedded("n1");
+    assert_eq!(async_engine.pending_embeddings_count(), 0);
+
+    assert_eq!(async_engine.refresh_pending_embeddings_index().unwrap(), 1);
+    assert_eq!(
+        async_engine
+            .find_node_needing_embedding()
+            .unwrap()
+            .unwrap()
+            .id,
+        "n1"
+    );
+
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_initializes_pending_embeddings_from_persisted_nodes() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let mut node = sample_node("n1", &["File"]);
+    node.properties
+        .insert("content".to_string(), json!("needs embedding"));
+    engine.put_node_record(&node).unwrap();
+    engine.flush().unwrap();
+
+    let async_engine = AsyncStorageEngine::new(
+        engine,
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+            ..Default::default()
+        }),
+    );
+
+    assert_eq!(async_engine.pending_embeddings_count(), 1);
+    assert_eq!(
+        async_engine
+            .find_node_needing_embedding()
+            .unwrap()
+            .unwrap()
+            .id,
+        "n1"
+    );
+
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_add_to_pending_embeddings_skips_pending_delete() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+            ..Default::default()
+        }),
+    );
+
+    let mut node = sample_node("n1", &["File"]);
+    node.properties
+        .insert("content".to_string(), json!("needs embedding"));
+    async_engine.put_node_record(&node).unwrap();
+    async_engine.flush().unwrap();
+    async_engine.mark_node_embedded("n1");
+
+    async_engine.delete_node_record("n1").unwrap();
+    async_engine.add_to_pending_embeddings("n1").unwrap();
+
+    assert_eq!(async_engine.pending_embeddings_count(), 0);
+    assert!(async_engine
+        .find_node_needing_embedding()
+        .unwrap()
+        .is_none());
+
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn node_record_needs_embedding_ignores_has_embedding_without_vector_and_skips_underscore_labels() {
+    let mut needs = sample_node("n1", &["File"]);
+    needs.embed_meta.has_embedding = Some(true);
+    assert!(needs.needs_embedding());
+
+    let mut skipped = sample_node("n2", &["_Internal"]);
+    skipped
+        .properties
+        .insert("content".to_string(), json!("internal"));
+    assert!(!skipped.needs_embedding());
+
+    let mut embedded = sample_node("n3", &["File"]);
+    embedded.set_default_embedding(vec![0.1, 0.2]);
+    assert!(!embedded.needs_embedding());
+}
+
+#[test]
+fn storage_engine_pending_embeddings_index_tracks_create_mark_refresh_and_delete() {
+    let engine = StorageEngine::open_temporary().unwrap();
+
+    let mut first = sample_node("n1", &["File"]);
+    first
+        .properties
+        .insert("content".to_string(), json!("first file"));
+    let mut second = sample_node("n2", &["File"]);
+    second
+        .properties
+        .insert("content".to_string(), json!("second file"));
+    second.set_default_embedding(vec![0.1, 0.2]);
+
+    engine.put_node_record(&first).unwrap();
+    engine.put_node_record(&second).unwrap();
+
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
+    assert_eq!(
+        engine.find_node_needing_embedding().unwrap().unwrap().id,
+        "n1"
+    );
+
+    engine.mark_node_embedded("n1").unwrap();
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 0);
+    assert!(engine.find_node_needing_embedding().unwrap().is_none());
+
+    engine.add_to_pending_embeddings("n1").unwrap();
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
+
+    engine.delete_node_record("n1").unwrap();
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 0);
+
+    let mut third = sample_node("n3", &["File"]);
+    third
+        .properties
+        .insert("content".to_string(), json!("third file"));
+    engine.put_node_record(&third).unwrap();
+    engine.mark_node_embedded("n3").unwrap();
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 0);
+    assert_eq!(engine.refresh_pending_embeddings_index().unwrap(), 1);
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
+    assert_eq!(
+        engine.find_node_needing_embedding().unwrap().unwrap().id,
+        "n3"
+    );
+}
+
+#[test]
+fn storage_engine_add_to_pending_embeddings_skips_embedded_or_missing_nodes() {
+    let engine = StorageEngine::open_temporary().unwrap();
+
+    let mut embedded = sample_node("n1", &["File"]);
+    embedded.set_default_embedding(vec![0.1, 0.2]);
+    engine.put_node_record(&embedded).unwrap();
+
+    engine.mark_node_embedded("n1").unwrap();
+    engine.add_to_pending_embeddings("n1").unwrap();
+    engine.add_to_pending_embeddings("missing").unwrap();
+
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 0);
+    assert!(engine.find_node_needing_embedding().unwrap().is_none());
+}
+
+#[test]
+fn storage_engine_clear_all_embeddings_requeues_nodes_for_regeneration() {
+    let engine = StorageEngine::open_temporary().unwrap();
+
+    let mut first = sample_node("n1", &["File"]);
+    first
+        .properties
+        .insert("content".to_string(), json!("first file"));
+    first.set_default_embedding(vec![0.1, 0.2, 0.3]);
+    first.embed_meta.has_embedding = Some(true);
+
+    let mut second = sample_node("tenant_a:n1", &["File"]);
+    second
+        .properties
+        .insert("content".to_string(), json!("tenant file"));
+    second.chunk_embeddings = vec![vec![0.4, 0.5, 0.6]];
+
+    engine.put_node_record(&first).unwrap();
+    engine.put_node_record(&second).unwrap();
+
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 0);
+
+    let cleared = engine.clear_all_embeddings().unwrap();
+    assert_eq!(cleared, 2);
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 2);
+
+    let first_after = engine.get_node_record("n1").unwrap().unwrap();
+    assert!(first_after.default_embedding().is_none());
+    assert!(first_after.named_embeddings.is_empty());
+    assert!(first_after.embed_meta.has_embedding.is_none());
+    assert!(first_after.needs_embedding());
+    let second_after = engine.get_node_record("tenant_a:n1").unwrap().unwrap();
+    assert!(second_after.chunk_embeddings.is_empty());
+    assert!(second_after.embed_meta.has_chunks.is_none());
+    assert!(second_after.needs_embedding());
+}
+
+#[test]
+fn storage_engine_clear_all_embeddings_for_prefix_only_clears_matching_namespace() {
+    let engine = StorageEngine::open_temporary().unwrap();
+
+    let mut tenant_a = sample_node("tenant_a:n1", &["File"]);
+    tenant_a
+        .properties
+        .insert("content".to_string(), json!("tenant a file"));
+    tenant_a.set_default_embedding(vec![0.1, 0.2, 0.3]);
+    let mut tenant_b = sample_node("tenant_b:n1", &["File"]);
+    tenant_b
+        .properties
+        .insert("content".to_string(), json!("tenant b file"));
+    tenant_b.set_default_embedding(vec![0.4, 0.5, 0.6]);
+
+    engine.put_node_record(&tenant_a).unwrap();
+    engine.put_node_record(&tenant_b).unwrap();
+
+    let cleared = engine.clear_all_embeddings_for_prefix("tenant_a:").unwrap();
+    assert_eq!(cleared, 1);
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
+
+    let tenant_a_after = engine.get_node_record("tenant_a:n1").unwrap().unwrap();
+    assert!(tenant_a_after.default_embedding().is_none());
+    assert!(tenant_a_after.named_embeddings.is_empty());
+    let tenant_b_after = engine.get_node_record("tenant_b:n1").unwrap().unwrap();
+    assert_eq!(
+        tenant_b_after.default_embedding(),
+        Some(&[0.4, 0.5, 0.6][..])
+    );
+    assert!(!tenant_b_after.named_embeddings.is_empty());
+}
+
+#[test]
+fn storage_engine_update_node_embedding_preserves_non_embedding_properties_and_removes_pending() {
+    let engine = StorageEngine::open_temporary().unwrap();
+
+    let mut node = sample_node("n1", &["File"]);
+    node.properties
+        .insert("content".to_string(), json!("needs embedding"));
+    node.properties
+        .insert("title".to_string(), json!("Original title"));
+    engine.put_node_record(&node).unwrap();
+
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
+    assert_eq!(engine.node_count_by_prefix("").unwrap(), 1);
+
+    let mut embedding_update = sample_node("n1", &["Ignored"]);
+    embedding_update.set_default_embedding(vec![0.1, 0.2, 0.3]);
+    embedding_update.embed_meta.embedding_model = Some("test-model".to_string());
+    embedding_update.embed_meta.embedding_dimensions = Some(3);
+    embedding_update.embed_meta.has_embedding = Some(true);
+    embedding_update.updated_at_unix_ms += 100;
+
+    engine.update_node_embedding(&embedding_update).unwrap();
+
+    let updated = engine.get_node_record("n1").unwrap().unwrap();
+    assert_eq!(updated.labels, vec!["File".to_string()]);
+    assert_eq!(
+        updated.properties.get("title"),
+        Some(&json!("Original title"))
+    );
+    assert_eq!(
+        updated.properties.get("content"),
+        Some(&json!("needs embedding"))
+    );
+    assert_eq!(
+        updated.embed_meta.embedding_model.as_deref(),
+        Some("test-model")
+    );
+    assert_eq!(engine.node_count_by_prefix("").unwrap(), 1);
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 0);
+}
+
+#[test]
+fn storage_engine_update_node_embedding_clears_omitted_embedding_metadata() {
+    let engine = StorageEngine::open_temporary().unwrap();
+
+    let mut node = sample_node("n1", &["File"]);
+    node.properties
+        .insert("content".to_string(), json!("needs embedding"));
+    engine.put_node_record(&node).unwrap();
+
+    let mut first_embedding = sample_node("n1", &["Ignored"]);
+    first_embedding.set_default_embedding(vec![0.1, 0.2, 0.3]);
+    first_embedding.embed_meta.embedding_model = Some("model-a".to_string());
+    first_embedding.embed_meta.embedding_dimensions = Some(3);
+    first_embedding.embed_meta.embedded_at = Some("2026-05-29T00:00:00Z".to_string());
+    first_embedding.embed_meta.has_embedding = Some(true);
+    engine.update_node_embedding(&first_embedding).unwrap();
+
+    let mut second_embedding = sample_node("n1", &["Ignored"]);
+    second_embedding.set_default_embedding(vec![0.4, 0.5, 0.6]);
+    second_embedding.embed_meta.has_embedding = Some(true);
+    engine.update_node_embedding(&second_embedding).unwrap();
+
+    let updated = engine.get_node_record("n1").unwrap().unwrap();
+    assert_eq!(updated.default_embedding(), Some(&[0.4, 0.5, 0.6][..]));
+    assert!(updated.embed_meta.embedding_model.is_none());
+    assert!(updated.embed_meta.embedding_dimensions.is_none());
+    assert!(updated.embed_meta.embedded_at.is_none());
+    assert_eq!(
+        updated.properties.get("content"),
+        Some(&json!("needs embedding"))
+    );
+}
+
+#[test]
+fn async_storage_engine_update_node_embedding_does_not_change_node_count() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+            ..Default::default()
+        }),
+    );
+
+    let mut node = sample_node("n1", &["File"]);
+    node.properties
+        .insert("content".to_string(), json!("needs embedding"));
+    async_engine.put_node_record(&node).unwrap();
+
+    let count_before = async_engine.node_count_by_prefix("").unwrap();
+    assert_eq!(count_before, 1);
+
+    let mut embedding_update = sample_node("n1", &["Ignored"]);
+    embedding_update.set_default_embedding(vec![0.1, 0.2, 0.3]);
+    embedding_update.embed_meta.has_embedding = Some(true);
+    embedding_update.updated_at_unix_ms += 100;
+
+    async_engine
+        .update_node_embedding(&embedding_update)
+        .unwrap();
+
+    assert_eq!(async_engine.node_count_by_prefix("").unwrap(), count_before);
+    assert_eq!(async_engine.pending_embeddings_count(), 0);
+    let updated = async_engine.get_node_record("n1").unwrap().unwrap();
+    assert_eq!(
+        updated.properties.get("content"),
+        Some(&json!("needs embedding"))
+    );
+    assert_eq!(updated.default_embedding(), Some(&[0.1, 0.2, 0.3][..]));
+
+    async_engine.close().unwrap();
+}
+
+#[test]
 fn async_storage_engine_effective_label_reads_reflect_pending_updates_before_flush() {
     let async_engine = AsyncStorageEngine::new(
         StorageEngine::open_temporary().unwrap(),
         Some(AsyncStorageConfig {
             flush_interval_ms: 60_000,
+            ..Default::default()
         }),
     );
 
@@ -1252,6 +2024,7 @@ fn async_storage_engine_pending_counts_reflect_namespace_updates_before_flush() 
         StorageEngine::open_temporary().unwrap(),
         Some(AsyncStorageConfig {
             flush_interval_ms: 60_000,
+            ..Default::default()
         }),
     );
 
@@ -1351,6 +2124,7 @@ fn async_storage_engine_effective_edge_type_reads_reflect_pending_updates_before
         StorageEngine::open_temporary().unwrap(),
         Some(AsyncStorageConfig {
             flush_interval_ms: 60_000,
+            ..Default::default()
         }),
     );
 
@@ -1407,6 +2181,7 @@ fn async_storage_engine_pending_label_index_rebuilds_and_evicts_on_flush() {
         StorageEngine::open_temporary().unwrap(),
         Some(AsyncStorageConfig {
             flush_interval_ms: 60_000,
+            ..Default::default()
         }),
     );
 
@@ -1446,6 +2221,7 @@ fn async_storage_engine_pending_edge_type_index_rebuilds_and_evicts_on_flush() {
         StorageEngine::open_temporary().unwrap(),
         Some(AsyncStorageConfig {
             flush_interval_ms: 60_000,
+            ..Default::default()
         }),
     );
 
@@ -1485,6 +2261,7 @@ fn async_storage_engine_pending_adjacency_indexes_rebuild_and_evict_on_flush() {
         StorageEngine::open_temporary().unwrap(),
         Some(AsyncStorageConfig {
             flush_interval_ms: 60_000,
+            ..Default::default()
         }),
     );
 
@@ -1499,16 +2276,28 @@ fn async_storage_engine_pending_adjacency_indexes_rebuild_and_evict_on_flush() {
         async_engine.pending_edge_ids_from_start("n1"),
         vec!["e1".to_string(), "e2".to_string()]
     );
-    assert_eq!(async_engine.pending_edge_ids_to_end("n2"), vec!["e1".to_string()]);
+    assert_eq!(
+        async_engine.pending_edge_ids_to_end("n2"),
+        vec!["e1".to_string()]
+    );
 
     let mut moved = sample_edge("e1", "KNOWS", "n4", "n1");
     moved.updated_at_unix_ms += 1;
     async_engine.put_edge_record(&moved).unwrap();
 
-    assert_eq!(async_engine.pending_edge_ids_from_start("n1"), vec!["e2".to_string()]);
+    assert_eq!(
+        async_engine.pending_edge_ids_from_start("n1"),
+        vec!["e2".to_string()]
+    );
     assert!(async_engine.pending_edge_ids_to_end("n2").is_empty());
-    assert_eq!(async_engine.pending_edge_ids_from_start("n4"), vec!["e1".to_string()]);
-    assert_eq!(async_engine.pending_edge_ids_to_end("n1"), vec!["e1".to_string()]);
+    assert_eq!(
+        async_engine.pending_edge_ids_from_start("n4"),
+        vec!["e1".to_string()]
+    );
+    assert_eq!(
+        async_engine.pending_edge_ids_to_end("n1"),
+        vec!["e1".to_string()]
+    );
 
     async_engine.flush().unwrap();
     assert!(async_engine.pending_edge_ids_from_start("n1").is_empty());
@@ -1523,6 +2312,7 @@ fn async_storage_engine_effective_adjacency_reads_reflect_pending_edge_updates_b
         StorageEngine::open_temporary().unwrap(),
         Some(AsyncStorageConfig {
             flush_interval_ms: 60_000,
+            ..Default::default()
         }),
     );
 
@@ -1615,6 +2405,7 @@ fn async_storage_engine_typed_adjacency_reads_reflect_pending_edge_updates_befor
         StorageEngine::open_temporary().unwrap(),
         Some(AsyncStorageConfig {
             flush_interval_ms: 60_000,
+            ..Default::default()
         }),
     );
 
@@ -1646,7 +2437,10 @@ fn async_storage_engine_typed_adjacency_reads_reflect_pending_edge_updates_befor
             .collect::<Vec<_>>(),
         vec!["e4".to_string()]
     );
-    assert!(async_engine.get_edges_from_node_by_type("n1", "MENTORS").unwrap().is_empty());
+    assert!(async_engine
+        .get_edges_from_node_by_type("n1", "MENTORS")
+        .unwrap()
+        .is_empty());
     assert_eq!(
         async_engine
             .get_edges_to_node_by_type("n1", "MENTORS")
@@ -1694,6 +2488,7 @@ fn async_storage_engine_all_and_stream_reads_merge_pending_updates_before_flush(
         StorageEngine::open_temporary().unwrap(),
         Some(AsyncStorageConfig {
             flush_interval_ms: 60_000,
+            ..Default::default()
         }),
     );
 
@@ -1836,6 +2631,7 @@ fn async_storage_engine_prefix_stream_reads_merge_pending_updates_before_flush()
         StorageEngine::open_temporary().unwrap(),
         Some(AsyncStorageConfig {
             flush_interval_ms: 60_000,
+            ..Default::default()
         }),
     );
 
@@ -1904,6 +2700,7 @@ fn async_storage_engine_chunk_stream_reads_merge_pending_updates_before_flush() 
         StorageEngine::open_temporary().unwrap(),
         Some(AsyncStorageConfig {
             flush_interval_ms: 60_000,
+            ..Default::default()
         }),
     );
 
@@ -1950,7 +2747,9 @@ fn async_storage_engine_chunk_stream_reads_merge_pending_updates_before_flush() 
         ]
     );
 
-    let err = async_engine.stream_node_record_chunks(0, |_| Ok(())).unwrap_err();
+    let err = async_engine
+        .stream_node_record_chunks(0, |_| Ok(()))
+        .unwrap_err();
     assert!(matches!(err, StorageError::InvalidChunkSize(0)));
 
     async_engine.close().unwrap();
@@ -1962,6 +2761,7 @@ fn async_storage_engine_streaming_apis_treat_iteration_stopped_as_normal_complet
         StorageEngine::open_temporary().unwrap(),
         Some(AsyncStorageConfig {
             flush_interval_ms: 60_000,
+            ..Default::default()
         }),
     );
 
@@ -2035,7 +2835,90 @@ fn async_storage_engine_streaming_apis_treat_iteration_stopped_as_normal_complet
         })
         .unwrap();
     assert_eq!(streamed, 2);
-    assert_eq!(chunks, vec![vec!["alpha:n1".to_string(), "beta:n1".to_string()]]);
+    assert_eq!(
+        chunks,
+        vec![vec!["alpha:n1".to_string(), "beta:n1".to_string()]]
+    );
+
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_streaming_apis_surface_external_cancellation() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+            ..Default::default()
+        }),
+    );
+
+    async_engine
+        .put_node_record(&sample_node("alpha:n1", &["Person"]))
+        .unwrap();
+    async_engine
+        .put_node_record(&sample_node("alpha:n2", &["Person"]))
+        .unwrap();
+    async_engine
+        .put_node_record(&sample_node("beta:n1", &["Person"]))
+        .unwrap();
+    async_engine
+        .put_edge_record(&sample_edge("alpha:e1", "KNOWS", "alpha:n1", "alpha:n2"))
+        .unwrap();
+    async_engine
+        .put_edge_record(&sample_edge("beta:e1", "KNOWS", "beta:n1", "beta:n1"))
+        .unwrap();
+
+    let cancel = RequestCancellation::new();
+    let mut node_ids = Vec::new();
+    let err = async_engine
+        .stream_node_records_with_cancellation(&cancel, |node| {
+            node_ids.push(node.id);
+            cancel.cancel();
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(matches!(err, StorageError::RequestCancelled(_)));
+    assert_eq!(node_ids, vec!["alpha:n1"]);
+
+    let cancel = RequestCancellation::new();
+    let mut alpha_ids = Vec::new();
+    let err = async_engine
+        .stream_node_records_by_prefix_with_cancellation("alpha:", &cancel, |node| {
+            alpha_ids.push(node.id);
+            cancel.cancel();
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(matches!(err, StorageError::RequestCancelled(_)));
+    assert_eq!(alpha_ids, vec!["alpha:n1"]);
+
+    let cancel = RequestCancellation::new();
+    let mut edge_ids = Vec::new();
+    let err = async_engine
+        .stream_edge_records_with_cancellation(&cancel, |edge| {
+            edge_ids.push(edge.id);
+            cancel.cancel();
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(matches!(err, StorageError::RequestCancelled(_)));
+    assert_eq!(edge_ids, vec!["alpha:e1"]);
+
+    let cancel = RequestCancellation::new();
+    let mut chunks = Vec::new();
+    let err = async_engine
+        .stream_node_record_chunks_with_cancellation(2, &cancel, |chunk| {
+            chunks.push(chunk.iter().map(|node| node.id.clone()).collect::<Vec<_>>());
+            cancel.cancel();
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(matches!(err, StorageError::RequestCancelled(_)));
+    assert_eq!(
+        chunks,
+        vec![vec!["alpha:n1".to_string(), "alpha:n2".to_string()]]
+    );
 
     async_engine.close().unwrap();
 }
@@ -2046,6 +2929,7 @@ fn async_storage_engine_hold_flush_blocks_background_auto_flush_until_release() 
         StorageEngine::open_temporary().unwrap(),
         Some(AsyncStorageConfig {
             flush_interval_ms: 10,
+            ..Default::default()
         }),
     );
     async_engine
@@ -2078,6 +2962,7 @@ fn async_storage_engine_hold_flush_prevents_try_flush_until_release() {
         StorageEngine::open_temporary().unwrap(),
         Some(AsyncStorageConfig {
             flush_interval_ms: 60_000,
+            ..Default::default()
         }),
     );
     async_engine
@@ -2090,6 +2975,182 @@ fn async_storage_engine_hold_flush_prevents_try_flush_until_release() {
 
     let result = async_engine.try_flush().unwrap().unwrap();
     assert_eq!(result.nodes_written, 1);
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_forces_node_flush_when_pending_cache_limit_is_reached() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+            max_node_cache_size: 1,
+            ..Default::default()
+        }),
+    );
+
+    async_engine
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+    assert!(async_engine
+        .get_persisted_node_record("n1")
+        .unwrap()
+        .is_none());
+
+    async_engine
+        .put_node_record(&sample_node("n2", &["Person"]))
+        .unwrap();
+
+    assert!(async_engine
+        .get_persisted_node_record("n1")
+        .unwrap()
+        .is_some());
+    assert!(async_engine
+        .get_persisted_node_record("n2")
+        .unwrap()
+        .is_none());
+    assert!(async_engine
+        .get_node_record_latest_effective("n2")
+        .unwrap()
+        .is_some());
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_forces_edge_flush_when_pending_cache_limit_is_reached() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+            max_edge_cache_size: 1,
+            ..Default::default()
+        }),
+    );
+
+    async_engine
+        .put_edge_record(&sample_edge("e1", "KNOWS", "n1", "n2"))
+        .unwrap();
+    assert!(async_engine
+        .get_persisted_edge_record("e1")
+        .unwrap()
+        .is_none());
+
+    async_engine
+        .put_edge_record(&sample_edge("e2", "KNOWS", "n2", "n3"))
+        .unwrap();
+
+    assert!(async_engine
+        .get_persisted_edge_record("e1")
+        .unwrap()
+        .is_some());
+    assert!(async_engine
+        .get_persisted_edge_record("e2")
+        .unwrap()
+        .is_none());
+    assert!(async_engine
+        .get_edge_record_latest_effective("e2")
+        .unwrap()
+        .is_some());
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_delete_pending_created_node_notifies_callback_without_deadlock() {
+    let async_engine = Arc::new(AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+            ..Default::default()
+        }),
+    ));
+
+    async_engine
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+
+    let weak_engine = Arc::downgrade(&async_engine);
+    let (callback_tx, callback_rx) = std::sync::mpsc::channel();
+    async_engine.on_node_deleted(Arc::new(move |id| {
+        let engine = weak_engine.upgrade().expect("async engine still alive");
+        assert!(engine.get_node_record(&id).unwrap().is_none());
+        callback_tx.send(id).unwrap();
+    }));
+
+    let delete_engine = Arc::clone(&async_engine);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        done_tx
+            .send(delete_engine.delete_node_record("n1"))
+            .unwrap();
+    });
+
+    done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("delete_node_record deadlocked")
+        .unwrap();
+    assert_eq!(
+        callback_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "n1".to_string()
+    );
+
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_delete_pending_updated_node_does_not_notify_callback() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+            ..Default::default()
+        }),
+    );
+
+    async_engine
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+    async_engine.flush().unwrap();
+
+    let mut updated = sample_node("n1", &["Device"]);
+    updated.updated_at_unix_ms += 1;
+    async_engine.put_node_record(&updated).unwrap();
+
+    let (callback_tx, callback_rx) = std::sync::mpsc::channel();
+    async_engine.on_node_deleted(Arc::new(move |id| {
+        callback_tx.send(id).unwrap();
+    }));
+
+    async_engine.delete_node_record("n1").unwrap();
+    assert!(callback_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_delete_pending_created_edge_notifies_callback() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+            ..Default::default()
+        }),
+    );
+
+    async_engine
+        .put_edge_record(&sample_edge("e1", "KNOWS", "n1", "n2"))
+        .unwrap();
+
+    let (callback_tx, callback_rx) = std::sync::mpsc::channel();
+    async_engine.on_edge_deleted(Arc::new(move |id| {
+        callback_tx.send(id).unwrap();
+    }));
+
+    async_engine.delete_edge_record("e1").unwrap();
+    assert_eq!(
+        callback_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "e1".to_string()
+    );
+
     async_engine.close().unwrap();
 }
 
@@ -2110,6 +3171,7 @@ fn async_storage_engine_delegates_mvcc_lifecycle_controls() {
         StorageEngine::open_temporary().unwrap(),
         Some(AsyncStorageConfig {
             flush_interval_ms: 60_000,
+            ..Default::default()
         }),
     );
 

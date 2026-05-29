@@ -431,6 +431,9 @@ fn event_to_node(event: &Event) -> Result<NodeRecord, AuditError> {
         ),
         labels: vec![AUDIT_LABEL.into(), SYSTEM_LABEL.into()],
         properties,
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: Vec::new(),
+        embed_meta: Default::default(),
         created_at_unix_ms: event.timestamp_unix_ms,
         updated_at_unix_ms: event.timestamp_unix_ms,
     })

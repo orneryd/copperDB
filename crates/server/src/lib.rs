@@ -36,9 +36,10 @@ use copperdb_retention::{
     RetentionSweepConfig,
 };
 use copperdb_search::{
-    collect_fabric_hydration_records, collect_planned_fabric_ranked_batches,
-    execute_planned_fabric_ranked_search, merge_rrf_search_batches, FabricHydrationRequest,
-    HydrationTransport, RankedSearchTransport, RrfConfig, RrfSearchPolicy, SearchQuery,
+    collect_fabric_hydration_records_with_context,
+    collect_planned_fabric_ranked_batches_with_context, execute_planned_fabric_ranked_search,
+    merge_rrf_search_batches, FabricHydrationRequest, HydrationTransport, RankedSearchTransport,
+    RrfConfig, RrfSearchPolicy, SearchQuery,
 };
 use copperdb_security::{
     RequestTarget, RequestViolation, SecurityConfig, SecurityMiddleware, SecurityRequest,
@@ -48,6 +49,7 @@ use copperdb_topology::{
     ConsistencyLevel, FabricDatabase, FabricGlobalId, LogicalTransactionId, PlacementKey,
 };
 use copperdb_txsession::{BookmarkMode, SessionConfig, TransactionMode};
+use copperdb_util::RequestContext;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -434,11 +436,26 @@ impl RemoteRankedSearchClient for LocalEngineRankedSearchHandler {
         )?;
         observe_remote_read_fence(&self.state, &request.placement.database, request.read_fence)
             .map_err(GrpcError::Transport)?;
-        let engine =
-            open_engine(&self.state, &request.placement.database).map_err(GrpcError::Transport)?;
-        engine
-            .search_fabric_ranked_batch_locally(&request.placement, &request.query)
-            .map_err(|error| GrpcError::Transport(error.to_string()))
+        let (request_context, _request_guard) = request
+            .request_context
+            .map(RequestContext::from_metadata)
+            .unwrap_or_else(|| RequestContext::root(None));
+        let state = Arc::clone(&self.state);
+        let database = request.placement.database.clone();
+        let placement = request.placement.clone();
+        let query = request.query.clone();
+        tokio::task::spawn_blocking(move || {
+            let engine = open_engine(&state, &database).map_err(GrpcError::Transport)?;
+            engine
+                .search_fabric_ranked_batch_locally_with_context(
+                    &request_context,
+                    &placement,
+                    &query,
+                )
+                .map_err(|error| GrpcError::Transport(error.to_string()))
+        })
+        .await
+        .map_err(|error| GrpcError::Transport(error.to_string()))?
     }
 }
 
@@ -462,11 +479,21 @@ impl RemoteHydrationClient for LocalEngineHydrationHandler {
         )?;
         observe_remote_read_fence(&self.state, &request.placement.database, request.read_fence)
             .map_err(GrpcError::Transport)?;
-        let engine =
-            open_engine(&self.state, &request.placement.database).map_err(GrpcError::Transport)?;
-        engine
-            .hydrate_fabric_entities_locally(&request.global_ids)
-            .map_err(|error| GrpcError::Transport(error.to_string()))
+        let (request_context, _request_guard) = request
+            .request_context
+            .map(RequestContext::from_metadata)
+            .unwrap_or_else(|| RequestContext::root(None));
+        let state = Arc::clone(&self.state);
+        let database = request.placement.database.clone();
+        let global_ids = request.global_ids.clone();
+        tokio::task::spawn_blocking(move || {
+            let engine = open_engine(&state, &database).map_err(GrpcError::Transport)?;
+            engine
+                .hydrate_fabric_entities_locally_with_context(&request_context, &global_ids)
+                .map_err(|error| GrpcError::Transport(error.to_string()))
+        })
+        .await
+        .map_err(|error| GrpcError::Transport(error.to_string()))?
     }
 }
 
@@ -1300,41 +1327,29 @@ async fn neo4j_tx_commit_handler(
     let mut errors = Vec::new();
 
     for statement in request.statements {
-        let result = if distributed {
-            let state = Arc::clone(&state);
-            let database = database.clone();
-            let roles = roles.clone();
-            let caller_auth_token = caller_auth_token.clone();
-            let request_region = request_region.clone();
-            tokio::task::spawn_blocking(move || {
-                execute_statement(
-                    state,
-                    database,
-                    statement.statement,
-                    statement.parameters.unwrap_or_default(),
-                    roles,
-                    true,
-                    distributed_read_fence,
-                    caller_auth_token,
-                    request_region,
-                )
-            })
-            .await
-            .map_err(|error| error.to_string())
-            .and_then(|result| result)
-        } else {
+        let state = Arc::clone(&state);
+        let database = database.clone();
+        let roles = roles.clone();
+        let caller_auth_token = caller_auth_token.clone();
+        let request_region = request_region.clone();
+        let (request_context, _request_guard) = RequestContext::root(None);
+        let result = tokio::task::spawn_blocking(move || {
             execute_statement(
                 Arc::clone(&state),
-                database.clone(),
+                database,
+                request_context,
                 statement.statement,
                 statement.parameters.unwrap_or_default(),
-                roles.clone(),
-                false,
+                roles,
+                distributed,
                 distributed_read_fence,
-                caller_auth_token.clone(),
-                request_region.clone(),
+                caller_auth_token,
+                request_region,
             )
-        };
+        })
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|result| result);
         match result {
             Ok(result) => results.push(result),
             Err(error) => errors.push(Neo4jError {
@@ -1351,6 +1366,7 @@ async fn neo4j_tx_commit_handler(
 fn execute_statement(
     state: Arc<AppState>,
     database: String,
+    request_context: RequestContext,
     statement: String,
     parameters: HashMap<String, serde_json::Value>,
     roles: Vec<String>,
@@ -1403,7 +1419,8 @@ fn execute_statement(
             .map_err(|error| error.to_string())?
             .block_on(async {
                 engine
-                    .execute_distributed_with_read_fence_as(
+                    .execute_distributed_with_read_fence_as_with_context(
+                        &request_context,
                         normalized,
                         parameters,
                         &roles,
@@ -1419,7 +1436,7 @@ fn execute_statement(
             })?
     } else {
         engine
-            .execute_as(normalized, parameters, &roles)
+            .execute_as_with_context(&request_context, normalized, parameters, &roles)
             .map_err(|error| error.to_string())?
     };
     Ok(convert_engine_result(result))
@@ -2098,6 +2115,7 @@ async fn execute_fabric_ranked_search_admin_impl(
     request: FabricRankedSearchRequest,
     caller_auth_token: Option<String>,
 ) -> Response {
+    let (request_context, _request_guard) = RequestContext::root(None);
     let read_fence = match derive_distributed_read_fence(&state, &database, &request.bookmarks) {
         Ok(read_fence) => read_fence,
         Err(error) => {
@@ -2188,7 +2206,8 @@ async fn execute_fabric_ranked_search_admin_impl(
             hydration_transport,
         )
     };
-    let collected = match collect_planned_fabric_ranked_batches(
+    let collected = match collect_planned_fabric_ranked_batches_with_context(
+        &request_context,
         search_plans.clone(),
         request.query,
         read_fence,
@@ -2217,17 +2236,22 @@ async fn execute_fabric_ranked_search_admin_impl(
                     .into_response();
             }
         };
-    let hydration =
-        match collect_fabric_hydration_records(hydration_requests, hydration_transport).await {
-            Ok(hydration) => hydration,
-            Err(error) => {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({"error": error.to_string()})),
-                )
-                    .into_response();
-            }
-        };
+    let hydration = match collect_fabric_hydration_records_with_context(
+        &request_context,
+        hydration_requests,
+        hydration_transport,
+    )
+    .await
+    {
+        Ok(hydration) => hydration,
+        Err(error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+    };
     let mut execution = execute_planned_fabric_ranked_search(
         search_plans,
         collected.batches,

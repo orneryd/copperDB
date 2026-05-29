@@ -574,6 +574,9 @@ mod tests {
                     .iter()
                     .map(|(key, value)| ((*key).to_string(), value.clone()))
                     .collect::<BTreeMap<_, _>>(),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
                 created_at_unix_ms: 0,
                 updated_at_unix_ms: 0,
             })

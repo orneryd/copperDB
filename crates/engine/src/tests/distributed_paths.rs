@@ -44,6 +44,10 @@ async fn engine_distributed_direct_path_persists_remote_edge_on_access_metadata(
         id: "Node:A".into(),
         labels: vec!["Node".into()],
         properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
+
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: Vec::new(),
+        embed_meta: Default::default(),
         created_at_unix_ms: 123,
         updated_at_unix_ms: 123,
     })
@@ -52,6 +56,10 @@ async fn engine_distributed_direct_path_persists_remote_edge_on_access_metadata(
         id: "Node:B".into(),
         labels: vec!["Node".into()],
         properties: BTreeMap::from([("name".into(), Value::String("b".into()))]),
+
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: Vec::new(),
+        embed_meta: Default::default(),
         created_at_unix_ms: 123,
         updated_at_unix_ms: 123,
     })
@@ -143,6 +151,10 @@ async fn engine_routes_distributed_variable_length_exact_path_query() {
             id: "Node:A".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -174,6 +186,10 @@ async fn engine_routes_distributed_variable_length_exact_path_query() {
             id: "Node:B".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), Value::String("b".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -205,6 +221,10 @@ async fn engine_routes_distributed_variable_length_exact_path_query() {
             id: "Node:C".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), Value::String("c".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -287,6 +307,10 @@ async fn engine_routes_distributed_variable_length_range_path_query() {
             id: "Node:A".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), Value::String("a".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -318,6 +342,10 @@ async fn engine_routes_distributed_variable_length_range_path_query() {
             id: "Node:B".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), Value::String("b".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -349,6 +377,10 @@ async fn engine_routes_distributed_variable_length_range_path_query() {
             id: "Node:C".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), Value::String("c".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -447,6 +479,10 @@ async fn engine_routes_distributed_optional_single_node_path_query_hit_and_miss(
             id: "Person:Alice".into(),
             labels: vec!["Person".into()],
             properties: BTreeMap::from([("name".into(), Value::String("Alice".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -553,6 +589,10 @@ async fn engine_routes_distributed_leading_match_optional_path_with_row_preserva
             id: "Seed:1".into(),
             labels: vec!["Seed".into()],
             properties: BTreeMap::from([("id".into(), Value::from(1))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -562,6 +602,10 @@ async fn engine_routes_distributed_leading_match_optional_path_with_row_preserva
             id: "Seed:2".into(),
             labels: vec!["Seed".into()],
             properties: BTreeMap::from([("id".into(), Value::from(2))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -580,6 +624,10 @@ async fn engine_routes_distributed_leading_match_optional_path_with_row_preserva
             id: "Person:Alice".into(),
             labels: vec!["Person".into()],
             properties: BTreeMap::from([("name".into(), Value::String("Alice".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -695,6 +743,10 @@ async fn engine_routes_distributed_leading_match_optional_path_using_bound_node(
             id: "Seed:1".into(),
             labels: vec!["Seed".into()],
             properties: BTreeMap::from([("id".into(), Value::from(1))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -704,6 +756,10 @@ async fn engine_routes_distributed_leading_match_optional_path_using_bound_node(
             id: "Seed:2".into(),
             labels: vec!["Seed".into()],
             properties: BTreeMap::from([("id".into(), Value::from(2))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -713,6 +769,10 @@ async fn engine_routes_distributed_leading_match_optional_path_using_bound_node(
             id: "Person:Alice".into(),
             labels: vec!["Person".into()],
             properties: BTreeMap::from([("name".into(), Value::String("Alice".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -868,6 +928,10 @@ async fn engine_routes_distributed_multi_match_optional_path_with_bound_node() {
                 id: id.into(),
                 labels: vec![label.into()],
                 properties,
+
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
                 created_at_unix_ms: 0,
                 updated_at_unix_ms: 0,
             })
@@ -1013,6 +1077,10 @@ async fn engine_routes_distributed_relationship_match_optional_path_with_bound_n
                 id: id.into(),
                 labels: vec![label.into()],
                 properties,
+
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
                 created_at_unix_ms: 0,
                 updated_at_unix_ms: 0,
             })
@@ -1178,6 +1246,10 @@ async fn engine_routes_distributed_mixed_prefix_optional_path_with_bound_node() 
                 id: id.into(),
                 labels: vec![label.into()],
                 properties,
+
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
                 created_at_unix_ms: 0,
                 updated_at_unix_ms: 0,
             })
@@ -1348,6 +1420,10 @@ async fn engine_routes_distributed_variable_length_relationship_prefix_optional_
                 id: id.into(),
                 labels: labels.into_iter().map(String::from).collect(),
                 properties,
+
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
                 created_at_unix_ms: 0,
                 updated_at_unix_ms: 0,
             })
@@ -1522,6 +1598,10 @@ async fn engine_routes_distributed_where_filtered_prefix_optional_path() {
                 id: id.into(),
                 labels: vec![label.into()],
                 properties,
+
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
                 created_at_unix_ms: 0,
                 updated_at_unix_ms: 0,
             })

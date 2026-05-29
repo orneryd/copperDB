@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use super::*;
+use copperdb_util::RequestContext;
 
 impl CopperDb {
     pub async fn execute_distributed_as(
@@ -13,7 +14,9 @@ impl CopperDb {
         request_region: Option<&str>,
         transport: Arc<dyn ReplicaTransport>,
     ) -> Result<DistributedQueryResult, CopperDbError> {
-        self.execute_distributed_with_read_fence_as(
+        let request_context = RequestContext::detached();
+        self.execute_distributed_with_read_fence_as_with_context(
+            &request_context,
             cypher,
             params,
             roles,
@@ -37,6 +40,34 @@ impl CopperDb {
         read_fence: Option<LogicalTransactionId>,
         transport: Arc<dyn ReplicaTransport>,
     ) -> Result<DistributedQueryResult, CopperDbError> {
+        let request_context = RequestContext::detached();
+        self.execute_distributed_with_read_fence_as_with_context(
+            &request_context,
+            cypher,
+            params,
+            roles,
+            placement,
+            consistency,
+            request_region,
+            read_fence,
+            transport,
+        )
+        .await
+    }
+
+    pub async fn execute_distributed_with_read_fence_as_with_context(
+        &self,
+        request_context: &RequestContext,
+        cypher: &str,
+        params: HashMap<String, Value>,
+        roles: &[String],
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+        read_fence: Option<LogicalTransactionId>,
+        transport: Arc<dyn ReplicaTransport>,
+    ) -> Result<DistributedQueryResult, CopperDbError> {
+        request_context.check_active()?;
         let parsed = Parser::new().parse(cypher)?;
         self.enforce_compliance(&parsed, roles)?;
 
@@ -44,6 +75,7 @@ impl CopperDb {
             if let Some(shape) = distributed_shortest_path_query_shape(&parsed) {
                 let (result, bfs) = self
                     .execute_distributed_shortest_path_query(
+                        request_context,
                         &shape,
                         &params,
                         placement,
@@ -67,6 +99,7 @@ impl CopperDb {
             if let Some(shape) = distributed_direct_path_query_shape(&parsed) {
                 let (result, read_outcome) = self
                     .execute_distributed_direct_path_query(
+                        request_context,
                         &shape,
                         &params,
                         placement,
@@ -85,6 +118,7 @@ impl CopperDb {
             if let Some(shape) = distributed_leading_path_query_shape(&parsed) {
                 let (result, read_outcome) = self
                     .execute_distributed_leading_path_query(
+                        request_context,
                         &shape,
                         &params,
                         placement,
@@ -106,6 +140,7 @@ impl CopperDb {
         let mut write_outcome = None;
         let mut read_outcome = None;
         if is_mutating_query(&parsed.query_type) {
+            request_context.check_active()?;
             write_outcome = Some(
                 coordinator
                     .write(
@@ -131,7 +166,7 @@ impl CopperDb {
         }
 
         Ok(DistributedQueryResult {
-            result: self.execute_as(cypher, params, roles)?,
+            result: self.execute_as_with_context(request_context, cypher, params, roles)?,
             write_outcome,
             read_outcome,
         })
@@ -174,6 +209,36 @@ impl CopperDb {
         read_fence: Option<LogicalTransactionId>,
         transport: Arc<dyn ReplicaTransport>,
     ) -> Result<DistributedBfsResult, CopperDbError> {
+        let request_context = RequestContext::detached();
+        self.distributed_bfs_path_with_read_fence_as_with_context(
+            &request_context,
+            start_node_id,
+            end_node_id,
+            rel_type,
+            direction,
+            placement,
+            consistency,
+            request_region,
+            read_fence,
+            transport,
+        )
+        .await
+    }
+
+    pub async fn distributed_bfs_path_with_read_fence_as_with_context(
+        &self,
+        request_context: &RequestContext,
+        start_node_id: &str,
+        end_node_id: &str,
+        rel_type: Option<&str>,
+        direction: EdgeDirection,
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+        read_fence: Option<LogicalTransactionId>,
+        transport: Arc<dyn ReplicaTransport>,
+    ) -> Result<DistributedBfsResult, CopperDbError> {
+        request_context.check_active()?;
         let plan = self.plan_distributed_read(placement, consistency, request_region)?;
         let mut responded_by = BTreeSet::new();
         let mut failed_replicas = BTreeSet::new();
@@ -290,8 +355,38 @@ impl CopperDb {
         read_fence: Option<LogicalTransactionId>,
         transport: Arc<dyn ReplicaTransport>,
     ) -> Result<(QueryResult, DistributedBfsResult), CopperDbError> {
+        let request_context = RequestContext::detached();
+        self.distributed_bfs_query_with_read_fence_as_with_context(
+            &request_context,
+            start_node_id,
+            end_node_id,
+            rel_type,
+            direction,
+            placement,
+            consistency,
+            request_region,
+            read_fence,
+            transport,
+        )
+        .await
+    }
+
+    pub async fn distributed_bfs_query_with_read_fence_as_with_context(
+        &self,
+        request_context: &RequestContext,
+        start_node_id: &str,
+        end_node_id: &str,
+        rel_type: Option<&str>,
+        direction: EdgeDirection,
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+        read_fence: Option<LogicalTransactionId>,
+        transport: Arc<dyn ReplicaTransport>,
+    ) -> Result<(QueryResult, DistributedBfsResult), CopperDbError> {
         let bfs = self
-            .distributed_bfs_path_with_read_fence_as(
+            .distributed_bfs_path_with_read_fence_as_with_context(
+                request_context,
                 start_node_id,
                 end_node_id,
                 rel_type,
@@ -328,6 +423,7 @@ impl CopperDb {
 
     async fn execute_distributed_shortest_path_query(
         &self,
+        request_context: &RequestContext,
         shape: &DistributedShortestPathQueryShape,
         params: &HashMap<String, Value>,
         placement: &PlacementKey,
@@ -336,6 +432,7 @@ impl CopperDb {
         read_fence: Option<LogicalTransactionId>,
         transport: Arc<dyn ReplicaTransport>,
     ) -> Result<(QueryResult, DistributedBfsResult), CopperDbError> {
+        request_context.check_active()?;
         let plan = self.plan_distributed_read(placement, consistency, request_region)?;
         let mut responded_by = BTreeSet::new();
         let mut failed_replicas = BTreeSet::new();
@@ -379,7 +476,9 @@ impl CopperDb {
         let mut best_path: Option<DistributedPath> = None;
 
         for start_node_id in &start_ids {
+            request_context.check_active()?;
             for end_node_id in &end_ids {
+                request_context.check_active()?;
                 let candidate = self
                     .distributed_bfs_path(
                         &plan,
@@ -456,6 +555,7 @@ impl CopperDb {
 
     async fn execute_distributed_direct_path_query(
         &self,
+        request_context: &RequestContext,
         shape: &DistributedDirectPathQueryShape,
         params: &HashMap<String, Value>,
         placement: &PlacementKey,
@@ -464,6 +564,7 @@ impl CopperDb {
         read_fence: Option<LogicalTransactionId>,
         transport: Arc<dyn ReplicaTransport>,
     ) -> Result<(QueryResult, DistributedReadOutcome), CopperDbError> {
+        request_context.check_active()?;
         let plan = self.plan_distributed_read(placement, consistency, request_region)?;
         let mut responded_by = BTreeSet::new();
         let mut failed_replicas = BTreeSet::new();
@@ -515,6 +616,7 @@ impl CopperDb {
 
     async fn execute_distributed_leading_path_query(
         &self,
+        request_context: &RequestContext,
         shape: &DistributedLeadingPathQueryShape,
         params: &HashMap<String, Value>,
         placement: &PlacementKey,
@@ -523,6 +625,7 @@ impl CopperDb {
         read_fence: Option<LogicalTransactionId>,
         transport: Arc<dyn ReplicaTransport>,
     ) -> Result<(QueryResult, DistributedReadOutcome), CopperDbError> {
+        request_context.check_active()?;
         let plan = self.plan_distributed_read(placement, consistency, request_region)?;
         let mut responded_by = BTreeSet::new();
         let mut failed_replicas = BTreeSet::new();
@@ -530,10 +633,12 @@ impl CopperDb {
 
         let mut base_rows = vec![HashMap::new()];
         for leading_step in &shape.leading_steps {
+            request_context.check_active()?;
             match leading_step {
                 DistributedLeadingStep::Match(leading_match) => {
                     let mut next_rows = Vec::new();
                     for base_row in &base_rows {
+                        request_context.check_active()?;
                         match leading_match {
                             DistributedLeadingMatch::Node { selector, variable } => {
                                 let matched_nodes = self
@@ -622,6 +727,7 @@ impl CopperDb {
                 DistributedLeadingStep::OptionalMatch(leading_match) => {
                     let mut next_rows = Vec::new();
                     for base_row in &base_rows {
+                        request_context.check_active()?;
                         match leading_match {
                             DistributedLeadingMatch::Node { selector, variable } => {
                                 let matched_nodes = self

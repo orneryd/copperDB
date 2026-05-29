@@ -1,7 +1,10 @@
 use crate::{
-    EdgeAdjacencyDirection, EdgeRecord, MvccLifecycleDebtKey, MvccLifecycleStatus,
-    MvccPruneOptions, MvccSnapshot, MvccSnapshotLease, NodeRecord, StorageEngine, StorageError,
+    EdgeAdjacencyDirection, EdgeDeleteCallback, EdgeEventCallback, EdgeRecord,
+    MvccLifecycleDebtKey, MvccLifecycleStatus, MvccPruneOptions, MvccSnapshot, MvccSnapshotLease,
+    NodeDeleteCallback, NodeEventCallback, NodeRecord, StorageEngine, StorageError,
+    StorageEventNotifier,
 };
+use copperdb_util::RequestCancellation;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
@@ -11,6 +14,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const DEFAULT_ASYNC_FLUSH_INTERVAL_MS: u64 = 50;
+const DEFAULT_ASYNC_MIN_FLUSH_INTERVAL_MS: u64 = 10;
+const DEFAULT_ASYNC_MAX_FLUSH_INTERVAL_MS: u64 = 200;
+const DEFAULT_ASYNC_TARGET_FLUSH_SIZE: usize = 1000;
 
 type PendingNodeOps = Vec<(String, Option<NodeRecord>)>;
 type PendingEdgeOps = Vec<(String, Option<EdgeRecord>)>;
@@ -18,14 +24,36 @@ type PendingEdgeOps = Vec<(String, Option<EdgeRecord>)>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AsyncStorageConfig {
     pub flush_interval_ms: u64,
+    pub adaptive_flush: bool,
+    pub min_flush_interval_ms: u64,
+    pub max_flush_interval_ms: u64,
+    pub target_flush_size: usize,
+    pub max_node_cache_size: usize,
+    pub max_edge_cache_size: usize,
 }
 
 impl Default for AsyncStorageConfig {
     fn default() -> Self {
         Self {
             flush_interval_ms: DEFAULT_ASYNC_FLUSH_INTERVAL_MS,
+            adaptive_flush: false,
+            min_flush_interval_ms: DEFAULT_ASYNC_MIN_FLUSH_INTERVAL_MS,
+            max_flush_interval_ms: DEFAULT_ASYNC_MAX_FLUSH_INTERVAL_MS,
+            target_flush_size: DEFAULT_ASYNC_TARGET_FLUSH_SIZE,
+            max_node_cache_size: 0,
+            max_edge_cache_size: 0,
         }
     }
+}
+
+#[derive(Default)]
+struct AsyncStorageCallbacks {
+    node_created: RwLock<Option<NodeEventCallback>>,
+    node_updated: RwLock<Option<NodeEventCallback>>,
+    node_deleted: RwLock<Option<NodeDeleteCallback>>,
+    edge_created: RwLock<Option<EdgeEventCallback>>,
+    edge_updated: RwLock<Option<EdgeEventCallback>>,
+    edge_deleted: RwLock<Option<EdgeDeleteCallback>>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -239,16 +267,81 @@ impl PendingState {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct AsyncStorageShared {
     pending: Mutex<PendingState>,
+    pending_embeddings: Mutex<BTreeSet<String>>,
     flush_lock: RwLock<()>,
+    last_flush_at: Mutex<Instant>,
+}
+
+impl Default for AsyncStorageShared {
+    fn default() -> Self {
+        Self {
+            pending: Mutex::new(PendingState::default()),
+            pending_embeddings: Mutex::new(BTreeSet::new()),
+            flush_lock: RwLock::new(()),
+            last_flush_at: Mutex::new(Instant::now()),
+        }
+    }
 }
 
 impl AsyncStorageShared {
+    fn pending_node_count(&self) -> usize {
+        self.pending.lock().nodes.len()
+    }
+
+    fn pending_edge_count(&self) -> usize {
+        self.pending.lock().edges.len()
+    }
+
+    fn pending_write_count(&self) -> usize {
+        let pending = self.pending.lock();
+        pending.nodes.len() + pending.edges.len()
+    }
+
+    fn pending_embeddings_count(&self) -> usize {
+        self.pending_embeddings.lock().len()
+    }
+
+    fn first_pending_embedding(&self) -> Option<String> {
+        self.pending_embeddings.lock().iter().next().cloned()
+    }
+
+    fn remove_pending_embedding(&self, id: &str) {
+        self.pending_embeddings.lock().remove(id);
+    }
+
+    fn update_pending_embedding_for_node(&self, node: &NodeRecord) {
+        let mut pending_embeddings = self.pending_embeddings.lock();
+        if node.needs_embedding() {
+            pending_embeddings.insert(node.id.clone());
+        } else {
+            pending_embeddings.remove(&node.id);
+        }
+    }
+
+    fn replace_pending_embeddings(&self, ids: BTreeSet<String>) -> usize {
+        let mut pending_embeddings = self.pending_embeddings.lock();
+        *pending_embeddings = ids;
+        pending_embeddings.len()
+    }
+
+    fn last_flush_at(&self) -> Instant {
+        *self.last_flush_at.lock()
+    }
+
+    fn record_flush_at(&self, when: Instant) {
+        *self.last_flush_at.lock() = when;
+    }
+
     fn flush_pending(&self, engine: &StorageEngine) -> Result<AsyncFlushResult, StorageError> {
         let _flush_guard = self.flush_lock.write();
-        self.flush_pending_locked(engine)
+        let result = self.flush_pending_locked(engine);
+        if result.is_ok() {
+            self.record_flush_at(Instant::now());
+        }
+        result
     }
 
     fn try_flush_pending(
@@ -258,7 +351,11 @@ impl AsyncStorageShared {
         let Some(_flush_guard) = self.flush_lock.try_write() else {
             return Ok(None);
         };
-        self.flush_pending_locked(engine).map(Some)
+        let result = self.flush_pending_locked(engine);
+        if result.is_ok() {
+            self.record_flush_at(Instant::now());
+        }
+        result.map(Some)
     }
 
     fn flush_pending_locked(
@@ -425,9 +522,9 @@ enum WorkerRequest {
     },
 }
 
-#[derive(Debug)]
 pub struct AsyncStorageEngine {
     shared: Arc<AsyncStorageShared>,
+    callbacks: AsyncStorageCallbacks,
     worker_tx: Mutex<Option<Sender<WorkerRequest>>>,
     worker_handle: Mutex<Option<JoinHandle<()>>>,
     config: AsyncStorageConfig,
@@ -436,18 +533,28 @@ pub struct AsyncStorageEngine {
 impl AsyncStorageEngine {
     pub fn new(engine: StorageEngine, config: Option<AsyncStorageConfig>) -> Self {
         let config = config.unwrap_or_default();
+        let initial_pending_embeddings = engine
+            .refresh_pending_embeddings_index()
+            .and_then(|_| {
+                engine
+                    .pending_embedding_ids()
+                    .map(|ids| ids.into_iter().collect::<BTreeSet<_>>())
+            })
+            .unwrap_or_default();
         let shared = Arc::new(AsyncStorageShared {
             pending: Mutex::new(PendingState::default()),
+            pending_embeddings: Mutex::new(initial_pending_embeddings),
             flush_lock: RwLock::new(()),
+            last_flush_at: Mutex::new(Instant::now()),
         });
         let (worker_tx, worker_rx) = mpsc::channel();
         let worker_shared = Arc::clone(&shared);
-        let flush_interval = Duration::from_millis(config.flush_interval_ms.max(1));
         let worker_handle =
-            thread::spawn(move || worker_loop(engine, worker_shared, worker_rx, flush_interval));
+            thread::spawn(move || worker_loop(engine, worker_shared, worker_rx, config));
 
         Self {
             shared,
+            callbacks: AsyncStorageCallbacks::default(),
             worker_tx: Mutex::new(Some(worker_tx)),
             worker_handle: Mutex::new(Some(worker_handle)),
             config,
@@ -489,14 +596,73 @@ impl AsyncStorageEngine {
         result
     }
 
+    fn flush_if_node_cache_full(&self) -> Result<(), StorageError> {
+        if self.config.max_node_cache_size == 0 {
+            return Ok(());
+        }
+        if self.shared.pending_node_count() >= self.config.max_node_cache_size {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush_if_edge_cache_full(&self) -> Result<(), StorageError> {
+        if self.config.max_edge_cache_size == 0 {
+            return Ok(());
+        }
+        if self.shared.pending_edge_count() >= self.config.max_edge_cache_size {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn notify_node_deleted(&self, id: &str) {
+        if let Some(callback) = self.callbacks.node_deleted.read().clone() {
+            callback(id.to_string());
+        }
+    }
+
+    fn notify_edge_deleted(&self, id: &str) {
+        if let Some(callback) = self.callbacks.edge_deleted.read().clone() {
+            callback(id.to_string());
+        }
+    }
+
     pub fn put_node_record(&self, node: &NodeRecord) -> Result<(), StorageError> {
+        self.flush_if_node_cache_full()?;
         self.shared.pending.lock().put_node(node.clone());
+        self.shared.update_pending_embedding_for_node(node);
         Ok(())
     }
 
     pub fn delete_node_record(&self, id: &str) -> Result<(), StorageError> {
-        self.shared.pending.lock().delete_node(id.to_string());
+        self.flush_if_node_cache_full()?;
+        self.shared.remove_pending_embedding(id);
+        let should_notify = {
+            let _flush_guard = self.shared.flush_lock.read();
+            let had_pending_node = {
+                let mut pending = self.shared.pending.lock();
+                let present = matches!(pending.pending_node(id), Some(Some(_)));
+                pending.delete_node(id.to_string());
+                present
+            };
+            had_pending_node && self.get_persisted_node_record(id)?.is_none()
+        };
+        if should_notify {
+            self.notify_node_deleted(id);
+        }
         Ok(())
+    }
+
+    pub fn update_node_embedding(&self, node: &NodeRecord) -> Result<(), StorageError> {
+        let mut existing = self
+            .get_node_record(&node.id)?
+            .ok_or_else(|| StorageError::NotFound(node.id.clone()))?;
+        existing.named_embeddings = node.named_embeddings.clone();
+        existing.chunk_embeddings = node.chunk_embeddings.clone();
+        existing.embed_meta = node.embed_meta.clone();
+        existing.updated_at_unix_ms = existing.updated_at_unix_ms.max(node.updated_at_unix_ms);
+        self.put_node_record(&existing)
     }
 
     pub fn get_node_record(&self, id: &str) -> Result<Option<NodeRecord>, StorageError> {
@@ -560,12 +726,68 @@ impl AsyncStorageEngine {
         Ok(nodes.into_values().collect())
     }
 
-    pub fn stream_node_records<F>(&self, mut visit: F) -> Result<u64, StorageError>
+    pub fn find_node_needing_embedding(&self) -> Result<Option<NodeRecord>, StorageError> {
+        loop {
+            let Some(id) = self.shared.first_pending_embedding() else {
+                return Ok(None);
+            };
+            let Some(node) = self.get_node_record(&id)? else {
+                self.shared.remove_pending_embedding(&id);
+                continue;
+            };
+            if node.needs_embedding() {
+                return Ok(Some(node));
+            }
+            self.shared.remove_pending_embedding(&id);
+        }
+    }
+
+    pub fn refresh_pending_embeddings_index(&self) -> Result<usize, StorageError> {
+        let ids = self
+            .all_nodes()?
+            .into_iter()
+            .filter(|node| node.needs_embedding())
+            .map(|node| node.id)
+            .collect::<BTreeSet<_>>();
+        Ok(self.shared.replace_pending_embeddings(ids))
+    }
+
+    pub fn mark_node_embedded(&self, id: &str) {
+        self.shared.remove_pending_embedding(id);
+    }
+
+    pub fn add_to_pending_embeddings(&self, id: &str) -> Result<(), StorageError> {
+        let Some(node) = self.get_node_record(id)? else {
+            return Ok(());
+        };
+        if node.needs_embedding() {
+            self.shared.update_pending_embedding_for_node(&node);
+        }
+        Ok(())
+    }
+
+    pub fn pending_embeddings_count(&self) -> usize {
+        self.shared.pending_embeddings_count()
+    }
+
+    pub fn stream_node_records<F>(&self, visit: F) -> Result<u64, StorageError>
+    where
+        F: FnMut(NodeRecord) -> Result<(), StorageError>,
+    {
+        self.stream_node_records_with_cancellation(&RequestCancellation::new(), visit)
+    }
+
+    pub fn stream_node_records_with_cancellation<F>(
+        &self,
+        cancel: &RequestCancellation,
+        mut visit: F,
+    ) -> Result<u64, StorageError>
     where
         F: FnMut(NodeRecord) -> Result<(), StorageError>,
     {
         let mut streamed = 0;
         for node in self.all_nodes()? {
+            cancel.check_cancelled()?;
             match visit(node) {
                 Ok(()) => streamed += 1,
                 Err(StorageError::IterationStopped) => {
@@ -581,6 +803,22 @@ impl AsyncStorageEngine {
     pub fn stream_node_records_by_prefix<F>(
         &self,
         prefix: &str,
+        visit: F,
+    ) -> Result<u64, StorageError>
+    where
+        F: FnMut(NodeRecord) -> Result<(), StorageError>,
+    {
+        self.stream_node_records_by_prefix_with_cancellation(
+            prefix,
+            &RequestCancellation::new(),
+            visit,
+        )
+    }
+
+    pub fn stream_node_records_by_prefix_with_cancellation<F>(
+        &self,
+        prefix: &str,
+        cancel: &RequestCancellation,
         mut visit: F,
     ) -> Result<u64, StorageError>
     where
@@ -609,6 +847,7 @@ impl AsyncStorageEngine {
 
         let mut streamed = 0;
         for node in nodes.into_values() {
+            cancel.check_cancelled()?;
             match visit(node) {
                 Ok(()) => streamed += 1,
                 Err(StorageError::IterationStopped) => {
@@ -624,6 +863,22 @@ impl AsyncStorageEngine {
     pub fn stream_node_record_chunks<F>(
         &self,
         chunk_size: usize,
+        visit: F,
+    ) -> Result<u64, StorageError>
+    where
+        F: FnMut(&[NodeRecord]) -> Result<(), StorageError>,
+    {
+        self.stream_node_record_chunks_with_cancellation(
+            chunk_size,
+            &RequestCancellation::new(),
+            visit,
+        )
+    }
+
+    pub fn stream_node_record_chunks_with_cancellation<F>(
+        &self,
+        chunk_size: usize,
+        cancel: &RequestCancellation,
         mut visit: F,
     ) -> Result<u64, StorageError>
     where
@@ -636,10 +891,11 @@ impl AsyncStorageEngine {
         let mut chunk = Vec::with_capacity(chunk_size);
         let mut stop_requested = false;
         let mut streamed = 0;
-        let result = self.stream_node_records(|node| {
+        let result = self.stream_node_records_with_cancellation(cancel, |node| {
             chunk.push(node);
             streamed += 1;
             if chunk.len() == chunk_size {
+                cancel.check_cancelled()?;
                 match visit(&chunk) {
                     Ok(()) => {
                         chunk.clear();
@@ -661,6 +917,7 @@ impl AsyncStorageEngine {
         }
 
         if !stop_requested && !chunk.is_empty() {
+            cancel.check_cancelled()?;
             match visit(&chunk) {
                 Ok(()) | Err(StorageError::IterationStopped) => {}
                 Err(err) => return Err(err),
@@ -718,12 +975,26 @@ impl AsyncStorageEngine {
     }
 
     pub fn put_edge_record(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
+        self.flush_if_edge_cache_full()?;
         self.shared.pending.lock().put_edge(edge.clone());
         Ok(())
     }
 
     pub fn delete_edge_record(&self, id: &str) -> Result<(), StorageError> {
-        self.shared.pending.lock().delete_edge(id.to_string());
+        self.flush_if_edge_cache_full()?;
+        let should_notify = {
+            let _flush_guard = self.shared.flush_lock.read();
+            let had_pending_edge = {
+                let mut pending = self.shared.pending.lock();
+                let present = matches!(pending.pending_edge(id), Some(Some(_)));
+                pending.delete_edge(id.to_string());
+                present
+            };
+            had_pending_edge && self.get_persisted_edge_record(id)?.is_none()
+        };
+        if should_notify {
+            self.notify_edge_deleted(id);
+        }
         Ok(())
     }
 
@@ -788,12 +1059,24 @@ impl AsyncStorageEngine {
         Ok(edges.into_values().collect())
     }
 
-    pub fn stream_edge_records<F>(&self, mut visit: F) -> Result<u64, StorageError>
+    pub fn stream_edge_records<F>(&self, visit: F) -> Result<u64, StorageError>
+    where
+        F: FnMut(EdgeRecord) -> Result<(), StorageError>,
+    {
+        self.stream_edge_records_with_cancellation(&RequestCancellation::new(), visit)
+    }
+
+    pub fn stream_edge_records_with_cancellation<F>(
+        &self,
+        cancel: &RequestCancellation,
+        mut visit: F,
+    ) -> Result<u64, StorageError>
     where
         F: FnMut(EdgeRecord) -> Result<(), StorageError>,
     {
         let mut streamed = 0;
         for edge in self.all_edges()? {
+            cancel.check_cancelled()?;
             match visit(edge) {
                 Ok(()) => streamed += 1,
                 Err(StorageError::IterationStopped) => {
@@ -1189,6 +1472,32 @@ impl AsyncStorageEngine {
     }
 }
 
+impl StorageEventNotifier for AsyncStorageEngine {
+    fn on_node_created(&self, callback: NodeEventCallback) {
+        *self.callbacks.node_created.write() = Some(callback);
+    }
+
+    fn on_node_updated(&self, callback: NodeEventCallback) {
+        *self.callbacks.node_updated.write() = Some(callback);
+    }
+
+    fn on_node_deleted(&self, callback: NodeDeleteCallback) {
+        *self.callbacks.node_deleted.write() = Some(callback);
+    }
+
+    fn on_edge_created(&self, callback: EdgeEventCallback) {
+        *self.callbacks.edge_created.write() = Some(callback);
+    }
+
+    fn on_edge_updated(&self, callback: EdgeEventCallback) {
+        *self.callbacks.edge_updated.write() = Some(callback);
+    }
+
+    fn on_edge_deleted(&self, callback: EdgeDeleteCallback) {
+        *self.callbacks.edge_deleted.write() = Some(callback);
+    }
+}
+
 impl Drop for AsyncStorageEngine {
     fn drop(&mut self) {
         let Some(worker_tx) = self.worker_tx.get_mut().take() else {
@@ -1207,9 +1516,10 @@ fn worker_loop(
     engine: StorageEngine,
     shared: Arc<AsyncStorageShared>,
     worker_rx: Receiver<WorkerRequest>,
-    flush_interval: Duration,
+    config: AsyncStorageConfig,
 ) {
-    let mut next_auto_flush = Instant::now() + flush_interval;
+    let tick_interval = auto_flush_tick_interval(config);
+    let mut next_auto_flush = Instant::now() + tick_interval;
     loop {
         let timeout = next_auto_flush.saturating_duration_since(Instant::now());
         match worker_rx.recv_timeout(timeout) {
@@ -1218,13 +1528,13 @@ fn worker_loop(
                     break;
                 }
                 if Instant::now() >= next_auto_flush {
-                    let _ = shared.try_flush_pending(&engine);
-                    next_auto_flush = Instant::now() + flush_interval;
+                    maybe_auto_flush(&engine, &shared, config);
+                    next_auto_flush = Instant::now() + tick_interval;
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
-                let _ = shared.try_flush_pending(&engine);
-                next_auto_flush = Instant::now() + flush_interval;
+                maybe_auto_flush(&engine, &shared, config);
+                next_auto_flush = Instant::now() + tick_interval;
             }
             Err(RecvTimeoutError::Disconnected) => {
                 let _ = shared.flush_pending(&engine);
@@ -1232,6 +1542,46 @@ fn worker_loop(
             }
         }
     }
+}
+
+fn auto_flush_tick_interval(config: AsyncStorageConfig) -> Duration {
+    if config.adaptive_flush {
+        Duration::from_millis(config.min_flush_interval_ms.max(1))
+    } else {
+        Duration::from_millis(config.flush_interval_ms.max(1))
+    }
+}
+
+fn adaptive_flush_interval(config: AsyncStorageConfig, pending: usize) -> Duration {
+    if pending == 0 || config.target_flush_size == 0 {
+        return Duration::from_millis(config.max_flush_interval_ms.max(1));
+    }
+    let min_interval = Duration::from_millis(config.min_flush_interval_ms.max(1));
+    let max_interval = Duration::from_millis(config.max_flush_interval_ms.max(1));
+    if max_interval <= min_interval {
+        return min_interval;
+    }
+    let ratio = (pending as f64 / config.target_flush_size as f64).min(1.0);
+    let span = max_interval - min_interval;
+    min_interval + Duration::from_secs_f64(span.as_secs_f64() * ratio)
+}
+
+fn maybe_auto_flush(
+    engine: &StorageEngine,
+    shared: &AsyncStorageShared,
+    config: AsyncStorageConfig,
+) {
+    if config.adaptive_flush {
+        let pending = shared.pending_write_count();
+        if pending == 0 {
+            return;
+        }
+        let interval = adaptive_flush_interval(config, pending);
+        if shared.last_flush_at().elapsed() < interval {
+            return;
+        }
+    }
+    let _ = shared.try_flush_pending(engine);
 }
 
 fn handle_request(
@@ -1282,7 +1632,8 @@ fn handle_request(
             edge_type,
             reply,
         } => {
-            let _ = reply.send(engine.get_adjacent_edges(&node_id, direction, edge_type.as_deref()));
+            let _ =
+                reply.send(engine.get_adjacent_edges(&node_id, direction, edge_type.as_deref()));
         }
         WorkerRequest::EdgeCountByPrefix { prefix, reply } => {
             let _ = reply.send(engine.edge_count_by_prefix(&prefix));

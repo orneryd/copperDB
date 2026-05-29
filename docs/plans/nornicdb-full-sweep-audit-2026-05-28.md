@@ -57,7 +57,7 @@ Deferred until after the core distributed engine works:
 Still MVP-relevant preparation work:
 
 - Builtin function/procedure registration should be plugin-ready so APOC-style extensions can be added later without rewriting the call dispatch architecture.
-- Embedding runtime should prefer `mistral.rs` if feasible as the in-memory model backend, replacing the previously assumed llama.cpp/local GGUF direction while preserving NornicDB's goal of running embeddings locally in memory.
+- Embedding runtime should track NornicDB's llama.cpp local GGUF path rather than introducing `mistral.rs`: preserve the ability to load multiple local model domains, pass through env-driven llama.cpp controls such as context type, pooling, attention type, and flash-attn, and pin to the same current llama.cpp revision NornicDB uses (`b9410` at present).
 - Automatic index/search/embedding behavior remains disabled by default and per-DB opt-in only, but schema-declared indexes must still reload/rebuild per database and the CLI override remains a hard global kill switch.
 
 ## Layer 0 Audit: Shared Contracts And Config
@@ -200,7 +200,7 @@ Priority drift:
 
 ### embedding/vector/LLM stack
 
-- `embed`: NornicDB has cached embedders, backend reporting, remote/local providers, crash recovery, and chunking behavior. copperDB embed remains much thinner. For MVP, prefer evaluating `mistral.rs` as the in-memory embedding backend instead of a llama.cpp-based local backend.
+- `embed`: NornicDB has cached embedders, backend reporting, remote/local providers, crash recovery, and chunking behavior. copperDB embed remains much thinner. For MVP, follow NornicDB's llama.cpp-based local embedding backend instead of introducing `mistral.rs`, including parity for multiple local model domains, env-driven context tuning, and the same pinned llama.cpp revision (`b9410` at present). Storage parity should also stop treating embedding metadata as user properties: the target model is dedicated typed node fields mirroring NornicDB's managed embedding state.
 - `vectorspace`: copperDB has vector primitives/config, but not NornicDB's full search lifecycle integration.
 - `math`/`simd`: copperDB crates are scaffolds; NornicDB has platform-specific SIMD/Metal acceleration for vector scoring. GPU acceleration is deferred until late-stage parity.
 - `localllm`/`inference`: copperDB should track backend lifecycle, crash isolation, and model/provider config before claiming parity. The broader inference lifecycle is deferred from MVP except for the embedding backend needed to run locally in memory.

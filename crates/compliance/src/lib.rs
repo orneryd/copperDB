@@ -329,6 +329,9 @@ fn policy_to_node(policy: &CompliancePolicy) -> Result<NodeRecord, ComplianceErr
         id: policy_node_id(&policy.id),
         labels: vec![POLICY_LABEL.into(), SYSTEM_LABEL.into()],
         properties,
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: Vec::new(),
+        embed_meta: Default::default(),
         created_at_unix_ms: timestamp,
         updated_at_unix_ms: timestamp,
     })

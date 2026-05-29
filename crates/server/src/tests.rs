@@ -738,6 +738,10 @@ async fn neo4j_commit_can_opt_into_distributed_graph_read_routing() {
             id: "Node:A".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), serde_json::Value::String("a".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -769,6 +773,10 @@ async fn neo4j_commit_can_opt_into_distributed_graph_read_routing() {
             id: "Node:B".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), serde_json::Value::String("b".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -800,6 +808,10 @@ async fn neo4j_commit_can_opt_into_distributed_graph_read_routing() {
             id: "Node:D".into(),
             labels: vec!["Node".into()],
             properties: BTreeMap::from([("name".into(), serde_json::Value::String("d".into()))]),
+
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: 0,
             updated_at_unix_ms: 0,
         })
@@ -1487,6 +1499,10 @@ async fn engine_backed_ranked_search_rpc_handler_executes_local_fulltext_runtime
                     "bio".into(),
                     serde_json::Value::String("Alice builds reliable graph systems".into()),
                 )]),
+
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
                 created_at_unix_ms: 10,
                 updated_at_unix_ms: 20,
             })
@@ -1511,6 +1527,7 @@ async fn engine_backed_ranked_search_rpc_handler_executes_local_fulltext_runtime
                     },
                     read_fence: None,
                     caller_auth_token: None,
+                    request_context: None,
                 })
                 .unwrap(),
             ))
@@ -1540,6 +1557,7 @@ async fn engine_backed_ranked_search_rpc_handler_executes_local_fulltext_runtime
                     global_ids: vec![batch.hits[0].global_id.clone()],
                     read_fence: None,
                     caller_auth_token: None,
+                    request_context: None,
                 })
                 .unwrap(),
             ))
@@ -1619,6 +1637,7 @@ async fn engine_backed_ranked_search_rpc_handler_respects_bm25_gate() {
                 },
                 read_fence: None,
                 caller_auth_token: None,
+                request_context: None,
             })
             .unwrap(),
         ))
@@ -1739,6 +1758,10 @@ async fn engine_backed_ranked_search_requires_forwarded_caller_authorization() {
                     "bio".into(),
                     serde_json::Value::String("Alice builds reliable graph systems".into()),
                 )]),
+
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
                 created_at_unix_ms: 10,
                 updated_at_unix_ms: 20,
             })
@@ -1769,6 +1792,7 @@ async fn engine_backed_ranked_search_requires_forwarded_caller_authorization() {
                 },
                 read_fence: None,
                 caller_auth_token: None,
+                request_context: None,
             })
             .unwrap(),
         )
@@ -2999,6 +3023,7 @@ fn server_statement_execution_passes_roles_to_compliance() {
     let err = match execute_statement(
         Arc::new(state.clone()),
         "clinic".into(),
+        RequestContext::detached(),
         "CREATE (n:Patient {name: 'Alice'})".into(),
         HashMap::new(),
         reader_roles.clone(),
@@ -3016,6 +3041,7 @@ fn server_statement_execution_passes_roles_to_compliance() {
     execute_statement(
         Arc::new(state),
         "clinic".into(),
+        RequestContext::detached(),
         "CREATE (n:Patient {name: 'Alice'})".into(),
         HashMap::new(),
         doctor_roles,

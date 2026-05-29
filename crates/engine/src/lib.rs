@@ -59,11 +59,12 @@ use copperdb_replication::{
     ScheduledRepairWorker,
 };
 use copperdb_search::{
-    collect_fabric_hydration_records, collect_planned_fabric_ranked_batches,
-    execute_planned_fabric_ranked_search, hydrate_rrf_search_outcome, merge_rrf_search_batches,
-    FabricHydrationRequest, FabricRankedSearchExecution, HydrationTransport, RankedSearchTransport,
-    RrfConfig, RrfHydratedSearchOutcome, RrfHydrationRecord, RrfSearchBatch, RrfSearchHit,
-    RrfSearchOutcome, RrfSearchPolicy, SearchQuery, SearchResult,
+    collect_fabric_hydration_records_with_context,
+    collect_planned_fabric_ranked_batches_with_context, execute_planned_fabric_ranked_search,
+    hydrate_rrf_search_outcome, merge_rrf_search_batches, FabricHydrationRequest,
+    FabricRankedSearchExecution, HydrationTransport, RankedSearchTransport, RrfConfig,
+    RrfHydratedSearchOutcome, RrfHydrationRecord, RrfSearchBatch, RrfSearchHit, RrfSearchOutcome,
+    RrfSearchPolicy, SearchQuery, SearchResult,
 };
 use copperdb_storage::{
     IndexEntityType, IndexKind, KnowledgePolicyAccessMetadata, NodeRecord, StorageEngine,
@@ -74,6 +75,7 @@ use copperdb_topology::{
     TopologyRegistry,
 };
 use copperdb_txsession::{SessionConfig, TransactionManager, TxError};
+use copperdb_util::RequestCancelled;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -101,6 +103,8 @@ pub enum CopperDbError {
     Replication(String),
     #[error("configuration error: {0}")]
     Config(String),
+    #[error(transparent)]
+    RequestCancelled(#[from] RequestCancelled),
 }
 
 impl From<copperdb_storage::StorageError> for CopperDbError {

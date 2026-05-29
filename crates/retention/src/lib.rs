@@ -465,6 +465,9 @@ impl Manager {
             id: retention_node_id(label, id),
             labels: vec![label.into()],
             properties,
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
             created_at_unix_ms: now_unix_ms(),
             updated_at_unix_ms: now_unix_ms(),
         })?;
@@ -720,6 +723,9 @@ mod tests {
                     "subject_id".into(),
                     serde_json::Value::String("expired".into()),
                 )]),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
                 created_at_unix_ms: old_ms,
                 updated_at_unix_ms: old_ms,
             })
@@ -732,6 +738,9 @@ mod tests {
                     "subject_id".into(),
                     serde_json::Value::String("held".into()),
                 )]),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
                 created_at_unix_ms: old_ms,
                 updated_at_unix_ms: old_ms,
             })
