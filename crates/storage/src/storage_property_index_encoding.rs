@@ -20,9 +20,7 @@ pub(crate) fn property_index_range_scan_bounds(
     let prefix_end = prefix_successor(prefix_bytes.clone());
 
     match comparison {
-        RangeIndexComparison::GreaterThan => {
-            Some((prefix_successor(value_prefix)?, prefix_end))
-        }
+        RangeIndexComparison::GreaterThan => Some((prefix_successor(value_prefix)?, prefix_end)),
         RangeIndexComparison::GreaterThanOrEqual => Some((value_prefix, prefix_end)),
         RangeIndexComparison::LessThan => Some((prefix_bytes, Some(value_prefix))),
         RangeIndexComparison::LessThanOrEqual => {

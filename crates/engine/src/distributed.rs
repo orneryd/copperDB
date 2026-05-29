@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use super::*;
 
 impl CopperDb {
@@ -9,6 +11,30 @@ impl CopperDb {
         placement: &PlacementKey,
         consistency: ConsistencyLevel,
         request_region: Option<&str>,
+        transport: Arc<dyn ReplicaTransport>,
+    ) -> Result<DistributedQueryResult, CopperDbError> {
+        self.execute_distributed_with_read_fence_as(
+            cypher,
+            params,
+            roles,
+            placement,
+            consistency,
+            request_region,
+            None,
+            transport,
+        )
+        .await
+    }
+
+    pub async fn execute_distributed_with_read_fence_as(
+        &self,
+        cypher: &str,
+        params: HashMap<String, Value>,
+        roles: &[String],
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+        read_fence: Option<LogicalTransactionId>,
         transport: Arc<dyn ReplicaTransport>,
     ) -> Result<DistributedQueryResult, CopperDbError> {
         let parsed = Parser::new().parse(cypher)?;
@@ -23,6 +49,7 @@ impl CopperDb {
                         placement,
                         consistency,
                         request_region,
+                        read_fence,
                         transport,
                     )
                     .await?;
@@ -45,6 +72,7 @@ impl CopperDb {
                         placement,
                         consistency,
                         request_region,
+                        read_fence,
                         transport,
                     )
                     .await?;
@@ -62,6 +90,7 @@ impl CopperDb {
                         placement,
                         consistency,
                         request_region,
+                        read_fence,
                         transport,
                     )
                     .await?;
@@ -119,6 +148,32 @@ impl CopperDb {
         request_region: Option<&str>,
         transport: Arc<dyn ReplicaTransport>,
     ) -> Result<DistributedBfsResult, CopperDbError> {
+        self.distributed_bfs_path_with_read_fence_as(
+            start_node_id,
+            end_node_id,
+            rel_type,
+            direction,
+            placement,
+            consistency,
+            request_region,
+            None,
+            transport,
+        )
+        .await
+    }
+
+    pub async fn distributed_bfs_path_with_read_fence_as(
+        &self,
+        start_node_id: &str,
+        end_node_id: &str,
+        rel_type: Option<&str>,
+        direction: EdgeDirection,
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+        read_fence: Option<LogicalTransactionId>,
+        transport: Arc<dyn ReplicaTransport>,
+    ) -> Result<DistributedBfsResult, CopperDbError> {
         let plan = self.plan_distributed_read(placement, consistency, request_region)?;
         let mut responded_by = BTreeSet::new();
         let mut failed_replicas = BTreeSet::new();
@@ -129,6 +184,7 @@ impl CopperDb {
                 &plan,
                 transport.as_ref(),
                 start_node_id,
+                read_fence,
                 &mut responded_by,
                 &mut failed_replicas,
             )
@@ -138,6 +194,7 @@ impl CopperDb {
                 &plan,
                 transport.as_ref(),
                 end_node_id,
+                read_fence,
                 &mut responded_by,
                 &mut failed_replicas,
             )
@@ -161,6 +218,7 @@ impl CopperDb {
                 rel_type,
                 &direction,
                 &params,
+                read_fence,
                 &mut access_writes,
                 &mut responded_by,
                 &mut failed_replicas,
@@ -206,8 +264,34 @@ impl CopperDb {
         request_region: Option<&str>,
         transport: Arc<dyn ReplicaTransport>,
     ) -> Result<(QueryResult, DistributedBfsResult), CopperDbError> {
+        self.distributed_bfs_query_with_read_fence_as(
+            start_node_id,
+            end_node_id,
+            rel_type,
+            direction,
+            placement,
+            consistency,
+            request_region,
+            None,
+            transport,
+        )
+        .await
+    }
+
+    pub async fn distributed_bfs_query_with_read_fence_as(
+        &self,
+        start_node_id: &str,
+        end_node_id: &str,
+        rel_type: Option<&str>,
+        direction: EdgeDirection,
+        placement: &PlacementKey,
+        consistency: ConsistencyLevel,
+        request_region: Option<&str>,
+        read_fence: Option<LogicalTransactionId>,
+        transport: Arc<dyn ReplicaTransport>,
+    ) -> Result<(QueryResult, DistributedBfsResult), CopperDbError> {
         let bfs = self
-            .distributed_bfs_path_as(
+            .distributed_bfs_path_with_read_fence_as(
                 start_node_id,
                 end_node_id,
                 rel_type,
@@ -215,6 +299,7 @@ impl CopperDb {
                 placement,
                 consistency,
                 request_region,
+                read_fence,
                 transport.clone(),
             )
             .await?;
@@ -229,6 +314,7 @@ impl CopperDb {
                     path,
                     &direction,
                     &params,
+                    read_fence,
                     &mut access_writes,
                 )
                 .await?,
@@ -247,6 +333,7 @@ impl CopperDb {
         placement: &PlacementKey,
         consistency: ConsistencyLevel,
         request_region: Option<&str>,
+        read_fence: Option<LogicalTransactionId>,
         transport: Arc<dyn ReplicaTransport>,
     ) -> Result<(QueryResult, DistributedBfsResult), CopperDbError> {
         let plan = self.plan_distributed_read(placement, consistency, request_region)?;
@@ -260,6 +347,7 @@ impl CopperDb {
                 transport.as_ref(),
                 &shape.start_selector,
                 params,
+                read_fence,
                 &mut access_writes,
                 &mut responded_by,
                 &mut failed_replicas,
@@ -271,6 +359,7 @@ impl CopperDb {
                 transport.as_ref(),
                 &shape.end_selector,
                 params,
+                read_fence,
                 &mut access_writes,
                 &mut responded_by,
                 &mut failed_replicas,
@@ -300,6 +389,7 @@ impl CopperDb {
                         shape.rel_type.as_deref(),
                         &shape.direction,
                         params,
+                        read_fence,
                         &mut access_writes,
                         &mut responded_by,
                         &mut failed_replicas,
@@ -340,6 +430,7 @@ impl CopperDb {
                     path,
                     &shape.direction,
                     params,
+                    read_fence,
                     &mut access_writes,
                 )
                 .await?,
@@ -370,6 +461,7 @@ impl CopperDb {
         placement: &PlacementKey,
         consistency: ConsistencyLevel,
         request_region: Option<&str>,
+        read_fence: Option<LogicalTransactionId>,
         transport: Arc<dyn ReplicaTransport>,
     ) -> Result<(QueryResult, DistributedReadOutcome), CopperDbError> {
         let plan = self.plan_distributed_read(placement, consistency, request_region)?;
@@ -382,6 +474,7 @@ impl CopperDb {
                 transport.as_ref(),
                 &shape.pattern,
                 params,
+                read_fence,
                 &mut access_writes,
                 &mut responded_by,
                 &mut failed_replicas,
@@ -427,6 +520,7 @@ impl CopperDb {
         placement: &PlacementKey,
         consistency: ConsistencyLevel,
         request_region: Option<&str>,
+        read_fence: Option<LogicalTransactionId>,
         transport: Arc<dyn ReplicaTransport>,
     ) -> Result<(QueryResult, DistributedReadOutcome), CopperDbError> {
         let plan = self.plan_distributed_read(placement, consistency, request_region)?;
@@ -449,6 +543,7 @@ impl CopperDb {
                                         selector,
                                         params,
                                         base_row,
+                                        read_fence,
                                         &mut access_writes,
                                         &mut responded_by,
                                         &mut failed_replicas,
@@ -482,6 +577,7 @@ impl CopperDb {
                                         pattern,
                                         params,
                                         base_row,
+                                        read_fence,
                                         &mut access_writes,
                                         &mut responded_by,
                                         &mut failed_replicas,
@@ -535,6 +631,7 @@ impl CopperDb {
                                         selector,
                                         params,
                                         base_row,
+                                        read_fence,
                                         &mut access_writes,
                                         &mut responded_by,
                                         &mut failed_replicas,
@@ -578,6 +675,7 @@ impl CopperDb {
                                         pattern,
                                         params,
                                         base_row,
+                                        read_fence,
                                         &mut access_writes,
                                         &mut responded_by,
                                         &mut failed_replicas,
@@ -679,6 +777,7 @@ impl CopperDb {
                     &shape.path_shape.pattern,
                     params,
                     &base_row,
+                    read_fence,
                     &mut access_writes,
                     &mut responded_by,
                     &mut failed_replicas,
@@ -731,6 +830,7 @@ impl CopperDb {
         transport: &dyn ReplicaTransport,
         pattern: &DistributedDirectPathPattern,
         params: &HashMap<String, Value>,
+        read_fence: Option<LogicalTransactionId>,
         access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
@@ -745,6 +845,7 @@ impl CopperDb {
                         transport,
                         selector,
                         params,
+                        read_fence,
                         access_writes,
                         responded_by,
                         failed_replicas,
@@ -784,6 +885,7 @@ impl CopperDb {
                         transport,
                         start_selector,
                         params,
+                        read_fence,
                         access_writes,
                         responded_by,
                         failed_replicas,
@@ -795,6 +897,7 @@ impl CopperDb {
                         transport,
                         end_selector,
                         params,
+                        read_fence,
                         access_writes,
                         responded_by,
                         failed_replicas,
@@ -824,6 +927,7 @@ impl CopperDb {
                             *min_hops,
                             *max_hops,
                             params,
+                            read_fence,
                             access_writes,
                             responded_by,
                             failed_replicas,
@@ -832,7 +936,13 @@ impl CopperDb {
                     {
                         path_values.push(
                             self.materialize_distributed_path_value(
-                                plan, transport, &path, direction, params, access_writes,
+                                plan,
+                                transport,
+                                &path,
+                                direction,
+                                params,
+                                read_fence,
+                                access_writes,
                             )
                             .await?,
                         );
@@ -859,6 +969,7 @@ impl CopperDb {
         pattern: &DistributedDirectPathPattern,
         params: &HashMap<String, Value>,
         base_row: &HashMap<String, Value>,
+        read_fence: Option<LogicalTransactionId>,
         access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
@@ -874,6 +985,7 @@ impl CopperDb {
                         selector,
                         params,
                         base_row,
+                        read_fence,
                         access_writes,
                         responded_by,
                         failed_replicas,
@@ -914,6 +1026,7 @@ impl CopperDb {
                         start_selector,
                         params,
                         base_row,
+                        read_fence,
                         access_writes,
                         responded_by,
                         failed_replicas,
@@ -926,6 +1039,7 @@ impl CopperDb {
                         end_selector,
                         params,
                         base_row,
+                        read_fence,
                         access_writes,
                         responded_by,
                         failed_replicas,
@@ -955,6 +1069,7 @@ impl CopperDb {
                             *min_hops,
                             *max_hops,
                             params,
+                            read_fence,
                             access_writes,
                             responded_by,
                             failed_replicas,
@@ -963,7 +1078,13 @@ impl CopperDb {
                     {
                         path_values.push(
                             self.materialize_distributed_path_value(
-                                plan, transport, &path, direction, params, access_writes,
+                                plan,
+                                transport,
+                                &path,
+                                direction,
+                                params,
+                                read_fence,
+                                access_writes,
                             )
                             .await?,
                         );
@@ -990,6 +1111,7 @@ impl CopperDb {
         selector: &DistributedNodeSelector,
         params: &HashMap<String, Value>,
         base_row: &HashMap<String, Value>,
+        read_fence: Option<LogicalTransactionId>,
         access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
@@ -1011,6 +1133,7 @@ impl CopperDb {
                     transport,
                     selector,
                     params,
+                    read_fence,
                     access_writes,
                     responded_by,
                     failed_replicas,
@@ -1032,6 +1155,7 @@ impl CopperDb {
         min_hops: u32,
         max_hops: u32,
         params: &HashMap<String, Value>,
+        read_fence: Option<LogicalTransactionId>,
         access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
@@ -1067,6 +1191,7 @@ impl CopperDb {
                     rel_type,
                     direction,
                     params,
+                    read_fence,
                     access_writes,
                     responded_by,
                     failed_replicas,
@@ -1104,6 +1229,7 @@ impl CopperDb {
         transport: &dyn ReplicaTransport,
         selector: &DistributedNodeSelector,
         params: &HashMap<String, Value>,
+        read_fence: Option<LogicalTransactionId>,
         access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
@@ -1115,6 +1241,7 @@ impl CopperDb {
                     transport,
                     node_id,
                     params,
+                    read_fence,
                     access_writes,
                     responded_by,
                     failed_replicas,
@@ -1131,6 +1258,7 @@ impl CopperDb {
                             transport,
                             node_id,
                             params,
+                            read_fence,
                             access_writes,
                             responded_by,
                             failed_replicas,
@@ -1150,6 +1278,7 @@ impl CopperDb {
                         property,
                         value,
                         params,
+                        read_fence,
                         access_writes,
                         responded_by,
                         failed_replicas,
@@ -1160,8 +1289,9 @@ impl CopperDb {
                         plan,
                         transport,
                         primary_label,
-                            params,
-                            access_writes,
+                        params,
+                        read_fence,
+                        access_writes,
                         responded_by,
                         failed_replicas,
                     )
@@ -1175,6 +1305,7 @@ impl CopperDb {
                             transport,
                             primary_label,
                             params,
+                            read_fence,
                             access_writes,
                             responded_by,
                             failed_replicas,
@@ -1198,6 +1329,7 @@ impl CopperDb {
         path: &DistributedPath,
         direction: &EdgeDirection,
         params: &HashMap<String, Value>,
+        read_fence: Option<LogicalTransactionId>,
         access_writes: &mut DistributedAccessWrites,
     ) -> Result<Value, CopperDbError> {
         let mut responded_by = BTreeSet::new();
@@ -1211,6 +1343,7 @@ impl CopperDb {
                     transport,
                     node_id,
                     params,
+                    read_fence,
                     access_writes,
                     &mut responded_by,
                     &mut failed_replicas,
@@ -1233,6 +1366,7 @@ impl CopperDb {
                     edge_id,
                     direction,
                     params,
+                    read_fence,
                     access_writes,
                     &mut responded_by,
                     &mut failed_replicas,
@@ -1261,11 +1395,15 @@ impl CopperDb {
         plan: &DistributedReadPlan,
         transport: &dyn ReplicaTransport,
         node_id: &str,
+        read_fence: Option<LogicalTransactionId>,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
     ) -> Result<bool, CopperDbError> {
         for replica in &plan.replicas {
-            match transport.graph_node(&replica.node_id, node_id).await {
+            match transport
+                .graph_node(&replica.node_id, node_id, read_fence)
+                .await
+            {
                 Ok(Some(_)) => {
                     responded_by.insert(replica.node_id.clone());
                     return Ok(true);
@@ -1287,12 +1425,16 @@ impl CopperDb {
         transport: &dyn ReplicaTransport,
         node_id: &str,
         params: &HashMap<String, Value>,
+        read_fence: Option<LogicalTransactionId>,
         access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
     ) -> Result<Option<Value>, CopperDbError> {
         for replica in &plan.replicas {
-            match transport.graph_node(&replica.node_id, node_id).await {
+            match transport
+                .graph_node(&replica.node_id, node_id, read_fence)
+                .await
+            {
                 Ok(Some(bytes)) => {
                     responded_by.insert(replica.node_id.clone());
                     let props: BTreeMap<String, Value> = rmp_serde::from_slice(&bytes)
@@ -1304,14 +1446,16 @@ impl CopperDb {
                                 plan,
                                 transport,
                                 &node.id,
+                                read_fence,
                                 responded_by,
                                 failed_replicas,
                             )
                             .await?;
-                        if !self
-                            .eval
-                            .node_visible_with_access_metadata(&node, access_metadata.clone(), params)?
-                        {
+                        if !self.eval.node_visible_with_access_metadata(
+                            &node,
+                            access_metadata.clone(),
+                            params,
+                        )? {
                             return Ok(None);
                         }
                         self.record_distributed_node_access(&node, access_metadata, access_writes)?;
@@ -1335,6 +1479,7 @@ impl CopperDb {
         transport: &dyn ReplicaTransport,
         label: &str,
         params: &HashMap<String, Value>,
+        read_fence: Option<LogicalTransactionId>,
         access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
@@ -1342,7 +1487,7 @@ impl CopperDb {
         let mut nodes = BTreeMap::new();
         for replica in &plan.replicas {
             match transport
-                .graph_nodes_by_label(&replica.node_id, label)
+                .graph_nodes_by_label(&replica.node_id, label, read_fence)
                 .await
             {
                 Ok(raw_nodes) => {
@@ -1359,14 +1504,16 @@ impl CopperDb {
                                 plan,
                                 transport,
                                 &node.id,
+                                read_fence,
                                 responded_by,
                                 failed_replicas,
                             )
                             .await?;
-                        if !self
-                            .eval
-                            .node_visible_with_access_metadata(&node, access_metadata.clone(), params)?
-                        {
+                        if !self.eval.node_visible_with_access_metadata(
+                            &node,
+                            access_metadata.clone(),
+                            params,
+                        )? {
                             continue;
                         }
                         self.record_distributed_node_access(&node, access_metadata, access_writes)?;
@@ -1391,6 +1538,7 @@ impl CopperDb {
         property: &str,
         value: &Value,
         params: &HashMap<String, Value>,
+        read_fence: Option<LogicalTransactionId>,
         access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
@@ -1398,7 +1546,7 @@ impl CopperDb {
         let mut nodes = BTreeMap::new();
         for replica in &plan.replicas {
             match transport
-                .graph_nodes_by_property(&replica.node_id, label, property, value)
+                .graph_nodes_by_property(&replica.node_id, label, property, value, read_fence)
                 .await
             {
                 Ok(raw_nodes) => {
@@ -1415,14 +1563,16 @@ impl CopperDb {
                                 plan,
                                 transport,
                                 &node.id,
+                                read_fence,
                                 responded_by,
                                 failed_replicas,
                             )
                             .await?;
-                        if !self
-                            .eval
-                            .node_visible_with_access_metadata(&node, access_metadata.clone(), params)?
-                        {
+                        if !self.eval.node_visible_with_access_metadata(
+                            &node,
+                            access_metadata.clone(),
+                            params,
+                        )? {
                             continue;
                         }
                         self.record_distributed_node_access(&node, access_metadata, access_writes)?;
@@ -1447,6 +1597,7 @@ impl CopperDb {
         edge_id: &str,
         direction: &EdgeDirection,
         params: &HashMap<String, Value>,
+        read_fence: Option<LogicalTransactionId>,
         access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
@@ -1459,6 +1610,7 @@ impl CopperDb {
                 None,
                 &EdgeDirection::Both,
                 params,
+                read_fence,
                 access_writes,
                 responded_by,
                 failed_replicas,
@@ -1482,6 +1634,7 @@ impl CopperDb {
         rel_type: Option<&str>,
         direction: &EdgeDirection,
         params: &HashMap<String, Value>,
+        read_fence: Option<LogicalTransactionId>,
         access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
@@ -1490,7 +1643,7 @@ impl CopperDb {
         for replica in &plan.replicas {
             match direction {
                 EdgeDirection::Outgoing => match transport
-                    .graph_edges_from_node(&replica.node_id, node_id, rel_type)
+                    .graph_edges_from_node(&replica.node_id, node_id, rel_type, read_fence)
                     .await
                 {
                     Ok(replica_edges) => {
@@ -1504,7 +1657,7 @@ impl CopperDb {
                     }
                 },
                 EdgeDirection::Incoming => match transport
-                    .graph_edges_to_node(&replica.node_id, node_id, rel_type)
+                    .graph_edges_to_node(&replica.node_id, node_id, rel_type, read_fence)
                     .await
                 {
                     Ok(replica_edges) => {
@@ -1519,10 +1672,10 @@ impl CopperDb {
                 },
                 EdgeDirection::Both => {
                     let outgoing = transport
-                        .graph_edges_from_node(&replica.node_id, node_id, rel_type)
+                        .graph_edges_from_node(&replica.node_id, node_id, rel_type, read_fence)
                         .await;
                     let incoming = transport
-                        .graph_edges_to_node(&replica.node_id, node_id, rel_type)
+                        .graph_edges_to_node(&replica.node_id, node_id, rel_type, read_fence)
                         .await;
                     match (outgoing, incoming) {
                         (Ok(mut outgoing), Ok(incoming)) => {
@@ -1553,14 +1706,16 @@ impl CopperDb {
                     plan,
                     transport,
                     &edge.id,
+                    read_fence,
                     responded_by,
                     failed_replicas,
                 )
                 .await?;
-            if self
-                .eval
-                .edge_visible_with_access_metadata(&edge, access_metadata.clone(), params)?
-            {
+            if self.eval.edge_visible_with_access_metadata(
+                &edge,
+                access_metadata.clone(),
+                params,
+            )? {
                 self.record_distributed_edge_access(&edge, access_metadata, access_writes)?;
                 visible_edges.push(edge);
             }
@@ -1612,7 +1767,10 @@ impl CopperDb {
                 .write(
                     placement,
                     consistency,
-                    Command::PutKnowledgePolicyAccessMetadata { entity_id, metadata },
+                    Command::PutKnowledgePolicyAccessMetadata {
+                        entity_id,
+                        metadata,
+                    },
                     request_region,
                 )
                 .await?;
@@ -1626,12 +1784,13 @@ impl CopperDb {
         plan: &DistributedReadPlan,
         transport: &dyn ReplicaTransport,
         entity_id: &str,
+        read_fence: Option<LogicalTransactionId>,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
     ) -> Result<Option<copperdb_storage::KnowledgePolicyAccessMetadata>, CopperDbError> {
         for replica in &plan.replicas {
             match transport
-                .graph_access_metadata(&replica.node_id, entity_id)
+                .graph_access_metadata(&replica.node_id, entity_id, read_fence)
                 .await
             {
                 Ok(metadata) => {
@@ -1657,6 +1816,7 @@ impl CopperDb {
         rel_type: Option<&str>,
         direction: &EdgeDirection,
         params: &HashMap<String, Value>,
+        read_fence: Option<LogicalTransactionId>,
         access_writes: &mut DistributedAccessWrites,
         responded_by: &mut BTreeSet<String>,
         failed_replicas: &mut BTreeSet<String>,
@@ -1681,6 +1841,7 @@ impl CopperDb {
                     rel_type,
                     direction,
                     params,
+                    read_fence,
                     access_writes,
                     responded_by,
                     failed_replicas,

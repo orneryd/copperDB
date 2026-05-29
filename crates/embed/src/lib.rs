@@ -74,15 +74,14 @@ impl Embedder for MockEmbedder {
                 let seed = hasher.finish();
                 let vector: Vec<f32> = (0..self.dims)
                     .map(|i| {
-                        let v = ((seed
+                        ((seed
                             .wrapping_add(i as u64)
                             .wrapping_mul(6364136223846793005)
                             .wrapping_add(1442695040888963407))
                             >> 33) as f32
                             / u32::MAX as f32
                             * 2.0
-                            - 1.0;
-                        v
+                            - 1.0
                     })
                     .collect();
                 let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();

@@ -132,6 +132,7 @@
         }
     }
 
+    #[allow(clippy::arc_with_non_send_sync)]
     fn make_engine() -> EvalEngine {
         let storage = Arc::new(StorageEngine::open_temporary().unwrap());
         EvalEngine::new(storage)
@@ -310,6 +311,49 @@
         let q2 = parser.parse("MATCH (n:Animal) RETURN n").unwrap();
         let result = engine.execute(&q2, &HashMap::new()).unwrap();
         assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_merge_marks_scan_fallback_without_schema_lookup_index() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser.parse("MERGE (n:Animal {species: 'Cat'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let trace = engine.hot_path_trace_snapshot();
+        assert!(trace.merge_scan_fallback_used);
+        assert!(!trace.merge_schema_lookup_used);
+    }
+
+    #[test]
+    fn test_merge_marks_schema_lookup_when_index_exists() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE INDEX animal_species_idx FOR (n:Animal) ON (n.species)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        engine
+            .execute(
+                &parser.parse("MERGE (n:Animal {species: 'Cat'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let trace = engine.hot_path_trace_snapshot();
+        assert!(trace.merge_schema_lookup_used);
+        assert!(!trace.merge_scan_fallback_used);
     }
 
     #[test]
@@ -556,6 +600,54 @@
     }
 
     #[test]
+    fn test_execute_with_routes_optimizes_simple_match_limit() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for (id, name) in [
+            ("person:01", "Alice"),
+            ("person:02", "Bob"),
+            ("person:03", "Carol"),
+        ] {
+            store_node(
+                engine.storage.as_ref(),
+                id,
+                &["Person"],
+                HashMap::from([("name".to_string(), Value::String(name.into()))]),
+            );
+        }
+
+        let cypher = "MATCH (p:Person) RETURN p LIMIT 2";
+        let query = parser.parse(cypher).unwrap();
+        let pattern = detect_query_pattern(cypher);
+
+        let result = engine
+            .execute_with_routes(&query, &HashMap::new(), &pattern, None, None)
+            .unwrap();
+
+        assert_eq!(pattern.pattern, QueryPattern::SimpleMatchLimit);
+        assert_eq!(result.columns, vec!["p"]);
+        assert_eq!(result.rows.len(), 2);
+
+        let returned_ids: Vec<&str> = result
+            .rows
+            .iter()
+            .map(|row| {
+                row.get("p")
+                    .and_then(Value::as_object)
+                    .and_then(|node| node.get("_id"))
+                    .and_then(Value::as_str)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(returned_ids, vec!["person:01", "person:02"]);
+
+        let trace = engine.hot_path_trace_snapshot();
+        assert!(trace.simple_match_limit_fast_path);
+        assert!(!trace.unwind_simple_merge_batch);
+    }
+
+    #[test]
     fn test_execute_with_routes_mutual_relationship_on_empty_db_returns_no_rows() {
         let engine = make_engine();
         let parser = Parser::new();
@@ -792,6 +884,10 @@
             .get_edges_by_type("TEMP_KNOWS")
             .unwrap()
             .is_empty());
+
+        let trace = engine.hot_path_trace_snapshot();
+        assert!(trace.compound_query_fast_path);
+        assert!(!trace.simple_match_limit_fast_path);
     }
 
     #[test]
@@ -837,6 +933,44 @@
             .get_edges_by_type("TEMP_REL")
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn test_execute_with_routes_pipelines_unwind_merge_return() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let cypher = "UNWIND [1, 2] AS customerID MERGE (c:Customer {customerID: customerID}) RETURN c.customerID AS customerID";
+        let query = parser.parse(cypher).unwrap();
+        let pattern = detect_query_pattern(cypher);
+        let (clauses, ok) = can_execute_as_pipeline(cypher);
+
+        let result = engine
+            .execute_with_routes(
+                &query,
+                &HashMap::new(),
+                &pattern,
+                None,
+                ok.then_some(clauses.as_slice()),
+            )
+            .unwrap();
+
+        assert!(ok);
+        assert!(engine.can_execute_pipeline_route(&query, &clauses));
+        assert_eq!(result.columns, vec!["customerID"]);
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0].get("customerID"), Some(&Value::from(1)));
+        assert_eq!(result.rows[1].get("customerID"), Some(&Value::from(2)));
+        assert_eq!(result.stats.nodes_created, 2);
+
+        let stored = engine.storage.get_nodes_by_label("Customer").unwrap();
+        assert_eq!(stored.len(), 2);
+
+        let trace = engine.hot_path_trace_snapshot();
+        assert!(trace.unwind_simple_merge_batch);
+        assert!(trace.merge_scan_fallback_used);
+        assert!(!trace.simple_match_limit_fast_path);
+        assert!(!trace.merge_schema_lookup_used);
     }
 
     #[test]
@@ -1028,7 +1162,7 @@
                 .into_iter()
                 .find_map(|node| {
                     let props = node_record_to_props(&node);
-                    (props.get(property) == Some(&Value::from(expected))).then(|| node.id)
+                    (props.get(property) == Some(&Value::from(expected))).then_some(node.id)
                 })
                 .expect("expected seeded node")
         };
@@ -1138,6 +1272,10 @@
             })
             .collect();
         assert_eq!(product_ids, HashSet::from([1, 2]));
+
+        let trace = engine.hot_path_trace_snapshot();
+        assert!(trace.unwind_fixed_chain_link_batch);
+        assert!(!trace.unwind_simple_merge_batch);
     }
 
     #[test]

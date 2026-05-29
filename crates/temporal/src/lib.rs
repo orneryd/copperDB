@@ -34,7 +34,7 @@ pub struct TemporalEdge {
 impl TemporalEdge {
     /// Check if this edge is valid at the given Unix timestamp.
     pub fn is_valid_at(&self, ts: u64) -> bool {
-        ts >= self.valid_from && self.valid_until.map_or(true, |end| ts < end)
+        ts >= self.valid_from && self.valid_until.is_none_or(|end| ts < end)
     }
 
     /// Expire this edge at the current time.

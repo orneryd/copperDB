@@ -37,6 +37,7 @@ copperdb-nornicgrpc = { workspace = true }
 copperdb-replication = { workspace = true }
 copperdb-search = { workspace = true }
 copperdb-topology = { workspace = true }
+copperdb-txsession = { workspace = true }
 copperdb-util = { workspace = true }
 copperdb-retention = { workspace = true }
 copperdb-otel = { workspace = true }

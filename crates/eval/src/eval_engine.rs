@@ -5,21 +5,24 @@ impl EvalEngine {
             storage,
             node_lookup_cache: Arc::new(Mutex::new(HashMap::new())),
             access_flusher: Arc::new(AccessFlusher::new()),
+            hot_path_trace: HotPathTraceState::new(),
         }
+    }
+
+    pub fn hot_path_trace_snapshot(&self) -> HotPathTrace {
+        self.hot_path_trace.snapshot()
     }
 
     fn with_access_buffer<T, F>(&self, operation: F) -> Result<T, EvalError>
     where
         F: FnOnce() -> Result<T, EvalError>,
     {
-        self.access_flusher
-            .with_buffer(operation, |buffer| self.flush_access_mutation_buffer(buffer))
+        self.access_flusher.with_buffer(operation, |buffer| {
+            self.flush_access_mutation_buffer(buffer)
+        })
     }
 
-    fn flush_access_mutation_buffer(
-        &self,
-        buffer: AccessMutationBuffer,
-    ) -> Result<(), EvalError> {
+    fn flush_access_mutation_buffer(&self, buffer: AccessMutationBuffer) -> Result<(), EvalError> {
         for (entity_id, pending) in buffer {
             if pending.access_count_delta == 0 && pending.last_accessed_at_unix_ms.is_none() {
                 continue;
@@ -159,6 +162,7 @@ impl EvalEngine {
         query: &Query,
         params: &HashMap<String, Value>,
     ) -> Result<EvalResult, EvalError> {
+        self.hot_path_trace.reset();
         self.with_access_buffer(|| self.execute_inner(query, params))
     }
 
@@ -176,12 +180,14 @@ impl EvalEngine {
         let mut clause_index = 0;
         while clause_index < query.clauses.len() {
             let clause = &query.clauses[clause_index];
-            let next_where_expression = query.clauses.get(clause_index + 1).and_then(|clause| {
-                match clause {
-                    Clause::Where(where_clause) => Some(&where_clause.expression),
-                    _ => None,
-                }
-            });
+            let next_where_expression =
+                query
+                    .clauses
+                    .get(clause_index + 1)
+                    .and_then(|clause| match clause {
+                        Clause::Where(where_clause) => Some(&where_clause.expression),
+                        _ => None,
+                    });
             match clause {
                 Clause::Call(call) => {
                     return self.execute_call_clause(call, params);
@@ -282,7 +288,9 @@ impl EvalEngine {
                             }
                         },
                         kind: match create.kind {
-                            copperdb_cypher::IndexKind::Range => copperdb_indexing::CatalogIndexKind::Range,
+                            copperdb_cypher::IndexKind::Range => {
+                                copperdb_indexing::CatalogIndexKind::Range
+                            }
                             copperdb_cypher::IndexKind::Temporal => {
                                 copperdb_indexing::CatalogIndexKind::Temporal
                             }
@@ -324,7 +332,9 @@ impl EvalEngine {
                     result_rows = indexes
                         .into_iter()
                         .filter(|idx| match show.kind {
-                            Some(copperdb_cypher::IndexKind::Range) => idx.kind == copperdb_indexing::CatalogIndexKind::Range,
+                            Some(copperdb_cypher::IndexKind::Range) => {
+                                idx.kind == copperdb_indexing::CatalogIndexKind::Range
+                            }
                             Some(copperdb_cypher::IndexKind::Temporal) => {
                                 idx.kind == copperdb_indexing::CatalogIndexKind::Temporal
                             }
@@ -389,16 +399,15 @@ impl EvalEngine {
                                 .and_then(|v| v.as_str().map(|s| s.to_string())),
                             no_decay: option_bool(&create.options, "noDecay", false)?,
                             visibility_threshold: match create.options.get("visibilityThreshold") {
-                                Some(_) => Some(option_f64(
-                                    &create.options,
-                                    "visibilityThreshold",
-                                    0.0,
-                                )?),
+                                Some(_) => {
+                                    Some(option_f64(&create.options, "visibilityThreshold", 0.0)?)
+                                }
                                 None => None,
                             },
                             order: option_i64(&create.options, "order", 0)?,
                         };
-                        self.storage.persist_decay_profile_binding_schema(&binding)?;
+                        self.storage
+                            .persist_decay_profile_binding_schema(&binding)?;
                     } else {
                         let profile = DecayProfileSchema {
                             name: create.name.clone(),
@@ -455,15 +464,14 @@ impl EvalEngine {
                         "profileRef".to_string(),
                         "enabled".to_string(),
                     ];
-                    result_rows = profiles.into_iter().map(|p| {
+                    result_rows = profiles
+                        .into_iter()
+                        .map(|p| {
                             let mut row = Row::new();
                             row.insert("kind".to_string(), Value::String("bundle".to_string()));
                             row.insert("name".to_string(), Value::String(p.name));
                             row.insert("scope".to_string(), Value::String(p.scope));
-                            row.insert(
-                                "target".to_string(),
-                                Value::String(String::new()),
-                            );
+                            row.insert("target".to_string(), Value::String(String::new()));
                             row.insert("profileRef".to_string(), Value::Null);
                             row.insert("enabled".to_string(), Value::Bool(p.enabled));
                             row
@@ -479,9 +487,7 @@ impl EvalEngine {
                             row.insert("target".to_string(), Value::String(target));
                             row.insert(
                                 "profileRef".to_string(),
-                                profile_ref
-                                    .map(Value::String)
-                                    .unwrap_or(Value::Null),
+                                profile_ref.map(Value::String).unwrap_or(Value::Null),
                             );
                             row.insert("enabled".to_string(), Value::Bool(true));
                             row
@@ -682,8 +688,9 @@ impl EvalEngine {
                                     params,
                                     next_where_expression,
                                 )? {
-                                    let node_val = serde_json::to_value(&props)
-                                        .map_err(|e| EvalError::SerializationError(e.to_string()))?;
+                                    let node_val = serde_json::to_value(&props).map_err(|e| {
+                                        EvalError::SerializationError(e.to_string())
+                                    })?;
 
                                     let mut row = base_row.clone();
                                     if let Some(var) = &node_pat.variable {
@@ -726,7 +733,7 @@ impl EvalEngine {
                 }
 
                 Clause::Return(ret) => {
-                    columns = ret.items.iter().map(|item| column_name(item)).collect();
+                    columns = ret.items.iter().map(column_name).collect();
 
                     // ORDER BY must be evaluated against the full pre-projection row so
                     // that ORDER BY expressions can reference variables not in RETURN.
@@ -782,10 +789,7 @@ impl EvalEngine {
                     // projected values, which is standard Cypher semantics).
                     if ret.distinct {
                         let mut seen = std::collections::HashSet::new();
-                        rows = rows
-                            .into_iter()
-                            .filter(|r| seen.insert(row_key(r)))
-                            .collect();
+                        rows.retain(|r| seen.insert(row_key(r)));
                     }
 
                     result_rows = rows;
@@ -879,8 +883,12 @@ impl EvalEngine {
         compound_match: Option<&ShapeMatch>,
         pipeline_clauses: Option<&[PipelineClause]>,
     ) -> Result<EvalResult, EvalError> {
+        self.hot_path_trace.reset();
         self.with_access_buffer(|| {
             match pattern_info.pattern {
+                QueryPattern::SimpleMatchLimit if self.can_execute_simple_match_limit(query) => {
+                    return self.execute_simple_match_limit_optimized(query, params);
+                }
                 QueryPattern::MutualRelationship if self.can_execute_simple_match_return(query) => {
                     return self.execute_mutual_relationship_optimized(query, pattern_info);
                 }
@@ -921,11 +929,118 @@ impl EvalEngine {
             .all(|clause| matches!(clause, Clause::Match(_) | Clause::Return(_)))
     }
 
+    fn can_execute_simple_match_limit(&self, query: &Query) -> bool {
+        if query.clauses.len() != 2 {
+            return false;
+        }
+
+        let Some(Clause::Match(match_clause)) = query.clauses.first() else {
+            return false;
+        };
+        let Some(Clause::Return(ret)) = query.clauses.get(1) else {
+            return false;
+        };
+
+        if ret.limit.is_none()
+            || ret.skip.is_some()
+            || ret.distinct
+            || !ret.order_by.is_empty()
+            || ret.items.len() != 1
+        {
+            return false;
+        }
+
+        let pattern = &match_clause.pattern;
+        if pattern.shortest_path
+            || pattern.path_variable.is_some()
+            || pattern.nodes.len() != 1
+            || !pattern.edges.is_empty()
+        {
+            return false;
+        }
+
+        let node_pattern = &pattern.nodes[0];
+        let Some(variable) = node_pattern.variable.as_ref() else {
+            return false;
+        };
+        if node_pattern.labels.is_empty() || !node_pattern.properties.is_empty() {
+            return false;
+        }
+
+        matches!(&ret.items[0].expression, Expression::Variable(returned) if returned == variable)
+    }
+
     fn can_execute_edge_property_agg(&self, query: &Query) -> bool {
         query
             .clauses
             .iter()
             .all(|clause| matches!(clause, Clause::Match(_) | Clause::Return(_)))
+    }
+
+    fn execute_simple_match_limit_optimized(
+        &self,
+        query: &Query,
+        params: &HashMap<String, Value>,
+    ) -> Result<EvalResult, EvalError> {
+        self.hot_path_trace.mark_simple_match_limit_fast_path();
+        let Some(Clause::Match(match_clause)) = query.clauses.first() else {
+            return self.execute_inner(query, params);
+        };
+        let ret = return_clause(query)?;
+        let limit = ret.limit.unwrap_or(0).max(0) as usize;
+        let columns: Vec<String> = ret.items.iter().map(column_name).collect();
+        if limit == 0 {
+            return Ok(EvalResult {
+                columns,
+                rows: Vec::new(),
+                stats: QueryStats::default(),
+            });
+        }
+
+        let node_pattern = &match_clause.pattern.nodes[0];
+        let variable = node_pattern.variable.clone().ok_or_else(|| {
+            EvalError::ExecutionError(
+                "optimized simple MATCH LIMIT requires a bound node variable".to_string(),
+            )
+        })?;
+        let primary_label = node_pattern.labels.first().ok_or_else(|| {
+            EvalError::ExecutionError(
+                "optimized simple MATCH LIMIT requires at least one label".to_string(),
+            )
+        })?;
+
+        let resolver = self.knowledge_policy_resolver()?;
+        let mut rows = Vec::with_capacity(limit);
+        for node in self.storage.get_nodes_by_label(primary_label)? {
+            if !node_pattern
+                .labels
+                .iter()
+                .all(|label| node.labels.iter().any(|node_label| node_label == label))
+            {
+                continue;
+            }
+            if !self.node_visible_under_policy(&node, &resolver)? {
+                continue;
+            }
+            self.apply_on_access_for_node(&node, &resolver)?;
+
+            let mut binding_row = Row::new();
+            binding_row.insert(
+                variable.clone(),
+                Value::Object(node_record_to_props(&node).into_iter().collect()),
+            );
+            rows.push(project_row(&binding_row, &ret.items, params)?);
+
+            if rows.len() == limit {
+                break;
+            }
+        }
+
+        Ok(EvalResult {
+            columns,
+            rows,
+            stats: QueryStats::default(),
+        })
     }
 
     fn execute_mutual_relationship_optimized(
@@ -996,7 +1111,8 @@ impl EvalEngine {
     ) -> Result<EvalResult, EvalError> {
         let ret = return_clause(query)?;
         let columns: Vec<String> = ret.items.iter().map(column_name).collect();
-        let edge_type = (!pattern_info.rel_type.is_empty()).then_some(pattern_info.rel_type.as_str());
+        let edge_type =
+            (!pattern_info.rel_type.is_empty()).then_some(pattern_info.rel_type.as_str());
         let edges = self.lookup_edges(edge_type)?;
         let mut counts: HashMap<String, i64> = HashMap::new();
 
@@ -1259,6 +1375,7 @@ impl EvalEngine {
         query: &Query,
         shape_match: &ShapeMatch,
     ) -> Result<Option<EvalResult>, EvalError> {
+        self.hot_path_trace.mark_compound_query_fast_path();
         if matches!(shape_match.kind, ShapeKind::CompoundCreateDeleteRel)
             && shape_match.captures.int("limit") == 0
         {
@@ -1287,9 +1404,11 @@ impl EvalEngine {
             return Ok(None);
         }
 
-        let mut stats = QueryStats::default();
-        stats.relationships_created = 1;
-        stats.relationships_deleted = 1;
+        let stats = QueryStats {
+            relationships_created: 1,
+            relationships_deleted: 1,
+            ..QueryStats::default()
+        };
 
         let (columns, rows) = if matches!(
             shape_match.kind,
@@ -1353,6 +1472,7 @@ impl EvalEngine {
                 Clause::Match(_) => query_kinds.push(PipelineClauseKind::Match),
                 Clause::OptionalMatch(_) => query_kinds.push(PipelineClauseKind::OptionalMatch),
                 Clause::Create(_) => query_kinds.push(PipelineClauseKind::Create),
+                Clause::Merge(_) => query_kinds.push(PipelineClauseKind::Merge),
                 Clause::With(_) => query_kinds.push(PipelineClauseKind::With),
                 Clause::Unwind(_) => query_kinds.push(PipelineClauseKind::Unwind),
                 Clause::Delete(_) => query_kinds.push(PipelineClauseKind::Delete),
@@ -1375,8 +1495,34 @@ impl EvalEngine {
         &self,
         query: &Query,
         params: &HashMap<String, Value>,
-        _pipeline_clauses: &[PipelineClause],
+        pipeline_clauses: &[PipelineClause],
     ) -> Result<EvalResult, EvalError> {
+        let pipeline_has_unwind = pipeline_clauses
+            .iter()
+            .any(|clause| clause.kind == PipelineClauseKind::Unwind);
+        let pipeline_has_match = pipeline_clauses.iter().any(|clause| {
+            matches!(
+                clause.kind,
+                PipelineClauseKind::Match | PipelineClauseKind::OptionalMatch
+            )
+        });
+        let unwind_index = pipeline_clauses
+            .iter()
+            .position(|clause| clause.kind == PipelineClauseKind::Unwind);
+        let match_after_unwind_index = unwind_index.and_then(|index| {
+            pipeline_clauses
+                .iter()
+                .enumerate()
+                .skip(index + 1)
+                .find(|(_, clause)| clause.kind == PipelineClauseKind::Match)
+                .map(|(match_index, _)| match_index)
+        });
+        let pipeline_has_unwind_match_create_tail = match_after_unwind_index.is_some_and(|index| {
+            pipeline_clauses
+                .iter()
+                .skip(index + 1)
+                .any(|clause| clause.kind == PipelineClauseKind::Create)
+        });
         let mut current_rows = pooled_binding_rows();
         current_rows.push(Row::new());
         let mut stats = QueryStats::default();
@@ -1384,12 +1530,14 @@ impl EvalEngine {
         let mut clause_index = 0;
         while clause_index < query.clauses.len() {
             let clause = &query.clauses[clause_index];
-            let next_where_expression = query.clauses.get(clause_index + 1).and_then(|clause| {
-                match clause {
-                    Clause::Where(where_clause) => Some(&where_clause.expression),
-                    _ => None,
-                }
-            });
+            let next_where_expression =
+                query
+                    .clauses
+                    .get(clause_index + 1)
+                    .and_then(|clause| match clause {
+                        Clause::Where(where_clause) => Some(&where_clause.expression),
+                        _ => None,
+                    });
             match clause {
                 Clause::Match(match_clause) => {
                     current_rows = self.execute_pipeline_match_clause(
@@ -1420,12 +1568,22 @@ impl EvalEngine {
                     current_rows = filtered;
                 }
                 Clause::Create(create) => {
+                    if pipeline_has_unwind_match_create_tail {
+                        self.hot_path_trace.mark_unwind_fixed_chain_link_batch();
+                    }
                     current_rows = self.execute_pipeline_create_clause(
                         &current_rows,
                         create,
                         params,
                         &mut stats,
                     )?;
+                }
+                Clause::Merge(merge) => {
+                    if pipeline_has_unwind && !pipeline_has_match {
+                        self.hot_path_trace.mark_unwind_simple_merge_batch();
+                    }
+                    current_rows =
+                        self.execute_merge_clause(&current_rows, merge, params, &mut stats)?;
                 }
                 Clause::With(with) => {
                     let mut projected: Vec<Row> = current_rows
@@ -1645,7 +1803,8 @@ impl EvalEngine {
             return Ok(());
         };
 
-        if props.contains_key("_type") && props.contains_key("_start") && props.contains_key("_end") {
+        if props.contains_key("_type") && props.contains_key("_start") && props.contains_key("_end")
+        {
             self.storage.delete_edge_record(id)?;
             stats.relationships_deleted += 1;
         } else {
@@ -1657,7 +1816,8 @@ impl EvalEngine {
     }
 
     fn persist_bound_props(&self, props: &HashMap<String, Value>) -> Result<(), EvalError> {
-        if props.contains_key("_type") && props.contains_key("_start") && props.contains_key("_end") {
+        if props.contains_key("_type") && props.contains_key("_start") && props.contains_key("_end")
+        {
             self.persist_edge_props(props)?;
         } else {
             self.persist_node_props(props)?;
@@ -1964,11 +2124,17 @@ impl EvalEngine {
             for base_row in &current_rows {
                 let merge_props =
                     evaluate_pattern_properties(&node_pat.properties, base_row, params)?;
+                let catalog = IndexCatalog::new(self.storage.as_ref());
 
                 let node_val =
                     if let Some(cached_val) = self.find_in_merge_cache(labels, &merge_props) {
                         cached_val
                     } else {
+                        if catalog.has_preferred_node_lookup_index(labels, &merge_props)? {
+                            self.hot_path_trace.mark_merge_schema_lookup();
+                        } else {
+                            self.hot_path_trace.mark_merge_scan_fallback();
+                        }
                         let mut found_node: Option<Value> = None;
                         for props in self.lookup_matching_node_props(labels, &merge_props)? {
                             if !node_matches_pattern(&props, labels, &merge_props) {
@@ -2123,7 +2289,8 @@ impl EvalEngine {
                 )?;
 
                 if pattern.shortest_path {
-                    if let Some(best) = matched_rows.into_iter().min_by_key(|matched| matched.hops) {
+                    if let Some(best) = matched_rows.into_iter().min_by_key(|matched| matched.hops)
+                    {
                         rows.push(best.row);
                     }
                 } else {
@@ -2134,6 +2301,7 @@ impl EvalEngine {
         Ok(rows)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn expand_relationship_chain(
         &self,
         pattern: &Pattern,
@@ -2241,7 +2409,8 @@ impl EvalEngine {
         let Some(current_node_id) = node_id(current_node_props) else {
             return Ok(Vec::new());
         };
-        let expected_edge_props = evaluate_pattern_properties(&edge_pattern.properties, row, params)?;
+        let expected_edge_props =
+            evaluate_pattern_properties(&edge_pattern.properties, row, params)?;
         let expected_end_props = evaluate_pattern_properties(&end_pattern.properties, row, params)?;
         let mut matches = Vec::new();
 
@@ -2259,7 +2428,8 @@ impl EvalEngine {
             if !bound_edge_matches_row(row, edge_pattern.variable.as_deref(), &edge) {
                 continue;
             }
-            let Some(end_id) = related_node_id(current_node_id, &edge, &edge_pattern.direction) else {
+            let Some(end_id) = related_node_id(current_node_id, &edge, &edge_pattern.direction)
+            else {
                 continue;
             };
             let Some(end_props) = self.node_props_by_id(end_id)? else {
@@ -2308,7 +2478,8 @@ impl EvalEngine {
         let current_value = serde_json::to_value(current_node_props)
             .map_err(|e| EvalError::SerializationError(e.to_string()))?;
         let expected_end_props = evaluate_pattern_properties(&end_pattern.properties, row, params)?;
-        let expected_edge_props = evaluate_pattern_properties(&edge_pattern.properties, row, params)?;
+        let expected_edge_props =
+            evaluate_pattern_properties(&edge_pattern.properties, row, params)?;
         let mut frontier = VecDeque::new();
         let mut visited = HashSet::new();
         let mut matches = Vec::new();
@@ -2345,12 +2516,13 @@ impl EvalEngine {
                                 .iter()
                                 .skip(1)
                                 .map(|node_id| {
-                                    let props = self.node_props_by_id(node_id)?.ok_or_else(|| {
-                                        EvalError::ExecutionError(format!(
-                                            "path node '{}' disappeared during traversal",
-                                            node_id
-                                        ))
-                                    })?;
+                                    let props =
+                                        self.node_props_by_id(node_id)?.ok_or_else(|| {
+                                            EvalError::ExecutionError(format!(
+                                                "path node '{}' disappeared during traversal",
+                                                node_id
+                                            ))
+                                        })?;
                                     serde_json::to_value(&props)
                                         .map_err(|e| EvalError::SerializationError(e.to_string()))
                                 })
@@ -2472,13 +2644,9 @@ impl EvalEngine {
         let catalog = IndexCatalog::new(self.storage.as_ref());
         let resolver = self.knowledge_policy_resolver()?;
         let mut out = Vec::new();
-        for node in catalog.lookup_nodes_by_range(
-            labels,
-            property,
-            comparison,
-            value,
-            expected_props,
-        )? {
+        for node in
+            catalog.lookup_nodes_by_range(labels, property, comparison, value, expected_props)?
+        {
             if !self.node_visible_under_policy(&node, &resolver)? {
                 continue;
             }
@@ -2522,7 +2690,11 @@ impl EvalEngine {
         Ok(Some(node_record_to_props(&node)))
     }
 
-    fn node_visible_under_policy(&self, node: &NodeRecord, resolver: &Resolver) -> Result<bool, EvalError> {
+    fn node_visible_under_policy(
+        &self,
+        node: &NodeRecord,
+        resolver: &Resolver,
+    ) -> Result<bool, EvalError> {
         self.node_visible_under_policy_with_params(node, resolver, &HashMap::new())
     }
 
@@ -2548,7 +2720,11 @@ impl EvalEngine {
         )
     }
 
-    fn edge_visible_under_policy(&self, edge: &EdgeRecord, resolver: &Resolver) -> Result<bool, EvalError> {
+    fn edge_visible_under_policy(
+        &self,
+        edge: &EdgeRecord,
+        resolver: &Resolver,
+    ) -> Result<bool, EvalError> {
         self.edge_visible_under_policy_with_params(edge, resolver, &HashMap::new())
     }
 
@@ -2578,12 +2754,18 @@ impl EvalEngine {
         &self,
         entity_id: &str,
     ) -> Result<Option<KnowledgePolicyAccessMetadata>, EvalError> {
-        let persisted = self.storage.get_knowledge_policy_access_metadata(entity_id)?;
+        let persisted = self
+            .storage
+            .get_knowledge_policy_access_metadata(entity_id)?;
         let pending = self.access_flusher.pending_mutation(entity_id);
         Ok(merge_access_metadata(persisted, pending.as_ref()))
     }
 
-    fn apply_on_access_for_node(&self, node: &NodeRecord, resolver: &Resolver) -> Result<(), EvalError> {
+    fn apply_on_access_for_node(
+        &self,
+        node: &NodeRecord,
+        resolver: &Resolver,
+    ) -> Result<(), EvalError> {
         self.apply_on_access_mutations(
             &node.id,
             resolver
@@ -2593,7 +2775,11 @@ impl EvalEngine {
         )
     }
 
-    fn apply_on_access_for_edge(&self, edge: &EdgeRecord, resolver: &Resolver) -> Result<(), EvalError> {
+    fn apply_on_access_for_edge(
+        &self,
+        edge: &EdgeRecord,
+        resolver: &Resolver,
+    ) -> Result<(), EvalError> {
         self.apply_on_access_mutations(
             &edge.id,
             resolver
@@ -2612,7 +2798,6 @@ impl EvalEngine {
             .record_policy_access(entity_id, policy.as_ref(), now_unix_ms());
         Ok(())
     }
-
 }
 
 struct NodeRangePredicate {
@@ -2647,11 +2832,13 @@ fn extract_node_range_predicate(
             {
                 if left_variable == variable {
                     let value = eval_expression(&operands.right, row, params)?;
-                    return Ok(is_range_comparable_value(&value).then(|| NodeRangePredicate {
-                        property: property.clone(),
-                        comparison,
-                        value,
-                    }));
+                    return Ok(
+                        is_range_comparable_value(&value).then(|| NodeRangePredicate {
+                            property: property.clone(),
+                            comparison,
+                            value,
+                        }),
+                    );
                 }
             }
 
@@ -2662,11 +2849,13 @@ fn extract_node_range_predicate(
             {
                 if right_variable == variable {
                     let value = eval_expression(&operands.left, row, params)?;
-                    return Ok(is_range_comparable_value(&value).then(|| NodeRangePredicate {
-                        property: property.clone(),
-                        comparison: invert_range_comparison(comparison),
-                        value,
-                    }));
+                    return Ok(
+                        is_range_comparable_value(&value).then(|| NodeRangePredicate {
+                            property: property.clone(),
+                            comparison: invert_range_comparison(comparison),
+                            value,
+                        }),
+                    );
                 }
             }
 
@@ -2708,4 +2897,3 @@ mod eval_engine_policy;
 
 #[path = "eval_engine_tail.rs"]
 mod eval_engine_tail;
-

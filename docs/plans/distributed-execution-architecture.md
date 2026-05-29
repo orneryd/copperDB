@@ -2,7 +2,7 @@
 
 Date: 2026-05-26
 
-This document is the implementation contract for copperDB distributed writes, reads, and search. The target is Cassandra-like distributed coordination rather than a single Raft leader path. Any Raft-style machinery that remains in the Rust workspace is transitional until it is either adapted behind this contract or removed.
+This document is the implementation contract for copperDB distributed writes, reads, and search. The replication target remains Cassandra-like distributed coordination rather than a single Raft leader path. For distributed MVCC snapshot isolation and read-your-own-writes guarantees, copperDB now targets a hybrid model: keep Dynamo-style quorum replication for data durability and fan-out, but allocate authoritative distributed transaction times through a separate consensus-backed transaction-time oracle. Paxos v2 is the intended direction for that oracle layer; it is not a plan to replace the Dynamo quorum replication contract itself. Any Raft-style machinery that remains in the Rust workspace is transitional until it is either adapted behind this contract or removed.
 
 This document defines one replicated placement at a time. The higher-level federated multi-shard AI fabric plan is defined in [federated-ai-fabric-architecture.md](federated-ai-fabric-architecture.md).
 
@@ -13,7 +13,8 @@ This document defines one replicated placement at a time. The higher-level feder
 - Writes are sent to all healthy storage replicas for the placement and succeed once the requested consistency level is met.
 - Reads are sent to enough healthy storage replicas to satisfy the requested consistency level and leave room for read repair.
 - Search is planned separately from graph storage reads: search fan-out targets search-capable nodes, merges shard results, and uses hedged requests for p99 control.
-- Distributed transaction IDs use topology logical clocks, not wall-clock time, for ordering across cores and peers.
+- Distributed transaction times for cross-node MVCC snapshot isolation and RYOW come from a consensus-backed transaction-time oracle; topology logical clocks remain the default local allocator and merge helper for non-consensus paths and transitional consumers.
+- Session bookmarks and read fences must be expressible as authoritative transaction-time lower bounds so later reads can demand "at least my last committed write" visibility.
 - High availability and hyperscaler/distributed transport seams are foundational, but external multi-region transports can remain pluggable while local/in-memory contract tests prove the behavior.
 
 ## Core Vocabulary
@@ -23,6 +24,7 @@ This document defines one replicated placement at a time. The higher-level feder
 - `PlacementRecord`: tenant/database/shard ownership, replica nodes, search nodes, and minimum durability requirements.
 - `ConsistencyLevel`: `One`, `Quorum`, `All`, and `LocalQuorum`.
 - `DistributedWriteMode::DynamoQuorum`: coordinator-based multi-replica writes with Cassandra/Dynamo-style acknowledgement rules.
+- `TransactionTimeOracle`: allocates authoritative begin, commit, and read-fence timestamps for distributed SI/RYOW. The local `DistributedTransactionClock` is the default implementation today; the target distributed implementation is Paxos v2-backed.
 - `DistributedWritePlan`: coordinator, target replicas, consistency level, and required acknowledgements.
 - `DistributedReadPlan`: coordinator, target replicas, consistency level, and required responses.
 - `DistributedSearchPlan`: latency-ranked search fan-out, bounded parallelism, and hedge deadline.
@@ -34,7 +36,7 @@ sequenceDiagram
     participant Client
     participant Coordinator
     participant Topology
-    participant Clock
+    participant TimeOracle
     participant ReplicaA
     participant ReplicaB
     participant ReplicaC
@@ -42,7 +44,7 @@ sequenceDiagram
     Client->>Coordinator: write(placement, mutation, consistency)
     Coordinator->>Topology: plan_write_with_consistency(placement, DynamoQuorum, consistency)
     Topology-->>Coordinator: coordinator, replicas, required_acks
-    Coordinator->>Clock: issue logical transaction id
+    Coordinator->>TimeOracle: allocate authoritative commit timestamp
     par fan out
         Coordinator->>ReplicaA: apply mutation(tx_id)
         Coordinator->>ReplicaB: apply mutation(tx_id)
@@ -58,12 +60,14 @@ Write execution rules:
 
 - The coordinator is selected by topology from healthy coordinator-capable placement participants, preferring request locality and lower observed RTT.
 - The coordinator does not need to be the primary node.
+- For distributed SI/RYOW write paths, the timestamp persisted with the mutation must come from the transaction-time oracle rather than a purely local clock.
 - The coordinator fans the mutation to every healthy storage/write participant in the placement.
 - `One` requires one successful replica acknowledgement.
 - `Quorum` requires `floor(replica_count / 2) + 1` acknowledgements.
 - `All` requires every healthy planned replica acknowledgement.
 - `LocalQuorum` requires `floor(local_replica_count / 2) + 1` acknowledgements in the request region.
 - A write that cannot satisfy the required acknowledgement count fails with `NoQuorum` and must not be reported as committed.
+- A distributed write that cannot obtain an authoritative transaction time from the oracle must also fail; quorum success alone is insufficient for the SI/RYOW path.
 - Late replica responses may still be accepted as durability progress, but they cannot change a client-visible failure into success after the coordinator has returned.
 - Future remote transports should preserve the same plan and acknowledgement contract; only the transport implementation should change.
 
@@ -74,6 +78,7 @@ sequenceDiagram
     participant Client
     participant Coordinator
     participant Topology
+    participant TimeOracle
     participant ReplicaA
     participant ReplicaB
     participant ReplicaC
@@ -82,6 +87,7 @@ sequenceDiagram
     Client->>Coordinator: read(placement, key, consistency)
     Coordinator->>Topology: plan_read(placement, consistency, region)
     Topology-->>Coordinator: coordinator, replicas, required_responses
+    Coordinator->>TimeOracle: resolve snapshot/read fence
     par fan out
         Coordinator->>ReplicaA: read key
         Coordinator->>ReplicaB: read key
@@ -97,6 +103,7 @@ sequenceDiagram
 Read execution rules:
 
 - Reads use storage-capable placement participants, sorted by locality, observed RTT, and node id for deterministic planning.
+- When the client carries a bookmark or RYOW fence, the coordinator must resolve or validate a snapshot that is at least that fence before treating the read as successful.
 - The coordinator waits for enough successful responses to meet the requested consistency level.
 - When multiple values are returned, the value with the highest topology logical transaction ID wins.
 - Missing, stale, or older-version responses should enqueue read repair once versioned storage values are wired through the engine.
@@ -142,14 +149,15 @@ Search execution rules:
 
 ## Package Responsibilities
 
-- `topology`: owns all placement, peer, consistency, read/write/search planning, and logical transaction ordering vocabulary.
+- `topology`: owns all placement, peer, consistency, read/write/search planning, and transaction-time vocabulary, including the transaction-time oracle seam and the local logical clock fallback implementation.
 - `storage`: persists topology metadata and graph/index records with version information needed for read repair and last-write-wins conflict resolution.
 - `replication`: owns coordinator write/read execution, replica transport abstraction, acknowledgement counting, quorum failure behavior, failed-replica outputs, and durable hinted handoff/read-repair queue records.
 - `search`: owns local index execution, distributed search routing over `DistributedSearchPlan`, fan-out transport seams, failure tracking, and deterministic result merging.
 - `fabric`: exposes placement-aware routing and control-plane-friendly topology views without implementing storage semantics.
+- `txsession`: acquires begin and commit timestamps through the transaction-time oracle seam and owns session bookmark/read-fence propagation for RYOW consumers.
 - `qdrantgrpc`: executes vector-search subplans against external vector stores when a search plan targets remote vector infrastructure; request envelopes must be derived from `DistributedSearchPlan`.
 - `nornicgrpc`: executes internal remote read/write/search RPCs while preserving topology plans and consistency contracts; request envelopes must be derived from `DistributedWritePlan`, `DistributedReadPlan`, or `DistributedSearchPlan`.
-- `engine`: loads durable topology from storage, exposes distributed read/write planning, builds Cassandra coordinators with durable repair queues, replays repair batches through replica transports, builds scheduled repair workers, and routes Cypher through an explicit distributed execution API; protocol crates must not reimplement distributed semantics.
+- `engine`: loads durable topology from storage, exposes distributed read/write planning, builds Cassandra coordinators with durable repair queues, replays repair batches through replica transports, builds scheduled repair workers, composes the transaction-time oracle for SI/RYOW paths, and routes Cypher through an explicit distributed execution API; protocol crates must not reimplement distributed semantics.
 - `server`: selects the distributed Cypher path for HTTP and Neo4j transaction requests when `COPPERDB_DISTRIBUTED_CYPHER` or `x-copperdb-distributed` is enabled, then delegates to the engine API with topology-derived placement and consistency. The server-owned write path now builds a real outbound tonic replica transport from topology peers and generates a short-lived admin cluster JWT when security is enabled. The read path now builds the real graph-read tonic transport, forwarding the original caller bearer token so the receiving node reapplies the existing per-database read gate while clustered access-metadata side effects continue through the internal admin-authenticated replica channel rather than fabricating in-memory replicas.
 - `nornicgrpc`: provides generated tonic/prost replica service bindings, remote execution envelopes, a generated-client adapter, a generated-server adapter, and a replica transport adapter that turns replication writes/reads into target-addressed remote client requests.
 - `qdrantgrpc`: turns distributed search plans into vector-search requests and provides a production Qdrant HTTP search client plus a distributed executor that fans out to Qdrant targets, records target failures, and merges hits deterministically.
@@ -159,18 +167,19 @@ Search execution rules:
 - Coordinator failure before client response is retried by the client or upper engine layer using idempotent mutation identity.
 - Replica failure before required acknowledgements returns `NoQuorum`.
 - Replica failure after required acknowledgements becomes asynchronous repair/hinted handoff work persisted in the replication repair queue.
+- Transaction-time oracle unavailability blocks distributed SI/RYOW commits and fenced reads even if enough replicas are otherwise reachable.
 - Peer health changes must flow through topology and alter future plans without changing the consistency contract.
 - Cross-region failures should prefer local quorum when requested and avoid global stalls for locality-scoped operations.
-- Transaction ordering must compare topology logical transaction IDs: `(epoch, counter, node_ordinal)`.
+- Transaction ordering must compare the authoritative transaction times attached to committed values. The local topology logical transaction ID format `(epoch, counter, node_ordinal)` remains the default/fallback allocator and merge helper until the consensus-backed oracle is fully threaded through the distributed write and read-fence paths.
 
 ## Implementation Order
 
-1. Finish topology consistency-level read/write plans and tests.
+1. Keep topology consistency-level read/write plans and tests as the replication baseline.
 2. Finish replication coordinator writes and reads using an in-memory replica transport, storage-backed adapter tests, and durable post-quorum repair records.
-3. Update `fabric` to expose read/write/search planning for the same Cassandra-like contract.
-4. Update `search` docs/tests around distributed fan-out and deterministic merge contracts.
-5. Wire engine request paths to the coordinator/fabric surfaces while keeping protocol adapters thin. The engine now exposes topology-backed planning, coordinator construction, repair replay, scheduled repair workers, and explicit distributed Cypher execution; HTTP and Neo4j transaction handlers can opt into that mode through server configuration or request headers. The server layer now has a real outbound replica transport for write-side routed execution and a real graph-read gRPC transport for read-side routed execution, with caller-auth forwarding on remote graph reads and internal admin-authenticated replica writes for distributed read side effects.
-6. Add `nornicgrpc` and `qdrantgrpc` transports as execution backends for the same plans.
+3. Introduce the transaction-time oracle seam across `topology`, `txsession`, and `engine`, keeping the local logical clock as the default implementation.
+4. Add the Paxos v2-backed transaction-time oracle for distributed SI/RYOW begin, commit, and read-fence allocation.
+5. Update `fabric` and read paths to propagate bookmarks/read fences so a client can require visibility at or above its last committed transaction time.
+6. Keep `search`, `nornicgrpc`, and `qdrantgrpc` aligned with the same plan and fence vocabulary.
 
 Current status: complete for the Layer 3 foundation. Remaining future work belongs to protocol hardening and deeper engine integration, not to the foundational distributed execution contracts.
 
@@ -181,4 +190,4 @@ Layer 3 packages can only be checked when:
 - The package follows this document as the single distributed execution path.
 - Package-owned state is durable or explicitly runtime-only.
 - Immediate consumers compile against the package contract.
-- Focused tests prove success, quorum failure, topology health behavior, and restart/persistence behavior where applicable.
+- Focused tests prove success, quorum failure, topology health behavior, restart/persistence behavior where applicable, and fenced read/write behavior once the transaction-time oracle path is enabled.

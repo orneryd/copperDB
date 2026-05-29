@@ -84,6 +84,7 @@ use super::*;
     ///
     /// Mirrors NornicDB v1.0.42 commit `6283009` (make hot paths n-ary and generic).
     #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
     fn test_match_multi_label_filters_correctly() {
         let storage = Arc::new(StorageEngine::open_temporary().unwrap());
         let engine = EvalEngine::new(Arc::clone(&storage));
@@ -3161,7 +3162,7 @@ use super::*;
 
         let stored = engine.storage.get_edges_by_type("FOLLOWS").unwrap();
         assert_eq!(stored.len(), 1);
-        assert!(stored[0].properties.get("weight").is_none());
+        assert!(!stored[0].properties.contains_key("weight"));
     }
 
     #[test]
@@ -4339,5 +4340,5 @@ use super::*;
 
         let stored = engine.storage.get_edges_by_type("FOLLOWS").unwrap();
         assert_eq!(stored.len(), 1);
-        assert!(stored[0].properties.get("weight").is_none());
+        assert!(!stored[0].properties.contains_key("weight"));
     }

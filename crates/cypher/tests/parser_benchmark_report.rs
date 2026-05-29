@@ -422,7 +422,9 @@ fn measure_median_parse_syntax_time(
 
     for _ in 0..sample_count {
         let start = Instant::now();
-        let parsed = parser.parse_syntax(query).map_err(|error| error.to_string())?;
+        let parsed = parser
+            .parse_syntax(query)
+            .map_err(|error| error.to_string())?;
         std::hint::black_box(parsed.clauses.len());
         durations.push(start.elapsed());
     }
@@ -621,7 +623,7 @@ fn parser_benchmark_report() {
     println!("\n{}", "=".repeat(80));
     println!("CYPHER PARSER BENCHMARK REPORT");
     println!("{}", "=".repeat(80));
-    println!("\n{:<30} | {:>12} | {}", "Query", "CopperDB", "Status");
+    println!("\n{:<30} | {:>12} | Status", "Query", "CopperDB");
     println!("{}", "-".repeat(80));
 
     for result in &results {
@@ -688,7 +690,7 @@ fn parser_syntax_benchmark_report() {
     println!("\n{}", "=".repeat(80));
     println!("CYPHER SYNTAX IR BENCHMARK REPORT");
     println!("{}", "=".repeat(80));
-    println!("\n{:<30} | {:>12} | {}", "Query", "CopperDB", "Status");
+    println!("\n{:<30} | {:>12} | Status", "Query", "CopperDB");
     println!("{}", "-".repeat(80));
 
     for result in &results {
@@ -754,7 +756,7 @@ fn parser_validation_benchmark_report() {
     println!("\n{}", "=".repeat(80));
     println!("CYPHER VALIDATION BENCHMARK REPORT");
     println!("{}", "=".repeat(80));
-    println!("\n{:<30} | {:>12} | {}", "Query", "CopperDB", "Status");
+    println!("\n{:<30} | {:>12} | Status", "Query", "CopperDB");
     println!("{}", "-".repeat(80));
 
     for result in &results {
@@ -821,7 +823,7 @@ fn parser_validation_shallow_benchmark_report() {
     println!("\n{}", "=".repeat(80));
     println!("CYPHER SHALLOW VALIDATION BENCHMARK REPORT");
     println!("{}", "=".repeat(80));
-    println!("\n{:<30} | {:>12} | {}", "Query", "CopperDB", "Status");
+    println!("\n{:<30} | {:>12} | Status", "Query", "CopperDB");
     println!("{}", "-".repeat(80));
 
     for result in &results {
@@ -913,8 +915,8 @@ fn parser_stage_benchmark_report() {
     println!("CYPHER PARSER STAGE BENCHMARK REPORT");
     println!("{}", "=".repeat(112));
     println!(
-        "\n{:<30} | {:>12} | {:>16} | {:>14} | {:>11} | {}",
-        "Query", "tokenize", "validate_shallow", "validate_core", "parse_core", "Status"
+        "\n{:<30} | {:>12} | {:>16} | {:>14} | {:>11} | Status",
+        "Query", "tokenize", "validate_shallow", "validate_core", "parse_core"
     );
     println!("{}", "-".repeat(112));
 
@@ -989,17 +991,8 @@ fn tokenizer_microbenchmark_report() {
     println!("CYPHER TOKENIZER MICROBENCHMARK REPORT");
     println!("{}", "=".repeat(120));
     println!(
-        "\n{:<24} | {:>10} | {:>6} | {:>6} | {:>6} | {:>7} | {:>8} | {:>10} | {:>8} | {}",
-        "Query",
-        "time",
-        "tokens",
-        "punct",
-        "ops",
-        "strings",
-        "allocs",
-        "reallocs",
-        "alloc_b",
-        "chars/tok"
+        "\n{:<24} | {:>10} | {:>6} | {:>6} | {:>6} | {:>7} | {:>8} | {:>10} | {:>8} | chars/tok",
+        "Query", "time", "tokens", "punct", "ops", "strings", "allocs", "reallocs", "alloc_b"
     );
     println!("{}", "-".repeat(120));
 
@@ -1249,10 +1242,7 @@ fn parser_validation_structural_microcase_report() {
     println!("\n{}", "=".repeat(108));
     println!("CYPHER VALIDATION STRUCTURAL MICROCASE REPORT");
     println!("{}", "=".repeat(108));
-    println!(
-        "\n{:<24} | {:>12} | {}",
-        "Microcase", "validate_core", "Query"
-    );
+    println!("\n{:<24} | {:>12} | Query", "Microcase", "validate_core");
     println!("{}", "-".repeat(108));
 
     let mut total = Duration::default();

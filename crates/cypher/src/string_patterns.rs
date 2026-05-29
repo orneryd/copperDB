@@ -58,7 +58,7 @@ pub fn split_by_keyword<'a>(s: &'a str, keyword: &str) -> Vec<&'a str> {
         if !sb[i..i + klen]
             .iter()
             .zip(kb.iter())
-            .all(|(s_b, k_b)| s_b.to_ascii_uppercase() == k_b.to_ascii_uppercase())
+            .all(|(s_b, k_b)| s_b.eq_ignore_ascii_case(k_b))
         {
             i += 1;
             continue;

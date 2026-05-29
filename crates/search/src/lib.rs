@@ -12,8 +12,8 @@ use std::sync::{Arc, RwLock};
 use thiserror::Error;
 
 use copperdb_topology::{
-    DistributedSearchPlan, FabricGlobalId, PlacementKey, SearchRoutingPolicy, TopologyError,
-    TopologyRegistry,
+    DistributedSearchPlan, FabricGlobalId, LogicalTransactionId, PlacementKey, SearchRoutingPolicy,
+    TopologyError, TopologyRegistry,
 };
 
 #[derive(Debug, Error)]
@@ -142,6 +142,7 @@ pub struct FabricHydrationRequest {
     pub node_id: String,
     pub placement: PlacementKey,
     pub global_ids: Vec<FabricGlobalId>,
+    pub read_fence: Option<LogicalTransactionId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -483,6 +484,7 @@ pub trait RankedSearchTransport: Send + Sync {
         node_id: &str,
         placement: &PlacementKey,
         query: &SearchQuery,
+        read_fence: Option<LogicalTransactionId>,
     ) -> Result<RrfSearchBatch, SearchError>;
 }
 
@@ -493,6 +495,7 @@ pub trait HydrationTransport: Send + Sync {
         node_id: &str,
         placement: &PlacementKey,
         global_ids: &[FabricGlobalId],
+        read_fence: Option<LogicalTransactionId>,
     ) -> Result<Vec<RrfHydrationRecord>, SearchError>;
 }
 
@@ -557,6 +560,7 @@ impl RankedSearchTransport for InMemorySearchTransport {
         node_id: &str,
         _placement: &PlacementKey,
         _query: &SearchQuery,
+        _read_fence: Option<LogicalTransactionId>,
     ) -> Result<RrfSearchBatch, SearchError> {
         self.node_ranked_results
             .read()
@@ -574,6 +578,7 @@ impl HydrationTransport for InMemorySearchTransport {
         node_id: &str,
         _placement: &PlacementKey,
         global_ids: &[FabricGlobalId],
+        _read_fence: Option<LogicalTransactionId>,
     ) -> Result<Vec<RrfHydrationRecord>, SearchError> {
         let requested = global_ids
             .iter()
@@ -689,14 +694,17 @@ impl DistributedRankedSearchExecutor {
         &self,
         plans: Vec<DistributedSearchPlan>,
         query: SearchQuery,
+        read_fence: Option<LogicalTransactionId>,
     ) -> Result<FabricRankedBatchCollection, SearchError> {
-        collect_planned_fabric_ranked_batches(plans, query, self.transport.clone()).await
+        collect_planned_fabric_ranked_batches(plans, query, read_fence, self.transport.clone())
+            .await
     }
 }
 
 pub async fn collect_planned_fabric_ranked_batches(
     plans: Vec<DistributedSearchPlan>,
     query: SearchQuery,
+    read_fence: Option<LogicalTransactionId>,
     transport: Arc<dyn RankedSearchTransport>,
 ) -> Result<FabricRankedBatchCollection, SearchError> {
     let mut responded_nodes = Vec::new();
@@ -706,7 +714,7 @@ pub async fn collect_planned_fabric_ranked_batches(
     for plan in plans {
         for peer in &plan.fanout {
             match transport
-                .search_ranked_node(&peer.node_id, &plan.placement, &query)
+                .search_ranked_node(&peer.node_id, &plan.placement, &query, read_fence)
                 .await
             {
                 Ok(batch) => {
@@ -743,7 +751,12 @@ pub async fn collect_fabric_hydration_records(
     for request in requests {
         requested_ids.extend(request.global_ids.iter().cloned());
         match transport
-            .hydrate_node(&request.node_id, &request.placement, &request.global_ids)
+            .hydrate_node(
+                &request.node_id,
+                &request.placement,
+                &request.global_ids,
+                request.read_fence,
+            )
             .await
         {
             Ok(mut node_records) => {
@@ -1533,6 +1546,7 @@ mod tests {
                     fields: vec!["body".into()],
                     limit: 10,
                 },
+                None,
             )
             .await
             .unwrap();
@@ -1566,11 +1580,13 @@ mod tests {
                     node_id: "node-a".into(),
                     placement: primary,
                     global_ids: vec![doc_a.clone()],
+                    read_fence: None,
                 },
                 FabricHydrationRequest {
                     node_id: "node-b".into(),
                     placement: person,
                     global_ids: vec![doc_b.clone()],
+                    read_fence: None,
                 },
             ],
             transport,

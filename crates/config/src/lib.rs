@@ -125,17 +125,30 @@ impl Config {
             ));
         }
         if self.server.grpc_tls_enabled {
-            if self.server.grpc_tls_cert.as_deref().unwrap_or_default().is_empty() {
+            if self
+                .server
+                .grpc_tls_cert
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty()
+            {
                 return Err(ConfigError::MissingField(
                     "server.grpc_tls_cert must be set when gRPC TLS is enabled".into(),
                 ));
             }
-            if self.server.grpc_tls_key.as_deref().unwrap_or_default().is_empty() {
+            if self
+                .server
+                .grpc_tls_key
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty()
+            {
                 return Err(ConfigError::MissingField(
                     "server.grpc_tls_key must be set when gRPC TLS is enabled".into(),
                 ));
             }
-            if self.server.grpc_tls_client_cert.is_some() ^ self.server.grpc_tls_client_key.is_some()
+            if self.server.grpc_tls_client_cert.is_some()
+                ^ self.server.grpc_tls_client_key.is_some()
             {
                 return Err(ConfigError::MissingField(
                     "server.grpc_tls_client_cert and server.grpc_tls_client_key must be set together"
@@ -144,7 +157,12 @@ impl Config {
             }
             if self.server.grpc_tls_client_auth_ca_cert.is_some()
                 && self.server.grpc_tls_client_auth_optional
-                && self.server.grpc_tls_client_auth_ca_cert.as_deref().unwrap_or_default().is_empty()
+                && self
+                    .server
+                    .grpc_tls_client_auth_ca_cert
+                    .as_deref()
+                    .unwrap_or_default()
+                    .is_empty()
             {
                 return Err(ConfigError::MissingField(
                     "server.grpc_tls_client_auth_ca_cert must be set when optional client auth is enabled"
@@ -271,7 +289,10 @@ fn validate_certificate_key_pair(
     Ok(())
 }
 
-fn load_certificate_chain(path: &str, label: &str) -> Result<Vec<CertificateDer<'static>>, ConfigError> {
+fn load_certificate_chain(
+    path: &str,
+    label: &str,
+) -> Result<Vec<CertificateDer<'static>>, ConfigError> {
     let pem = std::fs::read(path).map_err(ConfigError::Io)?;
     let mut certs = Vec::new();
     for block in Pem::iter_from_buffer(&pem) {
@@ -300,8 +321,12 @@ fn load_private_key(path: &str, label: &str) -> Result<PrivateKeyDer<'static>, C
             message: error.to_string(),
         })?;
         let key = match block.label.as_str() {
-            "PRIVATE KEY" => Some(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(block.contents))),
-            "RSA PRIVATE KEY" => Some(PrivateKeyDer::Pkcs1(PrivatePkcs1KeyDer::from(block.contents))),
+            "PRIVATE KEY" => Some(PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                block.contents,
+            ))),
+            "RSA PRIVATE KEY" => Some(PrivateKeyDer::Pkcs1(PrivatePkcs1KeyDer::from(
+                block.contents,
+            ))),
             "EC PRIVATE KEY" => Some(PrivateKeyDer::Sec1(PrivateSec1KeyDer::from(block.contents))),
             _ => None,
         };
@@ -576,22 +601,13 @@ impl Default for SearchConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct FeatureConfig {
     /// Automatic link creation.
     pub auto_links_enabled: bool,
     /// Automatic topology/TLP workflows.
     pub auto_tlp_enabled: bool,
-}
-
-impl Default for FeatureConfig {
-    fn default() -> Self {
-        Self {
-            auto_links_enabled: false,
-            auto_tlp_enabled: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -907,21 +923,25 @@ pub fn apply_env_overrides_from(config: &mut Config, env: &BTreeMap<String, Stri
     set_if_present(env_nonempty(env, "COPPERDB_GRPC_TLS_CA_CERT"), |value| {
         config.server.grpc_tls_ca_cert = Some(value)
     });
-    set_if_present(env_nonempty(env, "COPPERDB_GRPC_TLS_DOMAIN_NAME"), |value| {
-        config.server.grpc_tls_domain_name = Some(value)
-    });
-    set_if_present(env_nonempty(env, "COPPERDB_GRPC_TLS_CLIENT_CERT"), |value| {
-        config.server.grpc_tls_client_cert = Some(value)
-    });
+    set_if_present(
+        env_nonempty(env, "COPPERDB_GRPC_TLS_DOMAIN_NAME"),
+        |value| config.server.grpc_tls_domain_name = Some(value),
+    );
+    set_if_present(
+        env_nonempty(env, "COPPERDB_GRPC_TLS_CLIENT_CERT"),
+        |value| config.server.grpc_tls_client_cert = Some(value),
+    );
     set_if_present(env_nonempty(env, "COPPERDB_GRPC_TLS_CLIENT_KEY"), |value| {
         config.server.grpc_tls_client_key = Some(value)
     });
-    set_if_present(env_nonempty(env, "COPPERDB_GRPC_TLS_CLIENT_AUTH_CA_CERT"), |value| {
-        config.server.grpc_tls_client_auth_ca_cert = Some(value)
-    });
-    set_if_present(parse_env_bool(env, "COPPERDB_GRPC_TLS_CLIENT_AUTH_OPTIONAL"), |value| {
-        config.server.grpc_tls_client_auth_optional = value
-    });
+    set_if_present(
+        env_nonempty(env, "COPPERDB_GRPC_TLS_CLIENT_AUTH_CA_CERT"),
+        |value| config.server.grpc_tls_client_auth_ca_cert = Some(value),
+    );
+    set_if_present(
+        parse_env_bool(env, "COPPERDB_GRPC_TLS_CLIENT_AUTH_OPTIONAL"),
+        |value| config.server.grpc_tls_client_auth_optional = value,
+    );
     set_if_present(
         parse_env_u16(env, "COPPERDB_HTTP_PORT")
             .or_else(|| parse_env_u16(env, "NEO4J_dbms_connector_http_listen__address_port")),
@@ -965,31 +985,40 @@ pub fn apply_env_overrides_from(config: &mut Config, env: &BTreeMap<String, Stri
     set_if_present(env_nonempty(env, "COPPERDB_EMBEDDING_API_URL"), |value| {
         config.embedding.api_url = Some(value)
     });
-    set_if_present(parse_env_usize(env, "COPPERDB_EMBEDDING_DIMENSIONS"), |value| {
-        config.embedding.dimensions = value;
-        config.vectorspace.dimensions = value;
-    });
-    set_if_present(parse_env_f64(env, "COPPERDB_SEARCH_MIN_SIMILARITY"), |value| {
-        config.search.min_similarity = value
-    });
-    set_if_present(parse_env_bool(env, "COPPERDB_SEARCH_BM25_ENABLED"), |value| {
-        config.search.bm25_enabled = value
-    });
+    set_if_present(
+        parse_env_usize(env, "COPPERDB_EMBEDDING_DIMENSIONS"),
+        |value| {
+            config.embedding.dimensions = value;
+            config.vectorspace.dimensions = value;
+        },
+    );
+    set_if_present(
+        parse_env_f64(env, "COPPERDB_SEARCH_MIN_SIMILARITY"),
+        |value| config.search.min_similarity = value,
+    );
+    set_if_present(
+        parse_env_bool(env, "COPPERDB_SEARCH_BM25_ENABLED"),
+        |value| config.search.bm25_enabled = value,
+    );
     set_if_present(env_nonempty(env, "COPPERDB_SEARCH_BM25_WARMING"), |value| {
         config.search.bm25_warming = normalize_warming(&value)
     });
-    set_if_present(parse_env_bool(env, "COPPERDB_SEARCH_VECTOR_ENABLED"), |value| {
-        config.search.vector_enabled = value
-    });
-    set_if_present(env_nonempty(env, "COPPERDB_SEARCH_VECTOR_WARMING"), |value| {
-        config.search.vector_warming = normalize_warming(&value)
-    });
-    set_if_present(parse_env_bool(env, "COPPERDB_SEARCH_RERANK_ENABLED"), |value| {
-        config.search.rerank_enabled = value
-    });
-    set_if_present(parse_env_bool(env, "COPPERDB_AUTO_LINKS_ENABLED"), |value| {
-        config.features.auto_links_enabled = value
-    });
+    set_if_present(
+        parse_env_bool(env, "COPPERDB_SEARCH_VECTOR_ENABLED"),
+        |value| config.search.vector_enabled = value,
+    );
+    set_if_present(
+        env_nonempty(env, "COPPERDB_SEARCH_VECTOR_WARMING"),
+        |value| config.search.vector_warming = normalize_warming(&value),
+    );
+    set_if_present(
+        parse_env_bool(env, "COPPERDB_SEARCH_RERANK_ENABLED"),
+        |value| config.search.rerank_enabled = value,
+    );
+    set_if_present(
+        parse_env_bool(env, "COPPERDB_AUTO_LINKS_ENABLED"),
+        |value| config.features.auto_links_enabled = value,
+    );
     set_if_present(parse_env_bool(env, "COPPERDB_AUTO_TLP_ENABLED"), |value| {
         config.features.auto_tlp_enabled = value
     });
@@ -1195,11 +1224,7 @@ fn effective_values_from_global(global: &Config) -> BTreeMap<String, String> {
     effective
 }
 
-fn apply_per_database_override(
-    resolved: &mut EffectiveDatabaseConfig,
-    key: &str,
-    value: &str,
-) {
+fn apply_per_database_override(resolved: &mut EffectiveDatabaseConfig, key: &str, value: &str) {
     match key.to_ascii_uppercase().as_str() {
         "COPPERDB_EMBEDDING_ENABLED" => {
             resolved.embedding_enabled = parse_bool_override(value, resolved.embedding_enabled)
@@ -1230,9 +1255,7 @@ fn apply_per_database_override(
         "COPPERDB_SEARCH_VECTOR_ENABLED" => {
             resolved.vector_enabled = parse_bool_override(value, resolved.vector_enabled)
         }
-        "COPPERDB_SEARCH_VECTOR_WARMING" => {
-            resolved.vector_warming = normalize_warming(value)
-        }
+        "COPPERDB_SEARCH_VECTOR_WARMING" => resolved.vector_warming = normalize_warming(value),
         "COPPERDB_SEARCH_RERANK_ENABLED" => {
             resolved.rerank_enabled = parse_bool_override(value, resolved.rerank_enabled)
         }
@@ -1244,7 +1267,9 @@ fn apply_per_database_override(
         }
         _ => {}
     }
-    resolved.effective.insert(key.to_ascii_uppercase(), value.to_owned());
+    resolved
+        .effective
+        .insert(key.to_ascii_uppercase(), value.to_owned());
 }
 
 /// Load configuration from environment variables using the `config` crate.
@@ -1374,9 +1399,8 @@ mod tests {
         cfg.server.grpc_tls_key = Some(key_path.to_string_lossy().into_owned());
         cfg.server.grpc_tls_client_cert = Some(client_cert_path.to_string_lossy().into_owned());
         cfg.server.grpc_tls_client_key = Some(client_key_path.to_string_lossy().into_owned());
-        cfg.server.grpc_tls_client_auth_ca_cert = Some(
-            server_cert_path.to_string_lossy().into_owned(),
-        );
+        cfg.server.grpc_tls_client_auth_ca_cert =
+            Some(server_cert_path.to_string_lossy().into_owned());
 
         assert!(matches!(
             cfg.validate(),
@@ -1446,7 +1470,8 @@ mod tests {
         cfg.server.grpc_tls_key = Some(server_key_path.to_string_lossy().into_owned());
         cfg.server.grpc_tls_client_cert = Some(client_cert_path.to_string_lossy().into_owned());
         cfg.server.grpc_tls_client_key = Some(other_client_key_path.to_string_lossy().into_owned());
-        cfg.server.grpc_tls_client_auth_ca_cert = Some(server_cert_path.to_string_lossy().into_owned());
+        cfg.server.grpc_tls_client_auth_ca_cert =
+            Some(server_cert_path.to_string_lossy().into_owned());
 
         assert!(matches!(
             cfg.validate(),
@@ -1538,10 +1563,8 @@ server:
     #[test]
     fn resolve_per_database_config_applies_overrides_then_cli() {
         let mut cfg = Config::default();
-        cfg.cli_overrides.insert(
-            "COPPERDB_SEARCH_VECTOR_ENABLED".into(),
-            "false".into(),
-        );
+        cfg.cli_overrides
+            .insert("COPPERDB_SEARCH_VECTOR_ENABLED".into(), "false".into());
 
         let overrides = BTreeMap::from([
             ("COPPERDB_SEARCH_VECTOR_ENABLED".into(), "true".into()),

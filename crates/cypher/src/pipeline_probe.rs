@@ -6,6 +6,7 @@ pub enum PipelineClauseKind {
     Match,
     OptionalMatch,
     Create,
+    Merge,
     With,
     Unwind,
     Delete,
@@ -45,7 +46,7 @@ pub fn pending_pipeline_execution_todo() -> &'static str {
 
 fn split_pipeline_clauses(cypher: &str) -> Option<Vec<PipelineClause>> {
     let upper = cypher.to_ascii_uppercase();
-    for unsupported in ["MERGE", "FOREACH", "CALL"] {
+    for unsupported in ["FOREACH", "CALL"] {
         if find_keyword_index(&upper, unsupported).is_some() {
             return None;
         }
@@ -56,6 +57,7 @@ fn split_pipeline_clauses(cypher: &str) -> Option<Vec<PipelineClause>> {
         ("OPTIONAL MATCH", PipelineClauseKind::OptionalMatch),
         ("MATCH", PipelineClauseKind::Match),
         ("CREATE", PipelineClauseKind::Create),
+        ("MERGE", PipelineClauseKind::Merge),
         ("WITH", PipelineClauseKind::With),
         ("UNWIND", PipelineClauseKind::Unwind),
         ("DELETE", PipelineClauseKind::Delete),
@@ -219,6 +221,17 @@ mod tests {
         assert_eq!(clauses[1].kind, PipelineClauseKind::With);
         assert_eq!(clauses[2].kind, PipelineClauseKind::Set);
         assert_eq!(clauses[3].kind, PipelineClauseKind::Return);
+    }
+
+    #[test]
+    fn test_pipeline_accepts_unwind_merge_return() {
+        let query = "UNWIND [1, 2] AS customerID MERGE (c:Customer {customerID: customerID}) RETURN c.customerID AS customerID";
+        let (clauses, ok) = can_execute_as_pipeline(query);
+        assert!(ok);
+        assert_eq!(clauses.len(), 3);
+        assert_eq!(clauses[0].kind, PipelineClauseKind::Unwind);
+        assert_eq!(clauses[1].kind, PipelineClauseKind::Merge);
+        assert_eq!(clauses[2].kind, PipelineClauseKind::Return);
     }
 
     #[test]

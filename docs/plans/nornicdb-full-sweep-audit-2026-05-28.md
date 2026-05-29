@@ -11,8 +11,9 @@ This is an audit and documentation artifact only. It records architecture and pe
 1. copperDB's explicit-index direction is correct, but the docs need to preserve the target policy: Cypher schema DDL remains authoritative per database, so declared indexes should still load, rebuild, and maintain for that database, while automatic index/search/embedding work means only extra implicit/background indexing beyond declared schema and must default off unless enabled through explicit per-database configuration. NornicDB already has per-DB search/vector/embedding controls in `pkg/config/dbconfig`; copperDB now has a first per-DB resolver/override baseline, but broader runtime consumers and warming behavior still need to be threaded through the engine.
 2. Layer 2 storage is the largest structural drift. NornicDB has a substantial async write-behind engine, WAL repair/diagnostics, MVCC extension interfaces, streaming/prefix APIs, and richer schema/index lifecycle. copperDB has focused baselines but should not be documented as storage-complete for those operational surfaces.
 3. Layer 3 distributed packages are checked in the current dependency graph, but the audit found important production gaps versus NornicDB: multi-region replication, transport security, chaos testing, fragment-based fabric execution, distributed transaction context, remote fragment execution, and full gRPC caller auth/TLS parity.
-4. Layer 4 query/index/search remains the most performance-sensitive gap. copperDB has strong progress on Cypher execution and range/temporal index semantics, but NornicDB has production BM25, HNSW/IVFPQ/vector file store, decay-filtered search, hot-path tracing, SIMD/math acceleration, reranking, and embedding cache/backends that copperDB has not ported. For the first runnable MVP, GPU acceleration and reranking/inference lifecycle work are deferred; CPU search/vector runtime and in-memory embeddings remain the core target.
-5. Layer 5 and Layer 6 still need the central engine/config/protocol composition pass: per-database config, search/embedding warming, Bolt role propagation, conversion/import-export streaming, and plugin-ready builtin function/procedure registration are MVP-relevant. MCP tools, GraphQL resolvers, and Heimdall governance workflows remain recorded for parity but are deferred until after the core distributed engine is working.
+4. Distributed transaction time is also a first-class architecture gap. The current Rust path allocates logical transaction IDs locally and merges observed remote values, which is adequate for ordering and repair, but it is not the intended end state for distributed MVCC snapshot isolation plus read-your-own-writes. The target architecture is hybrid: keep Dynamo-style quorum replication for data durability and fan-out, but add a consensus-backed transaction-time oracle, with Paxos v2 as the target distributed implementation for authoritative begin/commit/read-fence allocation.
+5. Layer 4 query/index/search remains the most performance-sensitive gap. copperDB has strong progress on Cypher execution and range/temporal index semantics, but NornicDB has production BM25, HNSW/IVFPQ/vector file store, decay-filtered search, hot-path tracing, SIMD/math acceleration, reranking, and embedding cache/backends that copperDB has not ported. For the first runnable MVP, GPU acceleration and reranking/inference lifecycle work are deferred; CPU search/vector runtime and in-memory embeddings remain the core target.
+6. Layer 5 and Layer 6 still need the central engine/config/protocol composition pass: per-database config, search/embedding warming, Bolt role propagation, conversion/import-export streaming, plugin-ready builtin function/procedure registration, and bookmark/read-fence flow for the hybrid transaction-time model are MVP-relevant. MCP tools, GraphQL resolvers, and Heimdall governance workflows remain recorded for parity but are deferred until after the core distributed engine is working.
 
 ## Target Policy: Auto Indexing And Search Defaults
 
@@ -113,6 +114,7 @@ copperDB current drift:
 ### txsession, retention, multidb
 
 - `txsession`: broadly aligned on session states, buffered operations, and logical transaction IDs.
+- `txsession` now has the right first seam for the hybrid direction: the local transaction clock can be abstracted behind a transaction-time oracle, but the distributed consensus-backed implementation and bookmark/read-fence semantics are still missing.
 - `retention`: broadly aligned on policies, legal holds, and erasure request state.
 - `multidb`: durable logical database catalog and the first per-DB config store/resolver baseline now exist, but NornicDB's broader per-DB key surface and downstream runtime consumers are still missing. This remains a high-priority cross-layer drift item.
 
@@ -146,6 +148,7 @@ Drift:
 - Distributed transaction context for per-shard subtransactions is missing.
 - Remote fragment execution with auth forwarding and result streaming is missing.
 - Fabric query plan caching is missing.
+- Distributed transaction-time fencing remains open. The current architecture still relies on local logical allocation for transaction order, while the target SI/RYOW path is a separate consensus-backed transaction-time oracle layered beside Dynamo quorum replication.
 
 ### search, qdrantgrpc, nornicgrpc
 
@@ -172,7 +175,7 @@ Layer 4 remains the active area with the most performance-sensitive drift.
 
 Current copperDB progress is real: expression parsing, relationship/path semantics, routed pipeline slices, knowledge-policy scoring, and range/temporal index semantics are now documented and tested. Remaining drift:
 
-- NornicDB has broader hot-path query routing and trace coverage for simple `MATCH ... LIMIT`, UNWIND/MERGE batches, call-tail traversal, compound mutation chains, and pipeline branch shapes. copperDB has pieces of routed execution but should keep hot-path parity open until query-shape routing and trace tests cover those performance paths.
+- NornicDB has broader hot-path query routing and trace coverage for simple `MATCH ... LIMIT`, UNWIND/MERGE batches, call-tail traversal, compound mutation chains, and pipeline branch shapes. copperDB now has narrow routed slices for single-node `MATCH ... LIMIT`, the current compound create/delete relationship fast path, the seeded `UNWIND ... MATCH ... CREATE` pipeline shape, and basic `UNWIND ... MERGE ... RETURN` pipeline upserts, and node `MERGE` now also records deterministic schema-lookup versus scan-fallback trace behavior. Trace assertions cover those current routed slices plus the merge lookup/fallback branch, but hot-path parity should remain open until broader query-shape routing and trace tests cover the remaining performance paths.
 - `FULLTEXT` and `VECTOR` DDL/catalog lifecycle exists in copperDB. A first maintained local fulltext runtime now exists through storage-maintained inverted-token entries plus engine-side local query execution, but vector runtime paths and broader search lifecycle parity are still absent. The next parity step is to deepen that maintained runtime rather than adding more DDL.
 - Composite range/temporal selection is now strong, but broader Neo4j index provider semantics, index options, analyzers, and vector index configuration are not ported.
 
@@ -214,6 +217,7 @@ NornicDB `pkg/nornicdb` composes storage, search, embeddings, per-DB config, war
 Drift:
 
 - Per-database search flags resolver is no longer missing from copperDB engine composition: ranked-search gates, the first local fulltext runtime path, and engine-native local replica/ranked-search/hydration gRPC seams now consume the resolved per-database settings, with the binary able to start the local tonic service through config/CLI listener settings and thread the first TLS settings through the same resolved runtime config while internal replica auth is handled through the unified auth core instead of a separate shared-token setting. Broader search/vector/embedding runtime consumers are still missing.
+- Transaction-time oracle composition is missing: begin/commit timestamps and session read fences still need an engine-visible distributed implementation so MVCC snapshot isolation and RYOW do not depend on purely local logical allocation.
 - Search index warmup strategy is missing: `startup` versus `lazy` should be a per-DB effective config value.
 - Embedding enablement/warming/cache/model/dimensions are not engine-composed per database.
 - Auto-index/search/embedding work should default disabled in copperDB, with explicit per-DB opt-in for extra implicit/background work and a CLI kill switch that acts as the hard global stop for all indexing.
@@ -258,14 +262,16 @@ Documentation actions:
 
 ## Priority Backlog From Audit
 
-1. Add per-database config store/resolver with allowed keys and precedence: defaults, global config/env/YAML, per-DB stored overrides, CLI overrides. Default automatic search/index/embedding work to disabled for copperDB unless a database opts in.
-2. Add search/index warming lifecycle docs and implementation hooks: BM25, vector, embedding; `startup` and `lazy`; deterministic state transitions.
-3. Split Layer 4 index work into property/range/temporal parity versus fulltext/vector runtime parity.
-4. Port or consciously defer NornicDB's storage async engine: write-behind cache, flush hold/result, async count/read consistency, callback/event deadlock tests.
-5. Expand MVCC/WAL documentation with snapshot-visible indexes, temporal point-in-time lookup, lifecycle pruning, WAL repair, and corruption diagnostics.
-6. Add distributed production-hardening TODOs: multi-region replication, transport security, chaos tests, peer metrics GC, fragment executor, remote fragment execution, distributed transaction context.
-7. Add MVP search runtime TODOs: BM25 fulltext, CPU vector runtime, HNSW/IVFPQ strategy support, vector file store, search persistence/versioning, decay filter, and observability. Defer GPU acceleration and rerank/MMR/local-LLM lifecycle until late-stage parity.
-8. Add protocol/runtime TODOs: Bolt auth/role propagation, plugin-ready builtin function/procedure registration, and streaming import/export conversion utilities. copperDB already has server per-DB config routes plus effective-config views; MCP tools, Heimdall governance, GraphQL resolvers, and APOC compatibility remain deferred until after the core distributed engine works.
+1. Add the hybrid transaction-time architecture: keep Dynamo quorum for data durability, but introduce a consensus-backed transaction-time oracle for authoritative begin/commit/read-fence allocation, with Paxos v2 as the target distributed implementation.
+2. Thread bookmark/read-fence semantics through txsession, engine, replication, and fabric so distributed MVCC snapshot isolation and RYOW have an enforceable contract.
+3. Add per-database config store/resolver with allowed keys and precedence: defaults, global config/env/YAML, per-DB stored overrides, CLI overrides. Default automatic search/index/embedding work to disabled for copperDB unless a database opts in.
+4. Add search/index warming lifecycle docs and implementation hooks: BM25, vector, embedding; `startup` and `lazy`; deterministic state transitions.
+5. Split Layer 4 index work into property/range/temporal parity versus fulltext/vector runtime parity.
+6. Port or consciously defer NornicDB's storage async engine: write-behind cache, flush hold/result, async count/read consistency, callback/event deadlock tests.
+7. Expand MVCC/WAL documentation with snapshot-visible indexes, temporal point-in-time lookup, lifecycle pruning, WAL repair, and corruption diagnostics.
+8. Add distributed production-hardening TODOs: multi-region replication, transport security, chaos tests, peer metrics GC, fragment executor, remote fragment execution, distributed transaction context.
+9. Add MVP search runtime TODOs: BM25 fulltext, CPU vector runtime, HNSW/IVFPQ strategy support, vector file store, search persistence/versioning, decay filter, and observability. Defer GPU acceleration and rerank/MMR/local-LLM lifecycle until late-stage parity.
+10. Add protocol/runtime TODOs: Bolt auth/role propagation, plugin-ready builtin function/procedure registration, and streaming import/export conversion utilities. copperDB already has server per-DB config routes plus effective-config views; MCP tools, Heimdall governance, GraphQL resolvers, and APOC compatibility remain deferred until after the core distributed engine works.
 
 ## Audit Notes
 
@@ -480,10 +486,10 @@ Temporal and decay integration findings:
 Query optimization and hot-path findings:
 
 - Query shape detection/routing is incomplete. NornicDB routes UNWIND/MERGE/MATCH patterns to optimized paths.
-- Simple `MATCH ... LIMIT` fast path is missing or not fully proven: NornicDB can index-seek and stop after the limit without materializing all matches.
+- Simple `MATCH ... LIMIT` fast path now exists for the narrow single-node `MATCH (n:Label) RETURN n LIMIT k` shape by routing through label-backed early-stop retrieval, but broader trace-backed parity and richer `MATCH ... LIMIT` shapes remain open.
 - Compound query fast path is missing or incomplete for mutation chains and relationship link paths.
 - Call-tail traversal fast path is missing or incomplete for bounded traversal inside procedure/call execution.
-- UNWIND batch fast path is missing or incomplete; NornicDB reuses batch mutation interfaces and lookup caches.
+- UNWIND batch fast path is still incomplete overall; copperDB now routes the basic `UNWIND ... MERGE ... RETURN` pipeline upsert shape in addition to the existing seeded `UNWIND ... MATCH ... CREATE` slice, but broader batch mutation shapes and trace parity remain open.
 - Pipeline composite routing is missing or incomplete; NornicDB can route compatible clause chains through a single evaluator rather than materializing between every clause.
 
 Vector/embedding lifecycle findings:

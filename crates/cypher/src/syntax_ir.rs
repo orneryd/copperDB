@@ -1,4 +1,6 @@
-use crate::{string_patterns::find_keyword_index, CypherError, EdgeDirection, Expression, QueryType};
+use crate::{
+    string_patterns::find_keyword_index, CypherError, EdgeDirection, Expression, QueryType,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyntaxClauseKind {
@@ -284,7 +286,9 @@ pub fn parse_syntax(cypher: &str) -> Result<SyntaxQuery<'_>, CypherError> {
 
     let clauses = split_into_clauses(raw_query)?;
     let query_type = determine_query_type(&clauses);
-    let is_read_only = clauses.iter().all(|clause| is_read_only_clause(clause.kind));
+    let is_read_only = clauses
+        .iter()
+        .all(|clause| is_read_only_clause(clause.kind));
 
     Ok(SyntaxQuery {
         raw_query,
@@ -312,7 +316,11 @@ impl<'a> SyntaxClause<'a> {
     pub fn return_items(&self) -> Vec<SyntaxReturnItem<'a>> {
         match &self.content {
             SyntaxClauseContent::Return { distinct } | SyntaxClauseContent::With { distinct } => {
-                let items_text = if *distinct { strip_distinct(self.body).1 } else { self.body };
+                let items_text = if *distinct {
+                    strip_distinct(self.body).1
+                } else {
+                    self.body
+                };
                 parse_return_items(items_text)
             }
             _ => Vec::new(),
@@ -446,7 +454,9 @@ fn split_into_clauses(cypher: &str) -> Result<Vec<SyntaxClause<'_>>, CypherError
         return Err(CypherError::UnterminatedString);
     }
     if paren_depth != 0 || bracket_depth != 0 || brace_depth != 0 {
-        return Err(CypherError::ParseError("unbalanced brackets in query".into()));
+        return Err(CypherError::ParseError(
+            "unbalanced brackets in query".into(),
+        ));
     }
     if boundaries.is_empty() {
         return Err(CypherError::ParseError(
@@ -565,7 +575,9 @@ fn parse_merge_clause(body: &str) -> SyntaxClauseContent<'_> {
     }
 
     let on_create_range = on_create_idx.map(|idx| {
-        let end = on_match_idx.filter(|next| *next > idx).unwrap_or(body.len());
+        let end = on_match_idx
+            .filter(|next| *next > idx)
+            .unwrap_or(body.len());
         idx + "ON CREATE SET".len()..end
     });
     let on_match_range = on_match_idx.map(|idx| idx + "ON MATCH SET".len()..body.len());
@@ -743,7 +755,10 @@ fn parse_node(inner: &str) -> SyntaxNode<'_> {
 
     let mut variable = None;
     let mut labels = Vec::new();
-    let mut parts = header.split(':').map(str::trim).filter(|part| !part.is_empty());
+    let mut parts = header
+        .split(':')
+        .map(str::trim)
+        .filter(|part| !part.is_empty());
     if let Some(first) = parts.next() {
         if is_identifier(first) {
             variable = Some(first);
@@ -818,15 +833,7 @@ fn parse_relationship(text: &str, start: usize) -> Option<(SyntaxRelationship<'_
     ))
 }
 
-fn parse_relationship_inner(
-    inner: &str,
-) -> (
-    Option<&str>,
-    Option<&str>,
-    Option<&str>,
-    Option<u32>,
-    Option<u32>,
-) {
+fn parse_relationship_inner(inner: &str) -> ParsedRelationshipInner<'_> {
     let inner = inner.trim();
     let raw_properties = extract_braced_section(inner);
     let header = if let Some(raw_props) = raw_properties {
@@ -861,7 +868,11 @@ fn parse_relationship_inner(
         if let Some(range_idx) = hop_text.find("..") {
             let min_text = hop_text[..range_idx].trim();
             let max_text = hop_text[range_idx + 2..].trim();
-            min_hops = min_text.parse().ok().or(Some(1)).filter(|_| !min_text.is_empty() || max_text.is_empty());
+            min_hops = min_text
+                .parse()
+                .ok()
+                .or(Some(1))
+                .filter(|_| !min_text.is_empty() || max_text.is_empty());
             max_hops = max_text.parse().ok();
         } else if let Ok(hops) = hop_text.parse() {
             min_hops = Some(hops);
@@ -873,6 +884,14 @@ fn parse_relationship_inner(
 
     (variable, rel_type, raw_properties, min_hops, max_hops)
 }
+
+type ParsedRelationshipInner<'a> = (
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<u32>,
+    Option<u32>,
+);
 
 fn classify_expression(text: &str) -> SyntaxExprRef<'_> {
     let raw_text = text.trim();
@@ -1132,7 +1151,8 @@ fn is_identifier(text: &str) -> bool {
 }
 
 fn is_quoted(text: &str) -> bool {
-    (text.starts_with('\'') && text.ends_with('\'')) || (text.starts_with('"') && text.ends_with('"'))
+    (text.starts_with('\'') && text.ends_with('\''))
+        || (text.starts_with('"') && text.ends_with('"'))
 }
 
 fn is_numeric(text: &str) -> bool {
@@ -1165,11 +1185,16 @@ pub(crate) fn parse_expression_text(text: &str) -> Result<Expression, CypherErro
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_expression_text, parse_syntax, SyntaxClauseContent, SyntaxClauseKind, SyntaxExprKind};
+    use super::{
+        parse_expression_text, parse_syntax, SyntaxClauseContent, SyntaxClauseKind, SyntaxExprKind,
+    };
 
     #[test]
     fn syntax_ir_splits_top_level_clauses() {
-        let syntax = parse_syntax("MATCH (n {name: 'RETURN'}) WHERE n.age > 1 RETURN n.name ORDER BY n.name").unwrap();
+        let syntax = parse_syntax(
+            "MATCH (n {name: 'RETURN'}) WHERE n.age > 1 RETURN n.name ORDER BY n.name",
+        )
+        .unwrap();
         assert_eq!(syntax.clauses.len(), 4);
         assert_eq!(syntax.clauses[0].kind, SyntaxClauseKind::Match);
         assert_eq!(syntax.clauses[1].kind, SyntaxClauseKind::Where);

@@ -39,6 +39,7 @@ message RemoteGraphNodeRequest {
   string target_addr = 2;
   string database = 3;
   string node_id = 4;
+  string read_fence = 5;
 }
 
 message RemoteGraphNodeResponse {
@@ -53,6 +54,7 @@ message RemoteGraphEdgesRequest {
   string node_id = 4;
   string rel_type = 5;
   bool has_rel_type = 6;
+  string read_fence = 7;
 }
 
 message RemoteGraphEdgesResponse {
@@ -64,6 +66,7 @@ message RemoteGraphNodesByLabelRequest {
   string target_addr = 2;
   string database = 3;
   string label = 4;
+  string read_fence = 5;
 }
 
 message RemoteGraphNodesByPropertyRequest {
@@ -73,6 +76,7 @@ message RemoteGraphNodesByPropertyRequest {
   string label = 4;
   string property = 5;
   bytes value_json = 6;
+  string read_fence = 7;
 }
 
 message RemoteGraphNodesResponse {
@@ -84,6 +88,7 @@ message RemoteGraphAccessMetadataRequest {
   string target_addr = 2;
   string database = 3;
   string entity_id = 4;
+  string read_fence = 5;
 }
 
 message RemoteGraphAccessMetadataResponse {
@@ -96,6 +101,7 @@ message RemoteRankedSearchRequest {
   string target_addr = 2;
   bytes placement_json = 3;
   bytes query_json = 4;
+  string read_fence = 5;
 }
 
 message RemoteRankedSearchResponse {
@@ -107,6 +113,7 @@ message RemoteHydrationRequest {
   string target_addr = 2;
   bytes placement_json = 3;
   bytes global_ids_json = 4;
+  string read_fence = 5;
 }
 
 message RemoteHydrationResponse {

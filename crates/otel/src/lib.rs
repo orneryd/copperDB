@@ -26,21 +26,11 @@ pub const DEFAULT_REDACT_KEYS: &[&str] = &[
     "credentials",
 ];
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ObservabilityConfig {
     pub metrics: MetricsConfig,
     pub tracing: TracingConfig,
     pub pprof: PprofConfig,
-}
-
-impl Default for ObservabilityConfig {
-    fn default() -> Self {
-        Self {
-            metrics: MetricsConfig::default(),
-            tracing: TracingConfig::default(),
-            pprof: PprofConfig::default(),
-        }
-    }
 }
 
 impl ObservabilityConfig {

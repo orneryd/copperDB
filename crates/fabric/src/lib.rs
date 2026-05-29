@@ -100,23 +100,12 @@ impl FabricSortKey {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct FabricRowMergeOptions {
     pub distinct: bool,
     pub order_by: Vec<FabricSortKey>,
     pub skip: usize,
     pub limit: Option<usize>,
-}
-
-impl Default for FabricRowMergeOptions {
-    fn default() -> Self {
-        Self {
-            distinct: false,
-            order_by: Vec::new(),
-            skip: 0,
-            limit: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

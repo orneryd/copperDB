@@ -13,7 +13,9 @@ impl StorageEngine {
             return Ok(Vec::new());
         }
 
-        self.load_edges_from_index_prefix(&edge_property_index_value_prefix(edge_type, property, value))
+        self.load_edges_from_index_prefix(&edge_property_index_value_prefix(
+            edge_type, property, value,
+        ))
     }
 
     pub fn get_edges_by_properties(
@@ -45,7 +47,8 @@ impl StorageEngine {
         }
 
         let prefix = edge_property_index_property_prefix(edge_type, property);
-        let Some((start, end)) = property_index_range_scan_bounds(&prefix, comparison, value) else {
+        let Some((start, end)) = property_index_range_scan_bounds(&prefix, comparison, value)
+        else {
             return Ok(Vec::new());
         };
         let mut out = Vec::new();
@@ -84,7 +87,9 @@ impl StorageEngine {
         value: &serde_json::Value,
         exact_values: &HashMap<String, serde_json::Value>,
     ) -> Result<Vec<EdgeRecord>, StorageError> {
-        let Some(range_property_index) = properties.iter().position(|property| property == range_property)
+        let Some(range_property_index) = properties
+            .iter()
+            .position(|property| property == range_property)
         else {
             return Ok(Vec::new());
         };
@@ -106,7 +111,8 @@ impl StorageEngine {
             range_property_index,
             exact_values,
         )?;
-        let Some((start, end)) = property_index_range_scan_bounds(&prefix, comparison, value) else {
+        let Some((start, end)) = property_index_range_scan_bounds(&prefix, comparison, value)
+        else {
             return Ok(Vec::new());
         };
         let mut out = Vec::new();
@@ -138,18 +144,24 @@ impl StorageEngine {
         Ok(out)
     }
 
-    pub(crate) fn index_edge_property_indexes(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
+    pub(crate) fn index_edge_property_indexes(
+        &self,
+        edge: &EdgeRecord,
+    ) -> Result<(), StorageError> {
         for index in self.relationship_property_index_definitions()? {
             if index.label == edge.edge_type {
                 if let Some(key) = relationship_property_index_key_for_edge(&index, edge) {
-                    self.indexes.insert(key.as_bytes(), &[])?;
+                    self.indexes.insert(key.as_bytes(), [])?;
                 }
             }
         }
         Ok(())
     }
 
-    pub(crate) fn unindex_edge_property_indexes(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
+    pub(crate) fn unindex_edge_property_indexes(
+        &self,
+        edge: &EdgeRecord,
+    ) -> Result<(), StorageError> {
         for index in self.relationship_property_index_definitions()? {
             if index.label == edge.edge_type {
                 if let Some(key) = relationship_property_index_key_for_edge(&index, edge) {
@@ -160,21 +172,33 @@ impl StorageEngine {
         Ok(())
     }
 
-    pub(crate) fn rebuild_relationship_property_index(&self, index: &IndexDefinition) -> Result<(), StorageError> {
+    pub(crate) fn rebuild_relationship_property_index(
+        &self,
+        index: &IndexDefinition,
+    ) -> Result<(), StorageError> {
         self.delete_relationship_property_index_entries(index)?;
         for edge in self.get_edges_by_type(&index.label)? {
             if let Some(key) = relationship_property_index_key_for_edge(index, &edge) {
-                self.indexes.insert(key.as_bytes(), &[])?;
+                self.indexes.insert(key.as_bytes(), [])?;
             }
         }
         Ok(())
     }
 
-    pub(crate) fn delete_relationship_property_index_entries(&self, index: &IndexDefinition) -> Result<(), StorageError> {
+    pub(crate) fn delete_relationship_property_index_entries(
+        &self,
+        index: &IndexDefinition,
+    ) -> Result<(), StorageError> {
         let keys = self
             .indexes
-            .scan_prefix(edge_property_index_definition_prefix(&index.label, &index.properties).as_bytes())
-            .map(|entry| entry.map(|(key, _)| key.to_vec()).map_err(StorageError::from))
+            .scan_prefix(
+                edge_property_index_definition_prefix(&index.label, &index.properties).as_bytes(),
+            )
+            .map(|entry| {
+                entry
+                    .map(|(key, _)| key.to_vec())
+                    .map_err(StorageError::from)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         for key in keys {
             self.indexes.remove(key)?;
@@ -182,14 +206,20 @@ impl StorageEngine {
         Ok(())
     }
 
-    fn has_relationship_property_index(&self, edge_type: &str, properties: &[String]) -> Result<bool, StorageError> {
+    fn has_relationship_property_index(
+        &self,
+        edge_type: &str,
+        properties: &[String],
+    ) -> Result<bool, StorageError> {
         Ok(self
             .relationship_property_index_definitions()?
             .iter()
             .any(|index| index.label == edge_type && index.properties == properties))
     }
 
-    fn relationship_property_index_definitions(&self) -> Result<Vec<IndexDefinition>, StorageError> {
+    fn relationship_property_index_definitions(
+        &self,
+    ) -> Result<Vec<IndexDefinition>, StorageError> {
         Ok(self
             .load_index_definitions()?
             .into_iter()
@@ -246,7 +276,11 @@ fn edge_property_index_key(
     value: &serde_json::Value,
     edge_id: &str,
 ) -> String {
-    format!("{}{}", edge_property_index_value_prefix(edge_type, property, value), edge_id)
+    format!(
+        "{}{}",
+        edge_property_index_value_prefix(edge_type, property, value),
+        edge_id
+    )
 }
 
 fn edge_property_index_definition_prefix(edge_type: &str, properties: &[String]) -> String {
@@ -294,7 +328,10 @@ fn edge_property_index_lookup_prefix(
     ))
 }
 
-fn relationship_property_index_key_for_edge(index: &IndexDefinition, edge: &EdgeRecord) -> Option<String> {
+fn relationship_property_index_key_for_edge(
+    index: &IndexDefinition,
+    edge: &EdgeRecord,
+) -> Option<String> {
     let value_refs = index
         .properties
         .iter()
@@ -384,10 +421,7 @@ fn edge_property_matches_range(
         })
 }
 
-fn compare_index_values(
-    left: &serde_json::Value,
-    right: &serde_json::Value,
-) -> Option<Ordering> {
+fn compare_index_values(left: &serde_json::Value, right: &serde_json::Value) -> Option<Ordering> {
     match (left, right) {
         (serde_json::Value::Number(left), serde_json::Value::Number(right)) => {
             let left = left.as_f64()?;

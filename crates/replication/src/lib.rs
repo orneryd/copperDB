@@ -7,9 +7,7 @@
 //! - a transport abstraction with an in-memory implementation for tests
 
 use async_trait::async_trait;
-use copperdb_storage::{
-    EdgeRecord, KnowledgePolicyAccessMetadata, StorageEngine, StorageError,
-};
+use copperdb_storage::{EdgeRecord, KnowledgePolicyAccessMetadata, StorageEngine, StorageError};
 use copperdb_topology::{
     ConsistencyLevel, DistributedReadPlan, DistributedWriteMode, DistributedWritePlan,
     LogicalTransactionId, PlacementKey, TopologyError, TopologyRegistry,
@@ -412,7 +410,10 @@ impl ReplicationStorage for StorageEngineAdapter {
                     .put_node(&Self::cypher_key(database, query, params), &payload)
                     .map_err(Into::into)
             }
-            Command::PutKnowledgePolicyAccessMetadata { entity_id, metadata } => engine
+            Command::PutKnowledgePolicyAccessMetadata {
+                entity_id,
+                metadata,
+            } => engine
                 .put_knowledge_policy_access_metadata(entity_id, metadata)
                 .map_err(Into::into),
         }
@@ -541,23 +542,27 @@ pub trait ReplicaTransport: Send + Sync {
         &self,
         target: &str,
         node_id: &str,
+        read_fence: Option<LogicalTransactionId>,
     ) -> Result<Option<Vec<u8>>, ReplicationError>;
     async fn graph_edges_from_node(
         &self,
         target: &str,
         node_id: &str,
         rel_type: Option<&str>,
+        read_fence: Option<LogicalTransactionId>,
     ) -> Result<Vec<EdgeRecord>, ReplicationError>;
     async fn graph_edges_to_node(
         &self,
         target: &str,
         node_id: &str,
         rel_type: Option<&str>,
+        read_fence: Option<LogicalTransactionId>,
     ) -> Result<Vec<EdgeRecord>, ReplicationError>;
     async fn graph_nodes_by_label(
         &self,
         target: &str,
         label: &str,
+        read_fence: Option<LogicalTransactionId>,
     ) -> Result<Vec<Vec<u8>>, ReplicationError>;
     async fn graph_nodes_by_property(
         &self,
@@ -565,11 +570,13 @@ pub trait ReplicaTransport: Send + Sync {
         label: &str,
         property: &str,
         value: &Value,
+        read_fence: Option<LogicalTransactionId>,
     ) -> Result<Vec<Vec<u8>>, ReplicationError>;
     async fn graph_access_metadata(
         &self,
         target: &str,
         entity_id: &str,
+        read_fence: Option<LogicalTransactionId>,
     ) -> Result<Option<KnowledgePolicyAccessMetadata>, ReplicationError>;
 }
 
@@ -618,6 +625,7 @@ impl ReplicaTransport for InMemoryReplicaTransport {
         &self,
         target: &str,
         node_id: &str,
+        _read_fence: Option<LogicalTransactionId>,
     ) -> Result<Option<Vec<u8>>, ReplicationError> {
         self.lookup(target)?.graph_node(node_id)
     }
@@ -627,6 +635,7 @@ impl ReplicaTransport for InMemoryReplicaTransport {
         target: &str,
         node_id: &str,
         rel_type: Option<&str>,
+        _read_fence: Option<LogicalTransactionId>,
     ) -> Result<Vec<EdgeRecord>, ReplicationError> {
         self.lookup(target)?
             .graph_edges_from_node(node_id, rel_type)
@@ -637,6 +646,7 @@ impl ReplicaTransport for InMemoryReplicaTransport {
         target: &str,
         node_id: &str,
         rel_type: Option<&str>,
+        _read_fence: Option<LogicalTransactionId>,
     ) -> Result<Vec<EdgeRecord>, ReplicationError> {
         self.lookup(target)?.graph_edges_to_node(node_id, rel_type)
     }
@@ -645,6 +655,7 @@ impl ReplicaTransport for InMemoryReplicaTransport {
         &self,
         target: &str,
         label: &str,
+        _read_fence: Option<LogicalTransactionId>,
     ) -> Result<Vec<Vec<u8>>, ReplicationError> {
         self.lookup(target)?.graph_nodes_by_label(label)
     }
@@ -655,6 +666,7 @@ impl ReplicaTransport for InMemoryReplicaTransport {
         label: &str,
         property: &str,
         value: &Value,
+        _read_fence: Option<LogicalTransactionId>,
     ) -> Result<Vec<Vec<u8>>, ReplicationError> {
         self.lookup(target)?
             .graph_nodes_by_property(label, property, value)
@@ -664,6 +676,7 @@ impl ReplicaTransport for InMemoryReplicaTransport {
         &self,
         target: &str,
         entity_id: &str,
+        _read_fence: Option<LogicalTransactionId>,
     ) -> Result<Option<KnowledgePolicyAccessMetadata>, ReplicationError> {
         self.lookup(target)?.graph_access_metadata(entity_id)
     }
@@ -1846,8 +1859,7 @@ impl ReplicationRpc for QuorumReplicator {
 
         if !request.entries.is_empty() {
             let mut log = self.log.write().unwrap();
-            let mut next_slot = request.prev_log_index as usize;
-            for entry in request.entries {
+            for (next_slot, entry) in (request.prev_log_index as usize..).zip(request.entries) {
                 if let Some(existing) = log.get(next_slot) {
                     if existing.term != entry.term || existing.payload != entry.payload {
                         log.truncate(next_slot);
@@ -1856,7 +1868,6 @@ impl ReplicationRpc for QuorumReplicator {
                 } else {
                     log.push(entry);
                 }
-                next_slot += 1;
             }
         }
 

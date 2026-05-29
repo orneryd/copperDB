@@ -23,7 +23,8 @@ impl StorageEngine {
         }
 
         let prefix = node_property_index_property_prefix(label, property);
-        let Some((start, end)) = property_index_range_scan_bounds(&prefix, comparison, value) else {
+        let Some((start, end)) = property_index_range_scan_bounds(&prefix, comparison, value)
+        else {
             return Ok(Vec::new());
         };
         let mut out = Vec::new();
@@ -62,7 +63,9 @@ impl StorageEngine {
         value: &serde_json::Value,
         exact_values: &HashMap<String, serde_json::Value>,
     ) -> Result<Vec<NodeRecord>, StorageError> {
-        let Some(range_property_index) = properties.iter().position(|property| property == range_property)
+        let Some(range_property_index) = properties
+            .iter()
+            .position(|property| property == range_property)
         else {
             return Ok(Vec::new());
         };
@@ -78,8 +81,14 @@ impl StorageEngine {
             return Ok(Vec::new());
         }
 
-        let prefix = node_property_index_range_lookup_prefix(label, properties, range_property_index, exact_values)?;
-        let Some((start, end)) = property_index_range_scan_bounds(&prefix, comparison, value) else {
+        let prefix = node_property_index_range_lookup_prefix(
+            label,
+            properties,
+            range_property_index,
+            exact_values,
+        )?;
+        let Some((start, end)) = property_index_range_scan_bounds(&prefix, comparison, value)
+        else {
             return Ok(Vec::new());
         };
         let mut out = Vec::new();
@@ -181,7 +190,9 @@ fn compare_index_values(left: &serde_json::Value, right: &serde_json::Value) -> 
             let right = right.as_f64()?;
             left.partial_cmp(&right)
         }
-        (serde_json::Value::String(left), serde_json::Value::String(right)) => Some(left.cmp(right)),
+        (serde_json::Value::String(left), serde_json::Value::String(right)) => {
+            Some(left.cmp(right))
+        }
         _ => None,
     }
 }

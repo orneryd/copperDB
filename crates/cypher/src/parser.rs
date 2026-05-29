@@ -140,7 +140,7 @@ impl Parser {
     }
 
     #[doc(hidden)]
-    pub fn validate_tokenized<'a>(&self, tokens: Vec<&'a str>) -> Result<(), CypherError> {
+    pub fn validate_tokenized(&self, tokens: Vec<&str>) -> Result<(), CypherError> {
         if tokens.is_empty() {
             return Err(CypherError::EmptyQuery);
         }
@@ -150,7 +150,7 @@ impl Parser {
     }
 
     #[doc(hidden)]
-    pub fn parse_tokenized<'a>(&self, tokens: Vec<&'a str>) -> Result<Query, CypherError> {
+    pub fn parse_tokenized(&self, tokens: Vec<&str>) -> Result<Query, CypherError> {
         if tokens.is_empty() {
             return Err(CypherError::EmptyQuery);
         }

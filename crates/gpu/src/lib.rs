@@ -121,18 +121,14 @@ impl GpuAccelerator {
             }
         }
 
-        for backend in [
+        [
             Backend::OpenCl,
             Backend::Cuda,
             Backend::Vulkan,
             Backend::Wgpu,
-        ] {
-            if Self::detect_backend_runtime(backend).is_some() {
-                return Some(backend);
-            }
-        }
-
-        None
+        ]
+        .into_iter()
+        .find(|&backend| Self::detect_backend_runtime(backend).is_some())
     }
 
     fn detect_backend_runtime(backend: Backend) -> Option<String> {

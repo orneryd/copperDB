@@ -30,9 +30,7 @@ use copperdb_nornicgrpc::{
     TonicRemoteReplicaClient,
 };
 use copperdb_otel::Telemetry;
-use copperdb_replication::{
-    Command, ReplicaTransport, ReplicationStorage, StorageEngineAdapter,
-};
+use copperdb_replication::{Command, ReplicaTransport, ReplicationStorage, StorageEngineAdapter};
 use copperdb_retention::{
     ErasureRequest, LegalHold, Manager as RetentionManager, Policy, RetentionError,
     RetentionSweepConfig,
@@ -46,7 +44,10 @@ use copperdb_security::{
     RequestTarget, RequestViolation, SecurityConfig, SecurityMiddleware, SecurityRequest,
 };
 use copperdb_storage::StorageEngine;
-use copperdb_topology::{ConsistencyLevel, FabricDatabase, FabricGlobalId, PlacementKey};
+use copperdb_topology::{
+    ConsistencyLevel, FabricDatabase, FabricGlobalId, LogicalTransactionId, PlacementKey,
+};
+use copperdb_txsession::{BookmarkMode, SessionConfig, TransactionMode};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -139,6 +140,7 @@ impl AuthState {
         }
     }
 
+    #[allow(clippy::arc_with_non_send_sync)]
     fn open_authenticator(&self) -> Result<Authenticator, AuthError> {
         let storage = Arc::new(StorageEngine::open(&self.auth_storage_path)?);
         Authenticator::new(self.auth_config(), storage)
@@ -266,6 +268,8 @@ impl RemoteReplicaClient for LocalEngineReplicaHandler {
             &request.database,
             false,
         )?;
+        observe_remote_read_fence(&self.state, &request.database, request.read_fence)
+            .map_err(GrpcError::Transport)?;
         self.open_replication_storage(&request.database)?
             .graph_node(&request.node_id)
             .map_err(|error| GrpcError::Transport(error.to_string()))
@@ -281,6 +285,8 @@ impl RemoteReplicaClient for LocalEngineReplicaHandler {
             &request.database,
             false,
         )?;
+        observe_remote_read_fence(&self.state, &request.database, request.read_fence)
+            .map_err(GrpcError::Transport)?;
         self.open_replication_storage(&request.database)?
             .graph_edges_from_node(&request.node_id, request.rel_type.as_deref())
             .map_err(|error| GrpcError::Transport(error.to_string()))
@@ -296,6 +302,8 @@ impl RemoteReplicaClient for LocalEngineReplicaHandler {
             &request.database,
             false,
         )?;
+        observe_remote_read_fence(&self.state, &request.database, request.read_fence)
+            .map_err(GrpcError::Transport)?;
         self.open_replication_storage(&request.database)?
             .graph_edges_to_node(&request.node_id, request.rel_type.as_deref())
             .map_err(|error| GrpcError::Transport(error.to_string()))
@@ -311,6 +319,8 @@ impl RemoteReplicaClient for LocalEngineReplicaHandler {
             &request.database,
             false,
         )?;
+        observe_remote_read_fence(&self.state, &request.database, request.read_fence)
+            .map_err(GrpcError::Transport)?;
         self.open_replication_storage(&request.database)?
             .graph_nodes_by_label(&request.label)
             .map_err(|error| GrpcError::Transport(error.to_string()))
@@ -326,6 +336,8 @@ impl RemoteReplicaClient for LocalEngineReplicaHandler {
             &request.database,
             false,
         )?;
+        observe_remote_read_fence(&self.state, &request.database, request.read_fence)
+            .map_err(GrpcError::Transport)?;
         self.open_replication_storage(&request.database)?
             .graph_nodes_by_property(&request.label, &request.property, &request.value)
             .map_err(|error| GrpcError::Transport(error.to_string()))
@@ -341,6 +353,8 @@ impl RemoteReplicaClient for LocalEngineReplicaHandler {
             &request.database,
             false,
         )?;
+        observe_remote_read_fence(&self.state, &request.database, request.read_fence)
+            .map_err(GrpcError::Transport)?;
         self.open_replication_storage(&request.database)?
             .graph_access_metadata(&request.entity_id)
             .map_err(|error| GrpcError::Transport(error.to_string()))
@@ -373,9 +387,9 @@ fn forwarded_caller_claims(
         .map_err(|error| GrpcError::Unauthenticated(error.to_string()))?;
     ensure_database_access(state, &claims, database, write).map_err(|status| match status {
         StatusCode::UNAUTHORIZED => GrpcError::Unauthenticated("unauthorized caller".into()),
-        StatusCode::FORBIDDEN => GrpcError::PermissionDenied(format!(
-            "caller is not authorized for database {database}"
-        )),
+        StatusCode::FORBIDDEN => {
+            GrpcError::PermissionDenied(format!("caller is not authorized for database {database}"))
+        }
         other => GrpcError::Transport(format!("unexpected authorization status {other}")),
     })?;
     Ok(())
@@ -393,7 +407,11 @@ impl GrpcAuthValidator for UnifiedClusterAuthValidator {
             .map_err(|error| GrpcError::Transport(error.to_string()))?
             .validate_token(token)
             .map_err(|error| GrpcError::Unauthenticated(error.to_string()))?;
-        if claims.roles.iter().any(|role| role.eq_ignore_ascii_case("admin")) {
+        if claims
+            .roles
+            .iter()
+            .any(|role| role.eq_ignore_ascii_case("admin"))
+        {
             return Ok(());
         }
         Err(GrpcError::PermissionDenied(
@@ -414,8 +432,10 @@ impl RemoteRankedSearchClient for LocalEngineRankedSearchHandler {
             &request.placement.database,
             false,
         )?;
-        let engine = open_engine(&self.state, &request.placement.database)
+        observe_remote_read_fence(&self.state, &request.placement.database, request.read_fence)
             .map_err(GrpcError::Transport)?;
+        let engine =
+            open_engine(&self.state, &request.placement.database).map_err(GrpcError::Transport)?;
         engine
             .search_fabric_ranked_batch_locally(&request.placement, &request.query)
             .map_err(|error| GrpcError::Transport(error.to_string()))
@@ -440,8 +460,10 @@ impl RemoteHydrationClient for LocalEngineHydrationHandler {
             &request.placement.database,
             false,
         )?;
-        let engine = open_engine(&self.state, &request.placement.database)
+        observe_remote_read_fence(&self.state, &request.placement.database, request.read_fence)
             .map_err(GrpcError::Transport)?;
+        let engine =
+            open_engine(&self.state, &request.placement.database).map_err(GrpcError::Transport)?;
         engine
             .hydrate_fabric_entities_locally(&request.global_ids)
             .map_err(|error| GrpcError::Transport(error.to_string()))
@@ -481,7 +503,7 @@ impl Default for AppState {
         let retention = db_manager
             .get("copperdb")
             .and_then(|database| RetentionManager::open(database.storage_path).ok())
-            .unwrap_or_else(RetentionManager::new);
+            .unwrap_or_default();
         Self {
             db_name: "copperdb".into(),
             runtime_config: Arc::new(RuntimeConfig::default()),
@@ -616,6 +638,7 @@ async fn security_validation_middleware(
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn security_request_from_http(request: &Request<Body>) -> Result<SecurityRequest, Response> {
     let mut security_request = SecurityRequest::new();
     for (name, value) in request.headers() {
@@ -667,7 +690,7 @@ fn host_for_request(headers: &HeaderMap, _state: &AppState) -> String {
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .map(|host| host.to_string())
-        .unwrap_or_else(|| format!("localhost:7474"))
+        .unwrap_or_else(|| "localhost:7474".to_string())
 }
 
 fn bolt_host(host: &str) -> String {
@@ -1081,6 +1104,8 @@ struct Neo4jStatement {
 #[derive(Deserialize)]
 struct Neo4jCommitRequest {
     statements: Vec<Neo4jStatement>,
+    #[serde(default)]
+    bookmarks: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -1176,7 +1201,10 @@ async fn update_database_config_handler(
         return status.into_response();
     }
 
-    match state.db_manager.set_config_overrides(&database, request.overrides) {
+    match state
+        .db_manager
+        .set_config_overrides(&database, request.overrides)
+    {
         Ok(()) => Json(serde_json::json!({
             "database": database,
             "overrides": state.db_manager.get_config_overrides(&database),
@@ -1250,6 +1278,23 @@ async fn neo4j_tx_commit_handler(
         .get("x-copperdb-region")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+    let distributed_read_fence = if distributed {
+        match derive_distributed_read_fence(&state, &database, &request.bookmarks) {
+            Ok(read_fence) => read_fence,
+            Err(error) => {
+                return Json(Neo4jCommitResponse {
+                    results: Vec::new(),
+                    errors: vec![Neo4jError {
+                        code: "Neo.ClientError.Statement.ExecutionFailed".into(),
+                        message: error,
+                    }],
+                })
+                .into_response();
+            }
+        }
+    } else {
+        None
+    };
 
     let mut results = Vec::new();
     let mut errors = Vec::new();
@@ -1269,6 +1314,7 @@ async fn neo4j_tx_commit_handler(
                     statement.parameters.unwrap_or_default(),
                     roles,
                     true,
+                    distributed_read_fence,
                     caller_auth_token,
                     request_region,
                 )
@@ -1284,6 +1330,7 @@ async fn neo4j_tx_commit_handler(
                 statement.parameters.unwrap_or_default(),
                 roles.clone(),
                 false,
+                distributed_read_fence,
                 caller_auth_token.clone(),
                 request_region.clone(),
             )
@@ -1300,6 +1347,7 @@ async fn neo4j_tx_commit_handler(
     Json(Neo4jCommitResponse { results, errors }).into_response()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_statement(
     state: Arc<AppState>,
     database: String,
@@ -1307,6 +1355,7 @@ fn execute_statement(
     parameters: HashMap<String, serde_json::Value>,
     roles: Vec<String>,
     distributed: bool,
+    distributed_read_fence: Option<LogicalTransactionId>,
     caller_auth_token: Option<String>,
     request_region: Option<String>,
 ) -> Result<Neo4jResult, String> {
@@ -1354,13 +1403,14 @@ fn execute_statement(
             .map_err(|error| error.to_string())?
             .block_on(async {
                 engine
-                    .execute_distributed_as(
+                    .execute_distributed_with_read_fence_as(
                         normalized,
                         parameters,
                         &roles,
                         &placement,
                         consistency,
                         request_region,
+                        distributed_read_fence,
                         transport,
                     )
                     .await
@@ -1373,6 +1423,45 @@ fn execute_statement(
             .map_err(|error| error.to_string())?
     };
     Ok(convert_engine_result(result))
+}
+
+fn derive_distributed_read_fence(
+    state: &AppState,
+    database: &str,
+    bookmarks: &[String],
+) -> Result<Option<LogicalTransactionId>, String> {
+    let engine = open_engine(state, database)?;
+    let config = SessionConfig {
+        mode: TransactionMode::Read,
+        database: Some(database.to_string()),
+        bookmarks: bookmarks.to_vec(),
+        bookmark_mode: if bookmarks.is_empty() {
+            BookmarkMode::None
+        } else {
+            BookmarkMode::Required
+        },
+        ..SessionConfig::default()
+    };
+    let transaction_id = engine
+        .begin_transaction(&config)
+        .map_err(|error| error.to_string())?;
+    let read_fence = engine
+        .transaction_read_fence(&transaction_id)
+        .map_err(|error| error.to_string())?;
+    engine.tx_manager().remove(&transaction_id);
+    Ok(Some(read_fence))
+}
+
+fn observe_remote_read_fence(
+    state: &AppState,
+    database: &str,
+    read_fence: Option<LogicalTransactionId>,
+) -> Result<Option<LogicalTransactionId>, String> {
+    let Some(read_fence) = read_fence else {
+        return Ok(None);
+    };
+
+    derive_distributed_read_fence(state, database, &[read_fence.stable_id()])
 }
 
 fn convert_engine_result(result: copperdb_engine::QueryResult) -> Neo4jResult {
@@ -1488,8 +1577,7 @@ fn build_local_replica_transport(
     if !write {
         if state.auth.security_enabled && caller_auth_token.is_none() {
             return Err(
-                "distributed server reads require a forwarded caller authorization token"
-                    .into(),
+                "distributed server reads require a forwarded caller authorization token".into(),
             );
         }
         if let Some(token) = caller_auth_token {
@@ -1503,8 +1591,9 @@ fn build_local_replica_transport(
         client = client.with_tls_domain_name(domain_name);
     }
     if let Some(ca_cert_path) = state.runtime_config.server.grpc_tls_ca_cert.as_deref() {
-        let ca_cert = std::fs::read_to_string(ca_cert_path)
-            .map_err(|error| format!("failed to read gRPC TLS CA certificate {ca_cert_path}: {error}"))?;
+        let ca_cert = std::fs::read_to_string(ca_cert_path).map_err(|error| {
+            format!("failed to read gRPC TLS CA certificate {ca_cert_path}: {error}")
+        })?;
         client = client.with_tls_ca_certificate_pem(ca_cert);
     }
     if let (Some(client_cert_path), Some(client_key_path)) = (
@@ -1663,6 +1752,8 @@ struct FabricRankedSearchRequest {
     config: RrfConfig,
     #[serde(default)]
     policy: RrfSearchPolicy,
+    #[serde(default)]
+    bookmarks: Vec<String>,
     hydration_consistency: Option<String>,
 }
 
@@ -1804,6 +1895,7 @@ async fn plan_fabric_database(
     .into_response()
 }
 
+#[allow(clippy::type_complexity)]
 fn build_fabric_ranked_search_context(
     state: &AppState,
     engine: &GraphEngine,
@@ -1856,8 +1948,9 @@ fn build_fabric_ranked_search_context(
         ranked_client = ranked_client.with_tls_domain_name(domain_name);
     }
     if let Some(ca_cert_path) = state.runtime_config.server.grpc_tls_ca_cert.as_deref() {
-        let ca_cert = std::fs::read_to_string(ca_cert_path)
-            .map_err(|error| format!("failed to read gRPC TLS CA certificate {ca_cert_path}: {error}"))?;
+        let ca_cert = std::fs::read_to_string(ca_cert_path).map_err(|error| {
+            format!("failed to read gRPC TLS CA certificate {ca_cert_path}: {error}")
+        })?;
         ranked_client = ranked_client.with_tls_ca_certificate_pem(ca_cert);
     }
     if let (Some(client_cert_path), Some(client_key_path)) = (
@@ -1883,8 +1976,9 @@ fn build_fabric_ranked_search_context(
         hydration_client = hydration_client.with_tls_domain_name(domain_name);
     }
     if let Some(ca_cert_path) = state.runtime_config.server.grpc_tls_ca_cert.as_deref() {
-        let ca_cert = std::fs::read_to_string(ca_cert_path)
-            .map_err(|error| format!("failed to read gRPC TLS CA certificate {ca_cert_path}: {error}"))?;
+        let ca_cert = std::fs::read_to_string(ca_cert_path).map_err(|error| {
+            format!("failed to read gRPC TLS CA certificate {ca_cert_path}: {error}")
+        })?;
         hydration_client = hydration_client.with_tls_ca_certificate_pem(ca_cert);
     }
     if let (Some(client_cert_path), Some(client_key_path)) = (
@@ -1900,16 +1994,12 @@ fn build_fabric_ranked_search_context(
         hydration_client = hydration_client.with_tls_identity_pem(client_cert, client_key);
     }
 
-    let ranked_transport: Arc<dyn RankedSearchTransport> =
-        Arc::new(NornicGrpcRankedSearchTransport::new(
-            search_endpoints,
-            Arc::new(ranked_client),
-        ));
-    let hydration_transport: Arc<dyn HydrationTransport> =
-        Arc::new(NornicGrpcHydrationTransport::new(
-            hydration_endpoints,
-            Arc::new(hydration_client),
-        ));
+    let ranked_transport: Arc<dyn RankedSearchTransport> = Arc::new(
+        NornicGrpcRankedSearchTransport::new(search_endpoints, Arc::new(ranked_client)),
+    );
+    let hydration_transport: Arc<dyn HydrationTransport> = Arc::new(
+        NornicGrpcHydrationTransport::new(hydration_endpoints, Arc::new(hydration_client)),
+    );
     Ok((
         search_plans,
         hydration_coordinators,
@@ -1921,6 +2011,7 @@ fn build_fabric_ranked_search_context(
 fn build_fabric_hydration_requests(
     merged: &copperdb_search::RrfSearchOutcome,
     hydration_coordinators: &HashMap<String, String>,
+    read_fence: Option<LogicalTransactionId>,
 ) -> Result<Vec<FabricHydrationRequest>, String> {
     let mut grouped: HashMap<String, (PlacementKey, Vec<FabricGlobalId>)> = HashMap::new();
     for hit in &merged.results {
@@ -1942,11 +2033,13 @@ fn build_fabric_hydration_requests(
             node_id,
             placement,
             global_ids,
+            read_fence,
         });
     }
     Ok(requests)
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_fabric_ranked_search_path(path: &str) -> Result<(String, String), Response> {
     let segments = path
         .trim_matches('/')
@@ -1994,14 +2087,8 @@ async fn execute_fabric_ranked_search_admin_service(
                 .into_response();
         }
     };
-    execute_fabric_ranked_search_admin_impl(
-        state,
-        tenant,
-        database,
-        request,
-        caller_auth_token,
-    )
-    .await
+    execute_fabric_ranked_search_admin_impl(state, tenant, database, request, caller_auth_token)
+        .await
 }
 
 async fn execute_fabric_ranked_search_admin_impl(
@@ -2011,6 +2098,16 @@ async fn execute_fabric_ranked_search_admin_impl(
     request: FabricRankedSearchRequest,
     caller_auth_token: Option<String>,
 ) -> Response {
+    let read_fence = match derive_distributed_read_fence(&state, &database, &request.bookmarks) {
+        Ok(read_fence) => read_fence,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+    };
     let hydration_consistency = match parse_consistency_level(
         request.hydration_consistency.as_deref(),
         ConsistencyLevel::One,
@@ -2094,6 +2191,7 @@ async fn execute_fabric_ranked_search_admin_impl(
     let collected = match collect_planned_fabric_ranked_batches(
         search_plans.clone(),
         request.query,
+        read_fence,
         ranked_transport,
     )
     .await
@@ -2108,17 +2206,17 @@ async fn execute_fabric_ranked_search_admin_impl(
         }
     };
     let merged = merge_rrf_search_batches(collected.batches.clone(), request.config);
-    let hydration_requests = match build_fabric_hydration_requests(&merged, &hydration_coordinators)
-    {
-        Ok(requests) => requests,
-        Err(error) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": error})),
-            )
-                .into_response();
-        }
-    };
+    let hydration_requests =
+        match build_fabric_hydration_requests(&merged, &hydration_coordinators, read_fence) {
+            Ok(requests) => requests,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": error})),
+                )
+                    .into_response();
+            }
+        };
     let hydration =
         match collect_fabric_hydration_records(hydration_requests, hydration_transport).await {
             Ok(hydration) => hydration,
@@ -2430,7 +2528,6 @@ async fn retention_status(State(state): State<Arc<AppState>>, headers: HeaderMap
     }))
     .into_response()
 }
-
 
 #[cfg(test)]
 mod tests;

@@ -3,24 +3,24 @@
 //! Executes Cypher ASTs from `copperdb-cypher` against the storage engine.
 
 use copperdb_cypher::{
-    Clause, ConstraintKind, EdgeDirection, EdgePattern, Expression, NodePattern, Pattern,
-    PatternInfo, PipelineClause, PipelineClauseKind, PropertyEntry, Query, QueryPattern,
-    RemoveItem, ReturnItem, SetItem, ShapeKind, ShapeMatch, ShapeValue, LiteralValue,
+    hot_path_trace::{HotPathTrace, HotPathTraceState},
+    Clause, ConstraintKind, EdgeDirection, EdgePattern, Expression, LiteralValue, NodePattern,
+    Pattern, PatternInfo, PipelineClause, PipelineClauseKind, PropertyEntry, Query, QueryPattern,
+    RemoveItem, ReturnItem, SetItem, ShapeKind, ShapeMatch, ShapeValue,
 };
 use copperdb_filter::{eval_expression, eval_predicate};
 use copperdb_indexing::{CatalogRangeIndexComparison, IndexCatalog, IndexError};
 use copperdb_knowledgepolicy::{
-    access_metadata_after_policy_access,
-    build_binding_table, build_bundles_by_name, build_decay_bindings,
-    build_promotion_policies_by_name, build_promotion_profiles_by_name, merge_access_metadata,
-    score_binding, AccessFlusher, AccessMutationBuffer, CompiledBinding,
+    access_metadata_after_policy_access, build_binding_table, build_bundles_by_name,
+    build_decay_bindings, build_promotion_policies_by_name, build_promotion_profiles_by_name,
+    merge_access_metadata, score_binding, AccessFlusher, AccessMutationBuffer, CompiledBinding,
     PromotionProfileDef, Resolver, ScoreFromMode,
 };
 use copperdb_storage::{
     Constraint, ConstraintEntityType, ConstraintType, DecayProfileBindingSchema,
     DecayProfileSchema, EdgeRecord, KnowledgePolicyAccessMetadata, NodeRecord,
-    PromotionOnAccessMutationKindSchema, PromotionOnAccessMutationSchema,
-    PromotionPolicySchema, PromotionProfileSchema, PromotionWhenClauseSchema, StorageEngine,
+    PromotionOnAccessMutationKindSchema, PromotionOnAccessMutationSchema, PromotionPolicySchema,
+    PromotionProfileSchema, PromotionWhenClauseSchema, StorageEngine,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -132,7 +132,9 @@ impl KnowledgePolicyInspection {
         );
         row.insert(
             "targetEdgeType".to_string(),
-            self.target_edge_type.map(Value::String).unwrap_or(Value::Null),
+            self.target_edge_type
+                .map(Value::String)
+                .unwrap_or(Value::Null),
         );
         row.insert(
             "decayBinding".to_string(),
@@ -140,7 +142,9 @@ impl KnowledgePolicyInspection {
         );
         row.insert(
             "promotionPolicy".to_string(),
-            self.promotion_policy.map(Value::String).unwrap_or(Value::Null),
+            self.promotion_policy
+                .map(Value::String)
+                .unwrap_or(Value::Null),
         );
         row.insert(
             "matchedPromotionProfile".to_string(),
@@ -195,6 +199,7 @@ pub struct EvalEngine {
     /// to prevent stale entries from masking newly created or deleted nodes.
     node_lookup_cache: Arc<Mutex<HashMap<String, Value>>>,
     access_flusher: Arc<AccessFlusher>,
+    hot_path_trace: Arc<HotPathTraceState>,
 }
 
 mod eval_engine;
@@ -259,6 +264,7 @@ fn now_unix_ms() -> i64 {
         .unwrap_or(0)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn binding_visible_under_anchor(
     _engine: &EvalEngine,
     binding: &CompiledBinding,
@@ -285,22 +291,22 @@ fn binding_visible_under_anchor(
         return Ok(true);
     };
 
-    let matched_promotion = match_promotion_profile(
-        binding,
-        properties,
-        access_metadata.as_ref(),
-        params,
-    )
-    .map_err(|error| {
-        EvalError::FilterError(format!(
-            "promotion predicate evaluation failed for {entity_id}: {error}"
-        ))
-    })?;
+    let matched_promotion =
+        match_promotion_profile(binding, properties, access_metadata.as_ref(), params).map_err(
+            |error| {
+                EvalError::FilterError(format!(
+                    "promotion predicate evaluation failed for {entity_id}: {error}"
+                ))
+            },
+        )?;
 
-    Ok(
-        !score_binding(binding, Some(anchor_unix_ms), now_unix_ms(), matched_promotion.as_ref())
-            .suppressed,
+    Ok(!score_binding(
+        binding,
+        Some(anchor_unix_ms),
+        now_unix_ms(),
+        matched_promotion.as_ref(),
     )
+    .suppressed)
 }
 
 fn binding_anchor_unix_ms(
@@ -335,8 +341,10 @@ fn match_promotion_profile(
     access_metadata: Option<&KnowledgePolicyAccessMetadata>,
     params: &HashMap<String, Value>,
 ) -> Result<Option<PromotionProfileDef>, copperdb_filter::FilterError> {
-    Ok(matched_promotion_rule(binding, properties, access_metadata, params)?
-        .map(|rule| rule.profile))
+    Ok(
+        matched_promotion_rule(binding, properties, access_metadata, params)?
+            .map(|rule| rule.profile),
+    )
 }
 
 fn matched_promotion_rule(
@@ -370,7 +378,11 @@ fn promotion_predicate_row(
     }
     object.insert(
         "accessCount".to_string(),
-        Value::from(access_metadata.map(|metadata| metadata.access_count).unwrap_or(0)),
+        Value::from(
+            access_metadata
+                .map(|metadata| metadata.access_count)
+                .unwrap_or(0),
+        ),
     );
     object.insert(
         "lastAccessedAt".to_string(),
@@ -412,9 +424,9 @@ fn collect_expression_variables(expression: &Expression, variables: &mut HashSet
                 collect_expression_variables(&entry.value, variables);
             }
         }
-        Expression::Not(inner)
-        | Expression::IsNull(inner)
-        | Expression::IsNotNull(inner) => collect_expression_variables(inner, variables),
+        Expression::Not(inner) | Expression::IsNull(inner) | Expression::IsNotNull(inner) => {
+            collect_expression_variables(inner, variables)
+        }
         Expression::Literal(_) | Expression::Parameter(_) => {}
     }
 }
@@ -522,9 +534,8 @@ fn node_record_to_props(node: &NodeRecord) -> HashMap<String, Value> {
 }
 
 fn node_record_from_props(props: &HashMap<String, Value>) -> Result<NodeRecord, EvalError> {
-    let id = node_id(props).ok_or_else(|| {
-        EvalError::ExecutionError("node is missing _id metadata".to_string())
-    })?;
+    let id = node_id(props)
+        .ok_or_else(|| EvalError::ExecutionError("node is missing _id metadata".to_string()))?;
     let labels = props
         .get("_labels")
         .and_then(Value::as_array)
@@ -532,7 +543,9 @@ fn node_record_from_props(props: &HashMap<String, Value>) -> Result<NodeRecord, 
         .iter()
         .map(|label| {
             label.as_str().map(str::to_string).ok_or_else(|| {
-                EvalError::ExecutionError("node _labels metadata must be a string array".to_string())
+                EvalError::ExecutionError(
+                    "node _labels metadata must be a string array".to_string(),
+                )
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -553,28 +566,22 @@ fn node_record_from_props(props: &HashMap<String, Value>) -> Result<NodeRecord, 
 }
 
 fn edge_record_from_props(props: &HashMap<String, Value>) -> Result<EdgeRecord, EvalError> {
-    let id = props
-        .get("_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| EvalError::ExecutionError("relationship is missing _id metadata".to_string()))?;
-    let start_node = props
-        .get("_start")
-        .and_then(Value::as_str)
-        .ok_or_else(|| EvalError::ExecutionError("relationship is missing _start metadata".to_string()))?;
-    let end_node = props
-        .get("_end")
-        .and_then(Value::as_str)
-        .ok_or_else(|| EvalError::ExecutionError("relationship is missing _end metadata".to_string()))?;
-    let edge_type = props
-        .get("_type")
-        .and_then(Value::as_str)
-        .ok_or_else(|| EvalError::ExecutionError("relationship is missing _type metadata".to_string()))?;
+    let id = props.get("_id").and_then(Value::as_str).ok_or_else(|| {
+        EvalError::ExecutionError("relationship is missing _id metadata".to_string())
+    })?;
+    let start_node = props.get("_start").and_then(Value::as_str).ok_or_else(|| {
+        EvalError::ExecutionError("relationship is missing _start metadata".to_string())
+    })?;
+    let end_node = props.get("_end").and_then(Value::as_str).ok_or_else(|| {
+        EvalError::ExecutionError("relationship is missing _end metadata".to_string())
+    })?;
+    let edge_type = props.get("_type").and_then(Value::as_str).ok_or_else(|| {
+        EvalError::ExecutionError("relationship is missing _type metadata".to_string())
+    })?;
 
     let properties = props
         .iter()
-        .filter(|(key, _)| {
-            !matches!(key.as_str(), "_id" | "_start" | "_end" | "_type")
-        })
+        .filter(|(key, _)| !matches!(key.as_str(), "_id" | "_start" | "_end" | "_type"))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect::<BTreeMap<_, _>>();
 
@@ -943,8 +950,6 @@ fn row_key(row: &Row) -> String {
         .collect::<Vec<_>>()
         .join(",")
 }
-
-
 
 #[cfg(test)]
 mod tests {

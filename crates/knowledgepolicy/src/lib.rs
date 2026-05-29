@@ -6,12 +6,12 @@
 //! persists profile and promotion schemas; this crate owns the runtime logic
 //! that will consume those schemas once binding persistence is threaded in.
 
+use copperdb_cypher::{Expression, Parser};
 use copperdb_storage::{
     DecayProfileBindingSchema, DecayProfileSchema, KnowledgePolicyAccessMetadata,
     PromotionOnAccessMutationKindSchema, PromotionOnAccessMutationSchema, PromotionPolicySchema,
     PromotionProfileSchema, PromotionWhenClauseSchema,
 };
-use copperdb_cypher::{Expression, Parser};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::f64::consts::LN_2;
@@ -65,7 +65,9 @@ impl TryFrom<&str> for DecayFunction {
             "linear" => Ok(Self::Linear),
             "step" => Ok(Self::Step),
             "none" => Ok(Self::None),
-            other => Err(KnowledgePolicyError::InvalidDecayFunction(other.to_string())),
+            other => Err(KnowledgePolicyError::InvalidDecayFunction(
+                other.to_string(),
+            )),
         }
     }
 }
@@ -363,7 +365,12 @@ impl AccessFlusher {
             return result;
         }
 
-        let buffer = self.buffers.lock().unwrap().remove(&thread_id).unwrap_or_default();
+        let buffer = self
+            .buffers
+            .lock()
+            .unwrap()
+            .remove(&thread_id)
+            .unwrap_or_default();
         if result.is_ok() {
             flush(buffer)?;
         }
@@ -433,7 +440,9 @@ pub fn merge_access_metadata(
                     .unwrap_or(last_accessed_at_unix_ms),
             );
         }
-        merged.access_count = merged.access_count.saturating_add(pending.access_count_delta);
+        merged.access_count = merged
+            .access_count
+            .saturating_add(pending.access_count_delta);
     }
     Some(merged)
 }
@@ -581,11 +590,17 @@ impl BindingTable {
     }
 
     fn set_node_promotion(&self, label_key: String, policy: PromotionPolicyDef) {
-        self.promotion_nodes.write().unwrap().insert(label_key, policy);
+        self.promotion_nodes
+            .write()
+            .unwrap()
+            .insert(label_key, policy);
     }
 
     fn set_edge_promotion(&self, edge_type: String, policy: PromotionPolicyDef) {
-        self.promotion_edges.write().unwrap().insert(edge_type, policy);
+        self.promotion_edges
+            .write()
+            .unwrap()
+            .insert(edge_type, policy);
     }
 
     fn set_wild_node_promotion(&self, policy: PromotionPolicyDef) {
@@ -760,10 +775,7 @@ pub fn build_binding_table(
     sorted_policies.sort_by(|left, right| left.name.cmp(&right.name));
     for policy in sorted_policies {
         if policy.is_edge {
-            table.set_edge_promotion(
-                policy.target_edge_type.clone().unwrap_or_default(),
-                policy,
-            );
+            table.set_edge_promotion(policy.target_edge_type.clone().unwrap_or_default(), policy);
         } else if policy.is_wildcard {
             table.set_wild_node_promotion(policy);
         } else {
@@ -784,7 +796,10 @@ pub fn build_binding_table(
         }
 
         if binding.is_edge {
-            table.set_edge(binding.target_edge_type.clone().unwrap_or_default(), compiled);
+            table.set_edge(
+                binding.target_edge_type.clone().unwrap_or_default(),
+                compiled,
+            );
             continue;
         }
 
@@ -841,10 +856,13 @@ fn compile_binding(
             compiled_promotion_rules: Vec::new(),
         }
     } else {
-        let bundle = decay_profile.clone().ok_or_else(|| KnowledgePolicyError::UnknownDecayProfile {
-            binding: binding.name.clone(),
-            profile: binding.profile_ref.clone().unwrap_or_default(),
-        })?;
+        let bundle =
+            decay_profile
+                .clone()
+                .ok_or_else(|| KnowledgePolicyError::UnknownDecayProfile {
+                    binding: binding.name.clone(),
+                    profile: binding.profile_ref.clone().unwrap_or_default(),
+                })?;
         let visibility_threshold = binding
             .visibility_threshold
             .unwrap_or(bundle.visibility_threshold);
@@ -882,7 +900,11 @@ fn compile_binding(
                 .unwrap_or(compiled.function);
             let half_life_nanos = rule
                 .half_life_seconds
-                .or_else(|| override_bundle.as_ref().map(|bundle| bundle.half_life_seconds))
+                .or_else(|| {
+                    override_bundle
+                        .as_ref()
+                        .map(|bundle| bundle.half_life_seconds)
+                })
                 .unwrap_or(compiled.half_life_nanos / 1_000_000_000)
                 .saturating_mul(1_000_000_000);
             let decay_floor = rule
@@ -912,10 +934,10 @@ fn compile_binding(
     };
 
     let promotion_target = promotion_target_key(&compiled.decay_binding);
-    if let Some(policy) = find_promotion_policy_for_binding_target(&promotion_target, promotion_policies)
+    if let Some(policy) =
+        find_promotion_policy_for_binding_target(&promotion_target, promotion_policies)
     {
-        compiled.compiled_promotion_rules =
-            compile_promotion_rules(&policy, promotion_profiles)?;
+        compiled.compiled_promotion_rules = compile_promotion_rules(&policy, promotion_profiles)?;
         compiled.promotion_policy = Some(policy);
     }
 
@@ -931,18 +953,18 @@ fn compile_promotion_rules(
         .when_clauses
         .iter()
         .filter_map(|clause| {
-            profiles.get(&clause.profile_ref).and_then(|profile| {
-                profile.enabled.then_some((clause, profile))
-            })
+            profiles
+                .get(&clause.profile_ref)
+                .and_then(|profile| profile.enabled.then_some((clause, profile)))
         })
         .map(|(clause, profile)| {
-            let expression = parser.parse_expression_text(&clause.predicate).map_err(|error| {
-                KnowledgePolicyError::InvalidPromotionPredicate {
+            let expression = parser
+                .parse_expression_text(&clause.predicate)
+                .map_err(|error| KnowledgePolicyError::InvalidPromotionPredicate {
                     policy: policy.name.clone(),
                     predicate: clause.predicate.clone(),
                     message: error.to_string(),
-                }
-            })?;
+                })?;
             Ok(CompiledPromotionRule {
                 predicate: clause.predicate.clone(),
                 expression,
@@ -951,7 +973,7 @@ fn compile_promotion_rules(
             })
         })
         .collect::<Result<Vec<_>, KnowledgePolicyError>>()?;
-    compiled.sort_by(|left, right| left.order.cmp(&right.order));
+    compiled.sort_by_key(|left| left.order);
     Ok(compiled)
 }
 
@@ -998,7 +1020,10 @@ fn binding_label_key(labels: &[String]) -> String {
 
 fn promotion_target_key(binding: &DecayProfileBinding) -> String {
     if binding.is_edge {
-        return format!("edge:{}", binding.target_edge_type.clone().unwrap_or_default());
+        return format!(
+            "edge:{}",
+            binding.target_edge_type.clone().unwrap_or_default()
+        );
     }
     if binding.is_wildcard {
         return "wild:node".to_string();
@@ -1008,7 +1033,10 @@ fn promotion_target_key(binding: &DecayProfileBinding) -> String {
 
 fn promotion_policy_target_key(policy: &PromotionPolicyDef) -> String {
     if policy.is_edge {
-        return format!("edge:{}", policy.target_edge_type.clone().unwrap_or_default());
+        return format!(
+            "edge:{}",
+            policy.target_edge_type.clone().unwrap_or_default()
+        );
     }
     if policy.is_wildcard {
         return "wild:node".to_string();
@@ -1089,17 +1117,25 @@ fn compute_threshold_age_nanos(
         DecayFunction::Exponential => {
             (-(half_life_nanos as f64) * threshold.ln() / LN_2).round() as i64
         }
-        DecayFunction::Linear => ((1.0 - threshold) * (half_life_nanos as f64) * 2.0).round() as i64,
+        DecayFunction::Linear => {
+            ((1.0 - threshold) * (half_life_nanos as f64) * 2.0).round() as i64
+        }
         DecayFunction::Step => half_life_nanos,
         DecayFunction::None => i64::MAX,
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
-    fn decay_binding(name: &str, labels: &[&str], profile_ref: &str, order: i64) -> DecayProfileBinding {
+    fn decay_binding(
+        name: &str,
+        labels: &[&str],
+        profile_ref: &str,
+        order: i64,
+    ) -> DecayProfileBinding {
         DecayProfileBinding {
             name: name.to_string(),
             target_labels: labels.iter().map(|label| (*label).to_string()).collect(),
@@ -1177,8 +1213,14 @@ mod tests {
     #[test]
     fn binding_table_resolves_most_specific_then_subset_then_wildcard() {
         let bundles = HashMap::from([
-            ("single".to_string(), bundle("single", 1800, DecayFunction::Linear)),
-            ("pair".to_string(), bundle("pair", 7200, DecayFunction::Exponential)),
+            (
+                "single".to_string(),
+                bundle("single", 1800, DecayFunction::Linear),
+            ),
+            (
+                "pair".to_string(),
+                bundle("pair", 7200, DecayFunction::Exponential),
+            ),
             ("wild".to_string(), bundle("wild", 600, DecayFunction::Step)),
         ]);
         let bindings = vec![
@@ -1198,12 +1240,18 @@ mod tests {
             },
         ];
 
-        let resolver = Resolver::new(build_binding_table(&bundles, &bindings, &HashMap::new(), &HashMap::new()).unwrap());
+        let resolver = Resolver::new(
+            build_binding_table(&bundles, &bindings, &HashMap::new(), &HashMap::new()).unwrap(),
+        );
 
-        let exact = resolver.resolve_node(&["Person".to_string(), "Employee".to_string()]).unwrap();
+        let exact = resolver
+            .resolve_node(&["Person".to_string(), "Employee".to_string()])
+            .unwrap();
         assert_eq!(exact.half_life_nanos, 7_200 * 1_000_000_000);
 
-        let subset = resolver.resolve_node(&["Person".to_string(), "Admin".to_string()]).unwrap();
+        let subset = resolver
+            .resolve_node(&["Person".to_string(), "Admin".to_string()])
+            .unwrap();
         assert_eq!(subset.half_life_nanos, 1_800 * 1_000_000_000);
 
         let wildcard = resolver.resolve_node(&["Robot".to_string()]).unwrap();
@@ -1212,13 +1260,17 @@ mod tests {
 
     #[test]
     fn binding_table_rejects_same_target_same_order_conflicts() {
-        let bundles = HashMap::from([("base".to_string(), bundle("base", 3600, DecayFunction::Exponential))]);
+        let bundles = HashMap::from([(
+            "base".to_string(),
+            bundle("base", 3600, DecayFunction::Exponential),
+        )]);
         let bindings = vec![
             decay_binding("left", &["Person"], "base", 5),
             decay_binding("right", &["Person"], "base", 5),
         ];
 
-        let error = build_binding_table(&bundles, &bindings, &HashMap::new(), &HashMap::new()).unwrap_err();
+        let error =
+            build_binding_table(&bundles, &bindings, &HashMap::new(), &HashMap::new()).unwrap_err();
         assert_eq!(
             error,
             KnowledgePolicyError::BindingConflict {
@@ -1233,8 +1285,14 @@ mod tests {
     #[test]
     fn property_resolution_applies_override_without_leaking_nested_rules() {
         let bundles = HashMap::from([
-            ("base".to_string(), bundle("base", 3600, DecayFunction::Exponential)),
-            ("fast".to_string(), bundle("fast", 600, DecayFunction::Linear)),
+            (
+                "base".to_string(),
+                bundle("base", 3600, DecayFunction::Exponential),
+            ),
+            (
+                "fast".to_string(),
+                bundle("fast", 600, DecayFunction::Linear),
+            ),
         ]);
         let bindings = vec![DecayProfileBinding {
             name: "person".to_string(),
@@ -1266,20 +1324,29 @@ mod tests {
             order: 0,
         }];
 
-        let resolver = Resolver::new(build_binding_table(&bundles, &bindings, &HashMap::new(), &HashMap::new()).unwrap());
-        let bio = resolver.resolve_property(&["Person".to_string()], "bio").unwrap();
+        let resolver = Resolver::new(
+            build_binding_table(&bundles, &bindings, &HashMap::new(), &HashMap::new()).unwrap(),
+        );
+        let bio = resolver
+            .resolve_property(&["Person".to_string()], "bio")
+            .unwrap();
         assert_eq!(bio.function, DecayFunction::Linear);
         assert_eq!(bio.half_life_nanos, 600 * 1_000_000_000);
         assert_eq!(bio.decay_floor, 0.2);
         assert!(bio.compiled_property_rules.is_empty());
 
-        let name = resolver.resolve_property(&["Person".to_string()], "name").unwrap();
+        let name = resolver
+            .resolve_property(&["Person".to_string()], "name")
+            .unwrap();
         assert!(name.no_decay);
     }
 
     #[test]
     fn promotion_rules_attach_and_sort_by_order() {
-        let bundles = HashMap::from([("base".to_string(), bundle("base", 3600, DecayFunction::Exponential))]);
+        let bundles = HashMap::from([(
+            "base".to_string(),
+            bundle("base", 3600, DecayFunction::Exponential),
+        )]);
         let bindings = vec![decay_binding("person", &["Person"], "base", 0)];
         let promotion_profiles = HashMap::from([
             (
@@ -1333,14 +1400,22 @@ mod tests {
         )]);
 
         let resolver = Resolver::new(
-            build_binding_table(&bundles, &bindings, &promotion_profiles, &promotion_policies)
-                .unwrap(),
+            build_binding_table(
+                &bundles,
+                &bindings,
+                &promotion_profiles,
+                &promotion_policies,
+            )
+            .unwrap(),
         );
         let resolved = resolver.resolve_node(&["Person".to_string()]).unwrap();
         assert_eq!(resolved.promotion_policy.unwrap().name, "person_policy");
         assert_eq!(resolved.compiled_promotion_rules.len(), 2);
         assert_eq!(resolved.compiled_promotion_rules[0].profile.name, "boost");
-        assert_eq!(resolved.compiled_promotion_rules[0].predicate, "n.hot = true");
+        assert_eq!(
+            resolved.compiled_promotion_rules[0].predicate,
+            "n.hot = true"
+        );
         assert_eq!(resolved.compiled_promotion_rules[1].profile.name, "cap");
     }
 

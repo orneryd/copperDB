@@ -14,6 +14,7 @@
 //! | `IncomingCountAgg`      | `MATCH (x)<-[:T]-(y) RETURN x.name, count(y)`      |
 //! | `OutgoingCountAgg`      | `MATCH (x)-[:T]->(y) RETURN x.name, count(y)`      |
 //! | `EdgePropertyAgg`       | `RETURN avg(r.rating), count(r) GROUP BY node`     |
+//! | `SimpleMatchLimit`      | `MATCH (n:Label) RETURN n LIMIT 10`                |
 //! | `LargeResultSet`        | Any traversal with `LIMIT > 100`                   |
 //! | `Generic`               | Everything else — use standard execution           |
 
@@ -22,9 +23,10 @@ use crate::string_patterns::{extract_limit, find_keyword_index};
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 /// Identifies optimisable query structures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QueryPattern {
     /// Default — use standard execution.
+    #[default]
     Generic,
     /// `(a)-[:T]->(b)-[:T]->(a)` cycle back to start.
     /// Optimised via single-pass edge-set intersection.
@@ -38,6 +40,9 @@ pub enum QueryPattern {
     /// `avg(r.prop)`, `sum(r.prop)` on edge properties.
     /// Optimised via single-pass accumulation.
     EdgePropertyAgg,
+    /// `MATCH (n:Label) RETURN n LIMIT k`.
+    /// Optimised via label-backed early-stop node retrieval.
+    SimpleMatchLimit,
     /// Any traversal with `LIMIT > 100`.
     /// Optimised via batch node lookups and pre-allocation.
     LargeResultSet,
@@ -51,6 +56,7 @@ impl QueryPattern {
             QueryPattern::IncomingCountAgg => "IncomingCountAgg",
             QueryPattern::OutgoingCountAgg => "OutgoingCountAgg",
             QueryPattern::EdgePropertyAgg => "EdgePropertyAgg",
+            QueryPattern::SimpleMatchLimit => "SimpleMatchLimit",
             QueryPattern::LargeResultSet => "LargeResultSet",
         }
     }
@@ -98,12 +104,6 @@ pub struct PatternInfo {
     pub group_by_vars: Vec<String>,
 }
 
-impl Default for QueryPattern {
-    fn default() -> Self {
-        QueryPattern::Generic
-    }
-}
-
 // ─── Detection ────────────────────────────────────────────────────────────────
 
 /// Analyse a Cypher query string and return pattern information.
@@ -139,31 +139,31 @@ pub fn detect_query_pattern(query: &str) -> PatternInfo {
     }
 
     // Incoming / outgoing count aggregation (narrow shape only)
-    if info.pattern == QueryPattern::Generic && upper.contains("COUNT(") {
-        if !upper.contains("SUM(")
-            && !upper.contains("AVG(")
-            && !upper.contains("MIN(")
-            && !upper.contains("MAX(")
-            && !upper.contains("COLLECT(")
-        {
-            if let Some(detected) = detect_incoming_count_agg(query) {
-                info.pattern = QueryPattern::IncomingCountAgg;
-                info.start_var = detected.start_var;
-                info.end_var = detected.end_var;
-                info.rel_var = detected.rel_var;
-                info.rel_type = detected.rel_type;
-                info.agg_functions = vec!["count".into()];
-                return info;
-            }
-            if let Some(detected) = detect_outgoing_count_agg(query) {
-                info.pattern = QueryPattern::OutgoingCountAgg;
-                info.start_var = detected.start_var;
-                info.end_var = detected.end_var;
-                info.rel_var = detected.rel_var;
-                info.rel_type = detected.rel_type;
-                info.agg_functions = vec!["count".into()];
-                return info;
-            }
+    if info.pattern == QueryPattern::Generic
+        && upper.contains("COUNT(")
+        && !upper.contains("SUM(")
+        && !upper.contains("AVG(")
+        && !upper.contains("MIN(")
+        && !upper.contains("MAX(")
+        && !upper.contains("COLLECT(")
+    {
+        if let Some(detected) = detect_incoming_count_agg(query) {
+            info.pattern = QueryPattern::IncomingCountAgg;
+            info.start_var = detected.start_var;
+            info.end_var = detected.end_var;
+            info.rel_var = detected.rel_var;
+            info.rel_type = detected.rel_type;
+            info.agg_functions = vec!["count".into()];
+            return info;
+        }
+        if let Some(detected) = detect_outgoing_count_agg(query) {
+            info.pattern = QueryPattern::OutgoingCountAgg;
+            info.start_var = detected.start_var;
+            info.end_var = detected.end_var;
+            info.rel_var = detected.rel_var;
+            info.rel_type = detected.rel_type;
+            info.agg_functions = vec!["count".into()];
+            return info;
         }
     }
 
@@ -176,6 +176,11 @@ pub fn detect_query_pattern(query: &str) -> PatternInfo {
             info.agg_property = detected.agg_property;
             return info;
         }
+    }
+
+    if info.pattern == QueryPattern::Generic && detect_simple_match_limit(query) {
+        info.pattern = QueryPattern::SimpleMatchLimit;
+        return info;
     }
 
     // Large result set (LIMIT > 100)
@@ -354,6 +359,55 @@ fn strip_alias(s: &str) -> &str {
     } else {
         s
     }
+}
+
+fn detect_simple_match_limit(query: &str) -> bool {
+    let Some(limit) = extract_limit(query) else {
+        return false;
+    };
+    if limit > 100 || find_keyword_index(query, "WHERE").is_some() {
+        return false;
+    }
+
+    let match_clause = match extract_match_clause(query) {
+        Some(clause) => clause,
+        None => return false,
+    };
+    let body = match_clause.trim();
+    let body = if body.to_ascii_uppercase().starts_with("MATCH") {
+        body[5..].trim()
+    } else {
+        body
+    };
+
+    if body.contains('{') {
+        return false;
+    }
+
+    let chain = match parse_pattern_chain(body) {
+        Some(chain) => chain,
+        None => return false,
+    };
+    if chain.nodes.len() != 1 || !chain.edges.is_empty() {
+        return false;
+    }
+
+    let node_var = chain.nodes[0].trim();
+    if node_var.is_empty() {
+        return false;
+    }
+
+    let return_idx = match find_keyword_index(query, "RETURN") {
+        Some(index) => index,
+        None => return false,
+    };
+    let return_part = strip_return_suffixes(&query[return_idx + 6..]);
+    let items = split_top_level_commas(return_part);
+    if items.len() != 1 {
+        return false;
+    }
+
+    strip_alias(items[0].trim()).eq_ignore_ascii_case(node_var)
 }
 
 fn detect_edge_property_agg(query: &str) -> Option<EdgePropertyAggDetected> {
@@ -648,10 +702,10 @@ fn parse_relationship_part(s: &str) -> Option<(String, String, String, &str)> {
     let after_bracket = after_bracket.trim_start();
 
     // Direction suffix
-    let (outgoing_suffix, after_suffix) = if after_bracket.starts_with("->") {
-        (true, &after_bracket[2..])
-    } else if after_bracket.starts_with('-') {
-        (false, &after_bracket[1..])
+    let (outgoing_suffix, after_suffix) = if let Some(stripped) = after_bracket.strip_prefix("->") {
+        (true, stripped)
+    } else if let Some(stripped) = after_bracket.strip_prefix('-') {
+        (false, stripped)
     } else {
         return None;
     };
@@ -779,8 +833,14 @@ mod tests {
     #[test]
     fn test_not_large_result_under_100() {
         let info = detect_query_pattern("MATCH (n) RETURN n LIMIT 50");
-        // Under 100 → Generic
-        assert_eq!(info.pattern, QueryPattern::Generic);
+        assert_eq!(info.pattern, QueryPattern::SimpleMatchLimit);
+    }
+
+    #[test]
+    fn test_simple_match_limit_pattern() {
+        let info = detect_query_pattern("MATCH (n:Person) RETURN n AS person LIMIT 10");
+        assert_eq!(info.pattern, QueryPattern::SimpleMatchLimit);
+        assert_eq!(info.limit, Some(10));
     }
 
     #[test]
@@ -890,11 +950,13 @@ mod tests {
         assert!(QueryPattern::IncomingCountAgg.is_optimizable());
         assert!(QueryPattern::OutgoingCountAgg.is_optimizable());
         assert!(QueryPattern::EdgePropertyAgg.is_optimizable());
+        assert!(QueryPattern::SimpleMatchLimit.is_optimizable());
     }
 
     #[test]
     fn test_query_pattern_display() {
         assert_eq!(QueryPattern::Generic.as_str(), "Generic");
+        assert_eq!(QueryPattern::SimpleMatchLimit.as_str(), "SimpleMatchLimit");
         assert_eq!(QueryPattern::LargeResultSet.as_str(), "LargeResultSet");
         assert_eq!(
             QueryPattern::MutualRelationship.as_str(),

@@ -39,22 +39,32 @@ impl<'a> ParseContext<'a> {
                     } else if self.peek_is("RANGE") {
                         self.advance();
                         self.expect("INDEX")?;
-                        clauses.push(Clause::CreateIndex(self.parse_create_index(crate::IndexKind::Range)?));
+                        clauses.push(Clause::CreateIndex(
+                            self.parse_create_index(crate::IndexKind::Range)?,
+                        ));
                     } else if self.peek_is("TEMPORAL") {
                         self.advance();
                         self.expect("INDEX")?;
-                        clauses.push(Clause::CreateIndex(self.parse_create_index(crate::IndexKind::Temporal)?));
+                        clauses.push(Clause::CreateIndex(
+                            self.parse_create_index(crate::IndexKind::Temporal)?,
+                        ));
                     } else if self.peek_is("FULLTEXT") {
                         self.advance();
                         self.expect("INDEX")?;
-                        clauses.push(Clause::CreateIndex(self.parse_create_index(crate::IndexKind::FullText)?));
+                        clauses.push(Clause::CreateIndex(
+                            self.parse_create_index(crate::IndexKind::FullText)?,
+                        ));
                     } else if self.peek_is("VECTOR") {
                         self.advance();
                         self.expect("INDEX")?;
-                        clauses.push(Clause::CreateIndex(self.parse_create_index(crate::IndexKind::Vector)?));
+                        clauses.push(Clause::CreateIndex(
+                            self.parse_create_index(crate::IndexKind::Vector)?,
+                        ));
                     } else if self.peek_is("INDEX") {
                         self.advance();
-                        clauses.push(Clause::CreateIndex(self.parse_create_index(crate::IndexKind::Range)?));
+                        clauses.push(Clause::CreateIndex(
+                            self.parse_create_index(crate::IndexKind::Range)?,
+                        ));
                     } else if self.peek_is("DECAY") {
                         self.advance();
                         clauses.push(Clause::CreateDecayProfile(
@@ -185,19 +195,27 @@ impl<'a> ParseContext<'a> {
                     } else if self.peek_is("RANGE") {
                         self.advance();
                         self.expect("INDEXES")?;
-                        clauses.push(Clause::ShowIndexes(self.parse_show_indexes(Some(crate::IndexKind::Range))?));
+                        clauses.push(Clause::ShowIndexes(
+                            self.parse_show_indexes(Some(crate::IndexKind::Range))?,
+                        ));
                     } else if self.peek_is("TEMPORAL") {
                         self.advance();
                         self.expect("INDEXES")?;
-                        clauses.push(Clause::ShowIndexes(self.parse_show_indexes(Some(crate::IndexKind::Temporal))?));
+                        clauses.push(Clause::ShowIndexes(
+                            self.parse_show_indexes(Some(crate::IndexKind::Temporal))?,
+                        ));
                     } else if self.peek_is("FULLTEXT") {
                         self.advance();
                         self.expect("INDEXES")?;
-                        clauses.push(Clause::ShowIndexes(self.parse_show_indexes(Some(crate::IndexKind::FullText))?));
+                        clauses.push(Clause::ShowIndexes(
+                            self.parse_show_indexes(Some(crate::IndexKind::FullText))?,
+                        ));
                     } else if self.peek_is("VECTOR") {
                         self.advance();
                         self.expect("INDEXES")?;
-                        clauses.push(Clause::ShowIndexes(self.parse_show_indexes(Some(crate::IndexKind::Vector))?));
+                        clauses.push(Clause::ShowIndexes(
+                            self.parse_show_indexes(Some(crate::IndexKind::Vector))?,
+                        ));
                     } else if self.peek_is("INDEXES") {
                         self.advance();
                         clauses.push(Clause::ShowIndexes(self.parse_show_indexes(None)?));

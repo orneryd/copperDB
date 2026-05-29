@@ -51,10 +51,8 @@ pub fn eval_expression(
             if let Some(v) = row.get(&dot_key) {
                 return Ok(v.clone());
             }
-            if let Some(obj) = row.get(variable.as_str()) {
-                if let Value::Object(map) = obj {
-                    return Ok(map.get(property.as_str()).cloned().unwrap_or(Value::Null));
-                }
+            if let Some(Value::Object(map)) = row.get(variable.as_str()) {
+                return Ok(map.get(property.as_str()).cloned().unwrap_or(Value::Null));
             }
             Ok(Value::Null)
         }
@@ -764,46 +762,31 @@ mod tests {
     #[test]
     fn test_and_short_circuit() {
         let expr = Expression::And(binary(literal_bool(false), literal_bool(true)));
-        assert_eq!(
-            eval_predicate(&expr, &HashMap::new(), &HashMap::new()).unwrap(),
-            false
-        );
+        assert!(!eval_predicate(&expr, &HashMap::new(), &HashMap::new()).unwrap());
     }
 
     #[test]
     fn test_or_short_circuit() {
         let expr = Expression::Or(binary(literal_bool(true), literal_bool(false)));
-        assert_eq!(
-            eval_predicate(&expr, &HashMap::new(), &HashMap::new()).unwrap(),
-            true
-        );
+        assert!(eval_predicate(&expr, &HashMap::new(), &HashMap::new()).unwrap());
     }
 
     #[test]
     fn test_not() {
         let expr = Expression::Not(Box::new(literal_bool(false)));
-        assert_eq!(
-            eval_predicate(&expr, &HashMap::new(), &HashMap::new()).unwrap(),
-            true
-        );
+        assert!(eval_predicate(&expr, &HashMap::new(), &HashMap::new()).unwrap());
     }
 
     #[test]
     fn test_is_null() {
         let expr = Expression::IsNull(Box::new(literal_null()));
-        assert_eq!(
-            eval_predicate(&expr, &HashMap::new(), &HashMap::new()).unwrap(),
-            true
-        );
+        assert!(eval_predicate(&expr, &HashMap::new(), &HashMap::new()).unwrap());
     }
 
     #[test]
     fn test_is_not_null() {
         let expr = Expression::IsNotNull(Box::new(literal_string("hello")));
-        assert_eq!(
-            eval_predicate(&expr, &HashMap::new(), &HashMap::new()).unwrap(),
-            true
-        );
+        assert!(eval_predicate(&expr, &HashMap::new(), &HashMap::new()).unwrap());
     }
 
     #[test]

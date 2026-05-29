@@ -6,7 +6,10 @@ impl EvalEngine {
         call: &copperdb_cypher::CallClause,
         params: &HashMap<String, Value>,
     ) -> Result<EvalResult, EvalError> {
-        if call.procedure.eq_ignore_ascii_case("nornicdb.knowledgepolicy.resolve") {
+        if call
+            .procedure
+            .eq_ignore_ascii_case("nornicdb.knowledgepolicy.resolve")
+        {
             return self.execute_knowledge_policy_resolve_call(call, params);
         }
 
@@ -106,7 +109,7 @@ impl EvalEngine {
             .and_then(|compiled| compiled.promotion_policy.clone())
             .or_else(|| resolver.resolve_node_promotion(labels));
 
-        Ok(self.inspect_resolved_target(
+        self.inspect_resolved_target(
             None,
             "NODE".to_string(),
             labels.to_vec(),
@@ -117,7 +120,7 @@ impl EvalEngine {
             None,
             params,
             true,
-        )?)
+        )
     }
 
     fn inspect_knowledge_policy_for_edge_type(
@@ -132,7 +135,7 @@ impl EvalEngine {
             .and_then(|compiled| compiled.promotion_policy.clone())
             .or_else(|| resolver.resolve_edge_promotion(edge_type));
 
-        Ok(self.inspect_resolved_target(
+        self.inspect_resolved_target(
             None,
             "EDGE".to_string(),
             Vec::new(),
@@ -143,7 +146,7 @@ impl EvalEngine {
             None,
             params,
             true,
-        )?)
+        )
     }
 
     fn inspect_node_policy(
@@ -246,6 +249,7 @@ impl EvalEngine {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn inspect_resolved_target(
         &self,
         entity_id: Option<String>,
@@ -266,7 +270,8 @@ impl EvalEngine {
                     policy.name
                 )
             } else {
-                "no decay binding or promotion policy matched; final score defaults to 1.0".to_string()
+                "no decay binding or promotion policy matched; final score defaults to 1.0"
+                    .to_string()
             };
             return Ok(KnowledgePolicyInspection {
                 entity_id,
@@ -279,7 +284,9 @@ impl EvalEngine {
                 matched_promotion_predicate: None,
                 score_from: None,
                 anchor_unix_ms: None,
-                access_count: access_metadata.as_ref().map(|metadata| metadata.access_count),
+                access_count: access_metadata
+                    .as_ref()
+                    .map(|metadata| metadata.access_count),
                 last_accessed_at_unix_ms: access_metadata
                     .as_ref()
                     .and_then(|metadata| metadata.last_accessed_at_unix_ms),
@@ -292,38 +299,33 @@ impl EvalEngine {
             });
         };
 
-        let (anchor_unix_ms, matched_rule, score) = if let Some((created_at_unix_ms, updated_at_unix_ms, properties)) =
-            entity_state
-        {
-            let anchor_unix_ms = binding_anchor_unix_ms(
-                binding,
-                created_at_unix_ms,
-                updated_at_unix_ms,
-                access_metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.last_accessed_at_unix_ms),
-                properties,
-            );
-            let matched_rule = matched_promotion_rule(
-                binding,
-                properties,
-                access_metadata.as_ref(),
-                params,
-            )?;
-            let score = score_binding(
-                binding,
-                anchor_unix_ms,
-                now_unix_ms(),
-                matched_rule.as_ref().map(|rule| &rule.profile),
-            );
-            (anchor_unix_ms, matched_rule, score)
-        } else {
-            (
-                None,
-                None,
-                score_binding(binding, None, now_unix_ms(), None),
-            )
-        };
+        let (anchor_unix_ms, matched_rule, score) =
+            if let Some((created_at_unix_ms, updated_at_unix_ms, properties)) = entity_state {
+                let anchor_unix_ms = binding_anchor_unix_ms(
+                    binding,
+                    created_at_unix_ms,
+                    updated_at_unix_ms,
+                    access_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.last_accessed_at_unix_ms),
+                    properties,
+                );
+                let matched_rule =
+                    matched_promotion_rule(binding, properties, access_metadata.as_ref(), params)?;
+                let score = score_binding(
+                    binding,
+                    anchor_unix_ms,
+                    now_unix_ms(),
+                    matched_rule.as_ref().map(|rule| &rule.profile),
+                );
+                (anchor_unix_ms, matched_rule, score)
+            } else {
+                (
+                    None,
+                    None,
+                    score_binding(binding, None, now_unix_ms(), None),
+                )
+            };
 
         let explanation = if dry_run {
             format!(
@@ -361,7 +363,9 @@ impl EvalEngine {
             matched_promotion_predicate: matched_rule.as_ref().map(|rule| rule.predicate.clone()),
             score_from: Some(format!("{:?}", binding.score_from).to_ascii_uppercase()),
             anchor_unix_ms,
-            access_count: access_metadata.as_ref().map(|metadata| metadata.access_count),
+            access_count: access_metadata
+                .as_ref()
+                .map(|metadata| metadata.access_count),
             last_accessed_at_unix_ms: access_metadata
                 .as_ref()
                 .and_then(|metadata| metadata.last_accessed_at_unix_ms),
@@ -382,7 +386,13 @@ impl EvalEngine {
     ) -> Result<bool, EvalError> {
         let resolver = self.knowledge_policy_resolver()?;
         Ok(!self
-            .inspect_node_policy_with_access_metadata(&resolver, node, access_metadata, params, false)?
+            .inspect_node_policy_with_access_metadata(
+                &resolver,
+                node,
+                access_metadata,
+                params,
+                false,
+            )?
             .suppressed)
     }
 
@@ -394,7 +404,13 @@ impl EvalEngine {
     ) -> Result<bool, EvalError> {
         let resolver = self.knowledge_policy_resolver()?;
         Ok(!self
-            .inspect_edge_policy_with_access_metadata(&resolver, edge, access_metadata, params, false)?
+            .inspect_edge_policy_with_access_metadata(
+                &resolver,
+                edge,
+                access_metadata,
+                params,
+                false,
+            )?
             .suppressed)
     }
 

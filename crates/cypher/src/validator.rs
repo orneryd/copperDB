@@ -157,10 +157,7 @@ impl<'a> ParseContext<'a> {
         }
 
         loop {
-            if self.peek_is("SKIP") {
-                self.advance();
-                self.validate_i64()?;
-            } else if self.peek_is("LIMIT") {
+            if self.peek_is("SKIP") || self.peek_is("LIMIT") {
                 self.advance();
                 self.validate_i64()?;
             } else {

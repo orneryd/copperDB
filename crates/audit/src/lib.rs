@@ -241,6 +241,7 @@ impl AuditLog {
         Ok(event)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn log_auth(
         &self,
         event_type: EventType,
@@ -268,6 +269,7 @@ impl AuditLog {
         self.record(event)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn log_data_access(
         &self,
         user_id: impl Into<String>,
@@ -450,6 +452,7 @@ fn now_unix_ms() -> i64 {
 mod tests {
     use super::*;
 
+    #[allow(clippy::arc_with_non_send_sync)]
     fn audit_log() -> (Arc<StorageEngine>, AuditLog) {
         let storage = Arc::new(StorageEngine::open_temporary().unwrap());
         let log = AuditLog::new(Arc::clone(&storage), AuditConfig::default()).unwrap();

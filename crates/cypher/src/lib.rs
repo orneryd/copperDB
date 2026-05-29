@@ -237,9 +237,7 @@ impl<'a> ParseContext<'a> {
             "LIMIT",
         ])?;
         let descending = self.peek_is_one_of(&["DESC", "DESCENDING"]);
-        if descending {
-            self.advance();
-        } else if self.peek_is_one_of(&["ASC", "ASCENDING"]) {
+        if descending || self.peek_is_one_of(&["ASC", "ASCENDING"]) {
             self.advance();
         }
         Ok(OrderItem {
@@ -284,8 +282,8 @@ impl<'a> ParseContext<'a> {
         let property = self.advance_identifier()?;
         self.expect("=")?;
         let value = self.parse_expression_item(&[
-            ",", "MATCH", "CREATE", "MERGE", "SET", "REMOVE", "DELETE", "DETACH", "RETURN", "WITH", "UNWIND",
-            "CALL",
+            ",", "MATCH", "CREATE", "MERGE", "SET", "REMOVE", "DELETE", "DETACH", "RETURN", "WITH",
+            "UNWIND", "CALL",
         ])?;
         Ok(SetItem {
             variable,
@@ -566,7 +564,10 @@ impl<'a> ParseContext<'a> {
         Ok(DropIndexClause { name, if_exists })
     }
 
-    fn parse_show_indexes(&mut self, kind: Option<IndexKind>) -> Result<ShowIndexesClause, CypherError> {
+    fn parse_show_indexes(
+        &mut self,
+        kind: Option<IndexKind>,
+    ) -> Result<ShowIndexesClause, CypherError> {
         if self.peek().is_some() {
             return Err(CypherError::ParseError(format!(
                 "unexpected token '{}' after SHOW INDEXES",
@@ -679,7 +680,10 @@ impl<'a> ParseContext<'a> {
         let (on_access_mutations, when_clauses) = if self.peek() == Some("{") {
             self.parse_promotion_apply_block()?
         } else {
-            (Vec::new(), vec![self.parse_promotion_profile_clause_after_apply(1)?])
+            (
+                Vec::new(),
+                vec![self.parse_promotion_profile_clause_after_apply(1)?],
+            )
         };
         Ok(CreatePromotionPolicyClause {
             name,
@@ -767,9 +771,7 @@ impl<'a> ParseContext<'a> {
         Ok(trim_quotes(token).to_string())
     }
 
-    fn parse_on_access_mutations(
-        &mut self,
-    ) -> Result<Vec<PromotionOnAccessMutation>, CypherError> {
+    fn parse_on_access_mutations(&mut self) -> Result<Vec<PromotionOnAccessMutation>, CypherError> {
         self.expect("{")?;
         let mut mutations = Vec::new();
         while self.peek() != Some("}") {
@@ -801,8 +803,7 @@ impl<'a> ParseContext<'a> {
                         Some("0") => {}
                         _ => {
                             return Err(CypherError::ParseError(
-                                "ON ACCESS accessCount mutation must use coalesce(..., 0)"
-                                    .into(),
+                                "ON ACCESS accessCount mutation must use coalesce(..., 0)".into(),
                             ));
                         }
                     }

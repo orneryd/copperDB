@@ -1,7 +1,10 @@
 use super::*;
 
 impl EvalEngine {
-    pub(crate) fn persist_node_props(&self, props: &HashMap<String, Value>) -> Result<(), EvalError> {
+    pub(crate) fn persist_node_props(
+        &self,
+        props: &HashMap<String, Value>,
+    ) -> Result<(), EvalError> {
         let now = now_unix_ms();
         let mut record = node_record_from_props(props)?;
         if let Some(existing) = self.storage.get_node_record(&record.id)? {
@@ -15,7 +18,10 @@ impl EvalEngine {
         Ok(())
     }
 
-    pub(crate) fn persist_edge_props(&self, props: &HashMap<String, Value>) -> Result<(), EvalError> {
+    pub(crate) fn persist_edge_props(
+        &self,
+        props: &HashMap<String, Value>,
+    ) -> Result<(), EvalError> {
         let now = now_unix_ms();
         let mut record = edge_record_from_props(props)?;
         if let Some(existing) = self.storage.get_edge_record(&record.id)? {
@@ -29,7 +35,10 @@ impl EvalEngine {
         Ok(())
     }
 
-    pub(crate) fn persist_edge_record(&self, mut edge: EdgeRecord) -> Result<EdgeRecord, EvalError> {
+    pub(crate) fn persist_edge_record(
+        &self,
+        mut edge: EdgeRecord,
+    ) -> Result<EdgeRecord, EvalError> {
         let now = now_unix_ms();
         if let Some(existing) = self.storage.get_edge_record(&edge.id)? {
             edge.created_at_unix_ms = existing.created_at_unix_ms;
@@ -57,26 +66,26 @@ impl EvalEngine {
             self.relationship_candidates_by_range(node_id, edge, &range_predicate, expected_props)?
         } else {
             match (&edge.direction, edge.rel_type.as_deref()) {
-            (EdgeDirection::Outgoing, Some(edge_type)) => self
-                .storage
-                .get_edges_from_node_by_type(node_id, edge_type)?,
-            (EdgeDirection::Outgoing, None) => self.storage.get_edges_from_node(node_id)?,
-            (EdgeDirection::Incoming, Some(edge_type)) => {
-                self.storage.get_edges_to_node_by_type(node_id, edge_type)?
-            }
-            (EdgeDirection::Incoming, None) => self.storage.get_edges_to_node(node_id)?,
-            (EdgeDirection::Both, Some(edge_type)) => {
-                let mut edges = self
+                (EdgeDirection::Outgoing, Some(edge_type)) => self
                     .storage
-                    .get_edges_from_node_by_type(node_id, edge_type)?;
-                edges.extend(self.storage.get_edges_to_node_by_type(node_id, edge_type)?);
-                edges
-            }
-            (EdgeDirection::Both, None) => {
-                let mut edges = self.storage.get_edges_from_node(node_id)?;
-                edges.extend(self.storage.get_edges_to_node(node_id)?);
-                edges
-            }
+                    .get_edges_from_node_by_type(node_id, edge_type)?,
+                (EdgeDirection::Outgoing, None) => self.storage.get_edges_from_node(node_id)?,
+                (EdgeDirection::Incoming, Some(edge_type)) => {
+                    self.storage.get_edges_to_node_by_type(node_id, edge_type)?
+                }
+                (EdgeDirection::Incoming, None) => self.storage.get_edges_to_node(node_id)?,
+                (EdgeDirection::Both, Some(edge_type)) => {
+                    let mut edges = self
+                        .storage
+                        .get_edges_from_node_by_type(node_id, edge_type)?;
+                    edges.extend(self.storage.get_edges_to_node_by_type(node_id, edge_type)?);
+                    edges
+                }
+                (EdgeDirection::Both, None) => {
+                    let mut edges = self.storage.get_edges_from_node(node_id)?;
+                    edges.extend(self.storage.get_edges_to_node(node_id)?);
+                    edges
+                }
             }
         };
         let resolver = self.knowledge_policy_resolver()?;
@@ -94,7 +103,10 @@ impl EvalEngine {
         Ok(visible)
     }
 
-    pub(crate) fn lookup_edges(&self, edge_type: Option<&str>) -> Result<Vec<EdgeRecord>, EvalError> {
+    pub(crate) fn lookup_edges(
+        &self,
+        edge_type: Option<&str>,
+    ) -> Result<Vec<EdgeRecord>, EvalError> {
         let resolver = self.knowledge_policy_resolver()?;
         let mut visible = Vec::new();
         for edge in IndexCatalog::new(self.storage.as_ref()).lookup_edges(edge_type)? {
@@ -163,10 +175,12 @@ fn extract_relationship_range_predicate(
             {
                 if left_variable == variable {
                     let value = eval_expression(&operands.right, row, params)?;
-                    return Ok(is_range_comparable_value(&value).then(|| RelationshipRangePredicate {
-                        property: property.clone(),
-                        comparison,
-                        value,
+                    return Ok(is_range_comparable_value(&value).then(|| {
+                        RelationshipRangePredicate {
+                            property: property.clone(),
+                            comparison,
+                            value,
+                        }
                     }));
                 }
             }
@@ -178,10 +192,12 @@ fn extract_relationship_range_predicate(
             {
                 if right_variable == variable {
                     let value = eval_expression(&operands.left, row, params)?;
-                    return Ok(is_range_comparable_value(&value).then(|| RelationshipRangePredicate {
-                        property: property.clone(),
-                        comparison: invert_range_comparison(comparison),
-                        value,
+                    return Ok(is_range_comparable_value(&value).then(|| {
+                        RelationshipRangePredicate {
+                            property: property.clone(),
+                            comparison: invert_range_comparison(comparison),
+                            value,
+                        }
                     }));
                 }
             }

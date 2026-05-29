@@ -249,22 +249,12 @@ impl Default for RetentionSweepConfig {
 }
 
 /// Full-featured retention manager, mirroring NornicDB's `retention.Manager`.
+#[derive(Default)]
 pub struct Manager {
     policies: HashMap<String, Policy>,
     holds: HashMap<String, LegalHold>,
     erasures: HashMap<String, ErasureRequest>,
     storage_path: Option<PathBuf>,
-}
-
-impl Default for Manager {
-    fn default() -> Self {
-        Self {
-            policies: HashMap::new(),
-            holds: HashMap::new(),
-            erasures: HashMap::new(),
-            storage_path: None,
-        }
-    }
 }
 
 impl Manager {

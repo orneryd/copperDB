@@ -351,6 +351,7 @@ mod tests {
     use super::*;
     use copperdb_audit::{AuditConfig, Event, EventType};
 
+    #[allow(clippy::arc_with_non_send_sync)]
     fn manager() -> (Arc<StorageEngine>, ComplianceManager) {
         let storage = Arc::new(StorageEngine::open_temporary().unwrap());
         let manager = ComplianceManager::new(Arc::clone(&storage));
@@ -457,6 +458,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
     fn reporter_exports_hipaa_and_soc2_evidence_from_audit_log() {
         let storage = Arc::new(StorageEngine::open_temporary().unwrap());
         let audit = Arc::new(AuditLog::new(Arc::clone(&storage), AuditConfig::default()).unwrap());
@@ -498,6 +500,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
     fn reporter_honors_report_window() {
         let storage = Arc::new(StorageEngine::open_temporary().unwrap());
         let audit = Arc::new(AuditLog::new(storage, AuditConfig::default()).unwrap());

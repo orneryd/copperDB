@@ -564,10 +564,10 @@ mod tests {
 
     #[test]
     fn test_round_trip_float() {
-        let v = Value::Float(3.14159);
+        let v = Value::Float(std::f64::consts::PI);
         let rt = round_trip(&v);
         if let Value::Float(f) = rt {
-            assert!((f - 3.14159).abs() < 1e-10);
+            assert!((f - std::f64::consts::PI).abs() < 1e-10);
         } else {
             panic!("expected float");
         }
@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn test_round_trip_list8() {
-        let items: Vec<Value> = (0..20).map(|i| Value::Integer(i)).collect();
+        let items: Vec<Value> = (0..20).map(Value::Integer).collect();
         let v = Value::List(items);
         assert_eq!(round_trip(&v), v);
     }

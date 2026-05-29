@@ -61,6 +61,13 @@ pub struct LogicalTransactionRange {
     pub len: u64,
 }
 
+pub trait TransactionTimeOracle: Send + Sync {
+    fn issue(&self) -> LogicalTransactionId;
+    fn reserve(&self, len: u64) -> LogicalTransactionRange;
+    fn observe(&self, remote: LogicalTransactionId) -> LogicalTransactionId;
+    fn advance_epoch(&self, epoch: u64);
+}
+
 #[derive(Debug)]
 pub struct DistributedTransactionClock {
     node_ordinal: u32,
@@ -116,6 +123,24 @@ impl DistributedTransactionClock {
 
     pub fn advance_epoch(&self, epoch: u64) {
         advance_atomic_at_least(&self.epoch, epoch.max(1));
+    }
+}
+
+impl TransactionTimeOracle for DistributedTransactionClock {
+    fn issue(&self) -> LogicalTransactionId {
+        Self::issue(self)
+    }
+
+    fn reserve(&self, len: u64) -> LogicalTransactionRange {
+        Self::reserve(self, len)
+    }
+
+    fn observe(&self, remote: LogicalTransactionId) -> LogicalTransactionId {
+        Self::observe(self, remote)
+    }
+
+    fn advance_epoch(&self, epoch: u64) {
+        Self::advance_epoch(self, epoch)
     }
 }
 

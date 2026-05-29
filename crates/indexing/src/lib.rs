@@ -14,10 +14,8 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 pub use copperdb_storage::{
-    IndexDefinition as CatalogIndexDefinition,
-    IndexEntityType as CatalogIndexEntityType,
-    IndexKind as CatalogIndexKind,
-    RangeIndexComparison as CatalogRangeIndexComparison,
+    IndexDefinition as CatalogIndexDefinition, IndexEntityType as CatalogIndexEntityType,
+    IndexKind as CatalogIndexKind, RangeIndexComparison as CatalogRangeIndexComparison,
 };
 
 #[derive(Debug, Error)]
@@ -95,15 +93,35 @@ impl<'a> IndexCatalog<'a> {
                     &properties[&index.properties[0]],
                 )?)
             } else {
-                Ok(self
-                    .storage
-                    .get_nodes_by_properties(primary_label, &index.properties, properties)?)
+                Ok(self.storage.get_nodes_by_properties(
+                    primary_label,
+                    &index.properties,
+                    properties,
+                )?)
             };
         }
 
         let mut nodes = self.storage.get_nodes_by_label(primary_label)?;
         nodes.retain(|node| node_matches_properties(node, properties));
         Ok(nodes)
+    }
+
+    pub fn has_preferred_node_lookup_index(
+        &self,
+        labels: &[String],
+        properties: &HashMap<String, Value>,
+    ) -> Result<bool, IndexError> {
+        let Some(primary_label) = labels
+            .first()
+            .map(String::as_str)
+            .filter(|label| !label.is_empty())
+        else {
+            return Ok(false);
+        };
+
+        Ok(self
+            .preferred_node_index_definition(primary_label, properties)?
+            .is_some())
     }
 
     pub fn lookup_nodes_by_range(
@@ -159,7 +177,9 @@ impl<'a> IndexCatalog<'a> {
 
     pub fn lookup_edges(&self, edge_type: Option<&str>) -> Result<Vec<EdgeRecord>, IndexError> {
         match edge_type {
-            Some(edge_type) if !edge_type.is_empty() => Ok(self.storage.get_edges_by_type(edge_type)?),
+            Some(edge_type) if !edge_type.is_empty() => {
+                Ok(self.storage.get_edges_by_type(edge_type)?)
+            }
             _ => Ok(self.storage.all_edges()?),
         }
     }
@@ -175,7 +195,9 @@ impl<'a> IndexCatalog<'a> {
 
         let mut edges = match edge_type.filter(|edge_type| !edge_type.is_empty()) {
             Some(edge_type) => {
-                if let Some(index) = self.preferred_relationship_index_definition(edge_type, properties)? {
+                if let Some(index) =
+                    self.preferred_relationship_index_definition(edge_type, properties)?
+                {
                     if index.properties.len() == 1 {
                         self.storage.get_edges_by_property(
                             edge_type,
@@ -183,7 +205,11 @@ impl<'a> IndexCatalog<'a> {
                             &properties[&index.properties[0]],
                         )?
                     } else {
-                        self.storage.get_edges_by_properties(edge_type, &index.properties, properties)?
+                        self.storage.get_edges_by_properties(
+                            edge_type,
+                            &index.properties,
+                            properties,
+                        )?
                     }
                 } else {
                     self.storage.get_edges_by_type(edge_type)?
@@ -314,7 +340,10 @@ impl<'a> IndexCatalog<'a> {
             definition.entity_type == CatalogIndexEntityType::Relationship
                 && supports_ordered_comparison_index_kind(definition.kind)
                 && definition.label == edge_type
-                && definition.properties.iter().any(|candidate| candidate == property)
+                && definition
+                    .properties
+                    .iter()
+                    .any(|candidate| candidate == property)
                 && definition
                     .properties
                     .iter()
@@ -348,7 +377,10 @@ impl<'a> IndexCatalog<'a> {
             definition.entity_type == CatalogIndexEntityType::Node
                 && supports_ordered_comparison_index_kind(definition.kind)
                 && definition.label == label
-                && definition.properties.iter().any(|candidate| candidate == property)
+                && definition
+                    .properties
+                    .iter()
+                    .any(|candidate| candidate == property)
                 && definition
                     .properties
                     .iter()
@@ -514,7 +546,10 @@ mod tests {
             entity_type: CatalogIndexEntityType::Node,
             kind: CatalogIndexKind::Range,
             label: label.to_string(),
-            properties: properties.iter().map(|property| property.to_string()).collect(),
+            properties: properties
+                .iter()
+                .map(|property| property.to_string())
+                .collect(),
         }
     }
 
@@ -582,7 +617,11 @@ mod tests {
             .create(sample_definition("person_name_idx", "Person", &["name"]))
             .unwrap();
         catalog
-            .create(sample_definition("company_domain_idx", "Company", &["domain"]))
+            .create(sample_definition(
+                "company_domain_idx",
+                "Company",
+                &["domain"],
+            ))
             .unwrap();
 
         let listed = catalog.list().unwrap();
@@ -653,8 +692,14 @@ mod tests {
         let catalog = IndexCatalog::new(&reopened);
         let listed = catalog.list().unwrap();
         assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0], sample_definition("person_email_idx", "Person", &["email"]));
-        assert_eq!(listed[1], sample_definition("person_name_idx", "Person", &["name"]));
+        assert_eq!(
+            listed[0],
+            sample_definition("person_email_idx", "Person", &["email"])
+        );
+        assert_eq!(
+            listed[1],
+            sample_definition("person_name_idx", "Person", &["name"])
+        );
     }
 
     #[test]
@@ -716,13 +761,19 @@ mod tests {
             &storage,
             "person:2",
             &["Person"],
-            &[("email", json!("alice@example.com")), ("country", json!("CA"))],
+            &[
+                ("email", json!("alice@example.com")),
+                ("country", json!("CA")),
+            ],
         );
         store_node(
             &storage,
             "person:1",
             &["Person"],
-            &[("email", json!("alice@example.com")), ("country", json!("US"))],
+            &[
+                ("email", json!("alice@example.com")),
+                ("country", json!("US")),
+            ],
         );
 
         let properties = HashMap::from([
@@ -733,7 +784,13 @@ mod tests {
             .lookup_nodes(&[String::from("Person")], &properties)
             .unwrap();
 
-        assert_eq!(nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(), vec!["person:1"]);
+        assert_eq!(
+            nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["person:1"]
+        );
     }
 
     #[test]
@@ -796,7 +853,8 @@ mod tests {
 
     #[test]
     fn lookup_nodes_ignores_metadata_only_index_kinds_for_exact_property_lookup() {
-        let (_temp_dir, storage) = open_test_storage("catalog-lookup-ignore-metadata-only-node-index");
+        let (_temp_dir, storage) =
+            open_test_storage("catalog-lookup-ignore-metadata-only-node-index");
         let catalog = IndexCatalog::new(&storage);
 
         catalog
@@ -830,7 +888,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+            nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["person:1"]
         );
     }
@@ -860,7 +921,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+            nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["person:2", "person:3"]
         );
     }
@@ -875,7 +939,13 @@ mod tests {
         store_edge(&storage, "rel:3", "LIKES", "person:1", "movie:1");
 
         let edges = catalog.lookup_edges(Some("KNOWS")).unwrap();
-        assert_eq!(edges.iter().map(|edge| edge.id.as_str()).collect::<Vec<_>>(), vec!["rel:1", "rel:2"]);
+        assert_eq!(
+            edges
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["rel:1", "rel:2"]
+        );
         assert!(edges.iter().all(|edge| edge.edge_type == "KNOWS"));
     }
 
@@ -928,7 +998,13 @@ mod tests {
                 ]),
             )
             .unwrap();
-        assert_eq!(edges.iter().map(|edge| edge.id.as_str()).collect::<Vec<_>>(), vec!["rel:1"]);
+        assert_eq!(
+            edges
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["rel:1"]
+        );
     }
 
     #[test]
@@ -981,7 +1057,13 @@ mod tests {
                 ]),
             )
             .unwrap();
-        assert_eq!(edges.iter().map(|edge| edge.id.as_str()).collect::<Vec<_>>(), vec!["rel:1"]);
+        assert_eq!(
+            edges
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["rel:1"]
+        );
     }
 
     #[test]
@@ -994,12 +1076,19 @@ mod tests {
         store_edge(&storage, "rel:2", "KNOWS", "person:2", "person:3");
 
         let edges = catalog.lookup_edges(None).unwrap();
-        assert_eq!(edges.iter().map(|edge| edge.id.as_str()).collect::<Vec<_>>(), vec!["rel:1", "rel:2", "rel:3"]);
+        assert_eq!(
+            edges
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["rel:1", "rel:2", "rel:3"]
+        );
     }
 
     #[test]
     fn lookup_edges_by_properties_ignores_metadata_only_index_kinds_for_exact_property_lookup() {
-        let (_temp_dir, storage) = open_test_storage("catalog-lookup-ignore-metadata-only-edge-index");
+        let (_temp_dir, storage) =
+            open_test_storage("catalog-lookup-ignore-metadata-only-edge-index");
         let catalog = IndexCatalog::new(&storage);
 
         catalog
@@ -1037,7 +1126,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            edges.iter().map(|edge| edge.id.as_str()).collect::<Vec<_>>(),
+            edges
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["rel:1"]
         );
     }
@@ -1092,7 +1184,13 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(edges.iter().map(|edge| edge.id.as_str()).collect::<Vec<_>>(), vec!["rel:2"]);
+        assert_eq!(
+            edges
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["rel:2"]
+        );
     }
 
     #[test]
@@ -1104,7 +1202,11 @@ mod tests {
             .create(sample_definition("person_age_idx", "Person", &["age"]))
             .unwrap();
         catalog
-            .create(sample_definition("person_age_team_idx", "Person", &["age", "team"]))
+            .create(sample_definition(
+                "person_age_team_idx",
+                "Person",
+                &["age", "team"],
+            ))
             .unwrap();
 
         store_node(
@@ -1143,23 +1245,46 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+            nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["person:2", "person:4"]
         );
     }
 
     #[test]
     fn lookup_nodes_by_range_uses_composite_range_index_without_exact_suffix_filters() {
-        let (_temp_dir, storage) = open_test_storage("catalog-lookup-nodes-by-composite-range-no-suffix");
+        let (_temp_dir, storage) =
+            open_test_storage("catalog-lookup-nodes-by-composite-range-no-suffix");
         let catalog = IndexCatalog::new(&storage);
 
         catalog
-            .create(sample_definition("person_age_team_idx", "Person", &["age", "team"]))
+            .create(sample_definition(
+                "person_age_team_idx",
+                "Person",
+                &["age", "team"],
+            ))
             .unwrap();
 
-        store_node(&storage, "person:2", &["Person"], &[("age", json!(35)), ("team", json!("ops"))]);
-        store_node(&storage, "person:1", &["Person"], &[("age", json!(29)), ("team", json!("ops"))]);
-        store_node(&storage, "person:3", &["Person"], &[("age", json!(41)), ("team", json!("sales"))]);
+        store_node(
+            &storage,
+            "person:2",
+            &["Person"],
+            &[("age", json!(35)), ("team", json!("ops"))],
+        );
+        store_node(
+            &storage,
+            "person:1",
+            &["Person"],
+            &[("age", json!(29)), ("team", json!("ops"))],
+        );
+        store_node(
+            &storage,
+            "person:3",
+            &["Person"],
+            &[("age", json!(41)), ("team", json!("sales"))],
+        );
 
         let nodes = catalog
             .lookup_nodes_by_range(
@@ -1172,24 +1297,53 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+            nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["person:2", "person:3"]
         );
     }
 
     #[test]
-    fn lookup_nodes_by_range_uses_non_leading_composite_range_index_when_exact_prefix_is_available() {
-        let (_temp_dir, storage) = open_test_storage("catalog-lookup-nodes-by-non-leading-composite-range");
+    fn lookup_nodes_by_range_uses_non_leading_composite_range_index_when_exact_prefix_is_available()
+    {
+        let (_temp_dir, storage) =
+            open_test_storage("catalog-lookup-nodes-by-non-leading-composite-range");
         let catalog = IndexCatalog::new(&storage);
 
         catalog
-            .create(sample_definition("person_team_age_idx", "Person", &["team", "age"]))
+            .create(sample_definition(
+                "person_team_age_idx",
+                "Person",
+                &["team", "age"],
+            ))
             .unwrap();
 
-        store_node(&storage, "person:2", &["Person"], &[("team", json!("ops")), ("age", json!(35))]);
-        store_node(&storage, "person:1", &["Person"], &[("team", json!("ops")), ("age", json!(29))]);
-        store_node(&storage, "person:3", &["Person"], &[("team", json!("sales")), ("age", json!(41))]);
-        store_node(&storage, "person:4", &["Person"], &[("team", json!("ops")), ("age", json!(43))]);
+        store_node(
+            &storage,
+            "person:2",
+            &["Person"],
+            &[("team", json!("ops")), ("age", json!(35))],
+        );
+        store_node(
+            &storage,
+            "person:1",
+            &["Person"],
+            &[("team", json!("ops")), ("age", json!(29))],
+        );
+        store_node(
+            &storage,
+            "person:3",
+            &["Person"],
+            &[("team", json!("sales")), ("age", json!(41))],
+        );
+        store_node(
+            &storage,
+            "person:4",
+            &["Person"],
+            &[("team", json!("ops")), ("age", json!(43))],
+        );
 
         let nodes = catalog
             .lookup_nodes_by_range(
@@ -1202,7 +1356,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+            nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["person:2", "person:4"]
         );
     }
@@ -1222,9 +1379,24 @@ mod tests {
             })
             .unwrap();
 
-        store_node(&storage, "person:2", &["Person"], &[("seenAt", json!("2024-06-01T00:00:00Z"))]);
-        store_node(&storage, "person:1", &["Person"], &[("seenAt", json!("2024-01-01T00:00:00Z"))]);
-        store_node(&storage, "person:3", &["Person"], &[("seenAt", json!("2025-01-01T00:00:00Z"))]);
+        store_node(
+            &storage,
+            "person:2",
+            &["Person"],
+            &[("seenAt", json!("2024-06-01T00:00:00Z"))],
+        );
+        store_node(
+            &storage,
+            "person:1",
+            &["Person"],
+            &[("seenAt", json!("2024-01-01T00:00:00Z"))],
+        );
+        store_node(
+            &storage,
+            "person:3",
+            &["Person"],
+            &[("seenAt", json!("2025-01-01T00:00:00Z"))],
+        );
 
         let nodes = catalog
             .lookup_nodes_by_range(
@@ -1237,14 +1409,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+            nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["person:2", "person:3"]
         );
     }
 
     #[test]
     fn lookup_nodes_by_range_uses_composite_temporal_index_with_exact_suffix() {
-        let (_temp_dir, storage) = open_test_storage("catalog-lookup-nodes-by-composite-temporal-range");
+        let (_temp_dir, storage) =
+            open_test_storage("catalog-lookup-nodes-by-composite-temporal-range");
         let catalog = IndexCatalog::new(&storage);
 
         catalog
@@ -1261,25 +1437,37 @@ mod tests {
             &storage,
             "person:2",
             &["Person"],
-            &[("seenAt", json!("2024-06-01T00:00:00Z")), ("team", json!("ops"))],
+            &[
+                ("seenAt", json!("2024-06-01T00:00:00Z")),
+                ("team", json!("ops")),
+            ],
         );
         store_node(
             &storage,
             "person:1",
             &["Person"],
-            &[("seenAt", json!("2024-01-01T00:00:00Z")), ("team", json!("ops"))],
+            &[
+                ("seenAt", json!("2024-01-01T00:00:00Z")),
+                ("team", json!("ops")),
+            ],
         );
         store_node(
             &storage,
             "person:3",
             &["Person"],
-            &[("seenAt", json!("2025-01-01T00:00:00Z")), ("team", json!("sales"))],
+            &[
+                ("seenAt", json!("2025-01-01T00:00:00Z")),
+                ("team", json!("sales")),
+            ],
         );
         store_node(
             &storage,
             "person:4",
             &["Person"],
-            &[("seenAt", json!("2025-03-01T00:00:00Z")), ("team", json!("ops"))],
+            &[
+                ("seenAt", json!("2025-03-01T00:00:00Z")),
+                ("team", json!("ops")),
+            ],
         );
 
         let nodes = catalog
@@ -1293,14 +1481,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+            nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["person:2", "person:4"]
         );
     }
 
     #[test]
-    fn lookup_nodes_by_range_uses_non_leading_composite_temporal_index_when_exact_prefix_is_available() {
-        let (_temp_dir, storage) = open_test_storage("catalog-lookup-nodes-by-non-leading-composite-temporal-range");
+    fn lookup_nodes_by_range_uses_non_leading_composite_temporal_index_when_exact_prefix_is_available(
+    ) {
+        let (_temp_dir, storage) =
+            open_test_storage("catalog-lookup-nodes-by-non-leading-composite-temporal-range");
         let catalog = IndexCatalog::new(&storage);
 
         catalog
@@ -1317,25 +1510,37 @@ mod tests {
             &storage,
             "person:2",
             &["Person"],
-            &[("team", json!("ops")), ("seenAt", json!("2024-06-01T00:00:00Z"))],
+            &[
+                ("team", json!("ops")),
+                ("seenAt", json!("2024-06-01T00:00:00Z")),
+            ],
         );
         store_node(
             &storage,
             "person:1",
             &["Person"],
-            &[("team", json!("ops")), ("seenAt", json!("2024-01-01T00:00:00Z"))],
+            &[
+                ("team", json!("ops")),
+                ("seenAt", json!("2024-01-01T00:00:00Z")),
+            ],
         );
         store_node(
             &storage,
             "person:3",
             &["Person"],
-            &[("team", json!("sales")), ("seenAt", json!("2025-01-01T00:00:00Z"))],
+            &[
+                ("team", json!("sales")),
+                ("seenAt", json!("2025-01-01T00:00:00Z")),
+            ],
         );
         store_node(
             &storage,
             "person:4",
             &["Person"],
-            &[("team", json!("ops")), ("seenAt", json!("2025-03-01T00:00:00Z"))],
+            &[
+                ("team", json!("ops")),
+                ("seenAt", json!("2025-03-01T00:00:00Z")),
+            ],
         );
 
         let nodes = catalog
@@ -1349,13 +1554,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
+            nodes
+                .iter()
+                .map(|node| node.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["person:2", "person:4"]
         );
     }
 
     #[test]
-    fn lookup_edges_by_range_uses_composite_relationship_range_index_when_exact_suffix_is_available() {
+    fn lookup_edges_by_range_uses_composite_relationship_range_index_when_exact_suffix_is_available(
+    ) {
         let (_temp_dir, storage) = open_test_storage("catalog-lookup-edges-by-composite-range");
         let catalog = IndexCatalog::new(&storage);
 
@@ -1405,14 +1614,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            edges.iter().map(|edge| edge.id.as_str()).collect::<Vec<_>>(),
+            edges
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["rel:1", "rel:3"]
         );
     }
 
     #[test]
-    fn lookup_edges_by_range_uses_composite_relationship_range_index_without_exact_suffix_filters() {
-        let (_temp_dir, storage) = open_test_storage("catalog-lookup-edges-by-composite-range-no-suffix");
+    fn lookup_edges_by_range_uses_composite_relationship_range_index_without_exact_suffix_filters()
+    {
+        let (_temp_dir, storage) =
+            open_test_storage("catalog-lookup-edges-by-composite-range-no-suffix");
         let catalog = IndexCatalog::new(&storage);
 
         catalog
@@ -1461,14 +1675,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            edges.iter().map(|edge| edge.id.as_str()).collect::<Vec<_>>(),
+            edges
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["rel:1", "rel:3"]
         );
     }
 
     #[test]
-    fn lookup_edges_by_range_uses_non_leading_composite_relationship_range_index_when_exact_prefix_is_available() {
-        let (_temp_dir, storage) = open_test_storage("catalog-lookup-edges-by-non-leading-composite-range");
+    fn lookup_edges_by_range_uses_non_leading_composite_relationship_range_index_when_exact_prefix_is_available(
+    ) {
+        let (_temp_dir, storage) =
+            open_test_storage("catalog-lookup-edges-by-non-leading-composite-range");
         let catalog = IndexCatalog::new(&storage);
 
         catalog
@@ -1525,7 +1744,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            edges.iter().map(|edge| edge.id.as_str()).collect::<Vec<_>>(),
+            edges
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["rel:2", "rel:4"]
         );
     }
@@ -1581,14 +1803,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            edges.iter().map(|edge| edge.id.as_str()).collect::<Vec<_>>(),
+            edges
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["rel:2", "rel:3"]
         );
     }
 
     #[test]
     fn lookup_edges_by_range_uses_composite_temporal_relationship_index_with_exact_suffix() {
-        let (_temp_dir, storage) = open_test_storage("catalog-lookup-edges-by-composite-temporal-range");
+        let (_temp_dir, storage) =
+            open_test_storage("catalog-lookup-edges-by-composite-temporal-range");
         let catalog = IndexCatalog::new(&storage);
 
         catalog
@@ -1607,7 +1833,10 @@ mod tests {
             "KNOWS",
             "person:2",
             "person:3",
-            &[("seenAt", json!("2024-06-01T00:00:00Z")), ("years", json!(5))],
+            &[
+                ("seenAt", json!("2024-06-01T00:00:00Z")),
+                ("years", json!(5)),
+            ],
         );
         store_edge_with_properties(
             &storage,
@@ -1615,7 +1844,10 @@ mod tests {
             "KNOWS",
             "person:1",
             "person:2",
-            &[("seenAt", json!("2024-01-01T00:00:00Z")), ("years", json!(5))],
+            &[
+                ("seenAt", json!("2024-01-01T00:00:00Z")),
+                ("years", json!(5)),
+            ],
         );
         store_edge_with_properties(
             &storage,
@@ -1623,7 +1855,10 @@ mod tests {
             "KNOWS",
             "person:3",
             "person:4",
-            &[("seenAt", json!("2025-01-01T00:00:00Z")), ("years", json!(2))],
+            &[
+                ("seenAt", json!("2025-01-01T00:00:00Z")),
+                ("years", json!(2)),
+            ],
         );
         store_edge_with_properties(
             &storage,
@@ -1631,7 +1866,10 @@ mod tests {
             "KNOWS",
             "person:4",
             "person:5",
-            &[("seenAt", json!("2025-03-01T00:00:00Z")), ("years", json!(5))],
+            &[
+                ("seenAt", json!("2025-03-01T00:00:00Z")),
+                ("years", json!(5)),
+            ],
         );
 
         let edges = catalog
@@ -1645,14 +1883,19 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            edges.iter().map(|edge| edge.id.as_str()).collect::<Vec<_>>(),
+            edges
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["rel:2", "rel:4"]
         );
     }
 
     #[test]
-    fn lookup_edges_by_range_uses_non_leading_composite_temporal_relationship_index_when_exact_prefix_is_available() {
-        let (_temp_dir, storage) = open_test_storage("catalog-lookup-edges-by-non-leading-composite-temporal-range");
+    fn lookup_edges_by_range_uses_non_leading_composite_temporal_relationship_index_when_exact_prefix_is_available(
+    ) {
+        let (_temp_dir, storage) =
+            open_test_storage("catalog-lookup-edges-by-non-leading-composite-temporal-range");
         let catalog = IndexCatalog::new(&storage);
 
         catalog
@@ -1671,7 +1914,10 @@ mod tests {
             "KNOWS",
             "person:2",
             "person:3",
-            &[("years", json!(5)), ("seenAt", json!("2024-06-01T00:00:00Z"))],
+            &[
+                ("years", json!(5)),
+                ("seenAt", json!("2024-06-01T00:00:00Z")),
+            ],
         );
         store_edge_with_properties(
             &storage,
@@ -1679,7 +1925,10 @@ mod tests {
             "KNOWS",
             "person:1",
             "person:2",
-            &[("years", json!(5)), ("seenAt", json!("2024-01-01T00:00:00Z"))],
+            &[
+                ("years", json!(5)),
+                ("seenAt", json!("2024-01-01T00:00:00Z")),
+            ],
         );
         store_edge_with_properties(
             &storage,
@@ -1687,7 +1936,10 @@ mod tests {
             "KNOWS",
             "person:3",
             "person:4",
-            &[("years", json!(2)), ("seenAt", json!("2025-01-01T00:00:00Z"))],
+            &[
+                ("years", json!(2)),
+                ("seenAt", json!("2025-01-01T00:00:00Z")),
+            ],
         );
         store_edge_with_properties(
             &storage,
@@ -1695,7 +1947,10 @@ mod tests {
             "KNOWS",
             "person:4",
             "person:5",
-            &[("years", json!(5)), ("seenAt", json!("2025-03-01T00:00:00Z"))],
+            &[
+                ("years", json!(5)),
+                ("seenAt", json!("2025-03-01T00:00:00Z")),
+            ],
         );
 
         let edges = catalog
@@ -1709,18 +1964,26 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            edges.iter().map(|edge| edge.id.as_str()).collect::<Vec<_>>(),
+            edges
+                .iter()
+                .map(|edge| edge.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["rel:2", "rel:4"]
         );
     }
 
     #[test]
     fn preferred_node_range_index_definition_prefers_more_exact_prefix_for_non_leading_range() {
-        let (_temp_dir, storage) = open_test_storage("catalog-preferred-node-non-leading-range-prefix");
+        let (_temp_dir, storage) =
+            open_test_storage("catalog-preferred-node-non-leading-range-prefix");
         let catalog = IndexCatalog::new(&storage);
 
         catalog
-            .create(sample_definition("person_team_age_level_idx", "Person", &["team", "age", "level"]))
+            .create(sample_definition(
+                "person_team_age_level_idx",
+                "Person",
+                &["team", "age", "level"],
+            ))
             .unwrap();
         catalog
             .create(sample_definition(
@@ -1748,14 +2011,23 @@ mod tests {
 
     #[test]
     fn preferred_node_range_index_definition_prefers_more_exact_fields_when_prefix_is_equal() {
-        let (_temp_dir, storage) = open_test_storage("catalog-preferred-node-non-leading-range-specificity");
+        let (_temp_dir, storage) =
+            open_test_storage("catalog-preferred-node-non-leading-range-specificity");
         let catalog = IndexCatalog::new(&storage);
 
         catalog
-            .create(sample_definition("person_team_age_idx", "Person", &["team", "age"]))
+            .create(sample_definition(
+                "person_team_age_idx",
+                "Person",
+                &["team", "age"],
+            ))
             .unwrap();
         catalog
-            .create(sample_definition("person_team_age_level_idx", "Person", &["team", "age", "level"]))
+            .create(sample_definition(
+                "person_team_age_level_idx",
+                "Person",
+                &["team", "age", "level"],
+            ))
             .unwrap();
 
         let preferred = catalog
@@ -1774,8 +2046,10 @@ mod tests {
     }
 
     #[test]
-    fn preferred_relationship_range_index_definition_prefers_more_exact_prefix_for_non_leading_range() {
-        let (_temp_dir, storage) = open_test_storage("catalog-preferred-edge-non-leading-range-prefix");
+    fn preferred_relationship_range_index_definition_prefers_more_exact_prefix_for_non_leading_range(
+    ) {
+        let (_temp_dir, storage) =
+            open_test_storage("catalog-preferred-edge-non-leading-range-prefix");
         let catalog = IndexCatalog::new(&storage);
 
         catalog
@@ -1784,7 +2058,11 @@ mod tests {
                 entity_type: CatalogIndexEntityType::Relationship,
                 kind: CatalogIndexKind::Range,
                 label: "KNOWS".to_string(),
-                properties: vec!["years".to_string(), "weight".to_string(), "level".to_string()],
+                properties: vec![
+                    "years".to_string(),
+                    "weight".to_string(),
+                    "level".to_string(),
+                ],
             })
             .unwrap();
         catalog
@@ -1793,7 +2071,11 @@ mod tests {
                 entity_type: CatalogIndexEntityType::Relationship,
                 kind: CatalogIndexKind::Range,
                 label: "KNOWS".to_string(),
-                properties: vec!["since".to_string(), "years".to_string(), "weight".to_string()],
+                properties: vec![
+                    "since".to_string(),
+                    "years".to_string(),
+                    "weight".to_string(),
+                ],
             })
             .unwrap();
 
@@ -1814,8 +2096,10 @@ mod tests {
     }
 
     #[test]
-    fn preferred_relationship_range_index_definition_prefers_more_exact_fields_when_prefix_is_equal() {
-        let (_temp_dir, storage) = open_test_storage("catalog-preferred-edge-non-leading-range-specificity");
+    fn preferred_relationship_range_index_definition_prefers_more_exact_fields_when_prefix_is_equal(
+    ) {
+        let (_temp_dir, storage) =
+            open_test_storage("catalog-preferred-edge-non-leading-range-specificity");
         let catalog = IndexCatalog::new(&storage);
 
         catalog
@@ -1833,7 +2117,11 @@ mod tests {
                 entity_type: CatalogIndexEntityType::Relationship,
                 kind: CatalogIndexKind::Range,
                 label: "KNOWS".to_string(),
-                properties: vec!["years".to_string(), "weight".to_string(), "level".to_string()],
+                properties: vec![
+                    "years".to_string(),
+                    "weight".to_string(),
+                    "level".to_string(),
+                ],
             })
             .unwrap();
 

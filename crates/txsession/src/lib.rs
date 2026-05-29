@@ -4,7 +4,7 @@
 //! pending-write buffering.
 
 use copperdb_errors::{map_transient_transaction_error, TransientTransactionCode};
-use copperdb_topology::{DistributedTransactionClock, LogicalTransactionId};
+use copperdb_topology::{DistributedTransactionClock, LogicalTransactionId, TransactionTimeOracle};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -30,6 +30,8 @@ pub enum TxError {
     TimedOut,
     #[error("transaction conflict")]
     Conflict,
+    #[error("invalid bookmark: {0}")]
+    InvalidBookmark(String),
     #[error("terminal transaction error: {0}")]
     Terminal(String),
 }
@@ -94,6 +96,77 @@ pub enum TxOperation {
     },
 }
 
+fn parse_bookmark(value: &str) -> Result<LogicalTransactionId, TxError> {
+    let trimmed = value.trim();
+    let mut parts = trimmed.split(':');
+    let Some(epoch_hex) = parts.next() else {
+        return Err(TxError::InvalidBookmark(trimmed.to_string()));
+    };
+    let Some(counter_hex) = parts.next() else {
+        return Err(TxError::InvalidBookmark(trimmed.to_string()));
+    };
+    let Some(node_hex) = parts.next() else {
+        return Err(TxError::InvalidBookmark(trimmed.to_string()));
+    };
+    if parts.next().is_some() {
+        return Err(TxError::InvalidBookmark(trimmed.to_string()));
+    }
+
+    let epoch = u64::from_str_radix(epoch_hex, 16)
+        .map_err(|_| TxError::InvalidBookmark(trimmed.to_string()))?;
+    let counter = u64::from_str_radix(counter_hex, 16)
+        .map_err(|_| TxError::InvalidBookmark(trimmed.to_string()))?;
+    let node_ordinal = u32::from_str_radix(node_hex, 16)
+        .map_err(|_| TxError::InvalidBookmark(trimmed.to_string()))?;
+
+    Ok(LogicalTransactionId::new(epoch, counter, node_ordinal))
+}
+
+fn normalize_bookmarks(bookmarks: &[String], mode: BookmarkMode) -> Result<Vec<String>, TxError> {
+    if mode == BookmarkMode::None {
+        return Ok(Vec::new());
+    }
+
+    let mut normalized = Vec::new();
+    for bookmark in bookmarks {
+        match parse_bookmark(bookmark) {
+            Ok(parsed) => normalized.push(parsed.stable_id()),
+            Err(_) if mode == BookmarkMode::Optional => {}
+            Err(err) => return Err(err),
+        }
+    }
+
+    Ok(normalized)
+}
+
+fn resolve_bookmark_fence(
+    bookmarks: &[String],
+    mode: BookmarkMode,
+) -> Result<Option<LogicalTransactionId>, TxError> {
+    if mode == BookmarkMode::None {
+        return Ok(None);
+    }
+
+    let mut fence: Option<LogicalTransactionId> = None;
+    for bookmark in bookmarks {
+        match parse_bookmark(bookmark) {
+            Ok(parsed) => {
+                fence = Some(fence.map(|current| current.max(parsed)).unwrap_or(parsed));
+            }
+            Err(_) if mode == BookmarkMode::Optional => {}
+            Err(err) => return Err(err),
+        }
+    }
+
+    Ok(fence)
+}
+
+pub fn resolve_read_fence_from_bookmarks(
+    bookmarks: &[String],
+) -> Result<Option<LogicalTransactionId>, TxError> {
+    resolve_bookmark_fence(bookmarks, BookmarkMode::Required)
+}
+
 // ─── Transaction ─────────────────────────────────────────────────────────────
 
 /// An active database transaction.
@@ -155,6 +228,10 @@ impl Transaction {
 
     pub fn is_active(&self) -> bool {
         self.state == TransactionState::Active && !self.is_expired()
+    }
+
+    pub fn read_fence(&self) -> LogicalTransactionId {
+        self.begin_timestamp
     }
 
     pub fn is_expired(&self) -> bool {
@@ -253,7 +330,7 @@ impl Default for SessionConfig {
 /// Manages all active transactions.
 pub struct TransactionManager {
     active: DashMap<Uuid, Transaction>,
-    clock: Arc<DistributedTransactionClock>,
+    time_oracle: Arc<dyn TransactionTimeOracle>,
 }
 
 #[derive(Debug, Clone)]
@@ -261,6 +338,8 @@ pub struct Session {
     pub id: Uuid,
     pub transaction_id: Uuid,
     pub database: Option<String>,
+    pub bookmarks: Vec<String>,
+    pub read_fence: LogicalTransactionId,
     pub owner: Option<String>,
     pub expires_at: Instant,
     terminal_error: Option<TxError>,
@@ -273,6 +352,10 @@ impl Session {
 
     pub fn is_expired(&self) -> bool {
         Instant::now() > self.expires_at
+    }
+
+    pub fn read_fence(&self) -> LogicalTransactionId {
+        self.read_fence
     }
 }
 
@@ -313,6 +396,10 @@ impl SessionManager {
         owner: Option<&str>,
     ) -> Result<Uuid, TxError> {
         let transaction_id = self.transactions.begin(config)?;
+        let transaction = self
+            .transactions
+            .get(&transaction_id)
+            .ok_or(TxError::NoActiveTransaction)?;
         let session_id = Uuid::new_v4();
         let owner = owner.and_then(|value| {
             let trimmed = value.trim();
@@ -326,6 +413,8 @@ impl SessionManager {
             id: session_id,
             transaction_id,
             database: config.database.clone(),
+            bookmarks: transaction.bookmarks.clone(),
+            read_fence: transaction.read_fence(),
             owner,
             expires_at: Instant::now() + self.ttl,
             terminal_error: None,
@@ -382,6 +471,15 @@ impl SessionManager {
     }
 
     pub fn commit_and_delete(&self, session_id: Uuid) -> Result<(), TxError> {
+        self.commit_and_get_bookmark(session_id).map(|_| ())
+    }
+
+    pub fn read_fence(&self, session_id: &Uuid) -> Result<LogicalTransactionId, TxError> {
+        let session = self.get(session_id).ok_or(TxError::NoActiveTransaction)?;
+        Ok(session.read_fence())
+    }
+
+    pub fn commit_and_get_bookmark(&self, session_id: Uuid) -> Result<String, TxError> {
         let (_, session) = self
             .sessions
             .remove(&session_id)
@@ -390,7 +488,8 @@ impl SessionManager {
             self.transactions.remove(&session.transaction_id);
             return Err(err);
         }
-        self.transactions.commit(session.transaction_id)
+        self.transactions
+            .commit_with_bookmark(session.transaction_id)
     }
 
     pub fn rollback_and_delete(&self, session_id: Uuid) -> Result<(), TxError> {
@@ -443,22 +542,61 @@ impl TransactionManager {
     }
 
     pub fn with_clock(clock: Arc<DistributedTransactionClock>) -> Self {
+        let time_oracle: Arc<dyn TransactionTimeOracle> = clock;
+        Self::with_time_oracle(time_oracle)
+    }
+
+    pub fn with_time_oracle(time_oracle: Arc<dyn TransactionTimeOracle>) -> Self {
         Self {
             active: DashMap::new(),
-            clock,
+            time_oracle,
         }
     }
 
-    pub fn clock(&self) -> &Arc<DistributedTransactionClock> {
-        &self.clock
+    pub fn time_oracle(&self) -> &Arc<dyn TransactionTimeOracle> {
+        &self.time_oracle
+    }
+
+    fn issue_begin_timestamp(
+        &self,
+        config: &SessionConfig,
+    ) -> Result<LogicalTransactionId, TxError> {
+        match resolve_bookmark_fence(&config.bookmarks, config.bookmark_mode)? {
+            Some(fence) => Ok(self.time_oracle.observe(fence)),
+            None => Ok(self.time_oracle.issue()),
+        }
     }
 
     /// Begin a new transaction, returning its ID.
     pub fn begin(&self, config: &SessionConfig) -> Result<Uuid, TxError> {
-        let tx = Transaction::new_with_timestamp(config, self.clock.issue());
+        let begin_timestamp = self.issue_begin_timestamp(config)?;
+        let mut tx = Transaction::new_with_timestamp(config, begin_timestamp);
+        tx.bookmarks = normalize_bookmarks(&config.bookmarks, config.bookmark_mode)?;
         let id = tx.id;
         self.active.insert(id, tx);
         Ok(id)
+    }
+
+    pub fn read_fence(&self, id: &Uuid) -> Result<LogicalTransactionId, TxError> {
+        let tx = self.get(id).ok_or(TxError::NoActiveTransaction)?;
+        Ok(tx.read_fence())
+    }
+
+    pub fn commit_with_bookmark(&self, id: Uuid) -> Result<String, TxError> {
+        let (_, mut tx) = self
+            .active
+            .remove(&id)
+            .ok_or(TxError::NoActiveTransaction)?;
+        let commit_timestamp = self.time_oracle.issue();
+        match tx.commit_at(commit_timestamp) {
+            Ok(()) => Ok(commit_timestamp.stable_id()),
+            Err(err) => {
+                if tx.is_active() {
+                    self.active.insert(id, tx);
+                }
+                Err(err)
+            }
+        }
     }
 
     /// Commit the transaction with the given ID.
@@ -466,24 +604,7 @@ impl TransactionManager {
     /// Re-inserts only when the error is transient (i.e. the transaction
     /// remains Active so the caller can retry).
     pub fn commit(&self, id: Uuid) -> Result<(), TxError> {
-        let (_, mut tx) = self
-            .active
-            .remove(&id)
-            .ok_or(TxError::NoActiveTransaction)?;
-        let commit_timestamp = self.clock.issue();
-        match tx.commit_at(commit_timestamp) {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                // Only re-insert if the transaction is still Active (Conflict or
-                // other transient error).  Terminal states (TimedOut → Failed,
-                // AlreadyCommitted, AlreadyRolledBack, NotActive) are not retryable
-                // and we drop the transaction to avoid accumulating finished entries.
-                if tx.is_active() {
-                    self.active.insert(id, tx);
-                }
-                Err(err)
-            }
-        }
+        self.commit_with_bookmark(id).map(|_| ())
     }
 
     /// Rollback the transaction with the given ID.
@@ -600,6 +721,71 @@ mod tests {
     }
 
     #[test]
+    fn transaction_manager_begin_observes_required_bookmark_fence() {
+        let clock = Arc::new(DistributedTransactionClock::with_epoch(11, 5));
+        let mgr = TransactionManager::with_clock(clock);
+        let fence = LogicalTransactionId::new(7, 41, 9);
+        let config = SessionConfig {
+            bookmarks: vec![fence.stable_id()],
+            bookmark_mode: BookmarkMode::Required,
+            ..SessionConfig::default()
+        };
+
+        let id = mgr.begin(&config).unwrap();
+        let tx = mgr.get(&id).unwrap();
+
+        assert_eq!(tx.bookmarks, vec![fence.stable_id()]);
+        assert!(tx.begin_timestamp > fence);
+        assert_eq!(tx.begin_timestamp.epoch, fence.epoch);
+        assert_eq!(tx.begin_timestamp.counter, fence.counter + 1);
+        assert_eq!(mgr.read_fence(&id).unwrap(), tx.begin_timestamp);
+    }
+
+    #[test]
+    fn transaction_manager_begin_required_rejects_invalid_bookmark() {
+        let mgr = TransactionManager::new();
+        let config = SessionConfig {
+            bookmarks: vec!["not-a-bookmark".to_string()],
+            bookmark_mode: BookmarkMode::Required,
+            ..SessionConfig::default()
+        };
+
+        let err = mgr.begin(&config).unwrap_err();
+        assert!(matches!(err, TxError::InvalidBookmark(_)));
+    }
+
+    #[test]
+    fn transaction_manager_begin_optional_ignores_invalid_bookmark() {
+        let mgr = TransactionManager::new();
+        let config = SessionConfig {
+            bookmarks: vec!["not-a-bookmark".to_string()],
+            bookmark_mode: BookmarkMode::Optional,
+            ..SessionConfig::default()
+        };
+
+        let id = mgr.begin(&config).unwrap();
+        let tx = mgr.get(&id).unwrap();
+
+        assert!(tx.is_active());
+        assert!(tx.bookmarks.is_empty());
+    }
+
+    #[test]
+    fn transaction_manager_commit_with_bookmark_returns_commit_timestamp() {
+        let clock = Arc::new(DistributedTransactionClock::with_epoch(11, 5));
+        let mgr = TransactionManager::with_clock(Arc::clone(&clock));
+        let id = mgr.begin(&SessionConfig::default()).unwrap();
+        let begin_timestamp = mgr.get(&id).unwrap().begin_timestamp;
+
+        let bookmark = mgr.commit_with_bookmark(id).unwrap();
+        let commit_timestamp = parse_bookmark(&bookmark).unwrap();
+
+        assert!(commit_timestamp > begin_timestamp);
+        let next = clock.issue();
+        assert_eq!(next.counter, commit_timestamp.counter + 1);
+    }
+
+    #[test]
     fn test_transaction_manager_rollback() {
         let mgr = TransactionManager::new();
         let config = SessionConfig::default();
@@ -636,8 +822,10 @@ mod tests {
     #[test]
     fn test_cleanup_expired() {
         let mgr = TransactionManager::new();
-        let mut config = SessionConfig::default();
-        config.timeout = Duration::from_millis(1);
+        let config = SessionConfig {
+            timeout: Duration::from_millis(1),
+            ..SessionConfig::default()
+        };
         let id = mgr.begin(&config).unwrap();
         std::thread::sleep(Duration::from_millis(5));
         mgr.cleanup_expired();
@@ -769,6 +957,32 @@ mod tests {
     }
 
     #[test]
+    fn session_manager_persists_normalized_bookmarks_and_read_fence() {
+        let clock = Arc::new(DistributedTransactionClock::with_epoch(11, 5));
+        let transactions = Arc::new(TransactionManager::with_clock(clock));
+        let manager =
+            SessionManager::with_transactions(Duration::from_secs(30), Arc::clone(&transactions));
+        let bookmark = LogicalTransactionId::new(7, 41, 9).stable_id();
+        let config = SessionConfig {
+            database: Some("copper".to_string()),
+            bookmarks: vec![format!("  {bookmark}  ")],
+            bookmark_mode: BookmarkMode::Required,
+            ..SessionConfig::default()
+        };
+
+        let session_id = manager.open(&config).unwrap();
+        let session = manager.get(&session_id).unwrap();
+        let transaction = transactions.get(&session.transaction_id).unwrap();
+
+        assert_eq!(session.bookmarks, vec![bookmark]);
+        assert_eq!(session.read_fence(), transaction.begin_timestamp);
+        assert_eq!(
+            manager.read_fence(&session_id).unwrap(),
+            transaction.begin_timestamp
+        );
+    }
+
+    #[test]
     fn session_manager_commit_deletes_session_and_transaction() {
         let transactions = Arc::new(TransactionManager::new());
         let manager =
@@ -778,6 +992,21 @@ mod tests {
 
         manager.commit_and_delete(session_id).unwrap();
 
+        assert!(manager.get(&session_id).is_none());
+        assert!(!transactions.is_active(&transaction_id));
+    }
+
+    #[test]
+    fn session_manager_commit_and_get_bookmark_returns_commit_bookmark() {
+        let transactions = Arc::new(TransactionManager::new());
+        let manager =
+            SessionManager::with_transactions(Duration::from_secs(30), Arc::clone(&transactions));
+        let session_id = manager.open(&SessionConfig::default()).unwrap();
+        let transaction_id = manager.get(&session_id).unwrap().transaction_id;
+
+        let bookmark = manager.commit_and_get_bookmark(session_id).unwrap();
+
+        assert!(parse_bookmark(&bookmark).is_ok());
         assert!(manager.get(&session_id).is_none());
         assert!(!transactions.is_active(&transaction_id));
     }

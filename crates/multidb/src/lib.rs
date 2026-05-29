@@ -423,18 +423,14 @@ mod tests {
         manager
             .set_config_overrides(
                 "clinic",
-                BTreeMap::from([(
-                    "COPPERDB_SEARCH_VECTOR_ENABLED".into(),
-                    "true".into(),
-                )]),
+                BTreeMap::from([("COPPERDB_SEARCH_VECTOR_ENABLED".into(), "true".into())]),
             )
             .unwrap();
 
         let mut global = GlobalConfig::default();
-        global.cli_overrides.insert(
-            "COPPERDB_SEARCH_VECTOR_ENABLED".into(),
-            "false".into(),
-        );
+        global
+            .cli_overrides
+            .insert("COPPERDB_SEARCH_VECTOR_ENABLED".into(), "false".into());
 
         let effective = manager.effective_config("clinic", &global).unwrap();
         assert!(!effective.vector_enabled);

@@ -1410,6 +1410,7 @@ fn now_unix_ms() -> i64 {
 mod tests {
     use super::*;
 
+    #[allow(clippy::arc_with_non_send_sync)]
     fn test_auth() -> Authenticator {
         let storage = Arc::new(StorageEngine::open_temporary().unwrap());
         let auth = Authenticator::new(
@@ -1437,6 +1438,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
     fn persistent_user_survives_reload() {
         let storage = Arc::new(StorageEngine::open_temporary().unwrap());
         let auth = Authenticator::new(
@@ -1524,6 +1526,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::arc_with_non_send_sync)]
     fn role_entitlements_override_builtin_defaults_and_persist() {
         let storage = Arc::new(StorageEngine::open_temporary().unwrap());
         let auth = Authenticator::new(

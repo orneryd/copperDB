@@ -70,9 +70,10 @@ use copperdb_storage::{
 };
 use copperdb_topology::{
     ConsistencyLevel, DistributedReadPlan, DistributedSearchPlan, DistributedWriteMode,
-    DistributedWritePlan, FabricDatabase, FabricGlobalId, PlacementKey, TopologyRegistry,
+    DistributedWritePlan, FabricDatabase, FabricGlobalId, LogicalTransactionId, PlacementKey,
+    TopologyRegistry,
 };
-use copperdb_txsession::TransactionManager;
+use copperdb_txsession::{SessionConfig, TransactionManager, TxError};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -117,6 +118,12 @@ impl From<copperdb_cypher::CypherError> for CopperDbError {
 impl From<copperdb_eval::EvalError> for CopperDbError {
     fn from(e: copperdb_eval::EvalError) -> Self {
         CopperDbError::Eval(e.to_string())
+    }
+}
+
+impl From<TxError> for CopperDbError {
+    fn from(e: TxError) -> Self {
+        CopperDbError::Init(e.to_string())
     }
 }
 
@@ -258,7 +265,6 @@ pub struct CopperDb {
 
 mod copperdb;
 
-
 // ─── Legacy copperdb (full-server async variant) ──────────────────────────────
 
 /// Full-server async variant that integrates all subsystems.
@@ -365,7 +371,6 @@ fn collect_expression_properties(expression: &Expression, properties: &mut Vec<S
         Expression::Literal(_) | Expression::Parameter(_) | Expression::Variable(_) => {}
     }
 }
-
 
 #[cfg(test)]
 mod tests;

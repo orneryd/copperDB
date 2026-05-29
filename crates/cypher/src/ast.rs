@@ -332,11 +332,9 @@ impl Pattern {
                     .then(|| self.path_variable.clone())
                     .flatten(),
                 shortest_path: self.shortest_path,
-                nodes: self.nodes
-                    [segment.node_start..segment.node_start + segment.node_len]
+                nodes: self.nodes[segment.node_start..segment.node_start + segment.node_len]
                     .to_vec(),
-                edges: self.edges
-                    [segment.edge_start..segment.edge_start + segment.edge_len]
+                edges: self.edges[segment.edge_start..segment.edge_start + segment.edge_len]
                     .to_vec(),
                 segment_edge_counts: vec![segment.edge_len],
             })

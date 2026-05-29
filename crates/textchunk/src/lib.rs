@@ -60,7 +60,7 @@ pub fn chunk_by_sentences(text: &str, max_chunk_size: usize) -> Vec<Chunk> {
     let mut chunk_start = 0usize;
     let mut char_cursor = 0usize;
 
-    for sentence in text.split_inclusive(|c| c == '.' || c == '!' || c == '?' || c == '\n') {
+    for sentence in text.split_inclusive(['.', '!', '?', '\n']) {
         let sentence_char_len = sentence.chars().count();
         if current_char_len + sentence_char_len > max_chunk_size && !current.is_empty() {
             chunks.push(Chunk {

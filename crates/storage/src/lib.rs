@@ -19,12 +19,16 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+mod mvcc;
 mod storage_edge_property_index;
 mod storage_node_property_range;
 mod storage_property_index_encoding;
+pub use crate::mvcc::{
+    MvccHead, MvccLifecycleStatus, MvccSnapshot, MvccSnapshotLease, MvccStore, MvccVersion,
+};
 use crate::storage_edge_property_index::is_relationship_property_index;
-use crate::storage_property_index_encoding::property_index_value_key;
 pub use crate::storage_node_property_range::RangeIndexComparison;
+use crate::storage_property_index_encoding::property_index_value_key;
 
 pub const STORAGE_LAYOUT_VERSION: u8 = 0;
 const META_LAYOUT_MANIFEST_KEY: &[u8] = b"layout_manifest";
@@ -107,246 +111,6 @@ pub enum StorageError {
     EncryptionRequired,
     #[error("storage encryption metadata mismatch: {0}")]
     EncryptionMismatch(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MvccSnapshot {
-    pub id: u64,
-    pub read_ts: u64,
-}
-
-#[derive(Debug)]
-pub struct MvccSnapshotLease {
-    snapshot: MvccSnapshot,
-    active_readers: Arc<Mutex<BTreeMap<u64, u64>>>,
-}
-
-impl MvccSnapshotLease {
-    pub fn snapshot(&self) -> &MvccSnapshot {
-        &self.snapshot
-    }
-}
-
-impl Drop for MvccSnapshotLease {
-    fn drop(&mut self) {
-        let mut readers = self.active_readers.lock();
-        if let Some(count) = readers.get_mut(&self.snapshot.read_ts) {
-            *count -= 1;
-            if *count == 0 {
-                readers.remove(&self.snapshot.read_ts);
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MvccVersion {
-    pub version: u64,
-    pub value: Option<Vec<u8>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MvccHead {
-    pub floor: u64,
-    pub head: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MvccLifecycleStatus {
-    pub floor: u64,
-    pub head: u64,
-    pub oldest_active_reader: Option<u64>,
-    pub active_reader_count: u64,
-    pub retained_versions: usize,
-    pub prune_debt: usize,
-    pub suggested_prune_floor: u64,
-}
-
-#[derive(Debug, Default)]
-pub struct MvccStore {
-    current_version: AtomicU64,
-    floor: AtomicU64,
-    values: RwLock<BTreeMap<String, Vec<MvccVersion>>>,
-    active_readers: Arc<Mutex<BTreeMap<u64, u64>>>,
-}
-
-impl MvccStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn begin_snapshot(&self) -> MvccSnapshot {
-        let read_ts = self.current_version.load(Ordering::SeqCst);
-        MvccSnapshot {
-            id: read_ts,
-            read_ts,
-        }
-    }
-
-    pub fn begin_registered_snapshot(&self) -> MvccSnapshotLease {
-        let snapshot = self.begin_snapshot();
-        let mut readers = self.active_readers.lock();
-        *readers.entry(snapshot.read_ts).or_insert(0) += 1;
-        drop(readers);
-
-        MvccSnapshotLease {
-            snapshot,
-            active_readers: Arc::clone(&self.active_readers),
-        }
-    }
-
-    pub fn commit_batch<I>(&self, writes: I) -> u64
-    where
-        I: IntoIterator<Item = (String, Option<Vec<u8>>)>,
-    {
-        let version = self.current_version.fetch_add(1, Ordering::SeqCst) + 1;
-        let mut guard = self.values.write();
-        for (key, value) in writes {
-            guard
-                .entry(key)
-                .or_default()
-                .push(MvccVersion { version, value });
-        }
-        version
-    }
-
-    pub fn read(&self, snapshot: &MvccSnapshot, key: &str) -> Option<Vec<u8>> {
-        let guard = self.values.read();
-        guard.get(key).and_then(|versions| {
-            versions
-                .iter()
-                .rev()
-                .find(|v| v.version <= snapshot.read_ts)
-                .and_then(|v| v.value.clone())
-        })
-    }
-
-    pub fn prune_versions_older_than(&self, min_version: u64) {
-        let effective_min_version = self
-            .oldest_active_reader()
-            .map(|oldest_reader| min_version.min(oldest_reader))
-            .unwrap_or(min_version);
-
-        self.floor.store(effective_min_version, Ordering::SeqCst);
-        let mut guard = self.values.write();
-        for versions in guard.values_mut() {
-            if versions.len() <= 1 {
-                continue;
-            }
-            let keep_from = versions
-                .iter()
-                .position(|v| v.version >= effective_min_version)
-                .unwrap_or(versions.len().saturating_sub(1));
-            if keep_from > 0 {
-                versions.drain(0..keep_from);
-            }
-        }
-    }
-
-    pub fn trigger_prune_now(&self, retain_last_n_versions: u64) -> usize {
-        let head = self.current_version.load(Ordering::SeqCst);
-        let requested_floor = head.saturating_sub(retain_last_n_versions);
-        let effective_min_version = self.safe_prune_floor(requested_floor);
-
-        self.floor.store(effective_min_version, Ordering::SeqCst);
-        let mut removed_versions = 0usize;
-        let mut guard = self.values.write();
-        for versions in guard.values_mut() {
-            if versions.len() <= 1 {
-                continue;
-            }
-            let keep_from = versions
-                .iter()
-                .position(|v| v.version >= effective_min_version)
-                .unwrap_or(versions.len().saturating_sub(1));
-            if keep_from > 0 {
-                removed_versions += keep_from;
-                versions.drain(0..keep_from);
-            }
-        }
-
-        removed_versions
-    }
-
-    pub fn oldest_active_reader(&self) -> Option<u64> {
-        self.active_readers.lock().keys().next().copied()
-    }
-
-    pub fn lifecycle_status(&self) -> MvccLifecycleStatus {
-        let head = self.head();
-        let oldest_active_reader = self.oldest_active_reader();
-        let active_reader_count = self.active_reader_count();
-        let retained_versions = self.retained_version_count();
-        let suggested_prune_floor = oldest_active_reader.unwrap_or(head.head);
-        let prune_debt = self.compute_prune_debt(suggested_prune_floor);
-
-        MvccLifecycleStatus {
-            floor: head.floor,
-            head: head.head,
-            oldest_active_reader,
-            active_reader_count,
-            retained_versions,
-            prune_debt,
-            suggested_prune_floor,
-        }
-    }
-
-    pub fn active_reader_count(&self) -> u64 {
-        self.active_readers.lock().values().copied().sum()
-    }
-
-    pub fn retained_version_count(&self) -> usize {
-        let guard = self.values.read();
-        guard.values().map(Vec::len).sum()
-    }
-
-    fn safe_prune_floor(&self, requested_floor: u64) -> u64 {
-        self.oldest_active_reader()
-            .map(|oldest_reader| requested_floor.min(oldest_reader))
-            .unwrap_or(requested_floor)
-    }
-
-    fn compute_prune_debt(&self, candidate_floor: u64) -> usize {
-        let guard = self.values.read();
-        guard
-            .values()
-            .map(|versions| {
-                if versions.len() <= 1 {
-                    return 0;
-                }
-                versions
-                    .iter()
-                    .position(|v| v.version >= candidate_floor)
-                    .unwrap_or(versions.len().saturating_sub(1))
-            })
-            .sum()
-    }
-
-    pub fn head(&self) -> MvccHead {
-        MvccHead {
-            floor: self.floor.load(Ordering::SeqCst),
-            head: self.current_version.load(Ordering::SeqCst),
-        }
-    }
-
-    pub fn encode_head(head: &MvccHead) -> [u8; 16] {
-        let mut out = [0u8; 16];
-        out[..8].copy_from_slice(&head.floor.to_be_bytes());
-        out[8..].copy_from_slice(&head.head.to_be_bytes());
-        out
-    }
-
-    pub fn decode_head(raw: &[u8]) -> Result<MvccHead, StorageError> {
-        if raw.len() < 8 {
-            return Err(StorageError::MvccHeadTruncated(raw.len()));
-        }
-        if raw.len() < 16 {
-            return Err(StorageError::MvccHeadMissingFloor(raw.len()));
-        }
-        let floor = u64::from_be_bytes(raw[..8].try_into().expect("slice length checked"));
-        let head = u64::from_be_bytes(raw[8..16].try_into().expect("slice length checked"));
-        Ok(MvccHead { floor, head })
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1170,7 +934,9 @@ impl StorageEngine {
             Some(v) => {
                 let raw = self.decode_record_bytes(v.as_ref())?;
                 if let Some(node) = compat_node_record_from_bytes(id, &raw)? {
-                    return Ok(Some(rmp_serde::to_vec(&node_record_to_legacy_props(&node))?));
+                    return Ok(Some(rmp_serde::to_vec(&node_record_to_legacy_props(
+                        &node,
+                    ))?));
                 }
                 Ok(Some(raw))
             }
@@ -1198,10 +964,7 @@ impl StorageEngine {
             } else {
                 raw
             };
-            Ok((
-                Bytes::from(k.to_vec()),
-                Bytes::from(value),
-            ))
+            Ok((Bytes::from(k.to_vec()), Bytes::from(value)))
         })
     }
 
@@ -1246,7 +1009,9 @@ impl StorageEngine {
 
     pub fn get_node_record(&self, id: &str) -> Result<Option<NodeRecord>, StorageError> {
         match self.nodes.get(id.as_bytes())? {
-            Some(v) => compat_node_record_from_bytes(id, self.decode_record_bytes(v.as_ref())?.as_slice()),
+            Some(v) => {
+                compat_node_record_from_bytes(id, self.decode_record_bytes(v.as_ref())?.as_slice())
+            }
             None => Ok(None),
         }
     }
@@ -1278,7 +1043,8 @@ impl StorageEngine {
         if out.is_empty() {
             for entry in self.nodes.iter() {
                 let (key, value) = entry?;
-                let key_str = std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+                let key_str =
+                    std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
                 let raw = self.decode_record_bytes(value.as_ref())?;
                 let Some(node) = compat_node_record_from_bytes(key_str, &raw)? else {
                     continue;
@@ -1298,7 +1064,8 @@ impl StorageEngine {
         let mut out: Vec<NodeRecord> = Vec::new();
         for entry in self.nodes.iter() {
             let (key, value) = entry?;
-            let key_str = std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            let key_str =
+                std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
             let raw = self.decode_record_bytes(value.as_ref())?;
             if let Some(node) = compat_node_record_from_bytes(key_str, &raw)? {
                 out.push(node);
@@ -2071,7 +1838,7 @@ impl StorageEngine {
     fn index_node_labels(&self, node: &NodeRecord) -> Result<(), StorageError> {
         for label in &node.labels {
             self.indexes
-                .insert(label_index_key(label, &node.id).as_bytes(), &[])?;
+                .insert(label_index_key(label, &node.id).as_bytes(), [])?;
         }
         Ok(())
     }
@@ -2082,7 +1849,7 @@ impl StorageEngine {
                 continue;
             }
             if let Some(key) = node_property_index_key_for_node(&index, node) {
-                self.indexes.insert(key.as_bytes(), &[])?;
+                self.indexes.insert(key.as_bytes(), [])?;
             }
         }
         for index in self.node_fulltext_index_definitions()? {
@@ -2150,7 +1917,7 @@ impl StorageEngine {
         self.delete_node_property_index_entries(index)?;
         for node in self.get_nodes_by_label(&index.label)? {
             if let Some(key) = node_property_index_key_for_node(index, &node) {
-                self.indexes.insert(key.as_bytes(), &[])?;
+                self.indexes.insert(key.as_bytes(), [])?;
             }
         }
         Ok(())
@@ -2164,7 +1931,10 @@ impl StorageEngine {
         Ok(())
     }
 
-    fn delete_node_property_index_entries(&self, index: &IndexDefinition) -> Result<(), StorageError> {
+    fn delete_node_property_index_entries(
+        &self,
+        index: &IndexDefinition,
+    ) -> Result<(), StorageError> {
         let prefix = node_property_index_definition_prefix(&index.label, &index.properties);
         let keys = self
             .indexes
@@ -2181,7 +1951,10 @@ impl StorageEngine {
         Ok(())
     }
 
-    fn delete_node_fulltext_index_entries(&self, index: &IndexDefinition) -> Result<(), StorageError> {
+    fn delete_node_fulltext_index_entries(
+        &self,
+        index: &IndexDefinition,
+    ) -> Result<(), StorageError> {
         for property in &index.properties {
             let prefix = node_fulltext_property_prefix(&index.label, property);
             let keys = self
@@ -2212,7 +1985,7 @@ impl StorageEngine {
             for token in fulltext_tokens_for_value(value) {
                 self.indexes.insert(
                     node_fulltext_index_key(&index.label, property, &token, &node.id).as_bytes(),
-                    &[],
+                    [],
                 )?;
             }
         }
@@ -2280,15 +2053,15 @@ impl StorageEngine {
     fn index_edge(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
         self.indexes.insert(
             edge_type_index_key(&edge.edge_type, &edge.id).as_bytes(),
-            &[],
+            [],
         )?;
         self.indexes.insert(
             edge_start_index_key(&edge.start_node, &edge.edge_type, &edge.id).as_bytes(),
-            &[],
+            [],
         )?;
         self.indexes.insert(
             edge_end_index_key(&edge.end_node, &edge.edge_type, &edge.id).as_bytes(),
-            &[],
+            [],
         )?;
         self.index_edge_property_indexes(edge)?;
         Ok(())
@@ -2537,10 +2310,9 @@ fn fulltext_tokens_for_value(value: &serde_json::Value) -> Vec<String> {
         serde_json::Value::String(text) => tokenize_fulltext(text),
         serde_json::Value::Bool(boolean) => tokenize_fulltext(&boolean.to_string()),
         serde_json::Value::Number(number) => tokenize_fulltext(&number.to_string()),
-        serde_json::Value::Array(values) => values
-            .iter()
-            .flat_map(fulltext_tokens_for_value)
-            .collect(),
+        serde_json::Value::Array(values) => {
+            values.iter().flat_map(fulltext_tokens_for_value).collect()
+        }
         serde_json::Value::Object(_) => Vec::new(),
     }
 }
@@ -2652,7 +2424,13 @@ fn validate_decay_profile_binding(binding: &DecayProfileBindingSchema) -> Result
             ));
         }
     } else if binding.is_edge {
-        if binding.target_edge_type.as_deref().unwrap_or("").trim().is_empty() {
+        if binding
+            .target_edge_type
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+        {
             return Err(StorageError::KnowledgePolicyInvalid(
                 "edge decay binding requires a target edge type".into(),
             ));
@@ -2732,15 +2510,20 @@ fn validate_promotion_policy(
         ));
     }
     if policy.is_edge {
-        if policy.target_edge_type.as_deref().unwrap_or_default().trim().is_empty() {
+        if policy
+            .target_edge_type
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
             return Err(StorageError::KnowledgePolicyInvalid(
                 "promotion policy edge targets require an edge type".into(),
             ));
         }
         if !policy.target_labels.is_empty() || policy.is_wildcard {
             return Err(StorageError::KnowledgePolicyInvalid(
-                "promotion policy edge targets cannot also declare node labels or wildcard"
-                    .into(),
+                "promotion policy edge targets cannot also declare node labels or wildcard".into(),
             ));
         }
     } else if policy.is_wildcard {
@@ -2788,7 +2571,10 @@ fn validate_promotion_policy(
 
 fn promotion_policy_target_key(policy: &PromotionPolicySchema) -> String {
     if policy.is_edge {
-        return format!("edge:{}", policy.target_edge_type.clone().unwrap_or_default());
+        return format!(
+            "edge:{}",
+            policy.target_edge_type.clone().unwrap_or_default()
+        );
     }
     if policy.is_wildcard {
         return "wild:node".to_string();
@@ -2823,7 +2609,10 @@ fn compat_node_record_from_bytes(id: &str, raw: &[u8]) -> Result<Option<NodeReco
 
 fn node_record_to_legacy_props(node: &NodeRecord) -> BTreeMap<String, serde_json::Value> {
     let mut props = node.properties.clone();
-    props.insert("_id".to_string(), serde_json::Value::String(node.id.clone()));
+    props.insert(
+        "_id".to_string(),
+        serde_json::Value::String(node.id.clone()),
+    );
     props.insert(
         "_labels".to_string(),
         serde_json::Value::Array(
@@ -2837,10 +2626,7 @@ fn node_record_to_legacy_props(node: &NodeRecord) -> BTreeMap<String, serde_json
     props
 }
 
-fn legacy_node_labels(
-    id: &str,
-    stored_labels: Option<&serde_json::Value>,
-) -> Vec<String> {
+fn legacy_node_labels(id: &str, stored_labels: Option<&serde_json::Value>) -> Vec<String> {
     if let Some(serde_json::Value::Array(labels)) = stored_labels {
         let parsed = labels
             .iter()
@@ -2861,7 +2647,10 @@ fn legacy_node_labels(
 }
 
 fn derived_label_from_id(id: &str) -> Option<String> {
-    let namespace = id.split_once(':').map(|(namespace, _)| namespace).unwrap_or(id);
+    let namespace = id
+        .split_once(':')
+        .map(|(namespace, _)| namespace)
+        .unwrap_or(id);
     let mut chars = namespace.chars();
     let first = chars.next()?;
     let mut label = first.to_uppercase().collect::<String>();
@@ -2882,6 +2671,5 @@ fn now_unix_ms() -> i64 {
 }
 
 #[cfg(test)]
-
 #[cfg(test)]
 mod tests;

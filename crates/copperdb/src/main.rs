@@ -225,14 +225,23 @@ impl Component for GrpcComponent {
                 .as_deref()
             {
                 let client_ca_cert = std::fs::read(client_ca_cert_path).with_context(|| {
-                    format!("failed to read gRPC TLS client-auth CA certificate {client_ca_cert_path}")
+                    format!(
+                        "failed to read gRPC TLS client-auth CA certificate {client_ca_cert_path}"
+                    )
                 })?;
                 tls = tls.client_ca_root(Certificate::from_pem(client_ca_cert));
-                if self.state.runtime_config.server.grpc_tls_client_auth_optional {
+                if self
+                    .state
+                    .runtime_config
+                    .server
+                    .grpc_tls_client_auth_optional
+                {
                     tls = tls.client_auth_optional(true);
                 }
             }
-            builder = builder.tls_config(tls).context("failed to configure gRPC TLS")?;
+            builder = builder
+                .tls_config(tls)
+                .context("failed to configure gRPC TLS")?;
         }
         builder
             .add_service(service)

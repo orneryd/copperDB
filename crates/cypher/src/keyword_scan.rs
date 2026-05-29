@@ -65,8 +65,10 @@ pub fn keyword_index(s: &str, keyword: &str) -> Option<usize> {
 /// Use this when splitting clause boundaries, e.g. to find the `RETURN` that
 /// follows a `CALL { … }` subquery.
 pub fn top_level_keyword_index(s: &str, keyword: &str) -> Option<usize> {
-    let mut opts = KeywordScanOpts::default();
-    opts.skip_braces = true;
+    let opts = KeywordScanOpts {
+        skip_braces: true,
+        ..KeywordScanOpts::default()
+    };
     keyword_index_from(s, keyword, 0, opts)
 }
 
@@ -220,23 +222,11 @@ pub fn keyword_index_from(
         // ── Depth tracking ────────────────────────────────────────────────────
         match c {
             b'(' => paren_depth += 1,
-            b')' => {
-                if paren_depth > 0 {
-                    paren_depth -= 1;
-                }
-            }
+            b')' if paren_depth > 0 => paren_depth -= 1,
             b'[' => bracket_depth += 1,
-            b']' => {
-                if bracket_depth > 0 {
-                    bracket_depth -= 1;
-                }
-            }
+            b']' if bracket_depth > 0 => bracket_depth -= 1,
             b'{' => brace_depth += 1,
-            b'}' => {
-                if brace_depth > 0 {
-                    brace_depth -= 1;
-                }
-            }
+            b'}' if brace_depth > 0 => brace_depth -= 1,
             _ => {}
         }
 

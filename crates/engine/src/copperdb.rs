@@ -25,10 +25,7 @@ impl CopperDb {
         }
     }
 
-    pub fn validate_ranked_search_query(
-        &self,
-        query: &SearchQuery,
-    ) -> Result<(), CopperDbError> {
+    pub fn validate_ranked_search_query(&self, query: &SearchQuery) -> Result<(), CopperDbError> {
         self.ensure_ranked_search_query_enabled(query)
     }
 
@@ -167,17 +164,20 @@ impl CopperDb {
     }
 
     /// Create a new in-memory (temporary) database instance.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn open_temporary() -> Result<Self, CopperDbError> {
         let storage = Arc::new(StorageEngine::open_temporary()?);
         Self::from_storage(storage, DatabaseConfig::default())
     }
 
     /// Create a persistent database at the given path.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn open(config: DatabaseConfig) -> Result<Self, CopperDbError> {
         let storage = Arc::new(open_storage(&config)?);
         Self::from_storage(storage, config)
     }
 
+    #[allow(clippy::arc_with_non_send_sync)]
     fn from_storage(
         storage: Arc<StorageEngine>,
         config: DatabaseConfig,
@@ -299,6 +299,19 @@ impl CopperDb {
             rows: eval_result.rows,
             stats,
         })
+    }
+
+    pub fn begin_transaction(&self, config: &SessionConfig) -> Result<uuid::Uuid, CopperDbError> {
+        self.tx_manager.begin(config).map_err(Into::into)
+    }
+
+    pub fn transaction_read_fence(
+        &self,
+        transaction_id: &uuid::Uuid,
+    ) -> Result<LogicalTransactionId, CopperDbError> {
+        self.tx_manager
+            .read_fence(transaction_id)
+            .map_err(Into::into)
     }
 }
 
@@ -469,7 +482,11 @@ impl CopperDb {
         let mut labels = BTreeSet::new();
 
         if let Some(database) = database {
-            if let Some(shard) = database.shards.iter().find(|shard| shard.placement == *placement) {
+            if let Some(shard) = database
+                .shards
+                .iter()
+                .find(|shard| shard.placement == *placement)
+            {
                 labels.extend(shard.labels.iter().cloned());
             }
         }
@@ -559,6 +576,7 @@ impl CopperDb {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_fabric_ranked_search_with_transport(
         &self,
         database: &FabricDatabase,
@@ -566,13 +584,15 @@ impl CopperDb {
         hydration: Vec<RrfHydrationRecord>,
         config: RrfConfig,
         policy: RrfSearchPolicy,
+        read_fence: Option<LogicalTransactionId>,
         transport: Arc<dyn RankedSearchTransport>,
     ) -> Result<FabricRankedSearchExecution, CopperDbError> {
         self.ensure_ranked_search_query_enabled(&query)?;
         let plans = self.plan_fabric_searches(database)?;
-        let collected = collect_planned_fabric_ranked_batches(plans.clone(), query, transport)
-            .await
-            .map_err(|error| CopperDbError::Replication(error.to_string()))?;
+        let collected =
+            collect_planned_fabric_ranked_batches(plans.clone(), query, read_fence, transport)
+                .await
+                .map_err(|error| CopperDbError::Replication(error.to_string()))?;
         let mut execution = execute_planned_fabric_ranked_search(
             plans,
             collected.batches,
@@ -589,6 +609,7 @@ impl CopperDb {
         &self,
         outcome: &RrfSearchOutcome,
         consistency: ConsistencyLevel,
+        read_fence: Option<LogicalTransactionId>,
         transport: Arc<dyn HydrationTransport>,
     ) -> Result<Vec<RrfHydrationRecord>, CopperDbError> {
         let mut by_placement: BTreeMap<PlacementKey, Vec<_>> = BTreeMap::new();
@@ -606,6 +627,7 @@ impl CopperDb {
                 node_id: plan.coordinator.node_id,
                 placement,
                 global_ids,
+                read_fence,
             });
         }
 
@@ -615,6 +637,7 @@ impl CopperDb {
         Ok(collected.records)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_fabric_ranked_search_with_full_transport(
         &self,
         database: &FabricDatabase,
@@ -622,20 +645,26 @@ impl CopperDb {
         hydration_consistency: ConsistencyLevel,
         config: RrfConfig,
         policy: RrfSearchPolicy,
+        read_fence: Option<LogicalTransactionId>,
         ranked_transport: Arc<dyn RankedSearchTransport>,
         hydration_transport: Arc<dyn HydrationTransport>,
     ) -> Result<FabricRankedSearchExecution, CopperDbError> {
         self.ensure_ranked_search_query_enabled(&query)?;
         let plans = self.plan_fabric_searches(database)?;
-        let collected =
-            collect_planned_fabric_ranked_batches(plans.clone(), query, ranked_transport)
-                .await
-                .map_err(|error| CopperDbError::Replication(error.to_string()))?;
+        let collected = collect_planned_fabric_ranked_batches(
+            plans.clone(),
+            query,
+            read_fence,
+            ranked_transport,
+        )
+        .await
+        .map_err(|error| CopperDbError::Replication(error.to_string()))?;
         let merged = merge_rrf_search_batches(collected.batches.clone(), config);
         let hydration = self
             .fetch_fabric_ranked_hydration_with_transport(
                 &merged,
                 hydration_consistency,
+                read_fence,
                 hydration_transport,
             )
             .await?;
@@ -1497,13 +1526,7 @@ fn node_record_to_value(node: &NodeRecord) -> Value {
                 ("_id".to_string(), Value::String(node.id.clone())),
                 (
                     "_labels".to_string(),
-                    Value::Array(
-                        node.labels
-                            .iter()
-                            .cloned()
-                            .map(Value::String)
-                            .collect(),
-                    ),
+                    Value::Array(node.labels.iter().cloned().map(Value::String).collect()),
                 ),
                 (
                     "_created_at_unix_ms".to_string(),
