@@ -1,5 +1,5 @@
 use super::*;
-use copperdb_storage::EdgeRecord;
+use copperdb_storage::{EdgeRecord, MvccPruneOptions};
 use copperdb_txsession::{BookmarkMode, SessionConfig};
 use std::collections::BTreeMap;
 
@@ -808,6 +808,56 @@ fn test_storage_mvcc_rebuild_is_reachable_from_copperdb() {
         .get_nodes_by_label_visible_at(&repaired_snapshot, "Person")
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn test_storage_mvcc_prune_versions_is_reachable_from_copperdb() {
+    let db = CopperDb::open_temporary().unwrap();
+    db.execute("CREATE (n:Person {name: 'Ada'})", Default::default())
+        .unwrap();
+
+    let mut current = db.storage().get_nodes_by_label("Person").unwrap();
+    assert_eq!(current.len(), 1);
+    let mut node = current.pop().unwrap();
+
+    let lease = db.storage().begin_registered_mvcc_snapshot();
+    node.labels = vec!["Device".to_string()];
+    node.updated_at_unix_ms += 1;
+    db.storage().put_node_record(&node).unwrap();
+    node.updated_at_unix_ms += 1;
+    db.storage().put_node_record(&node).unwrap();
+
+    let removed = db.storage().prune_mvcc_versions(MvccPruneOptions {
+        max_versions_per_key: Some(1),
+    });
+    assert_eq!(removed, 1);
+    assert_eq!(db.storage().lifecycle_status().floor, 1);
+    assert_eq!(
+        db.storage()
+            .get_nodes_by_label_visible_at(lease.snapshot(), "Person")
+            .unwrap()
+            .len(),
+        1
+    );
+
+    drop(lease);
+    let removed = db.storage().prune_mvcc_versions(MvccPruneOptions {
+        max_versions_per_key: Some(1),
+    });
+    assert!(removed > 0);
+    let latest = db.storage().begin_mvcc_snapshot();
+    assert!(db
+        .storage()
+        .get_nodes_by_label_visible_at(&latest, "Person")
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        db.storage()
+            .get_nodes_by_label_visible_at(&latest, "Device")
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]

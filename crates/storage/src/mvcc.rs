@@ -70,6 +70,11 @@ pub struct MvccLifecycleDebtKey {
     pub prune_debt: usize,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MvccPruneOptions {
+    pub max_versions_per_key: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MvccLogicalHead {
     pub floor: u64,
@@ -169,6 +174,48 @@ impl MvccKeyState {
         removed_count
     }
 
+    fn prune_to_max_versions(
+        &mut self,
+        max_versions: usize,
+        oldest_active_reader: Option<u64>,
+    ) -> usize {
+        let Some(head) = self.head.as_ref() else {
+            return 0;
+        };
+
+        let mut keep_versions = BTreeSet::new();
+        keep_versions.insert(head.head);
+
+        for version in self
+            .archived
+            .keys()
+            .rev()
+            .take(max_versions.saturating_sub(1))
+        {
+            keep_versions.insert(*version);
+        }
+
+        if let Some(reader_anchor) = self.reader_anchor_version(oldest_active_reader) {
+            keep_versions.insert(reader_anchor);
+        }
+
+        let new_floor = keep_versions.iter().next().copied().unwrap_or(head.head);
+        let removed_keys = self
+            .archived
+            .keys()
+            .copied()
+            .filter(|version| !keep_versions.contains(version))
+            .collect::<Vec<_>>();
+        let removed_count = removed_keys.len();
+        for version in removed_keys {
+            self.archived.remove(&version);
+        }
+        if let Some(head) = self.head.as_mut() {
+            head.floor = new_floor;
+        }
+        removed_count
+    }
+
     fn prune_debt(&self, candidate_floor: u64) -> usize {
         let Some(new_floor) = self.compute_floor_for_request(candidate_floor) else {
             return 0;
@@ -182,6 +229,19 @@ impl MvccKeyState {
             head: head.head,
             tombstoned: head.tombstoned,
         })
+    }
+
+    fn reader_anchor_version(&self, oldest_active_reader: Option<u64>) -> Option<u64> {
+        let head = self.head.as_ref()?;
+        let read_ts = oldest_active_reader?;
+        if read_ts >= head.head {
+            return Some(head.head);
+        }
+        self.archived
+            .range(..=read_ts)
+            .next_back()
+            .map(|(version, _)| *version)
+            .or(Some(head.head))
     }
 }
 
@@ -283,19 +343,46 @@ impl MvccStore {
         }
     }
 
-    pub fn trigger_prune_now(&self, retain_last_n_versions: u64) -> usize {
-        let head = self.current_version.load(Ordering::SeqCst);
-        let requested_floor = head.saturating_sub(retain_last_n_versions);
-        let effective_min_version = self.safe_prune_floor(requested_floor);
+    pub fn prune_mvcc_versions(&self, opts: MvccPruneOptions) -> usize {
+        let max_versions = opts.max_versions_per_key.unwrap_or(1).max(1);
+        let oldest_active_reader = self.oldest_active_reader();
 
-        self.floor.store(effective_min_version, Ordering::SeqCst);
         let mut removed_versions = 0usize;
+        let mut pruned_node_ids = Vec::new();
+        let mut pruned_edge_ids = Vec::new();
+        let mut new_global_floor: Option<u64> = None;
         let mut guard = self.values.write();
-        for state in guard.values_mut() {
-            removed_versions += state.prune_to_floor(effective_min_version);
+        for (logical_key, state) in guard.iter_mut() {
+            let removed = state.prune_to_max_versions(max_versions, oldest_active_reader);
+            if let Some(head) = state.logical_head() {
+                new_global_floor = Some(match new_global_floor {
+                    Some(existing) => existing.min(head.floor),
+                    None => head.floor,
+                });
+            }
+            if removed == 0 {
+                continue;
+            }
+            removed_versions += removed;
+            if let Some(id) = logical_key.strip_prefix("node:") {
+                pruned_node_ids.push(id.to_string());
+            } else if let Some(id) = logical_key.strip_prefix("edge:") {
+                pruned_edge_ids.push(id.to_string());
+            }
         }
+        drop(guard);
+
+        self.floor
+            .store(new_global_floor.unwrap_or(0), Ordering::SeqCst);
+        self.compact_history_candidates(&pruned_node_ids, &pruned_edge_ids);
 
         removed_versions
+    }
+
+    pub fn trigger_prune_now(&self, retain_last_n_versions: u64) -> usize {
+        self.prune_mvcc_versions(MvccPruneOptions {
+            max_versions_per_key: Some(retain_last_n_versions.saturating_add(1) as usize),
+        })
     }
 
     pub fn current_head_for_key(&self, key: &str) -> Option<MvccLogicalHead> {
@@ -601,6 +688,24 @@ impl MvccStore {
         guard.values().map(MvccKeyState::retained_versions).sum()
     }
 
+    #[cfg(test)]
+    pub(crate) fn label_history_candidate_count(&self, label: &str) -> usize {
+        self.node_label_history
+            .read()
+            .get(label)
+            .map(BTreeSet::len)
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn edge_type_history_candidate_count(&self, edge_type: &str) -> usize {
+        self.edge_type_history
+            .read()
+            .get(edge_type)
+            .map(BTreeSet::len)
+            .unwrap_or(0)
+    }
+
     pub(crate) fn reset_for_rebuild(&self) {
         self.current_version.store(0, Ordering::SeqCst);
         self.floor.store(0, Ordering::SeqCst);
@@ -612,10 +717,30 @@ impl MvccStore {
         self.active_readers.lock().clear();
     }
 
-    fn safe_prune_floor(&self, requested_floor: u64) -> u64 {
-        self.oldest_active_reader()
-            .map(|oldest_reader| requested_floor.min(oldest_reader))
-            .unwrap_or(requested_floor)
+    fn compact_history_candidates(&self, pruned_node_ids: &[String], pruned_edge_ids: &[String]) {
+        if !pruned_node_ids.is_empty() {
+            let values = self.values.read();
+            let mut label_history = self.node_label_history.write();
+            for node_id in pruned_node_ids {
+                let retained_labels = values
+                    .get(&node_logical_key(node_id))
+                    .and_then(retained_node_labels)
+                    .unwrap_or_default();
+                prune_node_history_candidates(&mut label_history, node_id, &retained_labels);
+            }
+        }
+
+        if !pruned_edge_ids.is_empty() {
+            let values = self.values.read();
+            let mut edge_type_history = self.edge_type_history.write();
+            for edge_id in pruned_edge_ids {
+                let retained_types = values
+                    .get(&edge_logical_key(edge_id))
+                    .and_then(retained_edge_types)
+                    .unwrap_or_default();
+                prune_edge_history_candidates(&mut edge_type_history, edge_id, &retained_types);
+            }
+        }
     }
 
     fn compute_prune_debt(&self, candidate_floor: u64) -> usize {
@@ -790,6 +915,10 @@ impl<'a> NamespacedMvccStore<'a> {
         self.inner.trigger_prune_now(retain_last_n_versions)
     }
 
+    pub fn prune_mvcc_versions(&self, opts: MvccPruneOptions) -> usize {
+        self.inner.prune_mvcc_versions(opts)
+    }
+
     pub fn pause_lifecycle(&self) {
         self.inner.pause_lifecycle();
     }
@@ -911,6 +1040,76 @@ fn current_live_edge_from_state(state: &MvccKeyState) -> Option<Result<EdgeRecor
             .ok_or_else(|| StorageError::NotFound("missing edge head payload".to_string()))
             .and_then(decode_edge_record),
     )
+}
+
+fn retained_node_labels(state: &MvccKeyState) -> Option<BTreeSet<String>> {
+    let mut labels = BTreeSet::new();
+    for value in state.archived.values() {
+        let Some(raw) = value.as_deref() else {
+            continue;
+        };
+        let Ok(node) = decode_node_record(raw) else {
+            continue;
+        };
+        labels.extend(node.labels);
+    }
+    let head = state.head.as_ref()?;
+    if !head.tombstoned {
+        if let Some(raw) = head.current_value.as_deref() {
+            if let Ok(node) = decode_node_record(raw) {
+                labels.extend(node.labels);
+            }
+        }
+    }
+    Some(labels)
+}
+
+fn retained_edge_types(state: &MvccKeyState) -> Option<BTreeSet<String>> {
+    let mut edge_types = BTreeSet::new();
+    for value in state.archived.values() {
+        let Some(raw) = value.as_deref() else {
+            continue;
+        };
+        let Ok(edge) = decode_edge_record(raw) else {
+            continue;
+        };
+        edge_types.insert(edge.edge_type);
+    }
+    let head = state.head.as_ref()?;
+    if !head.tombstoned {
+        if let Some(raw) = head.current_value.as_deref() {
+            if let Ok(edge) = decode_edge_record(raw) {
+                edge_types.insert(edge.edge_type);
+            }
+        }
+    }
+    Some(edge_types)
+}
+
+fn prune_node_history_candidates(
+    label_history: &mut BTreeMap<String, BTreeSet<String>>,
+    node_id: &str,
+    retained_labels: &BTreeSet<String>,
+) {
+    label_history.retain(|label, ids| {
+        if !retained_labels.contains(label) {
+            ids.remove(node_id);
+        }
+        !ids.is_empty()
+    });
+}
+
+fn prune_edge_history_candidates(
+    edge_type_history: &mut BTreeMap<String, BTreeSet<String>>,
+    edge_id: &str,
+    retained_types: &BTreeSet<String>,
+) {
+    edge_type_history.retain(|edge_type, ids| {
+        if !retained_types.contains(edge_type) {
+            ids.remove(edge_id);
+        }
+        !ids.is_empty()
+    });
 }
 
 fn remove_node_from_current_labels(

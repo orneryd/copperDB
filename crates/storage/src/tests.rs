@@ -2,6 +2,8 @@ use super::*;
 use copperdb_kms::{LocalKms, LocalKmsConfig};
 use serde_json::json;
 use std::fs;
+use std::thread;
+use std::time::{Duration, Instant};
 
 fn local_provider(byte: u8) -> Arc<dyn KeyProvider> {
     Arc::new(LocalKms::new(LocalKmsConfig::new(vec![byte; 32])).unwrap())
@@ -877,6 +879,10 @@ fn namespaced_storage_engine_delegates_mvcc_visible_reads_and_lifecycle_controls
     assert!(debt
         .iter()
         .all(|entry| !entry.logical_key.contains("tenant_a:")));
+    let pruned = tenant_a.prune_mvcc_versions(MvccPruneOptions {
+        max_versions_per_key: Some(1),
+    });
+    assert!(pruned > 0);
     tenant_a.resume_lifecycle();
     assert!(!tenant_a.lifecycle_status().paused);
 }
@@ -1059,6 +1065,465 @@ fn flush_guard_and_size_api_are_stable() {
 }
 
 #[test]
+fn async_storage_engine_buffers_structured_node_writes_until_flush() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+        }),
+    );
+
+    async_engine
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+
+    assert!(async_engine
+        .get_persisted_node_record("n1")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        async_engine
+            .get_node_record_latest_effective("n1")
+            .unwrap()
+            .unwrap()
+            .labels,
+        vec!["Person".to_string()]
+    );
+
+    let flushed = async_engine.flush().unwrap();
+    assert_eq!(flushed.nodes_written, 1);
+    assert!(async_engine
+        .get_persisted_node_record("n1")
+        .unwrap()
+        .is_some());
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_background_flush_persists_pending_writes() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 10,
+        }),
+    );
+
+    async_engine
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+
+    wait_until(
+        || {
+            async_engine
+                .get_persisted_node_record("n1")
+                .unwrap()
+                .is_some()
+        },
+        Duration::from_secs(1),
+    );
+
+    assert_eq!(
+        async_engine
+            .get_persisted_nodes_by_label("Person")
+            .unwrap()
+            .len(),
+        1
+    );
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_effective_label_reads_reflect_pending_updates_before_flush() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+        }),
+    );
+
+    async_engine
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+    async_engine.flush().unwrap();
+
+    let mut updated = sample_node("n1", &["Device"]);
+    updated.updated_at_unix_ms += 1;
+    async_engine.put_node_record(&updated).unwrap();
+
+    assert_eq!(
+        async_engine
+            .get_persisted_nodes_by_label("Person")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(async_engine.pending_node_ids_for_label("Person").is_empty());
+    assert_eq!(
+        async_engine.pending_node_ids_for_label("Device"),
+        vec!["n1".to_string()]
+    );
+    assert!(async_engine
+        .get_nodes_by_label("Person")
+        .unwrap()
+        .is_empty());
+    assert_eq!(async_engine.get_nodes_by_label("Device").unwrap().len(), 1);
+
+    async_engine.flush().unwrap();
+    assert!(async_engine
+        .get_persisted_nodes_by_label("Person")
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        async_engine
+            .get_persisted_nodes_by_label("Device")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(async_engine.pending_node_ids_for_label("Person").is_empty());
+    assert!(async_engine.pending_node_ids_for_label("Device").is_empty());
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_pending_counts_reflect_namespace_updates_before_flush() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+        }),
+    );
+
+    async_engine
+        .put_node_record(&sample_node("alpha:n1", &["Person"]))
+        .unwrap();
+    async_engine
+        .put_node_record(&sample_node("beta:n1", &["Person"]))
+        .unwrap();
+    async_engine
+        .put_edge_record(&sample_edge("alpha:e1", "KNOWS", "alpha:n1", "beta:n1"))
+        .unwrap();
+    async_engine.flush().unwrap();
+
+    let mut relabeled = sample_node("alpha:n1", &["Device"]);
+    relabeled.updated_at_unix_ms += 1;
+    async_engine.put_node_record(&relabeled).unwrap();
+    async_engine
+        .put_node_record(&sample_node("alpha:n2", &["Person"]))
+        .unwrap();
+    async_engine.delete_node_record("beta:n1").unwrap();
+    async_engine
+        .put_edge_record(&sample_edge("alpha:e2", "KNOWS", "alpha:n2", "alpha:n1"))
+        .unwrap();
+
+    assert_eq!(
+        async_engine
+            .get_persisted_node_count_by_prefix("alpha:")
+            .unwrap(),
+        1
+    );
+    assert_eq!(async_engine.node_count_by_prefix("alpha:").unwrap(), 2);
+    assert_eq!(
+        async_engine
+            .get_persisted_node_count_by_prefix("beta:")
+            .unwrap(),
+        1
+    );
+    assert_eq!(async_engine.node_count_by_prefix("beta:").unwrap(), 0);
+    assert_eq!(
+        async_engine
+            .get_persisted_node_count_by_label_in_namespace("alpha", "Person")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        async_engine
+            .node_count_by_label_in_namespace("alpha", "Person")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        async_engine
+            .node_count_by_label_in_namespace("alpha", "Device")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        async_engine
+            .get_persisted_edge_count_by_prefix("alpha:")
+            .unwrap(),
+        1
+    );
+    assert_eq!(async_engine.edge_count_by_prefix("alpha:").unwrap(), 2);
+
+    async_engine.flush().unwrap();
+    assert_eq!(
+        async_engine
+            .get_persisted_node_count_by_prefix("alpha:")
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        async_engine
+            .get_persisted_node_count_by_prefix("beta:")
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        async_engine
+            .get_persisted_node_count_by_label_in_namespace("alpha", "Device")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        async_engine
+            .get_persisted_edge_count_by_prefix("alpha:")
+            .unwrap(),
+        2
+    );
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_effective_edge_type_reads_reflect_pending_updates_before_flush() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+        }),
+    );
+
+    async_engine
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+    async_engine
+        .put_node_record(&sample_node("n2", &["Person"]))
+        .unwrap();
+    async_engine
+        .put_edge_record(&sample_edge("e1", "KNOWS", "n1", "n2"))
+        .unwrap();
+    async_engine.flush().unwrap();
+
+    let mut updated = sample_edge("e1", "LIKES", "n1", "n2");
+    updated.updated_at_unix_ms += 1;
+    async_engine.put_edge_record(&updated).unwrap();
+
+    assert_eq!(
+        async_engine
+            .get_persisted_edges_by_type("KNOWS")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(async_engine.pending_edge_ids_for_type("KNOWS").is_empty());
+    assert_eq!(
+        async_engine.pending_edge_ids_for_type("LIKES"),
+        vec!["e1".to_string()]
+    );
+    assert!(async_engine.get_edges_by_type("KNOWS").unwrap().is_empty());
+    assert_eq!(async_engine.get_edges_by_type("LIKES").unwrap().len(), 1);
+
+    async_engine.flush().unwrap();
+    assert!(async_engine
+        .get_persisted_edges_by_type("KNOWS")
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        async_engine
+            .get_persisted_edges_by_type("LIKES")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(async_engine.pending_edge_ids_for_type("KNOWS").is_empty());
+    assert!(async_engine.pending_edge_ids_for_type("LIKES").is_empty());
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_pending_label_index_rebuilds_and_evicts_on_flush() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+        }),
+    );
+
+    async_engine
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+    async_engine
+        .put_node_record(&sample_node("n2", &["Person"]))
+        .unwrap();
+    assert_eq!(
+        async_engine.pending_node_ids_for_label("Person"),
+        vec!["n1".to_string(), "n2".to_string()]
+    );
+
+    let mut updated = sample_node("n1", &["Device"]);
+    updated.updated_at_unix_ms += 1;
+    async_engine.put_node_record(&updated).unwrap();
+
+    assert_eq!(
+        async_engine.pending_node_ids_for_label("Person"),
+        vec!["n2".to_string()]
+    );
+    assert_eq!(
+        async_engine.pending_node_ids_for_label("Device"),
+        vec!["n1".to_string()]
+    );
+
+    async_engine.flush().unwrap();
+    assert!(async_engine.pending_node_ids_for_label("Person").is_empty());
+    assert!(async_engine.pending_node_ids_for_label("Device").is_empty());
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_pending_edge_type_index_rebuilds_and_evicts_on_flush() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+        }),
+    );
+
+    async_engine
+        .put_edge_record(&sample_edge("e1", "KNOWS", "n1", "n2"))
+        .unwrap();
+    async_engine
+        .put_edge_record(&sample_edge("e2", "KNOWS", "n2", "n3"))
+        .unwrap();
+    assert_eq!(
+        async_engine.pending_edge_ids_for_type("KNOWS"),
+        vec!["e1".to_string(), "e2".to_string()]
+    );
+
+    let mut updated = sample_edge("e1", "LIKES", "n1", "n2");
+    updated.updated_at_unix_ms += 1;
+    async_engine.put_edge_record(&updated).unwrap();
+
+    assert_eq!(
+        async_engine.pending_edge_ids_for_type("KNOWS"),
+        vec!["e2".to_string()]
+    );
+    assert_eq!(
+        async_engine.pending_edge_ids_for_type("LIKES"),
+        vec!["e1".to_string()]
+    );
+
+    async_engine.flush().unwrap();
+    assert!(async_engine.pending_edge_ids_for_type("KNOWS").is_empty());
+    assert!(async_engine.pending_edge_ids_for_type("LIKES").is_empty());
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_hold_flush_blocks_background_auto_flush_until_release() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 10,
+        }),
+    );
+    async_engine
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+
+    let guard = async_engine.hold_flush();
+    thread::sleep(Duration::from_millis(40));
+    assert!(async_engine
+        .get_persisted_node_record("n1")
+        .unwrap()
+        .is_none());
+    drop(guard);
+
+    wait_until(
+        || {
+            async_engine
+                .get_persisted_node_record("n1")
+                .unwrap()
+                .is_some()
+        },
+        Duration::from_secs(1),
+    );
+    async_engine.close().unwrap();
+}
+
+#[test]
+fn async_storage_engine_hold_flush_prevents_try_flush_until_release() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+        }),
+    );
+    async_engine
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+
+    let guard = async_engine.hold_flush();
+    assert!(async_engine.try_flush().unwrap().is_none());
+    drop(guard);
+
+    let result = async_engine.try_flush().unwrap().unwrap();
+    assert_eq!(result.nodes_written, 1);
+    async_engine.close().unwrap();
+}
+
+fn wait_until(predicate: impl Fn() -> bool, timeout: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if predicate() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(predicate());
+}
+
+#[test]
+fn async_storage_engine_delegates_mvcc_lifecycle_controls() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+        }),
+    );
+
+    async_engine
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+    async_engine.flush().unwrap();
+    let snapshot = async_engine.begin_mvcc_snapshot();
+
+    let mut updated = sample_node("n1", &["Device"]);
+    updated.updated_at_unix_ms += 1;
+    async_engine.put_node_record(&updated).unwrap();
+    async_engine.flush().unwrap();
+
+    assert_eq!(
+        async_engine
+            .get_nodes_by_label_visible_at(&snapshot, "Person")
+            .unwrap()
+            .len(),
+        1
+    );
+
+    async_engine.pause_lifecycle();
+    assert!(async_engine.lifecycle_status().paused);
+    async_engine.set_lifecycle_schedule_ms(7_500);
+    assert_eq!(async_engine.lifecycle_status().schedule_interval_ms, 7_500);
+    let removed = async_engine.prune_mvcc_versions(MvccPruneOptions {
+        max_versions_per_key: Some(1),
+    });
+    assert!(removed > 0);
+    async_engine.resume_lifecycle();
+    assert!(!async_engine.lifecycle_status().paused);
+    async_engine.close().unwrap();
+}
+
+#[test]
 fn mvcc_snapshot_isolation_and_pruning_work() {
     let mvcc = MvccStore::new();
     let snapshot0 = mvcc.begin_snapshot();
@@ -1194,6 +1659,95 @@ fn mvcc_churn_prune_bounds_retained_chain_and_hides_pre_floor_reads() {
         read_ts: pre_floor,
     };
     assert_eq!(mvcc.read(&pre_floor_snapshot, "node:1"), None);
+}
+
+#[test]
+fn mvcc_prune_cleans_ghost_label_history_candidates_and_bounds_shared_scan_fanout() {
+    let mvcc = MvccStore::new();
+
+    for index in 0..24 {
+        let node_id = format!("ghost-node-{index}");
+        mvcc.put_node_record(&sample_node(&node_id, &["Ghost"]))
+            .unwrap();
+        mvcc.delete_node_record(&node_id).unwrap();
+    }
+
+    let latest = mvcc.begin_snapshot();
+    assert!(mvcc.get_nodes_by_label("Ghost").unwrap().is_empty());
+    assert!(mvcc
+        .get_nodes_by_label_visible_at(&latest, "Ghost")
+        .unwrap()
+        .is_empty());
+    assert_eq!(mvcc.label_history_candidate_count("Ghost"), 24);
+
+    let removed = mvcc.trigger_prune_now(0);
+    assert!(removed >= 24);
+    assert_eq!(mvcc.label_history_candidate_count("Ghost"), 0);
+    assert!(mvcc
+        .get_nodes_by_label_visible_at(&mvcc.begin_snapshot(), "Ghost")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn mvcc_prune_cleans_ghost_edge_type_history_candidates_and_bounds_shared_scan_fanout() {
+    let mvcc = MvccStore::new();
+
+    for index in 0..24 {
+        let node_id = format!("edge-node-{index}");
+        mvcc.put_node_record(&sample_node(&node_id, &["Vertex"]))
+            .unwrap();
+
+        let edge_id = format!("ghost-edge-{index}");
+        mvcc.put_edge_record(&sample_edge(&edge_id, "KNOWS", &node_id, &node_id))
+            .unwrap();
+        mvcc.delete_edge_record(&edge_id).unwrap();
+    }
+
+    let latest = mvcc.begin_snapshot();
+    assert!(mvcc.get_edges_by_type("KNOWS").unwrap().is_empty());
+    assert!(mvcc
+        .get_edges_by_type_visible_at(&latest, "KNOWS")
+        .unwrap()
+        .is_empty());
+    assert_eq!(mvcc.edge_type_history_candidate_count("KNOWS"), 24);
+
+    let removed = mvcc.trigger_prune_now(0);
+    assert!(removed >= 24);
+    assert_eq!(mvcc.edge_type_history_candidate_count("KNOWS"), 0);
+    assert!(mvcc
+        .get_edges_by_type_visible_at(&mvcc.begin_snapshot(), "KNOWS")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn mvcc_prune_versions_uses_explicit_max_versions_per_key_and_preserves_reader_anchor() {
+    let mvcc = MvccStore::new();
+    mvcc.commit_batch(vec![("node:1".to_string(), Some(b"v1".to_vec()))]);
+    let reader = mvcc.begin_registered_snapshot();
+    mvcc.commit_batch(vec![("node:1".to_string(), Some(b"v2".to_vec()))]);
+    mvcc.commit_batch(vec![("node:1".to_string(), Some(b"v3".to_vec()))]);
+
+    let removed = mvcc.prune_mvcc_versions(MvccPruneOptions {
+        max_versions_per_key: Some(1),
+    });
+    assert_eq!(removed, 1);
+    assert_eq!(mvcc.head().floor, 1);
+    assert_eq!(mvcc.retained_version_count(), 2);
+    assert_eq!(mvcc.read(reader.snapshot(), "node:1"), Some(b"v1".to_vec()));
+
+    drop(reader);
+    let removed = mvcc.prune_mvcc_versions(MvccPruneOptions {
+        max_versions_per_key: Some(1),
+    });
+    assert_eq!(removed, 1);
+    assert_eq!(mvcc.head().floor, 3);
+    assert_eq!(mvcc.retained_version_count(), 1);
+    assert_eq!(
+        mvcc.read(&mvcc.begin_snapshot(), "node:1"),
+        Some(b"v3".to_vec())
+    );
 }
 
 #[test]
@@ -1363,6 +1917,50 @@ fn namespaced_mvcc_store_delegates_lifecycle_controls_and_visible_reads() {
     assert!(debt
         .iter()
         .all(|entry| !entry.logical_key.contains("tenant_a:")));
+
+    let pruned = tenant_a.prune_mvcc_versions(MvccPruneOptions {
+        max_versions_per_key: Some(1),
+    });
+    assert!(pruned > 0);
+}
+
+#[test]
+fn storage_engine_prune_mvcc_versions_delegates_and_preserves_reader_anchor() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    engine
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+    let lease = engine.begin_registered_mvcc_snapshot();
+
+    let mut updated = sample_node("n1", &["Device"]);
+    updated.updated_at_unix_ms += 1;
+    engine.put_node_record(&updated).unwrap();
+    updated.updated_at_unix_ms += 1;
+    engine.put_node_record(&updated).unwrap();
+
+    let removed = engine.prune_mvcc_versions(MvccPruneOptions {
+        max_versions_per_key: Some(1),
+    });
+    assert_eq!(removed, 1);
+    assert_eq!(engine.lifecycle_status().floor, 1);
+    assert_eq!(
+        engine
+            .get_node_record_visible_at(lease.snapshot(), "n1")
+            .unwrap()
+            .unwrap()
+            .labels,
+        vec!["Person".to_string()]
+    );
+
+    drop(lease);
+    let removed = engine.prune_mvcc_versions(MvccPruneOptions {
+        max_versions_per_key: Some(1),
+    });
+    assert_eq!(removed, 1);
+    assert_eq!(
+        engine.lifecycle_status().floor,
+        engine.lifecycle_status().head
+    );
 }
 
 #[test]

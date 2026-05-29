@@ -19,14 +19,18 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+mod async_engine;
 mod mvcc;
 mod namespaced;
 mod storage_edge_property_index;
 mod storage_node_property_range;
 mod storage_property_index_encoding;
+pub use crate::async_engine::{
+    AsyncFlushGuard, AsyncFlushResult, AsyncStorageConfig, AsyncStorageEngine,
+};
 pub use crate::mvcc::{
-    MvccHead, MvccLifecycleDebtKey, MvccLifecycleStatus, MvccLogicalHead, MvccSnapshot,
-    MvccSnapshotLease, MvccStore, MvccVersion, NamespacedMvccStore,
+    MvccHead, MvccLifecycleDebtKey, MvccLifecycleStatus, MvccLogicalHead, MvccPruneOptions,
+    MvccSnapshot, MvccSnapshotLease, MvccStore, MvccVersion, NamespacedMvccStore,
 };
 pub use crate::namespaced::NamespacedStorageEngine;
 use crate::storage_edge_property_index::is_relationship_property_index;
@@ -86,6 +90,8 @@ pub enum StorageError {
     MvccHeadMissingFloor(usize),
     #[error("wal: closed")]
     WalClosed,
+    #[error("async engine: closed")]
+    AsyncEngineClosed,
     #[error("wal: corrupted entry")]
     WalCorruptedEntry,
     #[error("wal: partial write detected")]
@@ -1376,6 +1382,10 @@ impl StorageEngine {
 
     pub fn trigger_prune_now(&self, retain_last_n_versions: u64) -> usize {
         self.mvcc.trigger_prune_now(retain_last_n_versions)
+    }
+
+    pub fn prune_mvcc_versions(&self, opts: MvccPruneOptions) -> usize {
+        self.mvcc.prune_mvcc_versions(opts)
     }
 
     pub fn pause_lifecycle(&self) {

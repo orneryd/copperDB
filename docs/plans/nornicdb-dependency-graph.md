@@ -51,8 +51,8 @@ These packages own durable graph state and storage-adjacent state.
 - [x] `multidb` -> logical database catalog and namespace routing.
 
 Distributed foundation hooks in this layer:
-
-- storage metadata persists topology-native hyperscaler profiles, mesh peers, placements, search policies, and HA write policy inputs.
+- storage-owned MVCC pruning keeps retained-floor anchored history deterministic, now cleans historical label/type candidate directories so ghost chains do not remain as visible-at scan fanout, and exposes an explicit per-key prune-options surface alongside lifecycle pause/resume/schedule/debt inspection controls.
+- storage now also has a bounded `AsyncStorageEngine` baseline for pending structured writes, effective current-state reads, pending-aware prefix and namespace-label counts, maintained pending label and edge-type inverted indexes for current label or edge-type reads before flush, structured flush results, and real flush holds over a worker-owned message-passing storage seam, so background auto-flush no longer depends on sharing the sled-backed engine across threads; broader async index-maintenance parity remains open.
 - storage rebuilds a validated `TopologyRegistry` from durable metadata.
 - transaction errors should route through `errors`.
 

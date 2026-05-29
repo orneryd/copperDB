@@ -1,6 +1,7 @@
 use crate::{
-    EdgeAdjacencyDirection, EdgeRecord, MvccLifecycleDebtKey, MvccLifecycleStatus, MvccSnapshot,
-    MvccSnapshotLease, NamespaceSchema, NodeRecord, StorageEngine, StorageError,
+    EdgeAdjacencyDirection, EdgeRecord, MvccLifecycleDebtKey, MvccLifecycleStatus,
+    MvccPruneOptions, MvccSnapshot, MvccSnapshotLease, NamespaceSchema, NodeRecord, StorageEngine,
+    StorageError,
 };
 
 pub struct NamespacedStorageEngine<'a> {
@@ -241,6 +242,10 @@ impl<'a> NamespacedStorageEngine<'a> {
 
     pub fn trigger_prune_now(&self, retain_last_n_versions: u64) -> usize {
         self.inner.trigger_prune_now(retain_last_n_versions)
+    }
+
+    pub fn prune_mvcc_versions(&self, opts: MvccPruneOptions) -> usize {
+        self.inner.prune_mvcc_versions(opts)
     }
 
     pub fn pause_lifecycle(&self) {
