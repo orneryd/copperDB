@@ -3,6 +3,8 @@
 ## Objective
 Implement a Rust-native storage architecture baseline aligned to current NornicDB storage concepts while locking Copper storage to layout version **0** and excluding migration baggage.
 
+Status note: the supported runtime architecture is single-node only. Any topology or mesh metadata mentioned here is durable vocabulary/backlog for future work, not a statement that distributed execution is currently supported.
+
 ## Phase 1 (initial baseline in this change)
 - [x] Add layout manifest with fixed version `0`
 - [x] Enforce layout version checks at open-time
@@ -23,14 +25,14 @@ Implement a Rust-native storage architecture baseline aligned to current NornicD
 - [ ] Add MVCC visibility/head model and lifecycle controls
 - [ ] Add temporal indexing and maintenance APIs
 - [ ] Add embedding/index rebuild workflows
-- [ ] Wire mesh-aware query routing into `search`, `fabric`, and `replication`
+- [ ] After single-node GA, evaluate whether to wire any future distributed query routing into `search`, `fabric`, and `replication`
 
 ## Codebase update notes/stubs
-- `crates/search`: consume `storage` mesh peer/profile registry for distributed query fan-out.
-- `crates/fabric`: publish cluster topology updates to storage mesh metadata.
-- `crates/replication`: align WAL integration points and MVCC sequencing.
+- `crates/search`: any future distributed fan-out must be treated as deferred work after the single-node architecture is complete.
+- `crates/fabric`: any future topology publication remains deferred.
+- `crates/replication`: any future distributed integration remains deferred; current storage work should stay single-node-owned.
 - `crates/multidb`: use namespace count/list APIs and prefix deletion hooks.
-- `crates/server`/`graphql`: expose admin endpoints for mesh peer lifecycle.
+- `crates/server`/`graphql`: do not expose mesh-peer lifecycle as current capability; any such admin surface is future work only.
 
 ## Validation notes
 - Keep tests deterministic: sorted outputs, fixed timestamps where needed.

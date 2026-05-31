@@ -658,7 +658,6 @@ impl AsyncStorageEngine {
         let mut existing = self
             .get_node_record(&node.id)?
             .ok_or_else(|| StorageError::NotFound(node.id.clone()))?;
-        existing.named_embeddings = node.named_embeddings.clone();
         existing.chunk_embeddings = node.chunk_embeddings.clone();
         existing.embed_meta = node.embed_meta.clone();
         existing.updated_at_unix_ms = existing.updated_at_unix_ms.max(node.updated_at_unix_ms);

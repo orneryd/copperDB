@@ -1002,14 +1002,23 @@ fn namespaced_storage_engine_clear_all_embeddings_only_requeues_that_namespace()
     tenant_a_n1
         .properties
         .insert("content".to_string(), json!("tenant a file"));
-    tenant_a_n1.set_default_embedding(vec![0.1, 0.2, 0.3]);
-    tenant_a_n1.embed_meta.has_embedding = Some(true);
+    tenant_a_n1.set_managed_chunk_embeddings(
+        vec![vec![0.1, 0.2, 0.3]],
+        Some("test-model".to_string()),
+        Some("2026-05-29T00:00:00Z".to_string()),
+    );
     let mut tenant_b_n1 = sample_node("n1", &["File"]);
     tenant_b_n1
         .properties
         .insert("content".to_string(), json!("tenant b file"));
-    tenant_b_n1.set_default_embedding(vec![0.4, 0.5, 0.6]);
-    tenant_b_n1.embed_meta.has_embedding = Some(true);
+    tenant_b_n1.set_managed_chunk_embeddings(
+        vec![vec![0.4, 0.5, 0.6]],
+        Some("test-model".to_string()),
+        Some("2026-05-29T00:00:00Z".to_string()),
+    );
+    tenant_b_n1
+        .named_embeddings
+        .insert("qdrant".to_string(), vec![9.0, 8.0, 7.0]);
 
     tenant_a.put_node_record(&tenant_a_n1).unwrap();
     tenant_b.put_node_record(&tenant_b_n1).unwrap();
@@ -1020,15 +1029,15 @@ fn namespaced_storage_engine_clear_all_embeddings_only_requeues_that_namespace()
     assert_eq!(tenant_b.pending_embeddings_count().unwrap(), 0);
 
     let tenant_a_after = tenant_a.get_node_record("n1").unwrap().unwrap();
-    assert!(tenant_a_after.named_embeddings.is_empty());
     assert!(tenant_a_after.chunk_embeddings.is_empty());
     assert!(tenant_a_after.embed_meta.has_embedding.is_none());
     let tenant_b_after = tenant_b.get_node_record("n1").unwrap().unwrap();
-    assert_eq!(
-        tenant_b_after.default_embedding(),
-        Some(&[0.4, 0.5, 0.6][..])
-    );
+    assert_eq!(tenant_b_after.chunk_embeddings, vec![vec![0.4, 0.5, 0.6]]);
     assert_eq!(tenant_b_after.embed_meta.has_embedding, Some(true));
+    assert_eq!(
+        tenant_b_after.named_embeddings.get("qdrant"),
+        Some(&vec![9.0, 8.0, 7.0])
+    );
 }
 
 #[test]
@@ -1789,14 +1798,24 @@ fn storage_engine_clear_all_embeddings_requeues_nodes_for_regeneration() {
     first
         .properties
         .insert("content".to_string(), json!("first file"));
-    first.set_default_embedding(vec![0.1, 0.2, 0.3]);
-    first.embed_meta.has_embedding = Some(true);
+    first.set_managed_chunk_embeddings(
+        vec![vec![0.1, 0.2, 0.3]],
+        Some("test-model".to_string()),
+        Some("2026-05-29T00:00:00Z".to_string()),
+    );
+    first
+        .named_embeddings
+        .insert("qdrant".to_string(), vec![3.0, 2.0, 1.0]);
 
     let mut second = sample_node("tenant_a:n1", &["File"]);
     second
         .properties
         .insert("content".to_string(), json!("tenant file"));
-    second.chunk_embeddings = vec![vec![0.4, 0.5, 0.6]];
+    second.set_managed_chunk_embeddings(
+        vec![vec![0.4, 0.5, 0.6]],
+        Some("test-model".to_string()),
+        Some("2026-05-29T00:00:00Z".to_string()),
+    );
 
     engine.put_node_record(&first).unwrap();
     engine.put_node_record(&second).unwrap();
@@ -1805,16 +1824,19 @@ fn storage_engine_clear_all_embeddings_requeues_nodes_for_regeneration() {
 
     let cleared = engine.clear_all_embeddings().unwrap();
     assert_eq!(cleared, 2);
-    assert_eq!(engine.pending_embeddings_count().unwrap(), 2);
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
 
     let first_after = engine.get_node_record("n1").unwrap().unwrap();
-    assert!(first_after.default_embedding().is_none());
-    assert!(first_after.named_embeddings.is_empty());
+    assert_eq!(
+        first_after.named_embeddings.get("qdrant"),
+        Some(&vec![3.0, 2.0, 1.0])
+    );
+    assert!(!first_after.needs_embedding());
     assert!(first_after.embed_meta.has_embedding.is_none());
-    assert!(first_after.needs_embedding());
     let second_after = engine.get_node_record("tenant_a:n1").unwrap().unwrap();
     assert!(second_after.chunk_embeddings.is_empty());
     assert!(second_after.embed_meta.has_chunks.is_none());
+    assert!(second_after.embed_meta.chunk_count.is_none());
     assert!(second_after.needs_embedding());
 }
 
@@ -1826,12 +1848,23 @@ fn storage_engine_clear_all_embeddings_for_prefix_only_clears_matching_namespace
     tenant_a
         .properties
         .insert("content".to_string(), json!("tenant a file"));
-    tenant_a.set_default_embedding(vec![0.1, 0.2, 0.3]);
+    tenant_a.set_managed_chunk_embeddings(
+        vec![vec![0.1, 0.2, 0.3]],
+        Some("test-model".to_string()),
+        Some("2026-05-29T00:00:00Z".to_string()),
+    );
     let mut tenant_b = sample_node("tenant_b:n1", &["File"]);
     tenant_b
         .properties
         .insert("content".to_string(), json!("tenant b file"));
-    tenant_b.set_default_embedding(vec![0.4, 0.5, 0.6]);
+    tenant_b.set_managed_chunk_embeddings(
+        vec![vec![0.4, 0.5, 0.6]],
+        Some("test-model".to_string()),
+        Some("2026-05-29T00:00:00Z".to_string()),
+    );
+    tenant_b
+        .named_embeddings
+        .insert("qdrant".to_string(), vec![6.0, 5.0, 4.0]);
 
     engine.put_node_record(&tenant_a).unwrap();
     engine.put_node_record(&tenant_b).unwrap();
@@ -1841,14 +1874,13 @@ fn storage_engine_clear_all_embeddings_for_prefix_only_clears_matching_namespace
     assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
 
     let tenant_a_after = engine.get_node_record("tenant_a:n1").unwrap().unwrap();
-    assert!(tenant_a_after.default_embedding().is_none());
-    assert!(tenant_a_after.named_embeddings.is_empty());
+    assert!(tenant_a_after.chunk_embeddings.is_empty());
     let tenant_b_after = engine.get_node_record("tenant_b:n1").unwrap().unwrap();
+    assert_eq!(tenant_b_after.chunk_embeddings, vec![vec![0.4, 0.5, 0.6]]);
     assert_eq!(
-        tenant_b_after.default_embedding(),
-        Some(&[0.4, 0.5, 0.6][..])
+        tenant_b_after.named_embeddings.get("qdrant"),
+        Some(&vec![6.0, 5.0, 4.0])
     );
-    assert!(!tenant_b_after.named_embeddings.is_empty());
 }
 
 #[test]
@@ -1865,11 +1897,16 @@ fn storage_engine_update_node_embedding_preserves_non_embedding_properties_and_r
     assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
     assert_eq!(engine.node_count_by_prefix("").unwrap(), 1);
 
+    node.named_embeddings
+        .insert("qdrant".to_string(), vec![5.0, 5.0, 5.0]);
+    engine.put_node_record(&node).unwrap();
+
     let mut embedding_update = sample_node("n1", &["Ignored"]);
-    embedding_update.set_default_embedding(vec![0.1, 0.2, 0.3]);
-    embedding_update.embed_meta.embedding_model = Some("test-model".to_string());
-    embedding_update.embed_meta.embedding_dimensions = Some(3);
-    embedding_update.embed_meta.has_embedding = Some(true);
+    embedding_update.set_managed_chunk_embeddings(
+        vec![vec![0.1, 0.2, 0.3]],
+        Some("test-model".to_string()),
+        Some("2026-05-29T00:00:00Z".to_string()),
+    );
     embedding_update.updated_at_unix_ms += 100;
 
     engine.update_node_embedding(&embedding_update).unwrap();
@@ -1888,6 +1925,11 @@ fn storage_engine_update_node_embedding_preserves_non_embedding_properties_and_r
         updated.embed_meta.embedding_model.as_deref(),
         Some("test-model")
     );
+    assert_eq!(updated.chunk_embeddings, vec![vec![0.1, 0.2, 0.3]]);
+    assert_eq!(
+        updated.named_embeddings.get("qdrant"),
+        Some(&vec![5.0, 5.0, 5.0])
+    );
     assert_eq!(engine.node_count_by_prefix("").unwrap(), 1);
     assert_eq!(engine.pending_embeddings_count().unwrap(), 0);
 }
@@ -1902,22 +1944,21 @@ fn storage_engine_update_node_embedding_clears_omitted_embedding_metadata() {
     engine.put_node_record(&node).unwrap();
 
     let mut first_embedding = sample_node("n1", &["Ignored"]);
-    first_embedding.set_default_embedding(vec![0.1, 0.2, 0.3]);
-    first_embedding.embed_meta.embedding_model = Some("model-a".to_string());
-    first_embedding.embed_meta.embedding_dimensions = Some(3);
-    first_embedding.embed_meta.embedded_at = Some("2026-05-29T00:00:00Z".to_string());
-    first_embedding.embed_meta.has_embedding = Some(true);
+    first_embedding.set_managed_chunk_embeddings(
+        vec![vec![0.1, 0.2, 0.3]],
+        Some("model-a".to_string()),
+        Some("2026-05-29T00:00:00Z".to_string()),
+    );
     engine.update_node_embedding(&first_embedding).unwrap();
 
     let mut second_embedding = sample_node("n1", &["Ignored"]);
-    second_embedding.set_default_embedding(vec![0.4, 0.5, 0.6]);
-    second_embedding.embed_meta.has_embedding = Some(true);
+    second_embedding.set_managed_chunk_embeddings(vec![vec![0.4, 0.5, 0.6]], None, None);
     engine.update_node_embedding(&second_embedding).unwrap();
 
     let updated = engine.get_node_record("n1").unwrap().unwrap();
-    assert_eq!(updated.default_embedding(), Some(&[0.4, 0.5, 0.6][..]));
+    assert_eq!(updated.chunk_embeddings, vec![vec![0.4, 0.5, 0.6]]);
     assert!(updated.embed_meta.embedding_model.is_none());
-    assert!(updated.embed_meta.embedding_dimensions.is_none());
+    assert_eq!(updated.embed_meta.embedding_dimensions, Some(3));
     assert!(updated.embed_meta.embedded_at.is_none());
     assert_eq!(
         updated.properties.get("content"),
@@ -1943,9 +1984,16 @@ fn async_storage_engine_update_node_embedding_does_not_change_node_count() {
     let count_before = async_engine.node_count_by_prefix("").unwrap();
     assert_eq!(count_before, 1);
 
+    node.named_embeddings
+        .insert("qdrant".to_string(), vec![8.0, 8.0, 8.0]);
+    async_engine.put_node_record(&node).unwrap();
+
     let mut embedding_update = sample_node("n1", &["Ignored"]);
-    embedding_update.set_default_embedding(vec![0.1, 0.2, 0.3]);
-    embedding_update.embed_meta.has_embedding = Some(true);
+    embedding_update.set_managed_chunk_embeddings(
+        vec![vec![0.1, 0.2, 0.3]],
+        Some("test-model".to_string()),
+        Some("2026-05-29T00:00:00Z".to_string()),
+    );
     embedding_update.updated_at_unix_ms += 100;
 
     async_engine
@@ -1959,7 +2007,11 @@ fn async_storage_engine_update_node_embedding_does_not_change_node_count() {
         updated.properties.get("content"),
         Some(&json!("needs embedding"))
     );
-    assert_eq!(updated.default_embedding(), Some(&[0.1, 0.2, 0.3][..]));
+    assert_eq!(updated.chunk_embeddings, vec![vec![0.1, 0.2, 0.3]]);
+    assert_eq!(
+        updated.named_embeddings.get("qdrant"),
+        Some(&vec![8.0, 8.0, 8.0])
+    );
 
     async_engine.close().unwrap();
 }

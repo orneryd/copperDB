@@ -1,5 +1,7 @@
 # Neo4j/NornicDB Parity Contract (Current Slice)
 
+Scope note: this file describes local Cypher/parser/storage parity only. copperDB's supported runtime architecture remains single-node, and distributed execution is intentionally out of scope here.
+
 ## Cypher DDL surface (implemented in this slice)
 
 - `CREATE CONSTRAINT <name> [IF NOT EXISTS] FOR (n:<Label>) REQUIRE n.<property> IS UNIQUE`

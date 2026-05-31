@@ -2,7 +2,9 @@
 
 Date: 2026-05-29
 
-This document defines the planned Rust pattern for request-scoped cancellation across copperDB ingress, local execution, and distributed mesh fan-out. It is architecture guidance only; no implementation is implied by this document.
+Status: local cancellation is in scope; distributed propagation is deferred.
+
+copperDB's current supported architecture is single-node execution. This document defines the planned Rust pattern for request-scoped cancellation across copperDB ingress and local execution today, and records a future extension for distributed mesh fan-out if and when distributed work resumes. It is architecture guidance only; no implementation is implied by this document.
 
 ## Problem
 
@@ -75,6 +77,8 @@ Hot loops should not perform expensive checks on every tiny operation. A normal 
 
 ## Mesh Propagation
 
+This section is deferred future work. The current product/runtime guarantee stops at single-node ingress and local execution.
+
 Distributed work requires both passive and active propagation.
 
 Passive propagation is mandatory for every remote envelope:
@@ -97,6 +101,8 @@ Active cancellation is also required for efficient CPU cleanup across the mesh:
 The best approach is to use both mechanisms. Deadlines guarantee eventual stop even if a cancel message is lost. Active cancel reduces wasted CPU immediately when HTTP/Bolt/gRPC ingress disconnects, when a timeout fires, when a quorum has already been satisfied, or when a hedge loses the race.
 
 ## Transport Rules
+
+Only the local ingress parts are current-scope guidance. The copperDB-to-copperDB transport material below is deferred until distributed execution is intentionally resumed.
 
 For copperDB-to-copperDB gRPC:
 

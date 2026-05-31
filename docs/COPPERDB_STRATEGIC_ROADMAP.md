@@ -2,7 +2,9 @@
 
 **Investor Demonstration Draft**  
 **Date:** May 26, 2026  
-**Positioning:** From high-performance graph database to planet-scale cognitive infrastructure runtime.
+**Positioning:** Single-node graph and retrieval engine first; broader distributed cognitive infrastructure later.
+
+**Current execution guarantee:** copperDB should be documented and presented as a single-node execution architecture today. Any clustering, replication, federation, mesh, or cross-node planner material in this roadmap is forward-looking only and intentionally deferred until after the single-node engine/runtime is complete and stable.
 
 ---
 
@@ -22,14 +24,14 @@ Forward-looking metrics such as sub-10ms streaming retrieval, order-of-magnitude
 
 CopperDB should no longer be presented as only a faster Neo4j-compatible graph database. The stronger category is **cognitive infrastructure runtime**: one coherent substrate for graph traversal, vector retrieval, temporal truth, provenance, agent memory, and hardware-accelerated knowledge execution. The current-product basis for this statement is the NornicDB README's positioning around graph, vector, historical truth, GraphRAG, memory decay, canonical graph ledger modeling, and hardware-accelerated execution in [README.md](README.md).
 
-The near-term moat is compatibility plus consolidation: CopperDB can reduce the need to operate separate graph, vector, retrieval, and audit systems for GraphRAG-style workloads, as supported by the architecture comparison in [docs/architecture/graph-rag-nornicdb-comparison.md](docs/architecture/graph-rag-nornicdb-comparison.md) and the hybrid retrieval benchmark in [docs/performance/hybrid-query-benchmarks.md](docs/performance/hybrid-query-benchmarks.md). The long-term moat is deeper: distributed cognition, GPU-native graph execution, sovereign AI memory, immutable truth infrastructure, and ultra-low-latency retrieval while intelligent systems are reasoning in real time.
+The near-term moat is compatibility plus consolidation on one node: CopperDB can reduce the need to operate separate graph, vector, retrieval, and audit systems for GraphRAG-style workloads, as supported by the architecture comparison in [docs/architecture/graph-rag-nornicdb-comparison.md](docs/architecture/graph-rag-nornicdb-comparison.md) and the hybrid retrieval benchmark in [docs/performance/hybrid-query-benchmarks.md](docs/performance/hybrid-query-benchmarks.md). The longer-term moat includes distributed cognition, GPU-native graph execution, sovereign AI memory, immutable truth infrastructure, and ultra-low-latency retrieval while intelligent systems are reasoning in real time, but those remain future roadmap items rather than present commitments.
 
 ### Strategic Repositioning
 
 | Old Frame | Transition Frame | Future Frame |
 | --- | --- | --- |
-| Faster Neo4j-compatible graph database | Graph + vector + temporal truth database | Cognitive infrastructure runtime for intelligent systems |
-| Single-node performance advantage | Consolidated AI data plane | Planet-scale knowledge and memory substrate |
+| Faster Neo4j-compatible graph database | Single-node graph + vector + temporal truth database | Cognitive infrastructure runtime for intelligent systems |
+| Single-node performance advantage | Consolidated AI data plane on one node | Planet-scale knowledge and memory substrate |
 | Query execution | Retrieval and reasoning execution | Distributed cognition fabric |
 | Database buyer | AI platform, sovereign infrastructure, and agent runtime buyer | Enterprise AI operating system buyer |
 
@@ -54,7 +56,7 @@ CopperDB starts with a credible base rather than a speculative deck-only vision.
 | Knowledge-layer scoring | Decay, promotion, and retention semantics | Native agent memory foundation | [docs/features/memory-decay.md](docs/features/memory-decay.md), [docs/user-guides/promotion-policies.md](docs/user-guides/promotion-policies.md) |
 | Auto-relationships | Automatic graph enrichment from semantic similarity | Cognitive graph growth loop | [README.md](README.md), [pkg/linkpredict/README.md](pkg/linkpredict/README.md) |
 | GPU acceleration paths | Metal, CUDA, Vulkan-oriented execution surfaces | Hardware-native AI infrastructure direction | [docs/performance/test-results.md](docs/performance/test-results.md), [docs/packaging/docker.md](docs/packaging/docker.md), [pkg/simd/README.md](pkg/simd/README.md) |
-| Clustering, replication, composite databases | Existing distributed primitives and sharding surfaces | Scale-out platform path | [docs/architecture/clustering-roadmap.md](docs/architecture/clustering-roadmap.md), [docs/architecture/replication.md](docs/architecture/replication.md) |
+| Clustering, replication, composite databases | Deferred roadmap surface only; not part of the current runtime guarantee | Longer-term scale-out path | [docs/architecture/clustering-roadmap.md](docs/architecture/clustering-roadmap.md), [docs/architecture/replication.md](docs/architecture/replication.md) |
 | APOC and procedure compatibility | Familiar graph operations and algorithms | Migration and developer trust | [docs/neo4j-migration/feature-parity.md](docs/neo4j-migration/feature-parity.md), [apoc/README.md](apoc/README.md) |
 
 ### Core Narrative Shift
@@ -76,6 +78,8 @@ flowchart LR
 ---
 
 ## 3. Five-Layer Roadmap Architecture
+
+Before any Layer 1 distributed-systems work in this roadmap, the product requirement is to finish and stabilize the single-node architecture. Distributed layers remain explicitly sequenced after that point.
 
 The roadmap is organized into five product layers. Each layer maps to a buyer pain, a technical moat, and a commercial story.
 

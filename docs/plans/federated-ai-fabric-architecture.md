@@ -2,16 +2,20 @@
 
 Date: 2026-05-27
 
-This document defines the missing plan above the current Cassandra-style placement layer. The existing distributed foundation owns per-placement replica sets. This plan defines how one logical copperDB database becomes an AI fabric mesh spread across many physical machines and many shard placements, while preserving a single query path for Cypher, vector, keyword, graph traversal, RRF search, and future agent/memory workloads.
+Status: deferred roadmap only.
+
+copperDB currently guarantees single-node execution only. This document records a future fabric architecture and should not be read as a shipped or supported runtime surface.
+
+This document defines the future plan above a possible Cassandra-style placement layer. If distributed work resumes later, this plan defines how one logical copperDB database could become an AI fabric mesh spread across many physical machines and many shard placements while preserving a single query path for Cypher, vector, keyword, graph traversal, RRF search, and future agent/memory workloads.
 
 ## Architecture Target
 
-copperDB should have two distinct distributed layers:
+copperDB may eventually have two distinct distributed layers:
 
 - Placement replication: Cassandra/Dynamo-style read/write replica sets for one `PlacementKey { tenant, database, shard }`.
 - Fabric federation: a query and search router that maps one logical database to many placements, executes shard-local subplans on the correct physical server nodes, and merges results with deterministic semantics.
 
-The current code implements the first layer. This plan defines the second layer.
+Historical prototypes and parity scaffolding may exist, but copperDB does not currently support either layer as a product/runtime guarantee. This plan defines the second layer for future work.
 
 ## Core Vocabulary
 

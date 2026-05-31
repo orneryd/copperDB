@@ -76,6 +76,7 @@ pub struct MergeClause {
 pub struct CallClause {
     pub procedure: String,
     pub args: Vec<Expression>,
+    pub yield_items: Vec<ReturnItem>,
 }
 
 #[derive(Debug, Clone)]

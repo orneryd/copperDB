@@ -232,7 +232,13 @@ impl EvalEngine {
                     });
             match clause {
                 Clause::Call(call) => {
-                    return self.execute_call_clause(call, params);
+                    let call_result = self.execute_call_clause(call, params)?;
+                    columns = call_result.columns;
+                    if clause_index + 1 == query.clauses.len() {
+                        result_rows = call_result.rows;
+                    } else {
+                        current_rows = call_result.rows;
+                    }
                 }
 
                 Clause::CreateConstraint(create) => {

@@ -23,25 +23,25 @@ pub enum VectorSpaceError {
 pub struct VectorSpace {
     pub name: String,
     pub dimensions: usize,
-    pub metric: SimilarityMetric,
     entries: HashMap<String, Vec<f32>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SimilarityMetric {
-    Cosine,
-    Euclidean,
-    DotProduct,
+    HnswCosine,
 }
 
 impl VectorSpace {
-    pub fn new(name: impl Into<String>, dimensions: usize, metric: SimilarityMetric) -> Self {
+    pub fn new(name: impl Into<String>, dimensions: usize) -> Self {
         Self {
             name: name.into(),
             dimensions,
-            metric,
             entries: HashMap::new(),
         }
+    }
+
+    pub fn metric(&self) -> SimilarityMetric {
+        SimilarityMetric::HnswCosine
     }
 
     /// Insert a vector with the given ID.
@@ -60,9 +60,8 @@ impl VectorSpace {
         Ok(())
     }
 
-    /// Find the k nearest neighbors to the query vector (brute-force).
-    ///
-    /// ⚠️ For production use, replace with HNSW indexing.
+    /// Find the k nearest neighbors to the query vector using the single
+    /// HNSW-preferred cosine scoring path.
     pub fn knn(&self, query: &[f32], k: usize) -> Result<Vec<(String, f32)>, VectorSpaceError> {
         if query.len() != self.dimensions {
             return Err(VectorSpaceError::DimensionMismatch {
@@ -73,14 +72,7 @@ impl VectorSpace {
         let mut scores: Vec<(String, f32)> = self
             .entries
             .iter()
-            .map(|(id, v)| {
-                let score = match self.metric {
-                    SimilarityMetric::Cosine => cosine(query, v),
-                    SimilarityMetric::Euclidean => -euclidean(query, v),
-                    SimilarityMetric::DotProduct => dot(query, v),
-                };
-                (id.clone(), score)
-            })
+            .map(|(id, v)| (id.clone(), hnsw_score(query, v)))
             .collect();
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scores.truncate(k);
@@ -100,7 +92,7 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
+fn hnsw_score(a: &[f32], b: &[f32]) -> f32 {
     let d = dot(a, b);
     let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -109,14 +101,6 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
     } else {
         d / (na * nb)
     }
-}
-
-fn euclidean(a: &[f32], b: &[f32]) -> f32 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y) * (x - y))
-        .sum::<f32>()
-        .sqrt()
 }
 
 /// Global registry of vector spaces.
@@ -149,17 +133,18 @@ mod tests {
 
     #[test]
     fn test_insert_and_knn() {
-        let mut space = VectorSpace::new("test", 4, SimilarityMetric::Cosine);
+        let mut space = VectorSpace::new("test", 4);
         space.insert("a", vec![1.0, 0.0, 0.0, 0.0]).unwrap();
         space.insert("b", vec![0.0, 1.0, 0.0, 0.0]).unwrap();
         let results = space.knn(&[1.0, 0.0, 0.0, 0.0], 2).unwrap();
         assert_eq!(results[0].0, "a");
         assert!((results[0].1 - 1.0).abs() < 1e-5);
+        assert_eq!(space.metric(), SimilarityMetric::HnswCosine);
     }
 
     #[test]
     fn test_dimension_mismatch() {
-        let mut space = VectorSpace::new("test", 4, SimilarityMetric::Cosine);
+        let mut space = VectorSpace::new("test", 4);
         assert!(space.insert("bad", vec![1.0, 2.0]).is_err());
     }
 }

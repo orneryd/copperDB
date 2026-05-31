@@ -756,6 +756,8 @@ impl NodeEmbeddingMetadata {
         self.embedding_dimensions = None;
         self.has_embedding = None;
         self.embedded_at = None;
+        self.has_chunks = None;
+        self.chunk_count = None;
     }
 }
 
@@ -777,6 +779,39 @@ impl NodeRecord {
     pub fn set_default_embedding(&mut self, embedding: Vec<f32>) {
         self.named_embeddings
             .insert(DEFAULT_NAMED_EMBEDDING.to_string(), embedding);
+    }
+
+    pub fn has_materialized_chunk_embeddings(&self) -> bool {
+        self.chunk_embeddings
+            .iter()
+            .any(|embedding| !embedding.is_empty())
+    }
+
+    pub fn set_managed_chunk_embeddings(
+        &mut self,
+        embeddings: Vec<Vec<f32>>,
+        embedding_model: Option<String>,
+        embedded_at: Option<String>,
+    ) {
+        let dimensions = embeddings
+            .iter()
+            .find(|embedding| !embedding.is_empty())
+            .map(Vec::len);
+        let chunk_count = embeddings.len();
+        let has_embeddings = embeddings.iter().any(|embedding| !embedding.is_empty());
+
+        self.chunk_embeddings = embeddings;
+        self.embed_meta.chunk_count = Some(chunk_count);
+        self.embed_meta.has_chunks = Some(chunk_count > 0);
+        self.embed_meta.embedding_model = embedding_model;
+        self.embed_meta.embedding_dimensions = dimensions;
+        self.embed_meta.has_embedding = Some(has_embeddings);
+        self.embed_meta.embedded_at = embedded_at;
+    }
+
+    pub fn clear_managed_chunk_embeddings(&mut self) {
+        self.chunk_embeddings.clear();
+        self.embed_meta.clear_materialized_state();
     }
 }
 
@@ -1358,14 +1393,12 @@ impl StorageEngine {
             .all_node_records()?
             .into_iter()
             .filter(|node| prefix.is_empty() || node.id.starts_with(prefix))
-            .filter(|node| node.has_materialized_embedding())
+            .filter(|node| node.has_materialized_chunk_embeddings())
             .collect::<Vec<_>>();
 
         let mut cleared = 0;
         for mut node in nodes_to_clear {
-            node.named_embeddings.clear();
-            node.chunk_embeddings.clear();
-            node.embed_meta.clear_materialized_state();
+            node.clear_managed_chunk_embeddings();
             self.put_node_record(&node)?;
             cleared += 1;
         }
@@ -1377,7 +1410,6 @@ impl StorageEngine {
         let mut existing = self
             .get_node_record(&node.id)?
             .ok_or_else(|| StorageError::NotFound(node.id.clone()))?;
-        existing.named_embeddings = node.named_embeddings.clone();
         existing.chunk_embeddings = node.chunk_embeddings.clone();
         existing.embed_meta = node.embed_meta.clone();
         existing.updated_at_unix_ms = existing.updated_at_unix_ms.max(node.updated_at_unix_ms);

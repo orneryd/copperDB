@@ -2,13 +2,17 @@
 
 Date: 2026-05-26
 
-This document is the implementation contract for copperDB distributed writes, reads, and search. The replication target remains Cassandra-like distributed coordination rather than a single Raft leader path. For distributed MVCC snapshot isolation and read-your-own-writes guarantees, copperDB now targets a hybrid model: keep Dynamo-style quorum replication for data durability and fan-out, but allocate authoritative distributed transaction times through a separate consensus-backed transaction-time oracle. Paxos v2 is the intended direction for that oracle layer; it is not a plan to replace the Dynamo quorum replication contract itself. Any Raft-style machinery that remains in the Rust workspace is transitional until it is either adapted behind this contract or removed.
+Status: deferred roadmap only.
+
+copperDB's currently supported architecture is single-node execution. This document is future architecture guidance for work that is intentionally deferred until after the single-node engine, storage, query, and local search/runtime surfaces are complete and stable. It must not be read as a statement that distributed writes, reads, search, or transaction-time orchestration are currently supported.
+
+When distributed work resumes, the replication target remains Cassandra-like distributed coordination rather than a single Raft leader path. For distributed MVCC snapshot isolation and read-your-own-writes guarantees, copperDB targets a hybrid model: keep Dynamo-style quorum replication for data durability and fan-out, but allocate authoritative distributed transaction times through a separate consensus-backed transaction-time oracle. Paxos v2 is the intended direction for that oracle layer; it is not a plan to replace the Dynamo quorum replication contract itself. Any Raft-style machinery that remains in the Rust workspace is transitional until it is either adapted behind this contract or removed.
 
 This document defines one replicated placement at a time. The higher-level federated multi-shard AI fabric plan is defined in [federated-ai-fabric-architecture.md](federated-ai-fabric-architecture.md).
 
 Request cancellation and timeout propagation across HTTP, Bolt, gRPC, local execution, and mesh fan-out is defined in [request-cancellation-propagation.md](request-cancellation-propagation.md). Distributed execution envelopes must follow that contract once implemented so cancelled ingress work stops locally and across remote children instead of continuing expensive loops nobody is awaiting.
 
-## Goals
+## Future Goals
 
 - Any healthy coordinator-capable node can accept a client write, read, or search request.
 - Placement is resolved through `copperdb-topology` using `PlacementKey { tenant, database, shard }`.
@@ -153,7 +157,7 @@ Search execution rules:
 - Result merging must be deterministic for equal scores, using stable document ids as tie breakers.
 - Vector offload through `qdrantgrpc` and internal remote execution through `nornicgrpc` must consume the same `DistributedSearchPlan` rather than inventing separate routing rules.
 
-## Package Responsibilities
+## Planned Package Responsibilities
 
 - `topology`: owns all placement, peer, consistency, read/write/search planning, and transaction-time vocabulary, including the transaction-time oracle seam and the local logical clock fallback implementation.
 - `storage`: persists topology metadata and graph/index records with version information needed for read repair and last-write-wins conflict resolution.
@@ -179,7 +183,7 @@ Search execution rules:
 - Transaction ordering must compare the authoritative transaction times attached to committed values. The local topology logical transaction ID format `(epoch, counter, node_ordinal)` remains the default/fallback allocator and merge helper until the consensus-backed oracle is fully threaded through the distributed write and read-fence paths.
 - Request cancellation is best-effort for stopping work, but write outcome is determined by the active transaction or quorum protocol. Before a durable transaction commit decision, cancellation should drive an abort path when one exists. During commit uncertainty, the result must be resolved as committed, aborted, or unknown rather than guessed. After commit/quorum success, cancellation stops surplus CPU and remote work but does not retract the write. Coordinators propagate deadlines passively and cancellation actively to remote children; remote nodes also expire in-flight request registry entries by deadline in case active cancel messages are lost.
 
-## Implementation Order
+## Implementation Order When Distributed Work Resumes
 
 1. Keep topology consistency-level read/write plans and tests as the replication baseline.
 2. Finish replication coordinator writes and reads using an in-memory replica transport, storage-backed adapter tests, and durable post-quorum repair records.
@@ -188,9 +192,9 @@ Search execution rules:
 5. Update `fabric` and read paths to propagate bookmarks/read fences so a client can require visibility at or above its last committed transaction time.
 6. Keep `search`, `nornicgrpc`, and `qdrantgrpc` aligned with the same plan and fence vocabulary.
 
-Current status: complete for the Layer 3 foundation. Remaining future work belongs to protocol hardening and deeper engine integration, not to the foundational distributed execution contracts.
+Current status: deferred. Some topology, transport, replication, and fabric scaffolding may exist in the workspace, but copperDB does not currently guarantee or document a supported distributed execution path. The active product/runtime guarantee remains single-node execution only.
 
-## Completion Bar
+## Completion Bar For Future Distributed Enablement
 
 Layer 3 packages can only be checked when:
 

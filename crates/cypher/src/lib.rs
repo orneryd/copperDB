@@ -156,9 +156,24 @@ impl<'a> ParseContext<'a> {
         }
         self.expect(")")?;
 
+        let mut yield_items = Vec::new();
+        if self.peek_is("YIELD") {
+            self.advance();
+            yield_items.push(self.parse_projection_item(&[
+                ",", "RETURN", "WITH", "WHERE", "ORDER", "SKIP", "LIMIT",
+            ])?);
+            while self.peek() == Some(",") {
+                self.advance();
+                yield_items.push(self.parse_projection_item(&[
+                    ",", "RETURN", "WITH", "WHERE", "ORDER", "SKIP", "LIMIT",
+                ])?);
+            }
+        }
+
         Ok(CallClause {
             procedure: procedure_parts.join("."),
             args,
+            yield_items,
         })
     }
 
@@ -216,7 +231,13 @@ impl<'a> ParseContext<'a> {
     }
 
     fn parse_return_item(&mut self) -> Result<ReturnItem, CypherError> {
-        let expression = self.parse_expression_item(&[",", "AS", "ORDER", "SKIP", "LIMIT"])?;
+        self.parse_projection_item(&[",", "AS", "ORDER", "SKIP", "LIMIT"])
+    }
+
+    fn parse_projection_item(&mut self, terminators: &[&str]) -> Result<ReturnItem, CypherError> {
+        let mut expression_terminators = vec![",", "AS"];
+        expression_terminators.extend_from_slice(terminators);
+        let expression = self.parse_expression_item(&expression_terminators)?;
         let alias = if self.peek_is("AS") {
             self.advance();
             Some(self.advance_identifier()?)
@@ -1304,6 +1325,26 @@ mod tests {
         } else {
             panic!("expected Return clause");
         }
+    }
+
+    #[test]
+    fn test_parse_call_with_yield_aliases() {
+        let p = Parser::new();
+        let q = p
+            .parse(
+                "CALL db.index.vector.queryNodes('title_idx', 5, [1,0,0]) YIELD node AS hit, score AS similarity RETURN hit._id AS id, similarity AS value",
+            )
+            .unwrap();
+
+        let Some(Clause::Call(call)) = q.clauses.first() else {
+            panic!("expected Call clause");
+        };
+
+        assert_eq!(call.procedure, "db.index.vector.queryNodes");
+        assert_eq!(call.args.len(), 3);
+        assert_eq!(call.yield_items.len(), 2);
+        assert_eq!(call.yield_items[0].alias.as_deref(), Some("hit"));
+        assert_eq!(call.yield_items[1].alias.as_deref(), Some("similarity"));
     }
 
     #[test]

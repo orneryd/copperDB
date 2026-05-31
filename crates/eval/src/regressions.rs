@@ -2646,6 +2646,255 @@ use super::*;
     }
 
     #[test]
+    fn test_call_vector_query_nodes_prefers_named_embeddings_over_property_and_chunk_fallback() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let put_node = |node: NodeRecord| {
+            engine.storage.put_node_record(&node).unwrap();
+        };
+
+        put_node(NodeRecord {
+            id: "doc-named".to_string(),
+            labels: vec!["Doc".to_string()],
+            properties: BTreeMap::from([(
+                "title".to_string(),
+                Value::String("not a vector".to_string()),
+            )]),
+            named_embeddings: BTreeMap::from([("title".to_string(), vec![1.0, 0.0, 0.0])]),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        });
+        put_node(NodeRecord {
+            id: "doc-prop".to_string(),
+            labels: vec!["Doc".to_string()],
+            properties: BTreeMap::from([(
+                "title".to_string(),
+                Value::Array(vec![Value::from(0.8), Value::from(0.2), Value::from(0.0)]),
+            )]),
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        });
+        put_node(NodeRecord {
+            id: "doc-chunk".to_string(),
+            labels: vec!["Doc".to_string()],
+            properties: BTreeMap::new(),
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: vec![vec![0.5, 0.5, 0.0]],
+            embed_meta: Default::default(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        });
+        put_node(NodeRecord {
+            id: "doc-both".to_string(),
+            labels: vec!["Doc".to_string()],
+            properties: BTreeMap::from([(
+                "title".to_string(),
+                Value::Array(vec![Value::from(1.0), Value::from(0.0), Value::from(0.0)]),
+            )]),
+            named_embeddings: BTreeMap::from([("title".to_string(), vec![0.0, 1.0, 0.0])]),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        });
+        put_node(NodeRecord {
+            id: "other-label".to_string(),
+            labels: vec!["Other".to_string()],
+            properties: BTreeMap::new(),
+            named_embeddings: BTreeMap::from([("title".to_string(), vec![1.0, 0.0, 0.0])]),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        });
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE VECTOR INDEX title_idx FOR (n:Doc) ON (n.title)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.vector.queryNodes('title_idx', 10, [1,0,0])")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["node", "score"]);
+        assert_eq!(result.rows.len(), 4);
+
+        let ids = result
+            .rows
+            .iter()
+            .map(|row| {
+                row.get("node")
+                    .and_then(Value::as_object)
+                    .and_then(|node| node.get("_id"))
+                    .and_then(Value::as_str)
+                    .unwrap()
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        let scores = result
+            .rows
+            .iter()
+            .map(|row| row.get("score").and_then(Value::as_f64).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["doc-named", "doc-prop", "doc-chunk", "doc-both"]);
+        assert!(scores[0] > scores[1]);
+        assert!(scores[1] > scores[2]);
+        assert!(scores[2] > scores[3]);
+        assert_eq!(
+            result.rows[0]
+                .get("node")
+                .and_then(Value::as_object)
+                .and_then(|node| node.get("title")),
+            Some(&Value::String("not a vector".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_call_vector_query_nodes_yield_and_return_pipeline() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .storage
+            .put_node_record(&NodeRecord {
+                id: "doc-1".to_string(),
+                labels: vec!["Doc".to_string()],
+                properties: BTreeMap::from([(
+                    "title".to_string(),
+                    Value::String("Document one".to_string()),
+                )]),
+                named_embeddings: BTreeMap::from([("title".to_string(), vec![1.0, 0.0, 0.0])]),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        engine
+            .storage
+            .put_node_record(&NodeRecord {
+                id: "doc-2".to_string(),
+                labels: vec!["Doc".to_string()],
+                properties: BTreeMap::new(),
+                named_embeddings: BTreeMap::from([("title".to_string(), vec![0.8, 0.2, 0.0])]),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE VECTOR INDEX title_idx FOR (n:Doc) ON (n.title)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "CALL db.index.vector.queryNodes('title_idx', 5, [1,0,0]) YIELD node, score RETURN node._id AS id, score ORDER BY score DESC",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["id", "score"]);
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0].get("id"), Some(&Value::String("doc-1".to_string())));
+        assert_eq!(result.rows[1].get("id"), Some(&Value::String("doc-2".to_string())));
+        assert!(
+            result.rows[0]
+                .get("score")
+                .and_then(Value::as_f64)
+                .unwrap()
+                > result.rows[1]
+                    .get("score")
+                    .and_then(Value::as_f64)
+                    .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_call_vector_query_nodes_yield_aliases_flow_into_return() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for (id, vector) in [("doc-1", vec![1.0, 0.0, 0.0]), ("doc-2", vec![0.8, 0.2, 0.0])] {
+            engine
+                .storage
+                .put_node_record(&NodeRecord {
+                    id: id.to_string(),
+                    labels: vec!["Doc".to_string()],
+                    properties: BTreeMap::new(),
+                    named_embeddings: BTreeMap::from([("title".to_string(), vector)]),
+                    chunk_embeddings: Vec::new(),
+                    embed_meta: Default::default(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE VECTOR INDEX title_idx FOR (n:Doc) ON (n.title)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "CALL db.index.vector.queryNodes('title_idx', 5, [1,0,0]) YIELD node AS hit, score AS similarity RETURN hit._id AS id, similarity AS value ORDER BY similarity DESC",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["id", "value"]);
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0].get("id"), Some(&Value::String("doc-1".to_string())));
+        assert_eq!(result.rows[1].get("id"), Some(&Value::String("doc-2".to_string())));
+        assert!(
+            result.rows[0]
+                .get("value")
+                .and_then(Value::as_f64)
+                .unwrap()
+                > result.rows[1]
+                    .get("value")
+                    .and_then(Value::as_f64)
+                    .unwrap()
+        );
+    }
+
+    #[test]
     fn test_match_updates_node_access_metadata_via_on_access_policy() {
         let engine = make_engine();
         let parser = Parser::new();
