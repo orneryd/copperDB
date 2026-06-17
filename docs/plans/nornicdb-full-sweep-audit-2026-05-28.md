@@ -249,6 +249,33 @@ Current copperDB progress is real: expression parsing, relationship/path semanti
 - `FULLTEXT` and `VECTOR` DDL/catalog lifecycle exists in copperDB. A first maintained local fulltext runtime now exists through storage-maintained inverted-token entries plus engine-side local query execution, but vector runtime paths and broader search lifecycle parity are still absent. The next parity step is to deepen that maintained runtime rather than adding more DDL.
 - Composite range/temporal selection is now strong, but broader Neo4j index provider semantics, index options, analyzers, and vector index configuration are not ported.
 
+#### 2026-06-17 upstream cypher wave
+
+The NornicDB fast-forward from `2503ffca` to `f1fb4beb` materially expands the Layer 4 cypher backlog and should be treated as the current cypher parity anchor. The upstream wave touches 152 `pkg/cypher` files, including parser- and syntax-adjacent coverage, call-tail execution, vector cosine fast paths, broad bug regressions, schema contracts, and the new `graphiti_scenario_e2e_test.go`.
+
+High-signal upstream deltas that must be reflected in copperDB plans:
+
+- Parser-owned or parser-adjacent deltas: additional CALL-tail parsing coverage, yield/return compatibility checks, path or shortestPath shape validation, subquery parser-helper coverage, keyword-scan edge cases, and context-path substitution feeding pattern-property resolution.
+- Procedure and row-pipeline deltas: stricter `db.index.fulltext.queryNodes` signature coverage including the Neo4j-compatible third MAP argument, typed relationship constraints forcing call-tail fallback, and broader CALL plus WITH plus mutation chain branches.
+- Regression and scenario deltas: `bug_multihop_optional_match_test.go`, `bug_return_after_write_test.go`, `bug_repro_test.go`, `match_comma_create_test.go`, `match_unwind_merge_test.go`, `yield_return_test.go`, vector cosine query or relationship shapes, and Graphiti scenario end-to-end coverage.
+- Schema or planner deltas: the large `schema.go` update plus associated contract, precheck, relationship-index, and backfill branch tests; these should feed the Rust schema and planner work rather than being deferred as test-only churn.
+
+Iterative plan to full cypher parity from this anchor:
+
+1. Build the upstream-to-Rust cypher test inventory. Every changed upstream `pkg/cypher` file in this wave must be classified as parser-only, eval-owned, engine-or-search integration, schema-DDL, or non-applicable.
+2. Port parser-owned tests first into `crates/cypher`, especially CALL, YIELD, WITH, subquery parser helpers, path variables, shortestPath, and keyword-scan edge cases. If a test cannot be mirrored directly because the Rust AST differs, merge it into the closest Rust parser regression and record that mapping.
+3. Port parser-adjacent eval behavior next into `crates/eval`, including fulltext third-arg signature handling, map/context path substitution semantics, call-tail constrained shapes, and return-after-write or optional-match regressions.
+4. Port upstream vector-cosine, traversal, and Graphiti scenario coverage into the Rust engine/eval layers after the parser and row-pipeline slices are stable. This keeps the local HNSW-preferred path honest against the current upstream query corpus.
+5. Port the schema and query-shape branch wave into the Rust DDL and planning surfaces, then rerun the same parser/eval/engine regressions instead of treating schema parity as a disconnected workstream.
+6. Close the loop by proving that every changed upstream cypher test file is mirrored, merged, or explicitly dispositioned in this audit. No silent omissions count as parity progress.
+
+Exit criteria for "100% parity" on this cypher slice:
+
+- Every upstream changed `pkg/cypher` test file in `2503ffca..f1fb4beb` has a copperDB counterpart, a merged Rust equivalent, or a documented non-applicable disposition.
+- Parser-owned coverage lives in `crates/cypher`; eval-owned coverage lives in `crates/eval`; engine/search integration coverage lives in the consuming Rust crate rather than being dropped.
+- Graphiti, vector-cosine, fulltext third-arg, multihop optional-match, and return-after-write regressions all execute against real Rust behavior instead of being left as documentation-only backlog.
+- The Rust plan retains the single-node current-runtime guarantee; any distributed scaffolding exercised by upstream tests must still be documented as future-state unless and until copperDB intentionally enables it.
+
 ### search
 
 NornicDB has production search packages for BM25 fulltext, query-plan caching, fulltext persistence, HNSW, IVFPQ, GPU/Metal candidate generation, hybrid lexical/vector routing, decay filters, reranking, vector file store, and observability. copperDB search currently provides distributed/RRF data structures and simple in-memory fulltext helpers only. For MVP, GPU/Metal candidate generation and reranking are deferred; the nearer target is CPU BM25/fulltext, CPU vector runtime, vector file store, persistence/versioning, decay filtering, and observability.
@@ -340,9 +367,10 @@ Documentation actions:
 6. Expand MVCC/WAL documentation with snapshot-visible indexes, temporal point-in-time lookup, lifecycle pruning, WAL repair, and corruption diagnostics.
 7. Add MVP search runtime TODOs: BM25 fulltext, HNSW-preferred CPU vector runtime, vector file store, search persistence/versioning, decay filter, and observability. Defer IVFPQ strategy selection, GPU acceleration, rerank/MMR, and broad local-LLM lifecycle until late-stage parity.
 8. Add protocol/runtime TODOs: Bolt auth/role propagation, plugin-ready builtin function/procedure registration, and streaming import/export conversion utilities. copperDB already has server per-DB config routes plus effective-config views; MCP tools, Heimdall governance, GraphQL resolvers, and APOC compatibility remain deferred until after the single-node benchmark-ready core works.
-9. Future distributed state: add the hybrid transaction-time architecture by keeping Dynamo quorum for data durability while introducing a consensus-backed transaction-time oracle for authoritative begin/commit/read-fence allocation, with Paxos v2 as the target distributed implementation.
-10. Future distributed state: thread bookmark/read-fence semantics through txsession, engine, replication, and fabric so distributed MVCC snapshot isolation and RYOW have an enforceable contract when distributed execution resumes.
-11. Future distributed state: add production-hardening TODOs for multi-region replication, transport security, chaos tests, peer metrics GC, fragment executor, remote fragment execution, and distributed transaction context.
+9. Execute the staged 2026-06-17 cypher parity wave: inventory every changed upstream `pkg/cypher` test file, port parser-owned coverage into `crates/cypher`, port row-pipeline and procedure behavior into `crates/eval`, port vector-cosine and Graphiti scenarios into the owning runtime crates, and do not declare parity until every changed upstream test is mirrored, merged, or dispositioned.
+10. Future distributed state: add the hybrid transaction-time architecture by keeping Dynamo quorum for data durability while introducing a consensus-backed transaction-time oracle for authoritative begin/commit/read-fence allocation, with Paxos v2 as the target distributed implementation.
+11. Future distributed state: thread bookmark/read-fence semantics through txsession, engine, replication, and fabric so distributed MVCC snapshot isolation and RYOW have an enforceable contract when distributed execution resumes.
+12. Future distributed state: add production-hardening TODOs for multi-region replication, transport security, chaos tests, peer metrics GC, fragment executor, remote fragment execution, and distributed transaction context.
 
 ## Audit Notes
 
