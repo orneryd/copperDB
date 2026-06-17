@@ -299,6 +299,45 @@ impl<'a> ParseContext<'a> {
 
     fn parse_set_item(&mut self) -> Result<SetItem, CypherError> {
         let variable = self.advance_identifier()?;
+        // Map-merge form: SET n += expr
+        if self.peek() == Some("+=") {
+            self.advance();
+            let value = self.parse_expression_item(&[
+                ",", "MATCH", "CREATE", "MERGE", "SET", "REMOVE", "DELETE", "DETACH", "RETURN",
+                "WITH", "UNWIND", "CALL",
+            ])?;
+            return Ok(SetItem::MapMerge { variable, value });
+        }
+        // Map-assignment form: SET n = expr
+        if self.peek() == Some("=") {
+            self.advance();
+            let value = self.parse_expression_item(&[
+                ",", "MATCH", "CREATE", "MERGE", "SET", "REMOVE", "DELETE", "DETACH", "RETURN",
+                "WITH", "UNWIND", "CALL",
+            ])?;
+            return Ok(SetItem::MapAssignment { variable, value });
+        }
+        // Label form: SET n:Label or SET n:$(expr)
+        if self.peek() == Some(":") {
+            self.advance();
+            // Dynamic label: SET n:$(expr) — $ and ( are separate tokens
+            if self.peek() == Some("$") {
+                let next_is_paren = self.tokens.get(self.pos + 1).map(|t| *t == "(").unwrap_or(false);
+                if next_is_paren {
+                    self.advance(); // consume $
+                    self.advance(); // consume (
+                    let expr = self.parse_expression_item(&[")"])?;
+                    self.expect(")")?;
+                    return Ok(SetItem::DynamicLabel {
+                        variable,
+                        expression: expr,
+                    });
+                }
+            }
+            let label = self.advance_identifier()?;
+            return Ok(SetItem::Label { variable, label });
+        }
+        // Property form: SET n.prop = expr
         self.expect(".")?;
         let property = self.advance_identifier()?;
         self.expect("=")?;
@@ -306,7 +345,7 @@ impl<'a> ParseContext<'a> {
             ",", "MATCH", "CREATE", "MERGE", "SET", "REMOVE", "DELETE", "DETACH", "RETURN", "WITH",
             "UNWIND", "CALL",
         ])?;
-        Ok(SetItem {
+        Ok(SetItem::Property {
             variable,
             property,
             value,

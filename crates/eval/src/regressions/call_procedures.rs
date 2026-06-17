@@ -763,6 +763,60 @@
     }
 
     #[test]
+    fn test_call_dbms_components_yields_edition() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL dbms.components() YIELD name, versions, edition RETURN name, versions, edition")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.columns, vec!["name", "versions", "edition"]);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("name"), Some(&Value::String("CopperDB".to_string())));
+        assert_eq!(result.rows[0].get("edition"), Some(&Value::String("community".to_string())));
+    }
+
+    #[test]
+    fn test_call_dbms_list_config_returns_rows() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL dbms.listConfig() YIELD name, value, dynamic RETURN name, value, dynamic ORDER BY name")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.columns, vec!["name", "value", "dynamic"]);
+        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.rows[0].get("name"), Some(&Value::String("nornicdb.bolt.enabled".to_string())));
+        assert_eq!(result.rows[0].get("value"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_call_fulltext_list_analyzers_returns_standard_set() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.fulltext.listAvailableAnalyzers() YIELD analyzer, description RETURN analyzer, description ORDER BY analyzer")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.columns, vec!["analyzer", "description"]);
+        assert_eq!(result.rows.len(), 5);
+        assert_eq!(result.rows[0].get("analyzer"), Some(&Value::String("keyword".to_string())));
+        assert_eq!(result.rows[4].get("analyzer"), Some(&Value::String("whitespace".to_string())));
+    }
+
+    #[test]
     fn test_call_db_info_yields_counts() {
         let engine = make_engine();
         let parser = Parser::new();
@@ -1348,4 +1402,188 @@
             result.rows[0].get("content"),
             Some(&Value::String("alpha only".to_string()))
         );
+    }
+
+    #[test]
+    fn test_call_nornicdb_knowledgepolicy_profiles_yields_bundles_and_bindings() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // Create a decay profile bundle
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE slow_decay OPTIONS { halfLifeSeconds: 604800, visibilityThreshold: 0.1, scoreFloor: 0.05, function: 'exponential', scope: 'NODE', scoreFrom: 'CREATED', enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        // Create a decay binding referencing the bundle
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE DECAY PROFILE memory_binding FOR (n:MemoryEpisode) APPLY { DECAY PROFILE slow_decay, visibilityThreshold: 0.2, order: 10 }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL nornicdb.knowledgepolicy.profiles() YIELD kind, Name, HalfLifeSeconds, Scope, Enabled, ProfileRef, NoDecay, Order RETURN kind, Name, HalfLifeSeconds, Scope, Enabled, ProfileRef, NoDecay, Order ORDER BY kind, Name")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            result.columns,
+            vec![
+                "kind", "Name", "HalfLifeSeconds", "Scope", "Enabled",
+                "ProfileRef", "NoDecay", "Order"
+            ]
+        );
+
+        // Expect 2 rows: binding alphabetically before bundle
+        assert_eq!(result.rows.len(), 2);
+
+        // Binding row first (alphabetical)
+        let binding = &result.rows[0];
+        assert_eq!(
+            binding.get("kind"),
+            Some(&Value::String("binding".to_string()))
+        );
+        assert_eq!(
+            binding.get("Name"),
+            Some(&Value::String("memory_binding".to_string()))
+        );
+        assert_eq!(
+            binding.get("HalfLifeSeconds"),
+            Some(&Value::from(604800i64))
+        );
+        assert_eq!(binding.get("Enabled"), Some(&Value::Bool(true)));
+        assert_eq!(
+            binding.get("ProfileRef"),
+            Some(&Value::String("slow_decay".to_string()))
+        );
+        assert_eq!(binding.get("NoDecay"), Some(&Value::Bool(false)));
+        assert_eq!(binding.get("Order"), Some(&Value::from(10i64)));
+
+        // Bundle row second
+        let bundle = &result.rows[1];
+        assert_eq!(bundle.get("kind"), Some(&Value::String("bundle".to_string())));
+        assert_eq!(
+            bundle.get("Name"),
+            Some(&Value::String("slow_decay".to_string()))
+        );
+        assert_eq!(
+            bundle.get("HalfLifeSeconds"),
+            Some(&Value::from(604800i64))
+        );
+        assert_eq!(bundle.get("Scope"), Some(&Value::String("NODE".to_string())));
+        assert_eq!(bundle.get("Enabled"), Some(&Value::Bool(true)));
+        assert_eq!(bundle.get("ProfileRef"), Some(&Value::String("".to_string())));
+        assert_eq!(bundle.get("NoDecay"), Some(&Value::Bool(false)));
+        assert_eq!(bundle.get("Order"), Some(&Value::from(0i64)));
+    }
+
+    #[test]
+    fn test_call_nornicdb_knowledgepolicy_policies_yields_profiles_and_policies() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // Create a promotion profile
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE PROMOTION PROFILE boost_profile OPTIONS { scope: 'NODE', multiplier: 1.5, scoreFloor: 0.2, scoreCap: 1.0, enabled: true }",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        // Create a promotion policy referencing the profile
+        engine
+            .execute(
+                &parser
+                    .parse(
+                        "CREATE PROMOTION POLICY fact_policy FOR (n:KnowledgeFact) APPLY PROFILE boost_profile WHEN 'n.evidence >= 3'",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL nornicdb.knowledgepolicy.policies() YIELD kind, Name, Scope, Multiplier, ScoreFloor, ScoreCap, Enabled, TargetLabels, IsWildcard, IsEdge RETURN kind, Name, Scope, Multiplier, ScoreFloor, ScoreCap, Enabled, TargetLabels, IsWildcard, IsEdge ORDER BY kind, Name")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            result.columns,
+            vec![
+                "kind", "Name", "Scope", "Multiplier", "ScoreFloor",
+                "ScoreCap", "Enabled", "TargetLabels", "IsWildcard", "IsEdge"
+            ]
+        );
+
+        // Expect 2 rows: policy alphabetically before profile
+        assert_eq!(result.rows.len(), 2);
+
+        // Policy row first (alphabetical)
+        let policy = &result.rows[0];
+        assert_eq!(
+            policy.get("kind"),
+            Some(&Value::String("policy".to_string()))
+        );
+        assert_eq!(
+            policy.get("Name"),
+            Some(&Value::String("fact_policy".to_string()))
+        );
+        assert_eq!(
+            policy.get("Scope"),
+            Some(&Value::String("NODE".to_string()))
+        );
+        assert_eq!(policy.get("Multiplier"), Some(&Value::Null));
+        assert_eq!(policy.get("ScoreFloor"), Some(&Value::Null));
+        assert_eq!(policy.get("ScoreCap"), Some(&Value::Null));
+        assert_eq!(policy.get("Enabled"), Some(&Value::Bool(true)));
+        assert_eq!(policy.get("IsWildcard"), Some(&Value::Bool(false)));
+        assert_eq!(policy.get("IsEdge"), Some(&Value::Bool(false)));
+        assert_eq!(
+            policy.get("TargetLabels"),
+            Some(&Value::Array(vec![Value::String(
+                "KnowledgeFact".to_string()
+            )]))
+        );
+
+        // Profile row second
+        let profile = &result.rows[1];
+        assert_eq!(
+            profile.get("kind"),
+            Some(&Value::String("profile".to_string()))
+        );
+        assert_eq!(
+            profile.get("Name"),
+            Some(&Value::String("boost_profile".to_string()))
+        );
+        assert_eq!(
+            profile.get("Scope"),
+            Some(&Value::String("NODE".to_string()))
+        );
+        assert_eq!(profile.get("Multiplier"), Some(&Value::from(1.5)));
+        assert_eq!(profile.get("ScoreFloor"), Some(&Value::from(0.2)));
+        assert_eq!(profile.get("ScoreCap"), Some(&Value::from(1.0)));
+        assert_eq!(profile.get("Enabled"), Some(&Value::Bool(true)));
+        assert_eq!(profile.get("TargetLabels"), Some(&Value::Null));
     }

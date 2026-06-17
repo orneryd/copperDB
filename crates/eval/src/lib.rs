@@ -413,7 +413,14 @@ fn collect_expression_variables(expression: &Expression, variables: &mut HashSet
         Expression::Comparison { operands, .. }
         | Expression::InList { operands, .. }
         | Expression::And(operands)
-        | Expression::Or(operands) => {
+        | Expression::And(operands)
+        | Expression::Or(operands)
+        | Expression::Xor(operands)
+        | Expression::Add(operands)
+        | Expression::Subtract(operands)
+        | Expression::Multiply(operands)
+        | Expression::Divide(operands)
+        | Expression::Modulo(operands) => {
             collect_expression_variables(&operands.left, variables);
             collect_expression_variables(&operands.right, variables);
         }
@@ -421,6 +428,18 @@ fn collect_expression_variables(expression: &Expression, variables: &mut HashSet
             for argument in args {
                 collect_expression_variables(argument, variables);
             }
+        }
+        Expression::ListComprehension(comp) => {
+            collect_expression_variables(&comp.list, variables);
+            if let Some(ref pred) = comp.predicate {
+                collect_expression_variables(pred, variables);
+            }
+            collect_expression_variables(&comp.expression, variables);
+        }
+        Expression::Reduce(reduce) => {
+            collect_expression_variables(&reduce.initial, variables);
+            collect_expression_variables(&reduce.list, variables);
+            collect_expression_variables(&reduce.expression, variables);
         }
         Expression::MapLiteral(entries) => {
             for entry in entries {
@@ -430,7 +449,31 @@ fn collect_expression_variables(expression: &Expression, variables: &mut HashSet
         Expression::Not(inner) | Expression::IsNull(inner) | Expression::IsNotNull(inner) => {
             collect_expression_variables(inner, variables)
         }
-        Expression::Literal(_) | Expression::Parameter(_) => {}
+        Expression::Between {
+            expression,
+            lower,
+            upper,
+        } => {
+            collect_expression_variables(expression, variables);
+            collect_expression_variables(lower, variables);
+            collect_expression_variables(upper, variables);
+        }
+        Expression::Literal(_)
+        | Expression::Parameter(_)
+        | Expression::ParameterPropertyAccess { .. }
+        | Expression::PatternExists { .. } => {}
+        Expression::Case(case) => {
+            if let Some(ref expr) = case.expression {
+                collect_expression_variables(expr, variables);
+            }
+            for alt in &case.alternatives {
+                collect_expression_variables(&alt.condition, variables);
+                collect_expression_variables(&alt.result, variables);
+            }
+            if let Some(ref default) = case.default {
+                collect_expression_variables(default, variables);
+            }
+        }
     }
 }
 
@@ -830,11 +873,42 @@ fn return_clause(query: &Query) -> Result<&copperdb_cypher::ReturnClause, EvalEr
         .ok_or_else(|| EvalError::ExecutionError("query requires a RETURN clause".into()))
 }
 
+/// Build a map from RETURN/WITH alias to the underlying expression.
+fn return_alias_map(items: &[ReturnItem]) -> HashMap<String, Expression> {
+    items
+        .iter()
+        .filter_map(|item| {
+            item.alias
+                .as_ref()
+                .map(|alias| (alias.clone(), item.expression.clone()))
+        })
+        .collect()
+}
+
+/// Resolve an ORDER BY expression through RETURN/WITH aliases.
+///
+/// If the expression references a RETURN alias (e.g., `ORDER BY title`
+/// where `title` is `s.title AS title`), rewrite it to the underlying
+/// expression so it can be evaluated against the pre-projection row.
+fn resolve_order_expression(
+    expr: &Expression,
+    alias_map: &HashMap<String, Expression>,
+) -> Expression {
+    match expr {
+        Expression::Variable(name) => {
+            alias_map.get(name).cloned().unwrap_or_else(|| expr.clone())
+        }
+        _ => expr.clone(),
+    }
+}
+
 fn sort_rows_by_return_order(rows: &mut [Row], ret: &copperdb_cypher::ReturnClause) {
+    let alias_map = return_alias_map(&ret.items);
     rows.sort_by(|left, right| {
         for item in &ret.order_by {
-            let left_key = optimized_order_key(left, &item.expression);
-            let right_key = optimized_order_key(right, &item.expression);
+            let resolved = resolve_order_expression(&item.expression, &alias_map);
+            let left_key = optimized_order_key(left, &resolved);
+            let right_key = optimized_order_key(right, &resolved);
             let ord = compare_json(&left_key, &right_key);
             if ord != std::cmp::Ordering::Equal {
                 return if item.descending { ord.reverse() } else { ord };
@@ -858,10 +932,12 @@ fn apply_return_window(rows: &mut Vec<Row>, ret: &copperdb_cypher::ReturnClause)
 }
 
 fn sort_rows_by_with_order(rows: &mut [Row], with_clause: &WithClause) {
+    let alias_map = return_alias_map(&with_clause.items);
     rows.sort_by(|left, right| {
         for item in &with_clause.order_by {
-            let left_key = optimized_order_key(left, &item.expression);
-            let right_key = optimized_order_key(right, &item.expression);
+            let resolved = resolve_order_expression(&item.expression, &alias_map);
+            let left_key = optimized_order_key(left, &resolved);
+            let right_key = optimized_order_key(right, &resolved);
             let ord = compare_json(&left_key, &right_key);
             if ord != std::cmp::Ordering::Equal {
                 return if item.descending { ord.reverse() } else { ord };
@@ -944,10 +1020,16 @@ fn json_number_as_f64(value: &Value) -> Option<f64> {
 fn optimized_order_key(row: &Row, expression: &Expression) -> Value {
     match expression {
         Expression::Variable(variable) => row.get(variable).cloned().unwrap_or(Value::Null),
-        Expression::PropertyAccess { variable, property } => row
-            .get(&format!("{}.{}", variable, property))
-            .cloned()
-            .unwrap_or(Value::Null),
+        Expression::PropertyAccess { variable, property } => {
+            let dot_key = format!("{variable}.{property}");
+            if let Some(v) = row.get(&dot_key) {
+                return v.clone();
+            }
+            if let Some(Value::Object(map)) = row.get(variable.as_str()) {
+                return map.get(property.as_str()).cloned().unwrap_or(Value::Null);
+            }
+            Value::Null
+        }
         Expression::FunctionCall { name, args, .. } => {
             let key = if let Some(arg) = args.first() {
                 format!("{}({})", name, expression_name(arg))

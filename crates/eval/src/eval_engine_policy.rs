@@ -88,9 +88,49 @@ impl EvalEngine {
             self.execute_dbms_functions_call(call)
         } else if call
             .procedure
+            .eq_ignore_ascii_case("dbms.components")
+        {
+            self.execute_dbms_components_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("dbms.info")
+        {
+            self.execute_dbms_info_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("dbms.listConfig")
+        {
+            self.execute_dbms_list_config_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("dbms.clientConfig")
+        {
+            self.execute_dbms_client_config_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("dbms.listConnections")
+        {
+            self.execute_dbms_list_connections_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("db.index.fulltext.listAvailableAnalyzers")
+        {
+            self.execute_fulltext_list_analyzers_call(call)
+        } else if call
+            .procedure
             .eq_ignore_ascii_case("nornicdb.knowledgepolicy.resolve")
         {
             self.execute_knowledge_policy_resolve_call(call, params)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("nornicdb.knowledgepolicy.profiles")
+        {
+            self.execute_nornicdb_knowledgepolicy_profiles_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("nornicdb.knowledgepolicy.policies")
+        {
+            self.execute_nornicdb_knowledgepolicy_policies_call(call)
         } else if call
             .procedure
             .eq_ignore_ascii_case("db.index.fulltext.queryNodes")
@@ -224,6 +264,107 @@ impl EvalEngine {
             rows: functions,
             stats: QueryStats::default(),
         })
+    }
+
+    fn execute_dbms_components_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError("dbms.components expects no arguments".to_string()));
+        }
+        let mut row = Row::new();
+        row.insert("name".to_string(), Value::String("CopperDB".to_string()));
+        row.insert("versions".to_string(), Value::Array(vec![Value::String("0.1.0".to_string())]));
+        row.insert("edition".to_string(), Value::String("community".to_string()));
+        Ok(EvalResult { columns: vec!["name".to_string(), "versions".to_string(), "edition".to_string()], rows: vec![row], stats: QueryStats::default() })
+    }
+
+    fn execute_dbms_info_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError("dbms.info expects no arguments".to_string()));
+        }
+        let mut row = Row::new();
+        row.insert("id".to_string(), Value::String("copperdb-instance".to_string()));
+        row.insert("name".to_string(), Value::String("CopperDB".to_string()));
+        row.insert("creationDate".to_string(), Value::String("2024-01-01T00:00:00Z".to_string()));
+        Ok(EvalResult { columns: vec!["id".to_string(), "name".to_string(), "creationDate".to_string()], rows: vec![row], stats: QueryStats::default() })
+    }
+
+    fn execute_dbms_list_config_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError("dbms.listConfig expects no arguments".to_string()));
+        }
+        let configs: Vec<(&str, &str, Value, bool)> = vec![
+            ("nornicdb.version", "NornicDB version", Value::String("0.1.0".to_string()), false),
+            ("nornicdb.bolt.enabled", "Bolt protocol enabled", Value::Bool(true), false),
+            ("nornicdb.http.enabled", "HTTP API enabled", Value::Bool(true), false),
+        ];
+        let rows: Vec<Row> = configs.into_iter().map(|(name, desc, val, dynamic)| {
+            let mut row = Row::new();
+            row.insert("name".to_string(), Value::String(name.to_string()));
+            row.insert("description".to_string(), Value::String(desc.to_string()));
+            row.insert("value".to_string(), val.clone());
+            row.insert("dynamic".to_string(), Value::Bool(dynamic));
+            row
+        }).collect();
+        Ok(EvalResult { columns: vec!["name".to_string(), "description".to_string(), "value".to_string(), "dynamic".to_string()], rows, stats: QueryStats::default() })
+    }
+
+    fn execute_dbms_client_config_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError("dbms.clientConfig expects no arguments".to_string()));
+        }
+        let configs = vec![("server.bolt.advertised_address", "localhost:7687"), ("server.http.advertised_address", "localhost:7474")];
+        let rows: Vec<Row> = configs.into_iter().map(|(name, val)| {
+            let mut row = Row::new();
+            row.insert("name".to_string(), Value::String(name.to_string()));
+            row.insert("value".to_string(), Value::String(val.to_string()));
+            row
+        }).collect();
+        Ok(EvalResult { columns: vec!["name".to_string(), "value".to_string()], rows, stats: QueryStats::default() })
+    }
+
+    fn execute_dbms_list_connections_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError("dbms.listConnections expects no arguments".to_string()));
+        }
+        Ok(EvalResult { columns: vec!["connectionId".to_string(), "connectTime".to_string(), "connector".to_string(), "username".to_string(), "userAgent".to_string(), "clientAddress".to_string()], rows: vec![], stats: QueryStats::default() })
+    }
+
+    fn execute_fulltext_list_analyzers_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError("db.index.fulltext.listAvailableAnalyzers expects no arguments".to_string()));
+        }
+        let analyzers = vec![
+            ("standard-no-stop-words", "Standard analyzer without stop words"),
+            ("simple", "Simple analyzer with lowercase tokenizer"),
+            ("whitespace", "Whitespace analyzer"),
+            ("keyword", "Keyword analyzer - entire string as single token"),
+            ("url-or-email", "URL or email analyzer"),
+        ];
+        let rows: Vec<Row> = analyzers.into_iter().map(|(analyzer, desc)| {
+            let mut row = Row::new();
+            row.insert("analyzer".to_string(), Value::String(analyzer.to_string()));
+            row.insert("description".to_string(), Value::String(desc.to_string()));
+            row
+        }).collect();
+        Ok(EvalResult { columns: vec!["analyzer".to_string(), "description".to_string()], rows, stats: QueryStats::default() })
     }
 
     fn execute_db_property_keys_call(
@@ -628,6 +769,113 @@ impl EvalEngine {
             rows: vec![row],
             stats: QueryStats::default(),
         })
+    }
+
+    fn execute_nornicdb_knowledgepolicy_profiles_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError("nornicdb.knowledgepolicy.profiles expects no arguments".to_string()));
+        }
+        let bundles = self.storage.load_decay_profile_schemas().unwrap_or_default();
+        let bindings = self.storage.load_decay_profile_binding_schemas().unwrap_or_default();
+        let bundle_by_name: HashMap<String, &DecayProfileSchema> = bundles.iter().map(|b| (b.name.clone(), b)).collect();
+        let columns = vec!["kind","Name","HalfLifeSeconds","VisibilityThreshold","ScoreFloor","Function","Scope","DecayEnabled","ScoreFrom","ScoreFromProperty","Enabled","TargetLabels","TargetEdgeType","IsWildcard","IsEdge","ProfileRef","NoDecay","Order"].into_iter().map(String::from).collect();
+        let mut rows: Vec<Row> = Vec::new();
+        for bundle in &bundles {
+            let mut row = Row::new();
+            row.insert("kind".to_string(), Value::String("bundle".to_string()));
+            row.insert("Name".to_string(), Value::String(bundle.name.clone()));
+            row.insert("HalfLifeSeconds".to_string(), Value::from(bundle.half_life_seconds));
+            row.insert("VisibilityThreshold".to_string(), Value::from(bundle.visibility_threshold));
+            row.insert("ScoreFloor".to_string(), Value::from(bundle.score_floor));
+            row.insert("Function".to_string(), Value::String(bundle.function.clone()));
+            row.insert("Scope".to_string(), Value::String(bundle.scope.clone()));
+            row.insert("DecayEnabled".to_string(), Value::Bool(bundle.decay_enabled));
+            row.insert("ScoreFrom".to_string(), Value::String(bundle.score_from.clone()));
+            row.insert("ScoreFromProperty".to_string(), bundle.score_from_property.as_ref().map(|p| Value::String(p.clone())).unwrap_or(Value::Null));
+            row.insert("Enabled".to_string(), Value::Bool(bundle.enabled));
+            row.insert("TargetLabels".to_string(), Value::Null);
+            row.insert("TargetEdgeType".to_string(), Value::String(String::new()));
+            row.insert("IsWildcard".to_string(), Value::Bool(false));
+            row.insert("IsEdge".to_string(), Value::Bool(false));
+            row.insert("ProfileRef".to_string(), Value::String(String::new()));
+            row.insert("NoDecay".to_string(), Value::Bool(false));
+            row.insert("Order".to_string(), Value::from(0i64));
+            rows.push(row);
+        }
+        for binding in &bindings {
+            let half_life = binding.profile_ref.as_ref().and_then(|r| bundle_by_name.get(r)).map(|b| b.half_life_seconds).unwrap_or(0);
+            let score_floor = binding.profile_ref.as_ref().and_then(|r| bundle_by_name.get(r)).map(|b| b.score_floor).unwrap_or(0.0);
+            let scope = if binding.is_edge { "EDGE" } else { "NODE" };
+            let mut row = Row::new();
+            row.insert("kind".to_string(), Value::String("binding".to_string()));
+            row.insert("Name".to_string(), Value::String(binding.name.clone()));
+            row.insert("HalfLifeSeconds".to_string(), Value::from(half_life));
+            row.insert("VisibilityThreshold".to_string(), binding.visibility_threshold.map(Value::from).unwrap_or(Value::Null));
+            row.insert("ScoreFloor".to_string(), Value::from(score_floor));
+            row.insert("Function".to_string(), Value::String(String::new()));
+            row.insert("Scope".to_string(), Value::String(scope.to_string()));
+            row.insert("DecayEnabled".to_string(), Value::Bool(!binding.no_decay));
+            row.insert("ScoreFrom".to_string(), Value::String(String::new()));
+            row.insert("ScoreFromProperty".to_string(), Value::String(String::new()));
+            row.insert("Enabled".to_string(), Value::Bool(true));
+            row.insert("TargetLabels".to_string(), Value::Array(binding.target_labels.iter().map(|l| Value::String(l.clone())).collect()));
+            row.insert("TargetEdgeType".to_string(), binding.target_edge_type.as_ref().map(|t| Value::String(t.clone())).unwrap_or(Value::String(String::new())));
+            row.insert("IsWildcard".to_string(), Value::Bool(binding.is_wildcard));
+            row.insert("IsEdge".to_string(), Value::Bool(binding.is_edge));
+            row.insert("ProfileRef".to_string(), binding.profile_ref.as_ref().map(|r| Value::String(r.clone())).unwrap_or(Value::String(String::new())));
+            row.insert("NoDecay".to_string(), Value::Bool(binding.no_decay));
+            row.insert("Order".to_string(), Value::from(binding.order));
+            rows.push(row);
+        }
+        Ok(EvalResult { columns, rows, stats: QueryStats::default() })
+    }
+
+    fn execute_nornicdb_knowledgepolicy_policies_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError("nornicdb.knowledgepolicy.policies expects no arguments".to_string()));
+        }
+        let profiles = self.storage.load_promotion_profile_schemas().unwrap_or_default();
+        let policies = self.storage.load_promotion_policy_schemas().unwrap_or_default();
+        let columns = vec!["kind","Name","Scope","Multiplier","ScoreFloor","ScoreCap","Enabled","TargetLabels","TargetEdgeType","IsWildcard","IsEdge"].into_iter().map(String::from).collect();
+        let mut rows: Vec<Row> = Vec::new();
+        for profile in &profiles {
+            let mut row = Row::new();
+            row.insert("kind".to_string(), Value::String("profile".to_string()));
+            row.insert("Name".to_string(), Value::String(profile.name.clone()));
+            row.insert("Scope".to_string(), Value::String(profile.scope.clone()));
+            row.insert("Multiplier".to_string(), Value::from(profile.multiplier));
+            row.insert("ScoreFloor".to_string(), Value::from(profile.score_floor));
+            row.insert("ScoreCap".to_string(), Value::from(profile.score_cap));
+            row.insert("Enabled".to_string(), Value::Bool(profile.enabled));
+            row.insert("TargetLabels".to_string(), Value::Null);
+            row.insert("TargetEdgeType".to_string(), Value::String(String::new()));
+            row.insert("IsWildcard".to_string(), Value::Bool(false));
+            row.insert("IsEdge".to_string(), Value::Bool(false));
+            rows.push(row);
+        }
+        for policy in &policies {
+            let scope = if policy.is_edge { "EDGE" } else { "NODE" };
+            let mut row = Row::new();
+            row.insert("kind".to_string(), Value::String("policy".to_string()));
+            row.insert("Name".to_string(), Value::String(policy.name.clone()));
+            row.insert("Scope".to_string(), Value::String(scope.to_string()));
+            row.insert("Multiplier".to_string(), Value::Null);
+            row.insert("ScoreFloor".to_string(), Value::Null);
+            row.insert("ScoreCap".to_string(), Value::Null);
+            row.insert("Enabled".to_string(), Value::Bool(policy.enabled));
+            row.insert("TargetLabels".to_string(), Value::Array(policy.target_labels.iter().map(|l| Value::String(l.clone())).collect()));
+            row.insert("TargetEdgeType".to_string(), policy.target_edge_type.as_ref().map(|t| Value::String(t.clone())).unwrap_or(Value::String(String::new())));
+            row.insert("IsWildcard".to_string(), Value::Bool(policy.is_wildcard));
+            row.insert("IsEdge".to_string(), Value::Bool(policy.is_edge));
+            rows.push(row);
+        }
+        Ok(EvalResult { columns, rows, stats: QueryStats::default() })
     }
 
     fn execute_db_schema_node_properties_call(
@@ -1462,6 +1710,12 @@ fn builtin_procedure_rows() -> Vec<Row> {
             "READ",
         ),
         (
+            "db.index.fulltext.listAvailableAnalyzers",
+            "db.index.fulltext.listAvailableAnalyzers() :: (analyzer :: STRING, description :: STRING)",
+            "Lists available fulltext analyzers",
+            "READ",
+        ),
+        (
             "db.index.fulltext.queryNodes",
             "db.index.fulltext.queryNodes(indexName :: STRING, query :: STRING, options = {} :: MAP) :: (node :: NODE, score :: FLOAT)",
             "Fulltext search on nodes",
@@ -1528,6 +1782,18 @@ fn builtin_procedure_rows() -> Vec<Row> {
             "READ",
         ),
         (
+            "dbms.clientConfig",
+            "dbms.clientConfig() :: (name :: STRING, value :: ANY)",
+            "Returns client configuration",
+            "DBMS",
+        ),
+        (
+            "dbms.components",
+            "dbms.components() :: (name :: STRING, versions :: LIST<STRING>, edition :: STRING)",
+            "Lists DBMS components",
+            "DBMS",
+        ),
+        (
             "dbms.functions",
             "dbms.functions() :: (name :: STRING, signature :: STRING, description :: STRING, category :: STRING)",
             "Lists functions",
@@ -1537,6 +1803,24 @@ fn builtin_procedure_rows() -> Vec<Row> {
             "dbms.procedures",
             "dbms.procedures() :: (name :: STRING, signature :: STRING, description :: STRING, mode :: STRING)",
             "Lists procedures",
+            "DBMS",
+        ),
+        (
+            "dbms.info",
+            "dbms.info() :: (id :: STRING, name :: STRING, creationDate :: STRING)",
+            "Returns DBMS information",
+            "DBMS",
+        ),
+        (
+            "dbms.listConfig",
+            "dbms.listConfig() :: (name :: STRING, description :: STRING, value :: ANY, dynamic :: BOOLEAN)",
+            "Lists DBMS configuration",
+            "DBMS",
+        ),
+        (
+            "dbms.listConnections",
+            "dbms.listConnections() :: (connectionId :: STRING, connectTime :: STRING, connector :: STRING, username :: STRING, userAgent :: STRING, clientAddress :: STRING)",
+            "Lists active DBMS connections",
             "DBMS",
         ),
         (
@@ -1555,6 +1839,18 @@ fn builtin_procedure_rows() -> Vec<Row> {
             "nornicdb.knowledgepolicy.resolve",
             "nornicdb.knowledgepolicy.resolve(entityId :: STRING = '', labelsCsv :: STRING = '', edgeType :: STRING = '') :: (entityId :: STRING, targetKind :: STRING, targetLabels :: STRING, targetEdgeType :: STRING, decayBinding :: STRING, promotionPolicy :: STRING, matchedPromotionProfile :: STRING, matchedPromotionPredicate :: STRING, scoreFrom :: STRING, anchorUnixMs :: INTEGER, accessCount :: INTEGER, lastAccessedAtUnixMs :: INTEGER, baseScore :: FLOAT, finalScore :: FLOAT, visibilityThreshold :: FLOAT, suppressed :: BOOLEAN, dryRun :: BOOLEAN, explanation :: STRING)",
             "Resolves the effective knowledge-layer scoring policy for an entity, label set, or edge type",
+            "READ",
+        ),
+        (
+            "nornicdb.knowledgepolicy.policies",
+            "nornicdb.knowledgepolicy.policies() :: (kind :: STRING, Name :: STRING, Scope :: STRING, Multiplier :: FLOAT, ScoreFloor :: FLOAT, ScoreCap :: FLOAT, Enabled :: BOOLEAN, TargetLabels :: LIST<STRING>, TargetEdgeType :: STRING, IsWildcard :: BOOLEAN, IsEdge :: BOOLEAN)",
+            "Returns knowledge-layer promotion profiles and policies",
+            "READ",
+        ),
+        (
+            "nornicdb.knowledgepolicy.profiles",
+            "nornicdb.knowledgepolicy.profiles() :: (kind :: STRING, Name :: STRING, HalfLifeSeconds :: INTEGER, VisibilityThreshold :: FLOAT, ScoreFloor :: FLOAT, Function :: STRING, Scope :: STRING, DecayEnabled :: BOOLEAN, ScoreFrom :: STRING, ScoreFromProperty :: STRING, Enabled :: BOOLEAN, TargetLabels :: LIST<STRING>, TargetEdgeType :: STRING, IsWildcard :: BOOLEAN, IsEdge :: BOOLEAN, ProfileRef :: STRING, NoDecay :: BOOLEAN, Order :: INTEGER)",
+            "Returns knowledge-layer decay bundles and bindings",
             "READ",
         ),
         (

@@ -266,6 +266,9 @@ use super::*;
     // ─── CALL procedure regression tests ────────────────────
     include!("call_procedures.rs");
 
+    // ─── Upstream bug regression mirrors ──────────────────────────────
+    include!("upstream_bugs.rs");
+
     #[test]
     fn test_set_relationship_property_persists_edge_binding() {
         let engine = make_engine();

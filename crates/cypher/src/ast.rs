@@ -404,14 +404,25 @@ pub enum Expression {
         operands: Box<BinaryExpression>,
         negated: bool,
     },
+    Between {
+        expression: Box<Expression>,
+        lower: Box<Expression>,
+        upper: Box<Expression>,
+    },
     Literal(LiteralValue),
     Parameter(String),
+    ParameterPropertyAccess {
+        parameter: String,
+        property: String,
+    },
     FunctionCall {
         name: String,
         args: Vec<Expression>,
         distinct: bool,
     },
     ListLiteral(Vec<Expression>),
+    ListComprehension(ListComprehension),
+    Reduce(ReduceExpression),
     MapLiteral(Vec<PropertyEntry>),
     Variable(String),
     And(Box<BinaryExpression>),
@@ -419,6 +430,51 @@ pub enum Expression {
     Not(Box<Expression>),
     IsNull(Box<Expression>),
     IsNotNull(Box<Expression>),
+    Add(Box<BinaryExpression>),
+    Subtract(Box<BinaryExpression>),
+    Multiply(Box<BinaryExpression>),
+    Divide(Box<BinaryExpression>),
+    Modulo(Box<BinaryExpression>),
+    Xor(Box<BinaryExpression>),
+    PatternExists {
+        variable: String,
+        rel_type: String,
+        target_variable: String,
+    },
+    Case(CaseExpression),
+}
+
+#[derive(Debug, Clone)]
+pub struct CaseExpression {
+    /// For simple CASE: CASE expr WHEN ... (None for searched CASE)
+    pub expression: Option<Box<Expression>>,
+    /// WHEN ... THEN ... pairs
+    pub alternatives: Vec<CaseAlternative>,
+    /// Optional ELSE result
+    pub default: Option<Box<Expression>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CaseAlternative {
+    pub condition: Expression,
+    pub result: Expression,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListComprehension {
+    pub variable: String,
+    pub list: Box<Expression>,
+    pub predicate: Option<Box<Expression>>,
+    pub expression: Box<Expression>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReduceExpression {
+    pub accumulator: String,
+    pub initial: Box<Expression>,
+    pub variable: String,
+    pub list: Box<Expression>,
+    pub expression: Box<Expression>,
 }
 
 #[derive(Debug, Clone)]
@@ -434,10 +490,28 @@ pub struct OrderItem {
 }
 
 #[derive(Debug, Clone)]
-pub struct SetItem {
-    pub variable: String,
-    pub property: String,
-    pub value: Expression,
+pub enum SetItem {
+    Property {
+        variable: String,
+        property: String,
+        value: Expression,
+    },
+    MapAssignment {
+        variable: String,
+        value: Expression,
+    },
+    MapMerge {
+        variable: String,
+        value: Expression,
+    },
+    Label {
+        variable: String,
+        label: String,
+    },
+    DynamicLabel {
+        variable: String,
+        expression: Expression,
+    },
 }
 
 #[derive(Debug, Clone)]

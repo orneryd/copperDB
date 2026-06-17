@@ -200,6 +200,37 @@ impl<'a> ParseContext<'a> {
 
     fn validate_set_item(&mut self) -> Result<(), CypherError> {
         self.expect_identifier()?;
+        // Map-merge form: SET n += expr
+        if self.peek() == Some("+=") {
+            self.advance();
+            return self.validate_expression();
+        }
+        // Map-assignment: SET n = expr
+        if self.peek() == Some("=") {
+            self.advance();
+            return self.validate_expression();
+        }
+        // Label form: SET n:Label or SET n:$(expr)
+        if self.peek() == Some(":") {
+            self.advance();
+            if self.peek() == Some("$") {
+                let next_is_paren = self
+                    .tokens
+                    .get(self.pos + 1)
+                    .map(|t| *t == "(")
+                    .unwrap_or(false);
+                if next_is_paren {
+                    self.advance(); // consume $
+                    self.advance(); // consume (
+                    self.validate_expression()?;
+                    self.expect(")")?;
+                    return Ok(());
+                }
+            }
+            self.expect_identifier()?;
+            return Ok(());
+        }
+        // Property form: SET n.prop = expr
         self.expect(".")?;
         self.expect_identifier()?;
         self.expect("=")?;
@@ -474,8 +505,17 @@ impl<'a> ParseContext<'a> {
     }
 
     fn validate_and(&mut self) -> Result<(), CypherError> {
-        self.validate_not()?;
+        self.validate_xor()?;
         while self.peek_is("AND") {
+            self.advance();
+            self.validate_xor()?;
+        }
+        Ok(())
+    }
+
+    fn validate_xor(&mut self) -> Result<(), CypherError> {
+        self.validate_not()?;
+        while self.peek_is("XOR") {
             self.advance();
             self.validate_not()?;
         }
@@ -491,7 +531,7 @@ impl<'a> ParseContext<'a> {
     }
 
     fn validate_comparison(&mut self) -> Result<(), CypherError> {
-        self.validate_primary()?;
+        self.validate_addition()?;
 
         if self.peek_is("IS") {
             self.advance();
@@ -521,6 +561,12 @@ impl<'a> ParseContext<'a> {
                 self.expect("WITH")?;
                 return self.validate_primary();
             }
+            if token.eq_ignore_ascii_case("BETWEEN") {
+                self.advance();
+                self.validate_addition()?;
+                self.expect("AND")?;
+                return self.validate_addition();
+            }
         }
 
         match self.peek() {
@@ -535,8 +581,30 @@ impl<'a> ParseContext<'a> {
         Ok(())
     }
 
+    fn validate_addition(&mut self) -> Result<(), CypherError> {
+        self.validate_multiplication()?;
+        while self.peek() == Some("+") || self.peek() == Some("-") {
+            self.advance();
+            self.validate_multiplication()?;
+        }
+        Ok(())
+    }
+
+    fn validate_multiplication(&mut self) -> Result<(), CypherError> {
+        self.validate_primary()?;
+        while self.peek() == Some("*") || self.peek() == Some("/") || self.peek() == Some("%") {
+            self.advance();
+            self.validate_primary()?;
+        }
+        Ok(())
+    }
+
     fn validate_primary(&mut self) -> Result<(), CypherError> {
         match self.peek() {
+            Some("-") => {
+                self.advance();
+                self.validate_primary()
+            }
             Some(token) if token.starts_with('\'') || token.starts_with('"') => {
                 self.advance();
                 Ok(())
@@ -550,7 +618,22 @@ impl<'a> ParseContext<'a> {
                 self.validate_expression()?;
                 self.expect(")")
             }
-            Some("[") => self.validate_list_literal(),
+            Some("[") => {
+                self.advance();
+                if self.peek() == Some("]") {
+                    self.advance();
+                    return Ok(());
+                }
+                let saved = self.pos;
+                if let Some(_) = self.advance() {
+                    if self.peek_is("IN") {
+                        self.pos = saved;
+                        return self.validate_list_comprehension();
+                    }
+                }
+                self.pos = saved;
+                self.validate_list_literal()
+            }
             Some("{") => self.validate_map_literal(),
             Some(token)
                 if token.eq_ignore_ascii_case("true")
@@ -590,7 +673,41 @@ impl<'a> ParseContext<'a> {
                 }
             }
             Some(_) => {
-                self.expect_identifier()?;
+                let ident = self.expect_identifier()?;
+                // CASE expression
+                if ident.eq_ignore_ascii_case("CASE") {
+                    // Simple CASE: CASE expr WHEN ... END
+                    if !self.peek_is("WHEN") {
+                        self.validate_expression()?;
+                    }
+                    while self.peek_is("WHEN") {
+                        self.advance();
+                        self.validate_expression()?;
+                        self.expect("THEN")?;
+                        self.validate_expression()?;
+                    }
+                    if self.peek_is("ELSE") {
+                        self.advance();
+                        self.validate_expression()?;
+                    }
+                    self.expect("END")?;
+                    return Ok(());
+                }
+                // REDUCE expression
+                if ident.eq_ignore_ascii_case("REDUCE") && self.peek() == Some("(") {
+                    self.advance();
+                    self.expect_identifier()?; // accumulator
+                    self.expect("=")?;
+                    self.validate_expression()?;
+                    self.expect(",")?;
+                    self.expect_identifier()?; // variable
+                    self.expect("IN")?;
+                    self.validate_expression()?;
+                    self.expect("|")?;
+                    self.validate_expression()?;
+                    self.expect(")")?;
+                    return Ok(());
+                }
                 if self.peek() == Some("(") {
                     self.advance();
                     if self.peek_is("DISTINCT") {
@@ -631,6 +748,19 @@ impl<'a> ParseContext<'a> {
                 break;
             }
         }
+        self.expect("]")
+    }
+
+    fn validate_list_comprehension(&mut self) -> Result<(), CypherError> {
+        self.expect("[")?;
+        self.expect_identifier()?;
+        self.expect("IN")?;
+        if self.peek_is("WHERE") {
+            self.advance();
+            self.validate_expression()?;
+        }
+        self.expect("|")?;
+        self.validate_expression()?;
         self.expect("]")
     }
 

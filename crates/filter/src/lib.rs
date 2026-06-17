@@ -40,18 +40,43 @@ pub fn eval_expression(
             .cloned()
             .ok_or_else(|| FilterError::UnknownVariable(format!("parameter ${name}"))),
 
+        Expression::ParameterPropertyAccess {
+            parameter,
+            property,
+        } => {
+            let param_val = params
+                .get(parameter.as_str())
+                .cloned()
+                .ok_or_else(|| {
+                    FilterError::UnknownVariable(format!("parameter ${parameter}"))
+                })?;
+            if let Value::Object(map) = param_val {
+                Ok(map
+                    .get(property.as_str())
+                    .cloned()
+                    .unwrap_or(Value::Null))
+            } else {
+                Ok(Value::Null)
+            }
+        }
+
         Expression::Variable(name) => row
             .get(name)
             .cloned()
             .ok_or_else(|| FilterError::UnknownVariable(name.clone())),
 
         Expression::PropertyAccess { variable, property } => {
-            // Try row["variable.property"] first, then row["variable"]["property"]
+            // Try row["variable.property"] first, then row["variable"]["property"],
+            // then params["variable"]["property"] for dynamic labels like $(d.labels)
             let dot_key = format!("{variable}.{property}");
             if let Some(v) = row.get(&dot_key) {
                 return Ok(v.clone());
             }
             if let Some(Value::Object(map)) = row.get(variable.as_str()) {
+                return Ok(map.get(property.as_str()).cloned().unwrap_or(Value::Null));
+            }
+            // Fall back to params for bare-identifier context-path refs (SET n:$(d.labels))
+            if let Some(Value::Object(map)) = params.get(variable.as_str()) {
                 return Ok(map.get(property.as_str()).cloned().unwrap_or(Value::Null));
             }
             Ok(Value::Null)
@@ -71,6 +96,20 @@ pub fn eval_expression(
                 _ => return Err(FilterError::TypeError("IN requires a list value".into())),
             };
             Ok(Value::Bool(if *negated { !contains } else { contains }))
+        }
+
+        Expression::Between {
+            expression,
+            lower,
+            upper,
+        } => {
+            let val = eval_expression(expression, row, params)?;
+            let lo = eval_expression(lower, row, params)?;
+            let hi = eval_expression(upper, row, params)?;
+            Ok(Value::Bool(
+                compare_values(&val, ">=", &lo).unwrap_or(false)
+                    && compare_values(&val, "<=", &hi).unwrap_or(false),
+            ))
         }
 
         Expression::And(operands) => {
@@ -100,6 +139,136 @@ pub fn eval_expression(
             Ok(Value::Bool(v != Value::Null))
         }
 
+        Expression::Add(operands) => {
+            let lv = eval_expression(&operands.left, row, params)?;
+            let rv = eval_expression(&operands.right, row, params)?;
+            // Numeric addition when both sides are numbers
+            match (&lv, &rv) {
+                (Value::Number(a), Value::Number(b)) => {
+                    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+                        return Ok(Value::Number((ai + bi).into()));
+                    }
+                    let af = a.as_f64().unwrap_or(0.0);
+                    let bf = b.as_f64().unwrap_or(0.0);
+                    return Ok(Value::Number(
+                        serde_json::Number::from_f64(af + bf)
+                            .unwrap_or(serde_json::Number::from(0)),
+                    ));
+                }
+                _ => {}
+            }
+            // String concatenation otherwise
+            Ok(Value::String(format!("{}{}", coerce_string(&lv)?, coerce_string(&rv)?)))
+        }
+
+        Expression::Subtract(operands) => {
+            let lv = eval_expression(&operands.left, row, params)?;
+            let rv = eval_expression(&operands.right, row, params)?;
+            match (&lv, &rv) {
+                (Value::Number(a), Value::Number(b)) => {
+                    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+                        Ok(Value::Number((ai - bi).into()))
+                    } else {
+                        let af = a.as_f64().unwrap_or(0.0);
+                        let bf = b.as_f64().unwrap_or(0.0);
+                        Ok(Value::Number(
+                            serde_json::Number::from_f64(af - bf)
+                                .unwrap_or(serde_json::Number::from(0)),
+                        ))
+                    }
+                }
+                _ => Err(FilterError::TypeError(
+                    "subtraction requires numeric operands".into(),
+                )),
+            }
+        }
+
+        Expression::Multiply(operands) => {
+            let lv = eval_expression(&operands.left, row, params)?;
+            let rv = eval_expression(&operands.right, row, params)?;
+            match (&lv, &rv) {
+                (Value::Number(a), Value::Number(b)) => {
+                    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+                        Ok(Value::Number((ai * bi).into()))
+                    } else {
+                        let af = a.as_f64().unwrap_or(0.0);
+                        let bf = b.as_f64().unwrap_or(0.0);
+                        Ok(Value::Number(
+                            serde_json::Number::from_f64(af * bf)
+                                .unwrap_or(serde_json::Number::from(0)),
+                        ))
+                    }
+                }
+                _ => Err(FilterError::TypeError(
+                    "multiplication requires numeric operands".into(),
+                )),
+            }
+        }
+
+        Expression::Divide(operands) => {
+            let lv = eval_expression(&operands.left, row, params)?;
+            let rv = eval_expression(&operands.right, row, params)?;
+            match (&lv, &rv) {
+                (Value::Number(a), Value::Number(b)) => {
+                    let bf = b.as_f64().unwrap_or(0.0);
+                    if bf == 0.0 {
+                        return Ok(Value::Null);
+                    }
+                    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+                        if bi != 0 && ai % bi == 0 {
+                            return Ok(Value::Number((ai / bi).into()));
+                        }
+                    }
+                    let af = a.as_f64().unwrap_or(0.0);
+                    Ok(Value::Number(
+                        serde_json::Number::from_f64(af / bf)
+                            .unwrap_or(serde_json::Number::from(0)),
+                    ))
+                }
+                _ => Err(FilterError::TypeError(
+                    "division requires numeric operands".into(),
+                )),
+            }
+        }
+
+        Expression::Modulo(operands) => {
+            let lv = eval_expression(&operands.left, row, params)?;
+            let rv = eval_expression(&operands.right, row, params)?;
+            match (&lv, &rv) {
+                (Value::Number(a), Value::Number(b)) => {
+                    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+                        if bi != 0 {
+                            return Ok(Value::Number((ai % bi).into()));
+                        }
+                    }
+                    let af = a.as_f64().unwrap_or(0.0);
+                    let bf = b.as_f64().unwrap_or(0.0);
+                    if bf == 0.0 {
+                        return Ok(Value::Null);
+                    }
+                    Ok(Value::Number(
+                        serde_json::Number::from_f64(af % bf)
+                            .unwrap_or(serde_json::Number::from(0)),
+                    ))
+                }
+                _ => Err(FilterError::TypeError(
+                    "modulo requires numeric operands".into(),
+                )),
+            }
+        }
+
+        Expression::Xor(operands) => {
+            let lv = eval_predicate(&operands.left, row, params)?;
+            let rv = eval_predicate(&operands.right, row, params)?;
+            Ok(Value::Bool(lv != rv))
+        }
+
+        Expression::PatternExists { .. } => {
+            // PatternExists is evaluated by the eval engine (has storage access).
+            // At the filter level, return true to let eval handle it.
+            Ok(Value::Bool(true))
+        }
+
         Expression::FunctionCall {
             name,
             args,
@@ -112,6 +281,43 @@ pub fn eval_expression(
             .collect::<Result<Vec<_>, _>>()
             .map(Value::Array),
 
+        Expression::ListComprehension(comp) => {
+            let list_val = eval_expression(&comp.list, row, params)?;
+            let Value::Array(items) = list_val else {
+                return Ok(Value::Array(vec![]));
+            };
+            let mut results = Vec::new();
+            for item in &items {
+                // Bind variable to current item
+                let mut ext_row = row.clone();
+                ext_row.insert(comp.variable.clone(), item.clone());
+                // Evaluate predicate if present
+                if let Some(ref pred) = comp.predicate {
+                    if !eval_predicate(pred, &ext_row, params)? {
+                        continue;
+                    }
+                }
+                let result = eval_expression(&comp.expression, &ext_row, params)?;
+                results.push(result);
+            }
+            Ok(Value::Array(results))
+        }
+
+        Expression::Reduce(reduce) => {
+            let list_val = eval_expression(&reduce.list, row, params)?;
+            let Value::Array(items) = list_val else {
+                return Ok(Value::Null);
+            };
+            let mut acc = eval_expression(&reduce.initial, row, params)?;
+            for item in &items {
+                let mut ext_row = row.clone();
+                ext_row.insert(reduce.accumulator.clone(), acc.clone());
+                ext_row.insert(reduce.variable.clone(), item.clone());
+                acc = eval_expression(&reduce.expression, &ext_row, params)?;
+            }
+            Ok(acc)
+        }
+
         Expression::MapLiteral(entries) => {
             let mut map = Map::new();
             for entry in entries {
@@ -121,6 +327,32 @@ pub fn eval_expression(
                 );
             }
             Ok(Value::Object(map))
+        }
+
+        Expression::Case(case) => {
+            // Simple CASE: compare expression to each WHEN value
+            if let Some(ref input) = case.expression {
+                for alt in &case.alternatives {
+                    let cond_val = eval_expression(&alt.condition, row, params)?;
+                    let input_val = eval_expression(input, row, params)?;
+                    if values_equal(&input_val, &cond_val) {
+                        return eval_expression(&alt.result, row, params);
+                    }
+                }
+            } else {
+                // Searched CASE: evaluate each WHEN predicate
+                for alt in &case.alternatives {
+                    if eval_predicate(&alt.condition, row, params)? {
+                        return eval_expression(&alt.result, row, params);
+                    }
+                }
+            }
+            // ELSE default
+            if let Some(ref default) = case.default {
+                eval_expression(default, row, params)
+            } else {
+                Ok(Value::Null)
+            }
         }
     }
 }
@@ -480,6 +712,10 @@ fn eval_function(
         "abs" => {
             let v = eval_arg(0)?;
             if let Value::Number(n) = &v {
+                // Preserve integer type when possible
+                if let Some(i) = n.as_i64() {
+                    return Ok(Value::Number(i.abs().into()));
+                }
                 if let Some(f) = n.as_f64() {
                     return Ok(Value::Number(
                         serde_json::Number::from_f64(f.abs())
@@ -506,6 +742,353 @@ fn eval_function(
             Err(FilterError::TypeError(format!(
                 "{name}() requires a number"
             )))
+        }
+        "sign" => {
+            let v = eval_arg(0)?;
+            if let Value::Number(n) = &v {
+                if let Some(f) = n.as_f64() {
+                    let s = if f > 0.0 { 1 } else if f < 0.0 { -1 } else { 0 };
+                    return Ok(Value::Number(s.into()));
+                }
+            }
+            Err(FilterError::TypeError("sign() requires a number".into()))
+        }
+        "sqrt" => {
+            let v = eval_arg(0)?;
+            if let Value::Number(n) = &v {
+                if let Some(f) = n.as_f64() {
+                    if f >= 0.0 {
+                        return Ok(Value::Number(
+                            serde_json::Number::from_f64(f.sqrt())
+                                .unwrap_or(serde_json::Number::from(0)),
+                        ));
+                    }
+                }
+            }
+            Err(FilterError::TypeError("sqrt() requires a non-negative number".into()))
+        }
+        "rand" => {
+            let v = eval_arg(0)?;
+            let max = v.as_f64().unwrap_or(1.0);
+            let r: f64 = rand::random::<f64>() * max;
+            Ok(Value::Number(
+                serde_json::Number::from_f64((r * 1_000_000.0).round() / 1_000_000.0)
+                    .unwrap_or(serde_json::Number::from(0)),
+            ))
+        }
+        "pi" => Ok(Value::Number(
+            serde_json::Number::from_f64(std::f64::consts::PI)
+                .unwrap_or(serde_json::Number::from(3)),
+        )),
+        "range" => {
+            let start = eval_arg(0)?.as_i64().unwrap_or(0);
+            let end = eval_arg(1)?.as_i64().unwrap_or(0);
+            let step: i64 = args
+                .get(2)
+                .map(|e| eval_expression(e, row, params))
+                .transpose()?
+                .and_then(|v| v.as_i64())
+                .unwrap_or(1);
+            let list: Vec<Value> = if step > 0 {
+                (start..=end).step_by(step as usize).map(|i| Value::Number(i.into())).collect()
+            } else {
+                Vec::new()
+            };
+            Ok(Value::Array(list))
+        }
+        "head" => {
+            let v = eval_arg(0)?;
+            if let Value::Array(arr) = &v {
+                Ok(arr.first().cloned().unwrap_or(Value::Null))
+            } else {
+                Ok(Value::Null)
+            }
+        }
+        "tail" => {
+            let v = eval_arg(0)?;
+            if let Value::Array(arr) = &v {
+                if arr.is_empty() {
+                    Ok(Value::Array(vec![]))
+                } else {
+                    Ok(Value::Array(arr[1..].to_vec()))
+                }
+            } else {
+                Ok(Value::Array(vec![]))
+            }
+        }
+        "last" => {
+            let v = eval_arg(0)?;
+            if let Value::Array(arr) = &v {
+                Ok(arr.last().cloned().unwrap_or(Value::Null))
+            } else {
+                Ok(Value::Null)
+            }
+        }
+        "reverse" => {
+            let v = eval_arg(0)?;
+            match &v {
+                Value::Array(arr) => {
+                    let mut rev = arr.clone();
+                    rev.reverse();
+                    Ok(Value::Array(rev))
+                }
+                Value::String(s) => Ok(Value::String(s.chars().rev().collect())),
+                _ => Ok(v),
+            }
+        }
+        "all" => {
+            let v = eval_arg(0)?;
+            let _predicate_name = name; // reserved for future predicate evaluation
+            if let Value::Array(arr) = &v {
+                for item in arr {
+                    // Evaluate the predicate expression against current row,
+                    // substituting `item` into a variable.
+                    // For now, return true if list is non-empty.
+                    if item == &Value::Null {
+                        return Ok(Value::Bool(false));
+                    }
+                }
+                Ok(Value::Bool(true))
+            } else {
+                Ok(Value::Bool(false))
+            }
+        }
+        "any" => {
+            let v = eval_arg(0)?;
+            if let Value::Array(arr) = &v {
+                for _item in arr {
+                    return Ok(Value::Bool(true));
+                }
+                Ok(Value::Bool(false))
+            } else {
+                Ok(Value::Bool(false))
+            }
+        }
+        "none" => {
+            let v = eval_arg(0)?;
+            if let Value::Array(arr) = &v {
+                Ok(Value::Bool(arr.is_empty()))
+            } else {
+                Ok(Value::Bool(true))
+            }
+        }
+        "single" => {
+            let v = eval_arg(0)?;
+            if let Value::Array(arr) = &v {
+                Ok(Value::Bool(arr.len() == 1))
+            } else {
+                Ok(Value::Bool(false))
+            }
+        }
+        // ── Trig functions ──
+        "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
+        | "degrees" | "radians" => {
+            let v = eval_arg(0)?;
+            if let Some(f) = v.as_f64() {
+                let result = match name_lower.as_str() {
+                    "sin" => f.sin(),
+                    "cos" => f.cos(),
+                    "tan" => f.tan(),
+                    "asin" => f.asin(),
+                    "acos" => f.acos(),
+                    "atan" => f.atan(),
+                    "atan2" => {
+                        let x = eval_arg(1)?.as_f64().unwrap_or(0.0);
+                        f.atan2(x)
+                    }
+                    "degrees" => f.to_degrees(),
+                    "radians" => f.to_radians(),
+                    _ => f,
+                };
+                return Ok(Value::Number(
+                    serde_json::Number::from_f64(result).unwrap_or(serde_json::Number::from(0)),
+                ));
+            }
+            Err(FilterError::TypeError(format!("{name}() requires a number")))
+        }
+        // ── Power / log functions ──
+        "pow" | "power" => {
+            let base = eval_arg(0)?.as_f64().unwrap_or(0.0);
+            let exp = eval_arg(1)?.as_f64().unwrap_or(0.0);
+            Ok(Value::Number(
+                serde_json::Number::from_f64(base.powf(exp))
+                    .unwrap_or(serde_json::Number::from(0)),
+            ))
+        }
+        "exp" => {
+            let v = eval_arg(0)?.as_f64().unwrap_or(0.0);
+            Ok(Value::Number(
+                serde_json::Number::from_f64(v.exp()).unwrap_or(serde_json::Number::from(0)),
+            ))
+        }
+        "log" => {
+            let v = eval_arg(0)?.as_f64().unwrap_or(1.0);
+            Ok(Value::Number(
+                serde_json::Number::from_f64(v.ln()).unwrap_or(serde_json::Number::from(0)),
+            ))
+        }
+        "log10" => {
+            let v = eval_arg(0)?.as_f64().unwrap_or(1.0);
+            Ok(Value::Number(
+                serde_json::Number::from_f64(v.log10()).unwrap_or(serde_json::Number::from(0)),
+            ))
+        }
+        "randomuuid" => {
+            let uuid = uuid::Uuid::new_v4().to_string();
+            Ok(Value::String(uuid))
+        }
+        "toboolean" | "bool" => {
+            let v = eval_arg(0)?;
+            match &v {
+                Value::Bool(b) => Ok(Value::Bool(*b)),
+                Value::String(s) => Ok(Value::Bool(!s.is_empty() && s != "false")),
+                Value::Number(n) => Ok(Value::Bool(n.as_f64().unwrap_or(0.0) != 0.0)),
+                Value::Null => Ok(Value::Null),
+                _ => Ok(Value::Bool(true)),
+            }
+        }
+        "tolist" => {
+            let v = eval_arg(0)?;
+            match &v {
+                Value::Array(_) => Ok(v),
+                Value::Null => Ok(Value::Array(vec![])),
+                _ => Ok(Value::Array(vec![v])),
+            }
+        }
+        "isempty" => {
+            let v = eval_arg(0)?;
+            match &v {
+                Value::String(s) => Ok(Value::Bool(s.is_empty())),
+                Value::Array(a) => Ok(Value::Bool(a.is_empty())),
+                Value::Object(m) => Ok(Value::Bool(m.is_empty())),
+                Value::Null => Ok(Value::Bool(true)),
+                _ => Ok(Value::Bool(false)),
+            }
+        }
+        // ── Hyperbolic functions ──
+        "sinh" | "cosh" | "tanh" => {
+            let v = eval_arg(0)?;
+            if let Some(f) = v.as_f64() {
+                let result = match name_lower.as_str() {
+                    "sinh" => f.sinh(),
+                    "cosh" => f.cosh(),
+                    "tanh" => f.tanh(),
+                    _ => f,
+                };
+                return Ok(Value::Number(
+                    serde_json::Number::from_f64(result).unwrap_or(serde_json::Number::from(0)),
+                ));
+            }
+            Err(FilterError::TypeError(format!("{name}() requires a number")))
+        }
+        // ── Math constants ──
+        "e" => Ok(Value::Number(
+            serde_json::Number::from_f64(std::f64::consts::E)
+                .unwrap_or(serde_json::Number::from(2)),
+        )),
+        // ── Null-safe functions ──
+        "nullif" => {
+            let a = eval_arg(0)?;
+            let b = eval_arg(1)?;
+            if values_equal(&a, &b) {
+                Ok(Value::Null)
+            } else {
+                Ok(a)
+            }
+        }
+        "valuetype" | "valuetypeof" => {
+            let v = eval_arg(0)?;
+            let s = match &v {
+                Value::Null => "NULL",
+                Value::Bool(_) => "BOOLEAN",
+                Value::Number(n) => {
+                    if n.is_f64() { "FLOAT" } else { "INTEGER" }
+                }
+                Value::String(_) => "STRING",
+                Value::Array(_) => "LIST",
+                Value::Object(_) => "MAP",
+            };
+            Ok(Value::String(s.to_string()))
+        }
+        "char_length" | "character_length" => {
+            let s = coerce_string(&eval_arg(0)?)?;
+            Ok(Value::Number(s.chars().count().into()))
+        }
+        "tointegerornull" => {
+            let v = eval_arg(0)?;
+            match &v {
+                Value::String(s) => Ok(s.parse::<i64>()
+                    .ok()
+                    .map(|i| Value::Number(i.into()))
+                    .unwrap_or(Value::Null)),
+                Value::Number(n) => Ok(Value::Number(n.as_i64().unwrap_or(0).into())),
+                Value::Null => Ok(Value::Null),
+                _ => Ok(Value::Null),
+            }
+        }
+        "tofloatornull" => {
+            let v = eval_arg(0)?;
+            match &v {
+                Value::String(s) => Ok(s.parse::<f64>()
+                    .ok()
+                    .and_then(|f| serde_json::Number::from_f64(f))
+                    .map(Value::Number)
+                    .unwrap_or(Value::Null)),
+                Value::Number(n) => Ok(Value::Number(
+                    serde_json::Number::from_f64(n.as_f64().unwrap_or(0.0))
+                        .unwrap_or(serde_json::Number::from(0)),
+                )),
+                Value::Null => Ok(Value::Null),
+                _ => Ok(Value::Null),
+            }
+        }
+        "tobooleanornull" => {
+            let v = eval_arg(0)?;
+            match &v {
+                Value::Bool(b) => Ok(Value::Bool(*b)),
+                Value::String(s) => {
+                    if s == "true" { Ok(Value::Bool(true)) }
+                    else if s == "false" { Ok(Value::Bool(false)) }
+                    else { Ok(Value::Null) }
+                }
+                Value::Null => Ok(Value::Null),
+                _ => Ok(Value::Null),
+            }
+        }
+        "slice" => {
+            let v = eval_arg(0)?;
+            if let Value::Array(arr) = &v {
+                let from = eval_arg(1)?.as_i64().unwrap_or(0).max(0) as usize;
+                let to = args.get(2)
+                    .map(|e| eval_expression(e, row, params))
+                    .transpose()?
+                    .and_then(|v| v.as_i64())
+                    .map(|i| i.max(0) as usize)
+                    .unwrap_or(arr.len());
+                let from = from.min(arr.len());
+                let to = to.min(arr.len());
+                if from < to {
+                    Ok(Value::Array(arr[from..to].to_vec()))
+                } else {
+                    Ok(Value::Array(vec![]))
+                }
+            } else {
+                Ok(Value::Array(vec![]))
+            }
+        }
+        "indexof" => {
+            let v = eval_arg(0)?;
+            let needle = eval_arg(1)?;
+            if let Value::Array(arr) = &v {
+                for (i, item) in arr.iter().enumerate() {
+                    if values_equal(item, &needle) {
+                        return Ok(Value::Number((i as i64).into()));
+                    }
+                }
+                Ok(Value::Number((-1).into()))
+            } else {
+                Ok(Value::Number((-1).into()))
+            }
         }
         _ => Err(FilterError::UnknownFunction(name.to_string())),
     }

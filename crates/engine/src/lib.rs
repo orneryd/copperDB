@@ -43,7 +43,8 @@ use copperdb_cache::QueryCache;
 use copperdb_compliance::{ComplianceManager, ComplianceReporter};
 use copperdb_cypher::{
     can_execute_as_pipeline, detect_query_pattern, match_compound_query_shape, Clause,
-    EdgeDirection, Expression, Parser, Pattern, QueryType, ReturnItem, WhereClause, WithClause,
+    EdgeDirection, Expression, Parser, Pattern, QueryType, ReturnItem, SetItem, WhereClause,
+    WithClause,
 };
 use copperdb_eval::{EvalEngine, QueryStats};
 use copperdb_fabric::{
@@ -360,8 +361,31 @@ fn collect_compliance_terms(
             Clause::Where(clause) => collect_expression_properties(&clause.expression, properties),
             Clause::Set(clause) => {
                 for item in &clause.items {
-                    properties.push(item.property.clone());
-                    collect_expression_properties(&item.value, properties);
+                    match item {
+                        SetItem::Property {
+                            property,
+                            value,
+                            variable: _,
+                        } => {
+                            properties.push(property.clone());
+                            collect_expression_properties(value, properties);
+                        }
+                        SetItem::MapAssignment { value, variable: _ } => {
+                            collect_expression_properties(value, properties);
+                        }
+                        SetItem::MapMerge { value, variable: _ } => {
+                            collect_expression_properties(value, properties);
+                        }
+                        SetItem::Label { label, variable: _ } => {
+                            properties.push(label.clone());
+                        }
+                        SetItem::DynamicLabel {
+                            expression,
+                            variable: _,
+                        } => {
+                            collect_expression_properties(expression, properties);
+                        }
+                    }
                 }
             }
             Clause::Return(clause) => {
@@ -408,7 +432,8 @@ fn collect_expression_properties(expression: &Expression, properties: &mut Vec<S
         Expression::Comparison { operands, .. }
         | Expression::InList { operands, .. }
         | Expression::And(operands)
-        | Expression::Or(operands) => {
+        | Expression::Or(operands)
+        | Expression::Xor(operands) => {
             collect_expression_properties(&operands.left, properties);
             collect_expression_properties(&operands.right, properties);
         }
@@ -422,6 +447,18 @@ fn collect_expression_properties(expression: &Expression, properties: &mut Vec<S
                 collect_expression_properties(item, properties);
             }
         }
+        Expression::ListComprehension(comp) => {
+            collect_expression_properties(&comp.list, properties);
+            if let Some(ref pred) = comp.predicate {
+                collect_expression_properties(pred, properties);
+            }
+            collect_expression_properties(&comp.expression, properties);
+        }
+        Expression::Reduce(reduce) => {
+            collect_expression_properties(&reduce.initial, properties);
+            collect_expression_properties(&reduce.list, properties);
+            collect_expression_properties(&reduce.expression, properties);
+        }
         Expression::MapLiteral(entries) => {
             for entry in entries {
                 collect_expression_properties(&entry.value, properties);
@@ -430,7 +467,38 @@ fn collect_expression_properties(expression: &Expression, properties: &mut Vec<S
         Expression::Not(inner) | Expression::IsNull(inner) | Expression::IsNotNull(inner) => {
             collect_expression_properties(inner, properties);
         }
-        Expression::Literal(_) | Expression::Parameter(_) | Expression::Variable(_) => {}
+        Expression::Add(operands) | Expression::Subtract(operands)
+        | Expression::Multiply(operands) | Expression::Divide(operands)
+        | Expression::Modulo(operands) => {
+            collect_expression_properties(&operands.left, properties);
+            collect_expression_properties(&operands.right, properties);
+        }
+        Expression::Between {
+            expression,
+            lower,
+            upper,
+        } => {
+            collect_expression_properties(expression, properties);
+            collect_expression_properties(lower, properties);
+            collect_expression_properties(upper, properties);
+        }
+        Expression::Literal(_)
+        | Expression::Parameter(_)
+        | Expression::ParameterPropertyAccess { .. }
+        | Expression::Variable(_)
+        | Expression::PatternExists { .. } => {}
+        Expression::Case(case) => {
+            if let Some(ref expr) = case.expression {
+                collect_expression_properties(expr, properties);
+            }
+            for alt in &case.alternatives {
+                collect_expression_properties(&alt.condition, properties);
+                collect_expression_properties(&alt.result, properties);
+            }
+            if let Some(ref default) = case.default {
+                collect_expression_properties(default, properties);
+            }
+        }
     }
 }
 

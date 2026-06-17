@@ -24,11 +24,21 @@ impl<'a> ParseContext<'a> {
     }
 
     fn parse_and(&mut self) -> Result<Expression, CypherError> {
-        let mut left = self.parse_not()?;
+        let mut left = self.parse_xor()?;
         while self.peek_is("AND") {
             self.advance();
-            let right = self.parse_not()?;
+            let right = self.parse_xor()?;
             left = Expression::And(Self::binary_operands(left, right));
+        }
+        Ok(left)
+    }
+
+    fn parse_xor(&mut self) -> Result<Expression, CypherError> {
+        let mut left = self.parse_not()?;
+        while self.peek_is("XOR") {
+            self.advance();
+            let right = self.parse_not()?;
+            left = Expression::Xor(Self::binary_operands(left, right));
         }
         Ok(left)
     }
@@ -43,7 +53,7 @@ impl<'a> ParseContext<'a> {
     }
 
     fn parse_comparison(&mut self) -> Result<Expression, CypherError> {
-        let left = self.parse_primary()?;
+        let left = self.parse_addition()?;
 
         if self.peek_is("IS") {
             self.advance();
@@ -100,6 +110,17 @@ impl<'a> ParseContext<'a> {
                     op: "ENDS WITH".to_string(),
                 });
             }
+            if kw.eq_ignore_ascii_case("BETWEEN") {
+                self.advance();
+                let lower = self.parse_addition()?;
+                self.expect("AND")?;
+                let upper = self.parse_addition()?;
+                return Ok(Expression::Between {
+                    expression: Box::new(left),
+                    lower: Box::new(lower),
+                    upper: Box::new(upper),
+                });
+            }
         }
 
         let op = match self.peek() {
@@ -119,8 +140,69 @@ impl<'a> ParseContext<'a> {
         })
     }
 
+    fn parse_addition(&mut self) -> Result<Expression, CypherError> {
+        let mut left = self.parse_multiplication()?;
+        loop {
+            if self.peek() == Some("+") {
+                self.advance();
+                let right = self.parse_multiplication()?;
+                left = Expression::Add(Self::binary_operands(left, right));
+            } else if self.peek() == Some("-") {
+                self.advance();
+                let right = self.parse_multiplication()?;
+                left = Expression::Subtract(Self::binary_operands(left, right));
+            } else {
+                break;
+            }
+        }
+        Ok(left)
+    }
+
+    fn parse_multiplication(&mut self) -> Result<Expression, CypherError> {
+        let mut left = self.parse_primary()?;
+        loop {
+            if self.peek() == Some("*") {
+                self.advance();
+                let right = self.parse_primary()?;
+                left = Expression::Multiply(Self::binary_operands(left, right));
+            } else if self.peek() == Some("/") {
+                self.advance();
+                let right = self.parse_primary()?;
+                left = Expression::Divide(Self::binary_operands(left, right));
+            } else if self.peek() == Some("%") {
+                self.advance();
+                let right = self.parse_primary()?;
+                left = Expression::Modulo(Self::binary_operands(left, right));
+            } else {
+                break;
+            }
+        }
+        Ok(left)
+    }
+
     fn parse_primary(&mut self) -> Result<Expression, CypherError> {
+        // Try pattern predicate: (n)-[:REL]->(m)
+        if self.peek() == Some("(") {
+            if let Some(pred) = self.try_parse_pattern_predicate() {
+                return Ok(pred);
+            }
+        }
+
+        // CASE expression
+        if self.peek_is("CASE") {
+            return self.parse_case_expression();
+        }
+
         match self.peek() {
+            Some("-") => {
+                self.advance();
+                let inner = self.parse_primary()?;
+                // Negate via 0 - inner
+                Ok(Expression::Subtract(Self::binary_operands(
+                    Expression::Literal(LiteralValue::Integer(0)),
+                    inner,
+                )))
+            }
             Some(t) if t.starts_with('\'') || t.starts_with('"') => {
                 let raw = self.advance().unwrap();
                 if raw.len() < 2 {
@@ -131,7 +213,18 @@ impl<'a> ParseContext<'a> {
             }
             Some(t) if t.starts_with('$') => {
                 let raw = self.advance().unwrap();
-                Ok(Expression::Parameter(raw[1..].to_string()))
+                let param_name = raw[1..].to_string();
+                // Support $param.property for parameter map property access
+                if self.peek() == Some(".") {
+                    self.advance();
+                    let property = self.advance_identifier()?;
+                    Ok(Expression::ParameterPropertyAccess {
+                        parameter: param_name,
+                        property,
+                    })
+                } else {
+                    Ok(Expression::Parameter(param_name))
+                }
             }
             Some("(") => {
                 self.advance();
@@ -139,7 +232,23 @@ impl<'a> ParseContext<'a> {
                 self.expect(")")?;
                 Ok(expr)
             }
-            Some("[") => self.parse_list_literal(),
+            Some("[") => {
+                // Try list comprehension: [var IN list [WHERE pred] | expr]
+                let saved = self.pos;
+                self.advance(); // consume [
+                if self.peek() == Some("]") {
+                    self.advance();
+                    return Ok(Expression::ListLiteral(Vec::new()));
+                }
+                if let Some(_) = self.advance() {
+                    if self.peek_is("IN") {
+                        self.pos = saved;
+                        return self.parse_list_comprehension();
+                    }
+                }
+                self.pos = saved;
+                self.parse_list_literal()
+            }
             Some("{") => self.parse_map_literal(),
             Some(t) if t.eq_ignore_ascii_case("true") => {
                 self.advance();
@@ -184,6 +293,11 @@ impl<'a> ParseContext<'a> {
             Some(_) => {
                 let name = self.advance().unwrap().to_string();
 
+                // Special form: reduce(acc = init, var IN list | expr)
+                if name.eq_ignore_ascii_case("reduce") && self.peek() == Some("(") {
+                    return self.parse_reduce_expression();
+                }
+
                 if self.peek() == Some("(") {
                     self.advance();
                     let distinct = if self.peek_is("DISTINCT") {
@@ -225,6 +339,119 @@ impl<'a> ParseContext<'a> {
         }
     }
 
+    fn try_parse_pattern_predicate(&mut self) -> Option<Expression> {
+        let start = self.pos;
+        // (variable)
+        if self.peek() != Some("(") {
+            self.pos = start;
+            return None;
+        }
+        self.advance();
+        let variable = self.advance_identifier().ok()?;
+        if self.peek() == Some(":") {
+            // Skip optional label
+            self.advance();
+            self.advance_identifier().ok()?;
+        }
+        if self.peek() != Some(")") {
+            self.pos = start;
+            return None;
+        }
+        self.advance();
+        // -[:REL_TYPE]->
+        if self.peek() != Some("-") {
+            self.pos = start;
+            return None;
+        }
+        self.advance();
+        if self.peek() != Some("[") {
+            self.pos = start;
+            return None;
+        }
+        self.advance();
+        if self.peek() == Some(":") {
+            self.advance();
+        }
+        let rel_type = self.advance_identifier().ok()?;
+        if self.peek() != Some("]") {
+            self.pos = start;
+            return None;
+        }
+        self.advance();
+        // -> or -
+        if self.peek() != Some("-") {
+            self.pos = start;
+            return None;
+        }
+        self.advance();
+        if self.peek() == Some(">") {
+            self.advance();
+        }
+        // (target_variable)
+        if self.peek() != Some("(") {
+            self.pos = start;
+            return None;
+        }
+        self.advance();
+        let target_variable = self.advance_identifier().ok()?;
+        if self.peek() == Some(":") {
+            self.advance();
+            self.advance_identifier().ok()?;
+        }
+        if self.peek() != Some(")") {
+            self.pos = start;
+            return None;
+        }
+        self.advance();
+
+        Some(Expression::PatternExists {
+            variable,
+            rel_type,
+            target_variable,
+        })
+    }
+
+    fn parse_case_expression(&mut self) -> Result<Expression, CypherError> {
+        use crate::CaseExpression;
+        use crate::CaseAlternative;
+
+        self.expect("CASE")?;
+
+        // Simple CASE: CASE expr WHEN val THEN result ... END
+        // Searched CASE: CASE WHEN cond THEN result ... END
+        let expression = if self.peek_is("WHEN") {
+            None
+        } else {
+            let expr = self.parse_expression_item(&["WHEN"])?;
+            Some(Box::new(expr))
+        };
+
+        let mut alternatives: Vec<CaseAlternative> = Vec::new();
+        while self.peek_is("WHEN") {
+            self.advance(); // WHEN
+            let condition = self.parse_expression_item(&["THEN"])?;
+            self.expect("THEN")?;
+            let result = self.parse_expression_item(&["WHEN", "ELSE", "END"])?;
+            alternatives.push(CaseAlternative { condition, result });
+        }
+
+        let default = if self.peek_is("ELSE") {
+            self.advance();
+            let expr = self.parse_expression_item(&["END"])?;
+            Some(Box::new(expr))
+        } else {
+            None
+        };
+
+        self.expect("END")?;
+
+        Ok(Expression::Case(CaseExpression {
+            expression,
+            alternatives,
+            default,
+        }))
+    }
+
     fn parse_list_literal(&mut self) -> Result<Expression, CypherError> {
         self.expect("[")?;
         let mut items = Vec::new();
@@ -240,6 +467,53 @@ impl<'a> ParseContext<'a> {
         }
         self.expect("]")?;
         Ok(Expression::ListLiteral(items))
+    }
+
+    fn parse_list_comprehension(&mut self) -> Result<Expression, CypherError> {
+        use crate::ListComprehension;
+
+        self.expect("[")?;
+        let variable = self.advance_identifier()?;
+        self.expect("IN")?;
+        let list = self.parse_expression_item(&["WHERE", "|"])?;
+        let predicate = if self.peek_is("WHERE") {
+            self.advance();
+            Some(Box::new(self.parse_expression_item(&["|"])?))
+        } else {
+            None
+        };
+        self.expect("|")?;
+        let expression = self.parse_expression_item(&["]"])?;
+        self.expect("]")?;
+        Ok(Expression::ListComprehension(ListComprehension {
+            variable,
+            list: Box::new(list),
+            predicate,
+            expression: Box::new(expression),
+        }))
+    }
+
+    fn parse_reduce_expression(&mut self) -> Result<Expression, CypherError> {
+        use crate::ReduceExpression;
+
+        self.expect("(")?;
+        let accumulator = self.advance_identifier()?;
+        self.expect("=")?;
+        let initial = self.parse_expression_item(&[","])?;
+        self.expect(",")?;
+        let variable = self.advance_identifier()?;
+        self.expect("IN")?;
+        let list = self.parse_expression_item(&["|"])?;
+        self.expect("|")?;
+        let expression = self.parse_expression_item(&[")"])?;
+        self.expect(")")?;
+        Ok(Expression::Reduce(ReduceExpression {
+            accumulator,
+            initial: Box::new(initial),
+            variable,
+            list: Box::new(list),
+            expression: Box::new(expression),
+        }))
     }
 
     fn parse_map_literal(&mut self) -> Result<Expression, CypherError> {

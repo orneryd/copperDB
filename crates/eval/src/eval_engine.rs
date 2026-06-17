@@ -162,6 +162,56 @@ impl EvalEngine {
         }
     }
 
+    /// Evaluate a WHERE predicate, handling PatternExists against storage.
+    fn eval_where_predicate(
+        &self,
+        expr: &Expression,
+        row: &Row,
+        params: &HashMap<String, Value>,
+    ) -> Result<bool, EvalError> {
+        match expr {
+            Expression::Not(inner) => {
+                if let Expression::PatternExists { variable, rel_type, target_variable } = inner.as_ref() {
+                    let exists = self.check_edge_exists(row, variable, rel_type, target_variable)?;
+                    return Ok(!exists);
+                }
+                let inner_result = self.eval_where_predicate(inner, row, params)?;
+                Ok(!inner_result)
+            }
+            Expression::PatternExists { variable, rel_type, target_variable } => {
+                self.check_edge_exists(row, variable, rel_type, target_variable)
+            }
+            _ => eval_predicate(expr, row, params)
+                .map_err(|e| EvalError::FilterError(e.to_string())),
+        }
+    }
+
+    fn check_edge_exists(
+        &self,
+        row: &Row,
+        left_var: &str,
+        rel_type: &str,
+        right_var: &str,
+    ) -> Result<bool, EvalError> {
+        let left_props = row.get(left_var).and_then(Value::as_object);
+        let right_props = row.get(right_var).and_then(Value::as_object);
+        let (Some(left), Some(right)) = (left_props, right_props) else {
+            return Ok(false);
+        };
+        let left_id = left.get("_id").and_then(Value::as_str);
+        let right_id = right.get("_id").and_then(Value::as_str);
+        let (Some(left_id), Some(right_id)) = (left_id, right_id) else {
+            return Ok(false);
+        };
+        let edges = self.storage.get_edges_by_type(rel_type)?;
+        for edge in &edges {
+            if edge.start_node == left_id && edge.end_node == right_id {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Execute a parsed Cypher query against the storage engine.
     pub fn execute(
         &self,
@@ -770,10 +820,10 @@ impl EvalEngine {
                     let mut filtered = pooled_binding_rows();
                     let mut old_rows = std::mem::take(&mut current_rows);
                     for row in old_rows.drain(..) {
-                        match eval_predicate(expr, &row, params) {
+                        match self.eval_where_predicate(expr, &row, params) {
                             Ok(true) => filtered.push(row),
                             Ok(false) => {}
-                            Err(e) => return Err(EvalError::FilterError(e.to_string())),
+                            Err(e) => return Err(e),
                         }
                     }
                     recycle_binding_rows(old_rows);
@@ -783,37 +833,8 @@ impl EvalEngine {
                 Clause::Return(ret) => {
                     columns = ret.items.iter().map(column_name).collect();
 
-                    // ORDER BY must be evaluated against the full pre-projection row so
-                    // that ORDER BY expressions can reference variables not in RETURN.
-                    // Sort keys are precomputed in a fallible pass to propagate errors
-                    // instead of silently treating them as Null.
                     if !ret.order_by.is_empty() {
-                        let order = &ret.order_by;
-                        let mut rows_with_keys: Vec<(Row, Vec<Value>)> = current_rows
-                            .into_iter()
-                            .map(|row| {
-                                let keys = order
-                                    .iter()
-                                    .map(|item| {
-                                        eval_expression(&item.expression, &row, params)
-                                            .map_err(|e| EvalError::FilterError(e.to_string()))
-                                    })
-                                    .collect::<Result<Vec<_>, _>>()?;
-                                Ok((row, keys))
-                            })
-                            .collect::<Result<Vec<_>, EvalError>>()?;
-
-                        rows_with_keys.sort_by(|(_, keys_a), (_, keys_b)| {
-                            for (idx, item) in order.iter().enumerate() {
-                                let ord = compare_json(&keys_a[idx], &keys_b[idx]);
-                                if ord != std::cmp::Ordering::Equal {
-                                    return if item.descending { ord.reverse() } else { ord };
-                                }
-                            }
-                            std::cmp::Ordering::Equal
-                        });
-
-                        current_rows = rows_with_keys.into_iter().map(|(row, _)| row).collect();
+                        sort_rows_by_return_order(&mut current_rows, ret);
                     }
 
                     // SKIP / LIMIT applied before projection so we page over the
@@ -1642,10 +1663,10 @@ impl EvalEngine {
                     let mut filtered = pooled_binding_rows();
                     let mut old_rows = std::mem::take(&mut current_rows);
                     for row in old_rows.drain(..) {
-                        match eval_predicate(&where_clause.expression, &row, params) {
+                        match self.eval_where_predicate(&where_clause.expression, &row, params) {
                             Ok(true) => filtered.push(row),
                             Ok(false) => {}
-                            Err(e) => return Err(EvalError::FilterError(e.to_string())),
+                            Err(e) => return Err(e),
                         }
                     }
                     recycle_binding_rows(old_rows);
@@ -1722,32 +1743,7 @@ impl EvalEngine {
                     let columns: Vec<String> = ret.items.iter().map(column_name).collect();
 
                     if !ret.order_by.is_empty() {
-                        let order = &ret.order_by;
-                        let mut rows_with_keys: Vec<(Row, Vec<Value>)> = current_rows
-                            .into_iter()
-                            .map(|row| {
-                                let keys = order
-                                    .iter()
-                                    .map(|item| {
-                                        eval_expression(&item.expression, &row, params)
-                                            .map_err(|e| EvalError::FilterError(e.to_string()))
-                                    })
-                                    .collect::<Result<Vec<_>, _>>()?;
-                                Ok((row, keys))
-                            })
-                            .collect::<Result<Vec<_>, EvalError>>()?;
-
-                        rows_with_keys.sort_by(|(_, keys_a), (_, keys_b)| {
-                            for (idx, item) in order.iter().enumerate() {
-                                let ord = compare_json(&keys_a[idx], &keys_b[idx]);
-                                if ord != std::cmp::Ordering::Equal {
-                                    return if item.descending { ord.reverse() } else { ord };
-                                }
-                            }
-                            std::cmp::Ordering::Equal
-                        });
-
-                        current_rows = rows_with_keys.into_iter().map(|(row, _)| row).collect();
+                        sort_rows_by_return_order(&mut current_rows, ret);
                     }
 
                     if let Some(skip) = ret.skip {
@@ -1819,13 +1815,99 @@ impl EvalEngine {
         self.invalidate_node_lookup_cache();
         for row in rows {
             for item in items {
-                let new_val = eval_expression(&item.value, row, params)?;
-                if let Some(Value::Object(props)) = row.get_mut(&item.variable) {
-                    props.insert(item.property.clone(), new_val);
-                    stats.properties_set += 1;
-                    let persisted_props: HashMap<String, Value> =
-                        props.clone().into_iter().collect();
-                    self.persist_bound_props(&persisted_props)?;
+                match item {
+                    SetItem::Property { variable, property, value } => {
+                        let new_val = eval_expression(value, row, params)?;
+                        if let Some(Value::Object(props)) = row.get_mut(variable) {
+                            props.insert(property.clone(), new_val);
+                            stats.properties_set += 1;
+                            let persisted_props: HashMap<String, Value> =
+                                props.clone().into_iter().collect();
+                            self.persist_bound_props(&persisted_props)?;
+                        }
+                    }
+                    SetItem::MapAssignment { variable, value } => {
+                        let new_val = eval_expression(value, row, params)?;
+                        if let Value::Object(map) = &new_val {
+                            if let Some(Value::Object(props)) = row.get_mut(variable) {
+                                for (k, v) in map {
+                                    props.insert(k.clone(), v.clone());
+                                }
+                                stats.properties_set += map.len();
+                                let persisted_props: HashMap<String, Value> =
+                                    props.clone().into_iter().collect();
+                                self.persist_bound_props(&persisted_props)?;
+                            }
+                        }
+                    }
+                    SetItem::MapMerge { variable, value } => {
+                        let new_val = eval_expression(value, row, params)?;
+                        if let Value::Object(map) = &new_val {
+                            if let Some(Value::Object(props)) = row.get_mut(variable) {
+                                for (k, v) in map {
+                                    props.insert(k.clone(), v.clone());
+                                }
+                                stats.properties_set += map.len();
+                                let persisted_props: HashMap<String, Value> =
+                                    props.clone().into_iter().collect();
+                                self.persist_bound_props(&persisted_props)?;
+                            }
+                        }
+                    }
+                    SetItem::Label { variable, label } => {
+                        let Some(Value::Object(props)) = row.get_mut(variable) else {
+                            continue;
+                        };
+                        // Ensure _labels array exists, then add if not present
+                        let labels = props
+                            .entry("_labels".to_string())
+                            .or_insert_with(|| Value::Array(Vec::new()));
+                        if let Value::Array(arr) = labels {
+                            let label_val = Value::String(label.clone());
+                            if !arr.contains(&label_val) {
+                                arr.push(label_val);
+                            }
+                        }
+                        let persisted_props: HashMap<String, Value> =
+                            props.clone().into_iter().collect();
+                        self.persist_bound_props(&persisted_props)?;
+                    }
+                    SetItem::DynamicLabel {
+                        variable,
+                        expression,
+                    } => {
+                        let val = eval_expression(expression, row, params)?;
+                        let Some(Value::Object(props)) = row.get_mut(variable) else {
+                            continue;
+                        };
+                        let labels = props
+                            .entry("_labels".to_string())
+                            .or_insert_with(|| Value::Array(Vec::new()));
+                        if let Value::Array(arr) = labels {
+                            match val {
+                                Value::String(s) => {
+                                    let label_val = Value::String(s);
+                                    if !arr.contains(&label_val) {
+                                        arr.push(label_val);
+                                    }
+                                }
+                                Value::Array(items) => {
+                                    for item in items {
+                                        if let Some(s) = item.as_str() {
+                                            let label_val = Value::String(s.to_string());
+                                            if !arr.contains(&label_val) {
+                                                arr.push(label_val);
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        let persisted_props: HashMap<String, Value> =
+                            props.clone().into_iter().collect();
+                        self.persist_bound_props(&persisted_props)?;
+                    }
                 }
             }
         }
@@ -2207,6 +2289,20 @@ impl EvalEngine {
             let mut next_rows = pooled_binding_rows();
 
             for base_row in &current_rows {
+                // If the node variable is already bound in the row, reuse it
+                // instead of doing a fresh lookup. This preserves pipeline
+                // bindings from MATCH, UNWIND, and prior MERGE clauses.
+                if let Some((_existing_id, existing_node)) =
+                    self.resolve_pipeline_node_binding(base_row, node_pat, params)?
+                {
+                    let mut row = base_row.clone();
+                    if let Some(var) = &node_pat.variable {
+                        row.insert(var.clone(), existing_node);
+                    }
+                    next_rows.push(row);
+                    continue;
+                }
+
                 let merge_props =
                     evaluate_pattern_properties(&node_pat.properties, base_row, params)?;
                 let catalog = IndexCatalog::new(self.storage.as_ref());

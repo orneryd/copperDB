@@ -77,6 +77,7 @@ pub fn tokenize(input: &str) -> Result<Vec<&str>, CypherError> {
             if matches!(
                 pair,
                 (b'<', b'>') | (b'<', b'=') | (b'>', b'=') | (b'!', b'=') | (b'=', b'~')
+                | (b'+', b'=')
             ) {
                 tokens.push(&input[i..i + 2]);
                 i += 2;
