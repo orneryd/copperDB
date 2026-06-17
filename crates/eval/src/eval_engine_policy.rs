@@ -18,9 +18,74 @@ impl EvalEngine {
             self.execute_db_relationship_types_call(call)
         } else if call
             .procedure
+            .eq_ignore_ascii_case("db.propertyKeys")
+        {
+            self.execute_db_property_keys_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("db.constraints")
+        {
+            self.execute_db_constraints_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("db.indexes")
+        {
+            self.execute_db_indexes_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("db.ping")
+        {
+            self.execute_db_ping_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("db.info")
+        {
+            self.execute_db_info_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("db.schema.nodeProperties")
+        {
+            self.execute_db_schema_node_properties_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("db.schema.relProperties")
+        {
+            self.execute_db_schema_rel_properties_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("db.schema.visualization")
+        {
+            self.execute_db_schema_visualization_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("nornicdb.version")
+        {
+            self.execute_nornicdb_version_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("nornicdb.stats")
+        {
+            self.execute_nornicdb_stats_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("nornicdb.decay.info")
+        {
+            self.execute_nornicdb_decay_info_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("nornicdb.knowledgepolicy.info")
+        {
+            self.execute_nornicdb_knowledgepolicy_info_call(call)
+        } else if call
+            .procedure
             .eq_ignore_ascii_case("dbms.procedures")
         {
             self.execute_dbms_procedures_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("dbms.functions")
+        {
+            self.execute_dbms_functions_call(call)
         } else if call
             .procedure
             .eq_ignore_ascii_case("nornicdb.knowledgepolicy.resolve")
@@ -134,6 +199,581 @@ impl EvalEngine {
                 "mode".to_string(),
             ],
             rows,
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_dbms_functions_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError(
+                "dbms.functions expects no arguments".to_string(),
+            ));
+        }
+
+        let functions = builtin_function_rows();
+        Ok(EvalResult {
+            columns: vec![
+                "name".to_string(),
+                "signature".to_string(),
+                "description".to_string(),
+                "category".to_string(),
+            ],
+            rows: functions,
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_db_property_keys_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError(
+                "db.propertyKeys expects no arguments".to_string(),
+            ));
+        }
+
+        let mut keys: Vec<String> = Vec::new();
+        for node in self.storage.all_node_records()? {
+            keys.extend(node.properties.keys().cloned());
+        }
+        for edge in self.storage.all_edges()? {
+            keys.extend(edge.properties.keys().cloned());
+        }
+        keys.sort();
+        keys.dedup();
+
+        Ok(EvalResult {
+            columns: vec!["propertyKey".to_string()],
+            rows: keys
+                .into_iter()
+                .map(|key| {
+                    let mut row = Row::new();
+                    row.insert("propertyKey".to_string(), Value::String(key));
+                    row
+                })
+                .collect(),
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_db_constraints_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError(
+                "db.constraints expects no arguments".to_string(),
+            ));
+        }
+
+        let constraints = self.storage.load_constraints()?;
+        let rows = constraints
+            .into_iter()
+            .map(|constraint| {
+                let mut row = Row::new();
+                row.insert(
+                    "name".to_string(),
+                    Value::String(constraint.name),
+                );
+                let constraint_type = match constraint.constraint_type {
+                    ConstraintType::Unique => "UNIQUENESS",
+                    ConstraintType::Exists => "NODE_PROPERTY_EXISTENCE",
+                    ConstraintType::NodeKey => "NODE_KEY",
+                    ConstraintType::Type => "RELATIONSHIP_PROPERTY_TYPE",
+                    ConstraintType::Relationship => "RELATIONSHIP_PROPERTY_EXISTENCE",
+                };
+                row.insert(
+                    "type".to_string(),
+                    Value::String(constraint_type.to_string()),
+                );
+                row.insert(
+                    "labelsOrTypes".to_string(),
+                    Value::Array(vec![Value::String(constraint.label)]),
+                );
+                row.insert(
+                    "properties".to_string(),
+                    Value::Array(
+                        constraint
+                            .properties
+                            .iter()
+                            .map(|p| Value::String(p.clone()))
+                            .collect(),
+                    ),
+                );
+                row.insert(
+                    "propertyType".to_string(),
+                    Value::Null,
+                );
+                row
+            })
+            .collect();
+
+        Ok(EvalResult {
+            columns: vec![
+                "name".to_string(),
+                "type".to_string(),
+                "labelsOrTypes".to_string(),
+                "properties".to_string(),
+                "propertyType".to_string(),
+            ],
+            rows,
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_db_indexes_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError(
+                "db.indexes expects no arguments".to_string(),
+            ));
+        }
+
+        let indexes = self.storage.load_index_definitions()?;
+        let rows = indexes
+            .into_iter()
+            .map(|index| {
+                let mut row = Row::new();
+                row.insert("name".to_string(), Value::String(index.name));
+                let index_type = match index.kind {
+                    copperdb_storage::IndexKind::Range => "RANGE",
+                    copperdb_storage::IndexKind::Temporal => "TEMPORAL",
+                    copperdb_storage::IndexKind::FullText => "FULLTEXT",
+                    copperdb_storage::IndexKind::Vector => "VECTOR",
+                };
+                row.insert("type".to_string(), Value::String(index_type.to_string()));
+                row.insert(
+                    "labelsOrTypes".to_string(),
+                    Value::Array(vec![Value::String(index.label)]),
+                );
+                row.insert(
+                    "properties".to_string(),
+                    Value::Array(
+                        index
+                            .properties
+                            .iter()
+                            .map(|p| Value::String(p.clone()))
+                            .collect(),
+                    ),
+                );
+                row.insert("state".to_string(), Value::String("ONLINE".to_string()));
+                row
+            })
+            .collect();
+
+        Ok(EvalResult {
+            columns: vec![
+                "name".to_string(),
+                "type".to_string(),
+                "labelsOrTypes".to_string(),
+                "properties".to_string(),
+                "state".to_string(),
+            ],
+            rows,
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_db_ping_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError(
+                "db.ping expects no arguments".to_string(),
+            ));
+        }
+
+        let mut row = Row::new();
+        row.insert("success".to_string(), Value::Bool(true));
+        Ok(EvalResult {
+            columns: vec!["success".to_string()],
+            rows: vec![row],
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_db_info_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError(
+                "db.info expects no arguments".to_string(),
+            ));
+        }
+
+        let node_count = self.storage.all_node_records()?.len() as u64;
+        let edge_count = self.storage.all_edges()?.len() as u64;
+
+        let mut row = Row::new();
+        row.insert("id".to_string(), Value::String("copperdb".to_string()));
+        row.insert("name".to_string(), Value::String("copperdb".to_string()));
+        row.insert(
+            "creationDate".to_string(),
+            Value::String("2025-01-01T00:00:00Z".to_string()),
+        );
+        row.insert("nodeCount".to_string(), Value::from(node_count));
+        row.insert(
+            "relationshipCount".to_string(),
+            Value::from(edge_count),
+        );
+
+        Ok(EvalResult {
+            columns: vec![
+                "id".to_string(),
+                "name".to_string(),
+                "creationDate".to_string(),
+                "nodeCount".to_string(),
+                "relationshipCount".to_string(),
+            ],
+            rows: vec![row],
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_nornicdb_version_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError(
+                "nornicdb.version expects no arguments".to_string(),
+            ));
+        }
+
+        let mut row = Row::new();
+        row.insert("version".to_string(), Value::String("0.1.0".to_string()));
+        row.insert("build".to_string(), Value::String("dev".to_string()));
+        row.insert("edition".to_string(), Value::String("community".to_string()));
+
+        Ok(EvalResult {
+            columns: vec![
+                "version".to_string(),
+                "build".to_string(),
+                "edition".to_string(),
+            ],
+            rows: vec![row],
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_nornicdb_stats_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError(
+                "nornicdb.stats expects no arguments".to_string(),
+            ));
+        }
+
+        let nodes = self.storage.all_node_records()?;
+        let edges = self.storage.all_edges()?;
+
+        let node_count = nodes.len() as u64;
+        let edge_count = edges.len() as u64;
+
+        let mut label_set: HashSet<String> = HashSet::new();
+        for node in &nodes {
+            for label in &node.labels {
+                label_set.insert(label.clone());
+            }
+        }
+        let label_count = label_set.len() as u64;
+
+        let mut rel_type_set: HashSet<String> = HashSet::new();
+        for edge in &edges {
+            rel_type_set.insert(edge.edge_type.clone());
+        }
+        let rel_type_count = rel_type_set.len() as u64;
+
+        let mut row = Row::new();
+        row.insert("nodes".to_string(), Value::from(node_count));
+        row.insert("relationships".to_string(), Value::from(edge_count));
+        row.insert("labels".to_string(), Value::from(label_count));
+        row.insert("relationshipTypes".to_string(), Value::from(rel_type_count));
+
+        Ok(EvalResult {
+            columns: vec![
+                "nodes".to_string(),
+                "relationships".to_string(),
+                "labels".to_string(),
+                "relationshipTypes".to_string(),
+            ],
+            rows: vec![row],
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_nornicdb_decay_info_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError(
+                "nornicdb.decay.info expects no arguments".to_string(),
+            ));
+        }
+
+        let decay_profiles = self.storage.load_decay_profile_schemas().unwrap_or_default();
+        let decay_bindings = self
+            .storage
+            .load_decay_profile_binding_schemas()
+            .unwrap_or_default();
+        let enabled = !decay_profiles.is_empty() || !decay_bindings.is_empty();
+
+        let mut row = Row::new();
+        row.insert("enabled".to_string(), Value::Bool(enabled));
+        row.insert(
+            "system".to_string(),
+            Value::String(
+                "knowledge-layer scoring (decay profile bundles + bindings)".to_string(),
+            ),
+        );
+        row.insert(
+            "configuredVia".to_string(),
+            Value::String(
+                "CREATE DECAY PROFILE ... OPTIONS / CREATE DECAY PROFILE ... FOR ... APPLY DDL"
+                    .to_string(),
+            ),
+        );
+
+        Ok(EvalResult {
+            columns: vec![
+                "enabled".to_string(),
+                "system".to_string(),
+                "configuredVia".to_string(),
+            ],
+            rows: vec![row],
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_nornicdb_knowledgepolicy_info_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError(
+                "nornicdb.knowledgepolicy.info expects no arguments".to_string(),
+            ));
+        }
+
+        let decay_profiles = self.storage.load_decay_profile_schemas().unwrap_or_default();
+        let decay_bindings = self
+            .storage
+            .load_decay_profile_binding_schemas()
+            .unwrap_or_default();
+        let promotion_profiles = self
+            .storage
+            .load_promotion_profile_schemas()
+            .unwrap_or_default();
+        let promotion_policies = self
+            .storage
+            .load_promotion_policy_schemas()
+            .unwrap_or_default();
+
+        let enabled = !decay_profiles.is_empty()
+            || !decay_bindings.is_empty()
+            || !promotion_profiles.is_empty()
+            || !promotion_policies.is_empty();
+
+        let mut row = Row::new();
+        row.insert("enabled".to_string(), Value::Bool(enabled));
+        row.insert(
+            "system".to_string(),
+            Value::String("knowledge-layer profile and policy catalog".to_string()),
+        );
+        row.insert(
+            "decayProfiles".to_string(),
+            Value::from(decay_profiles.len() as u64),
+        );
+        row.insert(
+            "decayBindings".to_string(),
+            Value::from(decay_bindings.len() as u64),
+        );
+        row.insert(
+            "promotionProfiles".to_string(),
+            Value::from(promotion_profiles.len() as u64),
+        );
+        row.insert(
+            "promotionPolicies".to_string(),
+            Value::from(promotion_policies.len() as u64),
+        );
+        row.insert(
+            "configuredVia".to_string(),
+            Value::String(
+                "CREATE DECAY PROFILE / CREATE PROMOTION PROFILE / CREATE PROMOTION POLICY DDL"
+                    .to_string(),
+            ),
+        );
+
+        Ok(EvalResult {
+            columns: vec![
+                "enabled".to_string(),
+                "system".to_string(),
+                "decayProfiles".to_string(),
+                "decayBindings".to_string(),
+                "promotionProfiles".to_string(),
+                "promotionPolicies".to_string(),
+                "configuredVia".to_string(),
+            ],
+            rows: vec![row],
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_db_schema_node_properties_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError(
+                "db.schema.nodeProperties expects no arguments".to_string(),
+            ));
+        }
+
+        let nodes = self.storage.all_node_records()?;
+        let mut label_props: HashMap<String, HashSet<String>> = HashMap::new();
+        for node in &nodes {
+            for label in &node.labels {
+                let entry = label_props.entry(label.clone()).or_default();
+                for prop in node.properties.keys() {
+                    entry.insert(prop.clone());
+                }
+            }
+        }
+
+        let mut rows: Vec<Row> = Vec::new();
+        let mut labels: Vec<_> = label_props.keys().cloned().collect();
+        labels.sort();
+        for label in labels {
+            let mut props: Vec<_> = label_props[&label].iter().cloned().collect();
+            props.sort();
+            for prop in props {
+                let mut row = Row::new();
+                row.insert("nodeLabel".to_string(), Value::String(label.clone()));
+                row.insert("propertyName".to_string(), Value::String(prop));
+                row.insert("propertyType".to_string(), Value::String("ANY".to_string()));
+                rows.push(row);
+            }
+        }
+
+        Ok(EvalResult {
+            columns: vec![
+                "nodeLabel".to_string(),
+                "propertyName".to_string(),
+                "propertyType".to_string(),
+            ],
+            rows,
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_db_schema_rel_properties_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError(
+                "db.schema.relProperties expects no arguments".to_string(),
+            ));
+        }
+
+        let edges = self.storage.all_edges()?;
+        let mut type_props: HashMap<String, HashSet<String>> = HashMap::new();
+        for edge in &edges {
+            let entry = type_props.entry(edge.edge_type.clone()).or_default();
+            for prop in edge.properties.keys() {
+                entry.insert(prop.clone());
+            }
+        }
+
+        let mut rows: Vec<Row> = Vec::new();
+        let mut rel_types: Vec<_> = type_props.keys().cloned().collect();
+        rel_types.sort();
+        for rel_type in rel_types {
+            let mut props: Vec<_> = type_props[&rel_type].iter().cloned().collect();
+            props.sort();
+            for prop in props {
+                let mut row = Row::new();
+                row.insert("relType".to_string(), Value::String(rel_type.clone()));
+                row.insert("propertyName".to_string(), Value::String(prop));
+                row.insert("propertyType".to_string(), Value::String("ANY".to_string()));
+                rows.push(row);
+            }
+        }
+
+        Ok(EvalResult {
+            columns: vec![
+                "relType".to_string(),
+                "propertyName".to_string(),
+                "propertyType".to_string(),
+            ],
+            rows,
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_db_schema_visualization_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError(
+                "db.schema.visualization expects no arguments".to_string(),
+            ));
+        }
+
+        let nodes = self.storage.all_node_records()?;
+        let edges = self.storage.all_edges()?;
+
+        let mut label_set: HashSet<String> = HashSet::new();
+        for node in &nodes {
+            for label in &node.labels {
+                label_set.insert(label.clone());
+            }
+        }
+        let mut labels: Vec<_> = label_set.into_iter().collect();
+        labels.sort();
+        let schema_nodes: Vec<Value> = labels
+            .into_iter()
+            .map(|label| {
+                let mut map = serde_json::Map::new();
+                map.insert("label".to_string(), Value::String(label));
+                Value::Object(map)
+            })
+            .collect();
+
+        let mut rel_type_set: HashSet<String> = HashSet::new();
+        for edge in &edges {
+            rel_type_set.insert(edge.edge_type.clone());
+        }
+        let mut rel_types: Vec<_> = rel_type_set.into_iter().collect();
+        rel_types.sort();
+        let schema_rels: Vec<Value> = rel_types
+            .into_iter()
+            .map(|rel_type| {
+                let mut map = serde_json::Map::new();
+                map.insert("type".to_string(), Value::String(rel_type));
+                Value::Object(map)
+            })
+            .collect();
+
+        let mut row = Row::new();
+        row.insert("nodes".to_string(), Value::Array(schema_nodes));
+        row.insert("relationships".to_string(), Value::Array(schema_rels));
+
+        Ok(EvalResult {
+            columns: vec!["nodes".to_string(), "relationships".to_string()],
+            rows: vec![row],
             stats: QueryStats::default(),
         })
     }
@@ -816,6 +1456,12 @@ struct FulltextCallOptions {
 fn builtin_procedure_rows() -> Vec<Row> {
     let mut procedures = vec![
         (
+            "db.constraints",
+            "db.constraints() :: (name :: STRING, type :: STRING, labelsOrTypes :: LIST<STRING>, properties :: LIST<STRING>, propertyType :: STRING)",
+            "Lists all constraints in the database",
+            "READ",
+        ),
+        (
             "db.index.fulltext.queryNodes",
             "db.index.fulltext.queryNodes(indexName :: STRING, query :: STRING, options = {} :: MAP) :: (node :: NODE, score :: FLOAT)",
             "Fulltext search on nodes",
@@ -828,9 +1474,33 @@ fn builtin_procedure_rows() -> Vec<Row> {
             "READ",
         ),
         (
+            "db.indexes",
+            "db.indexes() :: (name :: STRING, type :: STRING, labelsOrTypes :: LIST<STRING>, properties :: LIST<STRING>, state :: STRING)",
+            "Lists all indexes in the database",
+            "READ",
+        ),
+        (
+            "db.info",
+            "db.info() :: (id :: STRING, name :: STRING, creationDate :: STRING, nodeCount :: INTEGER, relationshipCount :: INTEGER)",
+            "Returns database information",
+            "READ",
+        ),
+        (
             "db.labels",
             "db.labels() :: (label :: STRING)",
             "Lists all labels in the database",
+            "READ",
+        ),
+        (
+            "db.ping",
+            "db.ping() :: (success :: BOOLEAN)",
+            "Checks database connectivity",
+            "READ",
+        ),
+        (
+            "db.propertyKeys",
+            "db.propertyKeys() :: (propertyKey :: STRING)",
+            "Lists all property keys in the database",
             "READ",
         ),
         (
@@ -840,15 +1510,63 @@ fn builtin_procedure_rows() -> Vec<Row> {
             "READ",
         ),
         (
+            "db.schema.nodeProperties",
+            "db.schema.nodeProperties() :: (nodeLabel :: STRING, propertyName :: STRING, propertyType :: STRING)",
+            "Returns node properties by label",
+            "READ",
+        ),
+        (
+            "db.schema.relProperties",
+            "db.schema.relProperties() :: (relType :: STRING, propertyName :: STRING, propertyType :: STRING)",
+            "Returns relationship properties by type",
+            "READ",
+        ),
+        (
+            "db.schema.visualization",
+            "db.schema.visualization() :: (nodes :: LIST<MAP>, relationships :: LIST<MAP>)",
+            "Visualizes schema",
+            "READ",
+        ),
+        (
+            "dbms.functions",
+            "dbms.functions() :: (name :: STRING, signature :: STRING, description :: STRING, category :: STRING)",
+            "Lists functions",
+            "DBMS",
+        ),
+        (
             "dbms.procedures",
             "dbms.procedures() :: (name :: STRING, signature :: STRING, description :: STRING, mode :: STRING)",
             "Lists procedures",
             "DBMS",
         ),
         (
+            "nornicdb.decay.info",
+            "nornicdb.decay.info() :: (enabled :: BOOLEAN, system :: STRING, configuredVia :: STRING)",
+            "Returns knowledge-layer scoring configuration",
+            "READ",
+        ),
+        (
+            "nornicdb.knowledgepolicy.info",
+            "nornicdb.knowledgepolicy.info() :: (enabled :: BOOLEAN, system :: STRING, decayProfiles :: INTEGER, decayBindings :: INTEGER, promotionProfiles :: INTEGER, promotionPolicies :: INTEGER, configuredVia :: STRING)",
+            "Returns knowledge-layer profile and policy catalog counts",
+            "READ",
+        ),
+        (
             "nornicdb.knowledgepolicy.resolve",
             "nornicdb.knowledgepolicy.resolve(entityId :: STRING = '', labelsCsv :: STRING = '', edgeType :: STRING = '') :: (entityId :: STRING, targetKind :: STRING, targetLabels :: STRING, targetEdgeType :: STRING, decayBinding :: STRING, promotionPolicy :: STRING, matchedPromotionProfile :: STRING, matchedPromotionPredicate :: STRING, scoreFrom :: STRING, anchorUnixMs :: INTEGER, accessCount :: INTEGER, lastAccessedAtUnixMs :: INTEGER, baseScore :: FLOAT, finalScore :: FLOAT, visibilityThreshold :: FLOAT, suppressed :: BOOLEAN, dryRun :: BOOLEAN, explanation :: STRING)",
             "Resolves the effective knowledge-layer scoring policy for an entity, label set, or edge type",
+            "READ",
+        ),
+        (
+            "nornicdb.stats",
+            "nornicdb.stats() :: (nodes :: INTEGER, relationships :: INTEGER, labels :: INTEGER, relationshipTypes :: INTEGER)",
+            "Returns NornicDB stats",
+            "READ",
+        ),
+        (
+            "nornicdb.version",
+            "nornicdb.version() :: (version :: STRING, build :: STRING, edition :: STRING)",
+            "Returns NornicDB version",
             "READ",
         ),
     ];
@@ -868,6 +1586,73 @@ fn builtin_procedure_rows() -> Vec<Row> {
                 Value::String(description.to_string()),
             );
             row.insert("mode".to_string(), Value::String(mode.to_string()));
+            row
+        })
+        .collect()
+}
+
+fn builtin_function_rows() -> Vec<Row> {
+    let mut functions = vec![
+        ("abs", "abs(input :: NUMBER) :: NUMBER", "Returns the absolute value of a number", "Numeric"),
+        ("avg", "avg(input :: NUMBER) :: NUMBER", "Returns the average of numeric values", "Aggregating"),
+        ("ceil", "ceil(input :: NUMBER) :: NUMBER", "Returns the smallest integer greater than or equal to the input", "Numeric"),
+        ("coalesce", "coalesce(input :: ANY...) :: ANY", "Returns the first non-null value in the list", "Scalar"),
+        ("collect", "collect(input :: ANY) :: LIST<ANY>", "Collects values into a list", "Aggregating"),
+        ("contains", "contains(input :: STRING, substring :: STRING) :: BOOLEAN", "Returns whether the string contains the substring", "String"),
+        ("count", "count(input :: ANY) :: INTEGER", "Returns the number of values or rows", "Aggregating"),
+        ("date", "date() :: STRING", "Returns the current date", "Temporal"),
+        ("datetime", "datetime() :: STRING", "Returns the current datetime", "Temporal"),
+        ("duration", "duration() :: STRING", "Returns the current duration since epoch", "Temporal"),
+        ("elementId", "elementId(input :: NODE|RELATIONSHIP) :: STRING", "Returns the element id of a node or relationship", "Scalar"),
+        ("endsWith", "endsWith(input :: STRING, substring :: STRING) :: BOOLEAN", "Returns whether the string ends with the substring", "String"),
+        ("exists", "exists(input :: ANY) :: BOOLEAN", "Returns whether the value is not null", "Scalar"),
+        ("floor", "floor(input :: NUMBER) :: NUMBER", "Returns the largest integer less than or equal to the input", "Numeric"),
+        ("head", "head(input :: LIST<ANY>) :: ANY", "Returns the first element of a list", "List"),
+        ("id", "id(input :: NODE|RELATIONSHIP) :: STRING", "Returns the internal id of a node or relationship", "Scalar"),
+        ("keys", "keys(input :: NODE|RELATIONSHIP|MAP) :: LIST<STRING>", "Returns the property keys of a node, relationship, or map", "Scalar"),
+        ("labels", "labels(input :: NODE) :: LIST<STRING>", "Returns the labels of a node", "Scalar"),
+        ("last", "last(input :: LIST<ANY>) :: ANY", "Returns the last element of a list", "List"),
+        ("left", "left(input :: STRING, length :: INTEGER) :: STRING", "Returns the leftmost characters of a string", "String"),
+        ("length", "length(input :: PATH) :: INTEGER", "Returns the length of a path", "Scalar"),
+        ("ltrim", "ltrim(input :: STRING) :: STRING", "Returns the string with leading whitespace removed", "String"),
+        ("max", "max(input :: NUMBER) :: NUMBER", "Returns the maximum of numeric values", "Aggregating"),
+        ("min", "min(input :: NUMBER) :: NUMBER", "Returns the minimum of numeric values", "Aggregating"),
+        ("nodes", "nodes(input :: PATH) :: LIST<NODE>", "Returns the nodes in a path", "Scalar"),
+        ("now", "now() :: INTEGER", "Returns the current timestamp in milliseconds", "Temporal"),
+        ("properties", "properties(input :: NODE|RELATIONSHIP|MAP) :: MAP", "Returns the properties of a node, relationship, or map", "Scalar"),
+        ("range", "range(start :: INTEGER, end :: INTEGER [, step :: INTEGER]) :: LIST<INTEGER>", "Creates a list of integers in the given range", "List"),
+        ("relationships", "relationships(input :: PATH) :: LIST<RELATIONSHIP>", "Returns the relationships in a path", "Scalar"),
+        ("replace", "replace(input :: STRING, from :: STRING, to :: STRING) :: STRING", "Replaces all occurrences of a substring", "String"),
+        ("reverse", "reverse(input :: LIST<ANY>) :: LIST<ANY>", "Returns the list in reverse order", "List"),
+        ("right", "right(input :: STRING, length :: INTEGER) :: STRING", "Returns the rightmost characters of a string", "String"),
+        ("round", "round(input :: NUMBER) :: NUMBER", "Returns the nearest integer to the input", "Numeric"),
+        ("rtrim", "rtrim(input :: STRING) :: STRING", "Returns the string with trailing whitespace removed", "String"),
+        ("size", "size(input :: LIST<ANY>|STRING) :: INTEGER", "Returns the size of a list or string", "List"),
+        ("split", "split(input :: STRING, delimiter :: STRING) :: LIST<STRING>", "Splits a string by the delimiter", "String"),
+        ("startsWith", "startsWith(input :: STRING, substring :: STRING) :: BOOLEAN", "Returns whether the string starts with the substring", "String"),
+        ("substring", "substring(input :: STRING, start :: INTEGER [, length :: INTEGER]) :: STRING", "Returns a substring of the input", "String"),
+        ("sum", "sum(input :: NUMBER) :: NUMBER", "Returns the sum of numeric values", "Aggregating"),
+        ("tail", "tail(input :: LIST<ANY>) :: LIST<ANY>", "Returns the list without the first element", "List"),
+        ("timestamp", "timestamp() :: INTEGER", "Returns the current timestamp in milliseconds", "Temporal"),
+        ("toBoolean", "toBoolean(input :: ANY) :: BOOLEAN", "Converts a value to boolean", "Scalar"),
+        ("toFloat", "toFloat(input :: ANY) :: FLOAT", "Converts a value to float", "Scalar"),
+        ("toInteger", "toInteger(input :: ANY) :: INTEGER", "Converts a value to integer", "Scalar"),
+        ("toLower", "toLower(input :: STRING) :: STRING", "Returns the string in lowercase", "String"),
+        ("toString", "toString(input :: ANY) :: STRING", "Converts a value to string", "Scalar"),
+        ("toUpper", "toUpper(input :: STRING) :: STRING", "Returns the string in uppercase", "String"),
+        ("trim", "trim(input :: STRING) :: STRING", "Returns the string with leading and trailing whitespace removed", "String"),
+        ("type", "type(input :: RELATIONSHIP) :: STRING", "Returns the type of a relationship", "Scalar"),
+    ];
+    functions.sort_by(|left, right| left.0.cmp(right.0));
+
+    functions
+        .into_iter()
+        .map(|(name, signature, description, category)| {
+            let mut row = Row::new();
+            row.insert("name".to_string(), Value::String(name.to_string()));
+            row.insert("signature".to_string(), Value::String(signature.to_string()));
+            row.insert("description".to_string(), Value::String(description.to_string()));
+            row.insert("category".to_string(), Value::String(category.to_string()));
             row
         })
         .collect()
