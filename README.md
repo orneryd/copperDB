@@ -11,16 +11,24 @@
 
 A Rust implementation of the [NornicDB](https://github.com/orneryd/NornicDB) graph database engine.
 
-copperDB provides the same capabilities as NornicDB — a property-graph database with
-Cypher query support, vector embeddings, temporal data, Cassandra-like distributed
-writes/reads/search, and GPU acceleration — implemented idiomatically in Rust.
+copperDB is the Rust rewrite of NornicDB's property-graph database. The current
+supported runtime architecture is single-node execution while the Rust engine is
+brought up to apples-to-apples parity for storage, Cypher, indexes, local
+search/vector runtime, temporal data, and local embeddings.
+
+Distributed/fabric/replication, cross-node transaction-time orchestration, and
+GPU acceleration are retained as future-state architecture and parity backlog.
+They are not current runtime guarantees.
 
 ---
 
 ## Project Structure
 
 The repository is organized as a Cargo workspace. Each crate under `crates/` corresponds
-directly to a Go package under `pkg/` in NornicDB:
+to the NornicDB package architecture. Most crates map directly to a Go package under
+`pkg/`; the known mapping exceptions are `pkg/nornicdb` -> `crates/engine` plus
+`crates/copperdb`, `pkg/observability` -> `crates/otel`, and Rust-owned split crates
+such as `crates/topology` and `crates/decay`.
 
 ```
 copperDB/
@@ -35,7 +43,7 @@ copperDB/
     ├── config/         # ← pkg/config
     ├── convert/        # ← pkg/convert
     ├── cypher/         # ← pkg/cypher
-    ├── decay/          # ← pkg/decay
+    ├── decay/          # ← Rust split for temporal/knowledge-policy decay behavior
     ├── embed/          # ← pkg/embed
     ├── embeddingutil/  # ← pkg/embeddingutil
     ├── encryption/     # ← pkg/encryption
@@ -51,7 +59,7 @@ copperDB/
     ├── kms/            # ← pkg/kms
     ├── linkpredict/    # ← pkg/linkpredict
     ├── localllm/       # ← pkg/embed (local GGUF)
-    ├── copperDB/       # ← pkg/nornicdb  (main engine)
+    ├── copperdb/       # ← executable assembly for pkg/nornicdb parity
     ├── math/           # ← pkg/math
     ├── mcp/            # ← pkg/mcp
     ├── multidb/        # ← pkg/multidb
@@ -156,7 +164,7 @@ The following table maps every significant NornicDB Go dependency to its Rust eq
 | `github.com/spf13/cobra` | CLI framework | `clap = "4"` |
 | `github.com/gorilla/websocket` | WebSocket transport (MCP) | `tokio-tungstenite = "0.24"` |
 | `net/http` (Go stdlib) | HTTP server | `axum = "0.7"` |
-| Cassandra/Dynamo-style coordination | Distributed writes and reads | `copperdb-topology` + `copperdb-replication` coordinator contracts |
+| Cassandra/Dynamo-style coordination | Future distributed writes and reads | Deferred `copperdb-topology` + `copperdb-replication` coordinator contracts |
 | `github.com/ebitengine/purego` + `github.com/jupiterrider/ffi` | CGo-free FFI for native libs | `libloading = "0.8"` |
 | `github.com/hybridgroup/yzma` | WASM runtime for GGUF models | `libloading` (native) or `wasmtime = "20"` |
 | CUDA (NVIDIA) via CGo wrappers | GPU compute | `wgpu = "0.20"` (cross-platform) or `cudarc` (CUDA) |
@@ -289,10 +297,10 @@ Key differences:
 - For higher write throughput, consider `rocksdb` crate (FFI to RocksDB)
 
 ### Replication
-NornicDB's replication module is built around `hashicorp/raft` (the Go standard).
-copperDB uses `openraft` (TiKV's modern, async-native Raft library).
-`openraft` requires implementing three traits: `RaftStateMachine`, `RaftStorage`, and
-`RaftNetwork`. These are stubs in `crates/replication/src/lib.rs`.
+Replication is future-state only. The current supported architecture is
+single-node execution. Any topology, replication, or fabric code in the workspace
+is retained as deferred architecture/backlog and must not be treated as a shipped
+distributed runtime.
 
 ### GPU Acceleration
 NornicDB has four separate GPU backends (CUDA/Metal/Vulkan/OpenCL) each with CGo wrappers.
@@ -303,10 +311,12 @@ copperDB consolidates these under `wgpu` (WebGPU-based, cross-platform compute):
 
 ### Embedding Pipeline
 ```
-Text → textchunk → embed (OpenAI API or localllm) → vectorspace (HNSW index)
+Text -> textchunk -> embed/localllm (llama.cpp-compatible local GGUF path) -> typed node embedding fields -> vectorspace (HNSW-preferred scoring)
 ```
-Vector search is currently brute-force in `crates/vectorspace`. For production,
-integrate the `instant-distance` or `hnsw_rs` crate for approximate nearest neighbor search.
+Managed embeddings and embedding metadata belong in dedicated typed node fields,
+not in user properties. The local vector runtime should stay on a single
+HNSW-preferred scoring path; future IVFPQ/vector-file work belongs in the parity
+backlog unless it can be added without reintroducing query-time strategy switching.
 
 ---
 
@@ -327,7 +337,7 @@ integrate the `instant-distance` or `hnsw_rs` crate for approximate nearest neig
 | `kms` | ✅ Scaffolded | Local KMS impl; AWS/Azure/GCP stubs |
 | `simd` | ✅ Scaffolded | `wide` f32x8 impl |
 | `decay` | ✅ Scaffolded | Exp/Power/Gaussian + Kalman filter |
-| `vectorspace` | ✅ Scaffolded | Brute-force KNN; HNSW needed |
+| `vectorspace` | ✅ Scaffolded | HNSW-preferred cosine scoring path |
 | `embed` | ✅ Scaffolded | Mock embedder; OpenAI/local TODO |
 | `embeddingutil` | ✅ Scaffolded | Normalization/similarity helpers |
 | `textchunk` | ✅ Scaffolded | Char + sentence chunking |
@@ -342,12 +352,12 @@ integrate the `instant-distance` or `hnsw_rs` crate for approximate nearest neig
 | `txsession` | ✅ Scaffolded | ACID transaction lifecycle |
 | `retention` | ✅ Scaffolded | TTL-based expiry |
 | `multidb` | ✅ Scaffolded | Multi-database manager |
-| `fabric` | ✅ Scaffolded | Cluster routing |
+| `fabric` | 🔮 Future-state | Deferred cluster routing architecture |
 | `gpu` | ✅ Scaffolded | CPU fallback; wgpu TODO |
 | `cypher` | 🔧 AST complete | **Parser not implemented** |
 | `eval` | 🔧 Stub | Requires cypher parser |
 | `bolt` | 🔧 Partial | PackStream encoding partial; server TODO |
-| `replication` | 🔧 Stub | openraft traits not implemented |
+| `replication` | 🔮 Future-state | Deferred distributed architecture; not current runtime |
 | `graphql` | 🔧 Scaffolded | Schema stub; handlers need storage wiring |
 | `server` | 🔧 Scaffolded | Routes defined; handlers need storage wiring |
 | `mcp` | 🔧 Scaffolded | Tool definitions; JSON-RPC TODO |

@@ -11,7 +11,7 @@ applyTo: '**'
 # Project Architecture
 - Remove anything considered legacy. it is vestigial since this is a new project that is not released yet. Any plan changes to architecture are considered refactor to clean architecture that are not backwards compatible until a 1.0 release
 - copperDB is a Rust Cargo workspace mirroring NornicDB ../NornicDB package structure under `crates/`.
-- Distributed transport currently uses `crates/nornicgrpc` with tonic, unified-auth admin JWT validation for internal replica apply/read when security is enabled, `--no-auth` bypass for those internal RPCs, and caller-token forwarding on ranked-search, hydration, and distributed graph-read RPCs.
+- Distributed/fabric/replication transport is retained as future-state scaffolding only; do not document it as current runtime support even where tonic/auth/read-fence experiments exist.
 - Config and multidb own per-database effective config resolution; engine and server consume that for ranked-search gating.
 
 # Solutions Repository

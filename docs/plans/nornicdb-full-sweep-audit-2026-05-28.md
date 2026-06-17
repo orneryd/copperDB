@@ -15,7 +15,7 @@ Support status note: copperDB's supported runtime architecture is currently sing
 3. Distributed package scaffolding exists in the current dependency graph, but it should stay documented as deferred work rather than supported runtime behavior. The audit found important remaining gaps versus NornicDB: multi-region replication, transport security, chaos testing, fragment-based fabric execution, distributed transaction context, remote fragment execution, and full gRPC caller auth/TLS parity.
 4. Distributed transaction time is likewise deferred architecture work rather than a current guarantee. The target architecture remains hybrid: keep Dynamo-style quorum replication for future data durability and fan-out, but add a consensus-backed transaction-time oracle, with Paxos v2 as the target distributed implementation for authoritative begin/commit/read-fence allocation.
 5. Layer 4 query/index/search remains the most performance-sensitive gap. copperDB has strong progress on Cypher execution and range/temporal index semantics, but NornicDB has production BM25, HNSW/IVFPQ/vector file store, decay-filtered search, hot-path tracing, SIMD/math acceleration, reranking, and embedding cache/backends that copperDB has not ported. For the first runnable MVP, GPU acceleration and reranking/inference lifecycle work are deferred; CPU search/vector runtime and in-memory embeddings remain the core target.
-6. Layer 5 and Layer 6 still need the central engine/config/protocol composition pass: per-database config, search/embedding warming, Bolt role propagation, conversion/import-export streaming, plugin-ready builtin function/procedure registration, and bookmark/read-fence flow for the hybrid transaction-time model are MVP-relevant. MCP tools, GraphQL resolvers, and Heimdall governance workflows remain recorded for parity but are deferred until after the core distributed engine is working.
+6. Layer 5 and Layer 6 still need the central single-node engine/config/protocol composition pass: per-database config, search/embedding warming, Bolt role propagation, conversion/import-export streaming, and plugin-ready builtin function/procedure registration are MVP-relevant for an apples-to-apples Northwind run. Bookmark/read-fence flow for the hybrid transaction-time model remains recorded as future distributed architecture work. MCP tools, GraphQL resolvers, and Heimdall governance workflows remain recorded for parity but are deferred until after the single-node benchmark-ready core is proven.
 
 ## Target Policy: Auto Indexing And Search Defaults
 
@@ -46,9 +46,9 @@ copperDB current drift:
 
 ## MVP Scope Clarification
 
-The full audit is a parity register, not the first-runnable MVP scope. For the first point where copperDB can be turned on and tried end to end, the MVP should focus on the core distributed engine, durable storage/query/index behavior, per-database config, CPU search/vector runtime, and embedding execution that can run in process.
+The full audit is a parity register, not the first-runnable MVP scope. For the first point where copperDB can be turned on and tried end to end, the MVP should focus on the single-node engine, durable storage/query/index behavior, per-database config, CPU search/vector runtime, and embedding execution that can run in process.
 
-Deferred until after the core distributed engine works:
+Deferred until after the single-node benchmark-ready core works:
 
 - MCP tool surface and transport.
 - GraphQL schema/resolver surface.
@@ -61,6 +61,73 @@ Still MVP-relevant preparation work:
 - Builtin function/procedure registration should be plugin-ready so APOC-style extensions can be added later without rewriting the call dispatch architecture.
 - Embedding runtime should track NornicDB's llama.cpp local GGUF path rather than introducing `mistral.rs`: preserve the ability to load multiple local model domains, pass through env-driven llama.cpp controls such as context type, pooling, attention type, and flash-attn, and pin to the same current llama.cpp revision NornicDB uses (`b9410` at present).
 - Automatic index/search/embedding behavior remains disabled by default and per-DB opt-in only, but schema-declared indexes must still reload/rebuild per database and the CLI override remains a hard global kill switch.
+
+## Single-Node Northwind Audit Gate
+
+Northwind readiness is a file-by-file parity gate, not a benchmark shortcut. Before copperDB is called ready for apples-to-apples Northwind comparison against NornicDB, every Go file in the mapped NornicDB package must be read and translated into one of three Rust outcomes: implemented in the mapped crate, explicitly deferred as non-Northwind or future distributed work, or documented as an intentional Rust architecture split with equivalent runtime behavior.
+
+Current inventory from `NornicDB/pkg` and `copperDB/crates`: 1,399 Go files versus 99 Rust files. The audit should run as one package workstream per row below; no row is complete until the file-level checklist for that package has named each upstream file and its Rust disposition.
+
+| NornicDB package | Go files | copperDB target | Rust files | Single-node Northwind gate |
+| --- | ---: | --- | ---: | --- |
+| `audit` | 2 | `crates/audit` | 1 | data-access event parity |
+| `auth` | 23 | `crates/auth` | 1 | HTTP/Bolt identity and role propagation |
+| `bolt` | 50 | `crates/bolt` | 4 | PackStream, session, and transaction parity |
+| `buildinfo` | 2 | `crates/buildinfo` | 1 | version and status metadata parity |
+| `cache` | 2 | `crates/cache` | 1 | query/result cache behavior and eviction cost |
+| `compliance` | 3 | `crates/compliance` | 1 | policy/evidence hooks at query entrypoints |
+| `config` | 19 | `crates/config` | 1 | env/YAML/CLI/per-DB resolver parity |
+| `convert` | 3 | `crates/convert` | 1 | import/export and Northwind load path |
+| `cypher` | 368 | `crates/cypher` | 23 | parser, validator, shape, and Cypher semantics |
+| `embed` | 20 | `crates/embed` | 1 | llama.cpp local embedding/cache behavior |
+| `embeddingutil` | 3 | `crates/embeddingutil` | 1 | embedding/vector serialization helpers |
+| `encryption` | 8 | `crates/encryption` | 1 | envelope, DEK cache, rotation/rekey parity |
+| `envutil` | 2 | `crates/envutil` | 1 | strict/loose env parsing parity |
+| `errors` | 3 | `crates/errors` | 1 | Neo4j-compatible errors and retry classification |
+| `eval` | 5 | `crates/eval` | 6 | row pipeline, procedures, mutations, and returns |
+| `fabric` | 27 | `crates/fabric` | 1 | retained future distributed architecture only |
+| `filter` | 7 | `crates/filter` | 1 | predicate evaluation parity |
+| `gpu` | 36 | `crates/gpu` | 1 | deferred accelerator parity |
+| `graphql` | 19 | `crates/graphql` | 1 | deferred protocol parity |
+| `heimdall` | 21 | `crates/heimdall` | 1 | deferred governance parity |
+| `indexing` | 2 | `crates/indexing` | 1 | index catalog and lookup-selection parity |
+| `inference` | 19 | `crates/inference` | 1 | defer broad lifecycle; keep embedding prerequisites |
+| `kms` | 22 | `crates/kms` | 1 | provider/key metadata parity |
+| `knowledgepolicy` | 39 | `crates/knowledgepolicy` | 1 | ON ACCESS, decay, and promotion parity |
+| `lifecycle` | 9 | `crates/lifecycle` | 1 | startup/shutdown supervision parity |
+| `linkpredict` | 9 | `crates/linkpredict` | 1 | deferred auto-link/auto-TLP parity |
+| `localllm` | 6 | `crates/localllm` | 1 | llama.cpp binding shape and model lifecycle |
+| `math` | 3 | `crates/math` | 1 | numeric/vector primitive parity |
+| `mcp` | 13 | `crates/mcp` | 1 | deferred tool protocol parity |
+| `multidb` | 30 | `crates/multidb` | 1 | namespace catalog and per-DB config parity |
+| `nornicdb` | 51 | `crates/engine` + `crates/copperdb` | 10 | facade, runtime composition, and executable assembly |
+| `nornicgrpc` | 4 | `crates/nornicgrpc` | 3 | local internal service seams; remote execution future |
+| `observability` | 97 | `crates/otel` | 2 | metrics catalog, tracing, and readiness parity |
+| `pool` | 4 | `crates/pool` | 1 | hot-row and buffer pool use in eval paths |
+| `qdrantgrpc` | 15 | `crates/qdrantgrpc` | 1 | future external vector-store parity |
+| `replication` | 26 | `crates/replication` | 1 | retained future distributed architecture only |
+| `retention` | 2 | `crates/retention` | 1 | retention/legal-hold state parity |
+| `search` | 82 | `crates/search` | 1 | BM25, HNSW, vector file, persistence, decay filtering |
+| `security` | 7 | `crates/security` | 1 | request validation and ingress hardening parity |
+| `server` | 44 | `crates/server` | 2 | HTTP/admin/Neo4j transaction API parity |
+| `simd` | 13 | `crates/simd` | 1 | deferred platform acceleration parity |
+| `storage` | 250 | `crates/storage` | 8 | durable records, async, MVCC, WAL, schema, indexes |
+| `temporal` | 15 | `crates/temporal` | 1 | temporal/session/decay integration parity |
+| `textchunk` | 2 | `crates/textchunk` | 1 | chunking behavior parity |
+| `txsession` | 3 | `crates/txsession` | 1 | transaction/session state parity |
+| `util` | 5 | `crates/util` | 1 | hashing and bounded decode parity |
+| `vectorspace` | 4 | `crates/vectorspace` | 1 | HNSW-preferred local vector scoring path |
+
+Rust-only split crates also need explicit disposition: `crates/topology` is the Rust-owned vocabulary crate for future distributed placement/transaction-time contracts, while `crates/decay` is the Rust split for decay behavior that NornicDB spreads through temporal, knowledge-policy, and inference surfaces.
+
+Northwind cannot be declared apples-to-apples until these single-node criteria pass:
+
+- The import/load path can ingest Northwind through the same public protocol or conversion surface used by NornicDB.
+- Cypher parser/eval behavior covers the Northwind query corpus, including aliases, procedure calls, joins/traversals, ordering, aggregation, and typed index use.
+- Storage/index behavior is observable through durable records, schema-declared indexes, MVCC-visible reads where required, and no embedding metadata pollution of user properties.
+- Search/vector procedures follow the single HNSW-preferred local path, with named vector precedence and managed embedding fields matching NornicDB's typed node model.
+- Benchmark harnesses compare equivalent cold/warm states, dataset contents, query results, and latency/throughput metrics without adding benchmark-only shortcuts.
+- Any distributed/fabric/replication/remote search behavior stays documented as future-state and is excluded from the current supported runtime claim.
 
 ## Layer 0 Audit: Shared Contracts And Config
 
@@ -189,7 +256,7 @@ NornicDB has production search packages for BM25 fulltext, query-plan caching, f
 Priority drift:
 
 - BM25/fulltext maintained indexes and query surface.
-- Vector index runtime with strategy selection: brute-force for small sets, HNSW for larger sets, compressed IVFPQ for very large sets.
+- Vector index runtime with a single HNSW-preferred local query path. IVFPQ/vector-file architecture remains a future persistence/index-format parity item unless it can be added without query-time strategy switching.
 - Durable vector file store and search index persistence with version checks.
 - Decay/knowledge-policy filtering during search.
 - Reranking and MMR/local-LLM hooks are parity items, but deferred out of the first runnable MVP.
@@ -244,7 +311,7 @@ Documentation actions:
 
 ### graphql
 
-- copperDB GraphQL is still a stub schema/resolver layer. NornicDB has schema/resolver structure. Needed work includes node/edge traversal resolvers, mutations, pagination, subscriptions/streaming where applicable, auth propagation, and engine-backed execution. GraphQL is deferred out of the first runnable MVP and should follow the core distributed engine.
+- copperDB GraphQL is still a stub schema/resolver layer. NornicDB has schema/resolver structure. Needed work includes node/edge traversal resolvers, mutations, pagination, subscriptions/streaming where applicable, auth propagation, and engine-backed execution. GraphQL is deferred out of the first runnable MVP and should follow the single-node engine/protocol baseline.
 
 ### mcp
 
@@ -252,7 +319,7 @@ Documentation actions:
 
 ### heimdall
 
-- NornicDB Heimdall includes governance/quality-control workflows around LLM-backed suggestion review, scheduler, plugin points, and RBAC filtering. copperDB currently has rate-limiter/anomaly scaffolding only. Heimdall, reranking, and broad inference lifecycle work are deferred until after the core distributed engine works; this also keeps auto-TLP/auto-link disabled by default.
+- NornicDB Heimdall includes governance/quality-control workflows around LLM-backed suggestion review, scheduler, plugin points, and RBAC filtering. copperDB currently has rate-limiter/anomaly scaffolding only. Heimdall, reranking, and broad inference lifecycle work are deferred until after the single-node benchmark-ready core works; this also keeps auto-TLP/auto-link disabled by default.
 
 ### plugins and APOC
 
@@ -265,23 +332,24 @@ Documentation actions:
 
 ## Priority Backlog From Audit
 
-1. Add the hybrid transaction-time architecture: keep Dynamo quorum for data durability, but introduce a consensus-backed transaction-time oracle for authoritative begin/commit/read-fence allocation, with Paxos v2 as the target distributed implementation.
-2. Thread bookmark/read-fence semantics through txsession, engine, replication, and fabric so distributed MVCC snapshot isolation and RYOW have an enforceable contract.
-3. Add per-database config store/resolver with allowed keys and precedence: defaults, global config/env/YAML, per-DB stored overrides, CLI overrides. Default automatic search/index/embedding work to disabled for copperDB unless a database opts in.
-4. Add search/index warming lifecycle docs and implementation hooks: BM25, vector, embedding; `startup` and `lazy`; deterministic state transitions.
-5. Split Layer 4 index work into property/range/temporal parity versus fulltext/vector runtime parity.
-6. Port or consciously defer NornicDB's storage async engine: write-behind cache, flush hold/result, async count/read consistency, callback/event deadlock tests.
-7. Expand MVCC/WAL documentation with snapshot-visible indexes, temporal point-in-time lookup, lifecycle pruning, WAL repair, and corruption diagnostics.
-8. Add distributed production-hardening TODOs: multi-region replication, transport security, chaos tests, peer metrics GC, fragment executor, remote fragment execution, distributed transaction context.
-9. Add MVP search runtime TODOs: BM25 fulltext, CPU vector runtime, HNSW/IVFPQ strategy support, vector file store, search persistence/versioning, decay filter, and observability. Defer GPU acceleration and rerank/MMR/local-LLM lifecycle until late-stage parity.
-10. Add protocol/runtime TODOs: Bolt auth/role propagation, plugin-ready builtin function/procedure registration, and streaming import/export conversion utilities. copperDB already has server per-DB config routes plus effective-config views; MCP tools, Heimdall governance, GraphQL resolvers, and APOC compatibility remain deferred until after the core distributed engine works.
+1. Complete the single-node Northwind audit gate above package-by-package, with every upstream Go file read and assigned a Rust disposition before calling the benchmark apples-to-apples.
+2. Add per-database config store/resolver with allowed keys and precedence: defaults, global config/env/YAML, per-DB stored overrides, CLI overrides. Default automatic search/index/embedding work to disabled for copperDB unless a database opts in.
+3. Add search/index warming lifecycle docs and implementation hooks: BM25, vector, embedding; `startup` and `lazy`; deterministic state transitions.
+4. Split Layer 4 index work into property/range/temporal parity versus fulltext/vector runtime parity.
+5. Port or consciously defer NornicDB's storage async engine: write-behind cache, flush hold/result, async count/read consistency, callback/event deadlock tests.
+6. Expand MVCC/WAL documentation with snapshot-visible indexes, temporal point-in-time lookup, lifecycle pruning, WAL repair, and corruption diagnostics.
+7. Add MVP search runtime TODOs: BM25 fulltext, HNSW-preferred CPU vector runtime, vector file store, search persistence/versioning, decay filter, and observability. Defer IVFPQ strategy selection, GPU acceleration, rerank/MMR, and broad local-LLM lifecycle until late-stage parity.
+8. Add protocol/runtime TODOs: Bolt auth/role propagation, plugin-ready builtin function/procedure registration, and streaming import/export conversion utilities. copperDB already has server per-DB config routes plus effective-config views; MCP tools, Heimdall governance, GraphQL resolvers, and APOC compatibility remain deferred until after the single-node benchmark-ready core works.
+9. Future distributed state: add the hybrid transaction-time architecture by keeping Dynamo quorum for data durability while introducing a consensus-backed transaction-time oracle for authoritative begin/commit/read-fence allocation, with Paxos v2 as the target distributed implementation.
+10. Future distributed state: thread bookmark/read-fence semantics through txsession, engine, replication, and fabric so distributed MVCC snapshot isolation and RYOW have an enforceable contract when distributed execution resumes.
+11. Future distributed state: add production-hardening TODOs for multi-region replication, transport security, chaos tests, peer metrics GC, fragment executor, remote fragment execution, and distributed transaction context.
 
 ## Audit Notes
 
 - This audit intentionally does not change package completion status by itself. It records drift that should guide the next implementation slices.
 - Some copperDB architecture choices are deliberate deviations from NornicDB, especially promoting topology to Layer 0 and keeping Rust dependency cycles out of the workspace. Those deviations are acceptable as long as docs explain the reason and the consumer contracts remain equivalent.
 - When NornicDB defaults conflict with copperDB target policy, copperDB should prefer explicit per-DB opt-in for automatic work. This is especially important for automatic search/index/embedding features that can create memory pressure or surprise operators.
-- MVP scope deliberately excludes MCP, GraphQL, Heimdall, APOC, GPU acceleration, reranking, and broad inference lifecycle work. These remain in the register as post-core-distributed-engine parity items.
+- MVP scope deliberately excludes MCP, GraphQL, Heimdall, APOC, GPU acceleration, reranking, and broad inference lifecycle work. These remain in the register as post-single-node-benchmark or future distributed parity items.
 
 ## Full Agent Findings Register
 
@@ -469,7 +537,7 @@ Search package findings:
 Search performance implications from the agent:
 
 - BM25 query cost can blow up from indexed posting-list lookup to broad scans when a maintained inverted index is missing.
-- Vector index build/search cost scales poorly without HNSW/IVFPQ strategy switching.
+- Vector index build/search cost scales poorly if the HNSW-preferred local path is missing or bypassed. IVFPQ remains future persistence/index-format parity, not a reason to reintroduce query-time strategy switching in the current runtime.
 - Decay visibility leaks occur if stale/suppressed entities are not filtered during search ranking.
 
 Knowledgepolicy runtime findings:
