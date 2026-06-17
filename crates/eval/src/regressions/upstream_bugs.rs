@@ -1150,3 +1150,640 @@
             .unwrap();
         assert_eq!(result.rows[0].get("b"), Some(&Value::Bool(true)));
     }
+
+    /// Tests vector similarity functions.
+    #[test]
+    fn test_vector_similarity() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // Cosine of identical vectors = 1.0
+        let result = engine
+            .execute(
+                &parser
+                    .parse("RETURN vector.similarity.cosine([1,0,0], [1,0,0]) AS c")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        let c = result.rows[0].get("c").and_then(Value::as_f64).unwrap();
+        assert!((c - 1.0).abs() < 0.001, "identical vectors should have cosine 1.0");
+
+        // Cosine of orthogonal vectors = 0.0
+        let result = engine
+            .execute(
+                &parser
+                    .parse("RETURN vector.similarity.cosine([1,0], [0,1]) AS c")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        let c = result.rows[0].get("c").and_then(Value::as_f64).unwrap();
+        assert!(c.abs() < 0.001, "orthogonal vectors should have cosine ~0");
+
+        // Euclidean of identical vectors
+        let result = engine
+            .execute(
+                &parser
+                    .parse("RETURN vector.similarity.euclidean([1,0,0], [1,0,0]) AS e")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        let e = result.rows[0].get("e").and_then(Value::as_f64).unwrap();
+        assert!((e - 1.0).abs() < 0.001, "identical vectors should have euclidean 1.0");
+    }
+
+    /// Tests vector search hot path: CREATE VECTOR INDEX + CALL db.index.vector.queryNodes.
+    #[test]
+    fn test_vector_search_index_hot_path() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE VECTOR INDEX vec_idx FOR (n:Doc) ON (n.emb) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        engine
+            .execute(
+                &parser.parse("CREATE (a:Doc {name: 'a', emb: [1.0, 0.0, 0.0]})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser.parse("CREATE (c:Doc {name: 'c', emb: [1.0, 0.0, 0.0]})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.vector.queryNodes('vec_idx', 10, [1.0, 0.0, 0.0]) YIELD node, score RETURN node.name AS name, score ORDER BY score DESC")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert!(!result.rows.is_empty(), "vector search should return results");
+        let top_score = result.rows[0].get("score").and_then(Value::as_f64).unwrap();
+        assert!((top_score - 1.0).abs() < 0.01);
+    }
+
+    /// Mirrors NornicDB `GraphitiScenarioE2E` bulk node save with vector properties.
+    #[test]
+    fn test_graphiti_bulk_node_save_with_vectors() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        let mut params = HashMap::new();
+        params.insert(
+            "nodes".to_string(),
+            serde_json::json!([
+                {"uuid": "n1", "name": "Alpha", "labels": ["Entity"], "name_embedding": [1.0, 0.0, 0.0]},
+                {"uuid": "n2", "name": "Beta",  "labels": ["Entity"], "name_embedding": [0.0, 1.0, 0.0]},
+                {"uuid": "n3", "name": "Gamma", "labels": ["Entity"], "name_embedding": [1.0, 0.0, 0.0]},
+            ]),
+        );
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "UNWIND $nodes AS node \
+                         MERGE (n:Entity {uuid: node.uuid}) \
+                         SET n:$(node.labels) \
+                         SET n = node \
+                         RETURN n.uuid AS uuid, n.name_embedding AS emb",
+                    )
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 3, "should create/merge 3 entities");
+        // Verify vector properties persisted
+        for row in &result.rows {
+            let emb = row.get("emb").and_then(Value::as_array);
+            assert!(emb.is_some(), "each node should have a name_embedding vector");
+        }
+    }
+
+    /// Mirrors NornicDB `TestE2E_VectorCosine_QueryShapes_StayOnIndexedPaths` —
+    /// verifies all five vector cosine query shapes produce correct results.
+    #[test]
+    fn test_vector_cosine_query_shapes() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        let mut params = HashMap::new();
+        let q: Vec<f64> = vec![1.0, 0.0, 0.0];
+        params.insert("q".to_string(), serde_json::to_value(&q).unwrap());
+        params.insert("g".to_string(), Value::String("g".into()));
+        params.insert("groups".to_string(), serde_json::json!(["g"]));
+        params.insert("lim".to_string(), Value::from(5));
+        params.insert("min".to_string(), Value::from(0.1));
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE VECTOR INDEX chunk_emb FOR (c:Chunk) ON (c.emb) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        for i in 0..20 {
+            let mut v = vec![0.0f64; 3];
+            v[i % 3] = 1.0;
+            engine.execute(
+                &parser.parse(&format!("CREATE (c:Chunk {{uuid:'c-{i}', group_id:'g', emb: {v:?}}})")).unwrap(),
+                &HashMap::new(),
+            ).unwrap();
+        }
+
+        // V1: direct return cosine
+        let r = engine.execute(
+            &parser.parse("MATCH (c:Chunk) RETURN vector.similarity.cosine(c.emb, $q) AS s ORDER BY s DESC LIMIT 5").unwrap(),
+            &params,
+        ).unwrap();
+        assert!(!r.rows.is_empty());
+
+        // V2: direct return cosine with where
+        let r = engine.execute(
+            &parser.parse("MATCH (c:Chunk) WHERE c.group_id = $g RETURN vector.similarity.cosine(c.emb, $q) AS s ORDER BY s DESC LIMIT 5").unwrap(),
+            &params,
+        ).unwrap();
+        assert!(!r.rows.is_empty());
+
+        // V3: WITH projection cosine
+        let r = engine.execute(
+            &parser.parse("MATCH (c:Chunk) WITH c, vector.similarity.cosine(c.emb, $q) AS s RETURN c.uuid, s ORDER BY s DESC LIMIT 5").unwrap(),
+            &params,
+        ).unwrap();
+        assert!(!r.rows.is_empty());
+
+        // V4: parameterized limit
+        let r = engine.execute(
+            &parser.parse("MATCH (c:Chunk) RETURN vector.similarity.cosine(c.emb, $q) AS s ORDER BY s DESC LIMIT $lim").unwrap(),
+            &params,
+        ).unwrap();
+        assert_eq!(r.rows.len(), 5);
+
+        // V5: graphiti projection with pre and post where
+        let r = engine.execute(
+            &parser.parse("MATCH (c:Chunk) WHERE c.group_id IN $groups WITH c, vector.similarity.cosine(c.emb, $q) AS score WHERE score > $min RETURN c.uuid, score ORDER BY score DESC LIMIT $lim").unwrap(),
+            &params,
+        ).unwrap();
+        assert!(!r.rows.is_empty());
+    }
+
+    /// Tests CALL db.index.fulltext.queryRelationships — Phase 3 Graphiti parity.
+    #[test]
+    fn test_fulltext_query_relationships() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE FULLTEXT INDEX rel_ft FOR ()-[r:RELATES_TO]-() ON EACH [r.fact, r.name]")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (a:Entity {name: 'A'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (b:Entity {name: 'B'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Entity {name: 'A'}), (b:Entity {name: 'B'}) CREATE (a)-[:RELATES_TO {fact: 'authentication flow', name: 'auth'}]->(b)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.fulltext.queryRelationships('rel_ft', 'authentication', {limit: 10}) YIELD relationship, score RETURN relationship.fact AS fact, score")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert!(!result.rows.is_empty(), "should find authentication relationship");
+    }
+
+    /// Tests Phase 3: CREATE VECTOR INDEX on relationships + CALL db.index.vector.queryRelationships.
+    #[test]
+    fn test_vector_relationship_index_search() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE VECTOR INDEX rel_vec_idx FOR ()-[r:RELATES_TO]-() ON (r.fact_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser.parse("CREATE (a:Entity {name: 'A'}), (b:Entity {name: 'B'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Entity {name: 'A'}), (b:Entity {name: 'B'}) CREATE (a)-[:RELATES_TO {fact_embedding: [1.0, 0.0, 0.0]}]->(b)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.vector.queryRelationships('rel_vec_idx', 10, [1.0, 0.0, 0.0]) YIELD relationship, score RETURN relationship.fact_embedding AS emb, score")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert!(!result.rows.is_empty(), "should find vector-similar relationship");
+    }
+
+    /// Tests FOREACH clause: FOREACH (var IN list | SET ...).
+    #[test]
+    fn test_foreach_set() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        engine
+            .execute(
+                &parser.parse("CREATE (a:Item {id: 'a'}), (b:Item {id: 'b'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Item) FOREACH (x IN [1] | SET n.marked = true) RETURN n.id, n.marked")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 2);
+        for row in &result.rows {
+            assert_eq!(row.get("n.marked"), Some(&Value::Bool(true)));
+        }
+    }
+
+    /// Mirrors NornicDB `TestCreateVectorIndex_RelationshipSyntaxFormsAccepted` —
+    /// relationship vector index with IF NOT EXISTS and directional arrow.
+    #[test]
+    fn test_rel_vector_index_syntax_variants() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // Undirected form
+        engine.execute(
+            &parser.parse("CREATE VECTOR INDEX rel_emb_idx IF NOT EXISTS FOR ()-[e:RELATES_TO]-() ON (e.fact_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}").unwrap(),
+            &HashMap::new(),
+        ).unwrap();
+
+        // Directed form (->)
+        engine.execute(
+            &parser.parse("CREATE VECTOR INDEX rel_emb_dir IF NOT EXISTS FOR ()-[e:RELATES_TO]->() ON (e.fact_embedding) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}").unwrap(),
+            &HashMap::new(),
+        ).unwrap();
+
+        // Both should be queryable via SHOW INDEXES
+        let result = engine.execute(
+            &parser.parse("SHOW VECTOR INDEXES").unwrap(),
+            &HashMap::new(),
+        ).unwrap();
+        assert!(result.rows.len() >= 2, "should list at least 2 vector indexes");
+    }
+
+    /// Tests improved temporal functions: date(), datetime(), timestamp(), duration().
+    #[test]
+    fn test_temporal_functions() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // timestamp() returns millis since epoch
+        let result = engine
+            .execute(
+                &parser.parse("RETURN timestamp() AS ts").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        let ts = result.rows[0].get("ts").and_then(Value::as_u64).unwrap();
+        assert!(ts > 1_700_000_000_000, "timestamp should be recent");
+
+        // date() returns ISO date string
+        let result = engine
+            .execute(
+                &parser.parse("RETURN date() AS d").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        let d = result.rows[0].get("d").and_then(Value::as_str).unwrap();
+        assert!(d.contains('-'), "date should contain dashes: {d}");
+        assert_eq!(d.len(), 10, "date should be YYYY-MM-DD");
+
+        // datetime() returns ISO 8601
+        let result = engine
+            .execute(
+                &parser.parse("RETURN datetime() AS dt").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        let dt = result.rows[0].get("dt").and_then(Value::as_str).unwrap();
+        assert!(dt.contains('T'), "datetime should contain T: {dt}");
+
+        // duration() returns ISO duration
+        let result = engine
+            .execute(
+                &parser.parse("RETURN duration() AS dur").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        let dur = result.rows[0].get("dur").and_then(Value::as_str).unwrap();
+        assert!(!dur.is_empty(), "duration should not be empty");
+    }
+
+    /// Tests USING INDEX hints: queries with USING INDEX/S/JOIN/SCAN parse correctly.
+    #[test]
+    fn test_using_index_hints() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        engine
+            .execute(
+                &parser.parse("CREATE (n:Person {name: 'Alice', age: 30})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Person) USING INDEX n:Person(name) WHERE n.name = 'Alice' RETURN n.name")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Person) USING SCAN n:Person WHERE n.age > 20 RETURN n.age")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    /// Tests temporal component functions: date.year(), date.month(), date.day(), etc.
+    #[test]
+    fn test_temporal_components() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // date.year()
+        let result = engine
+            .execute(
+                &parser.parse("RETURN date.year('2024-06-15') AS y").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("y").and_then(Value::as_i64), Some(2024));
+
+        // date.month()
+        let result = engine
+            .execute(
+                &parser.parse("RETURN date.month('2024-06-15') AS m").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("m").and_then(Value::as_i64), Some(6));
+
+        // date.day()
+        let result = engine
+            .execute(
+                &parser.parse("RETURN date.day('2024-06-15') AS d").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("d").and_then(Value::as_i64), Some(15));
+
+        // date.quarter()
+        let result = engine
+            .execute(
+                &parser.parse("RETURN date.quarter('2024-02-15') AS q").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("q").and_then(Value::as_i64), Some(1));
+
+        // date.week (approx)
+        let result = engine
+            .execute(
+                &parser.parse("RETURN date.week('2024-01-07') AS w").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        let w = result.rows[0].get("w").and_then(Value::as_i64).unwrap();
+        assert!(w >= 1 && w <= 2, "week should be 1 or 2, got {w}");
+
+        // date.dayOfWeek (2024-01-01 is Monday)
+        let result = engine
+            .execute(
+                &parser.parse("RETURN date.dayOfWeek('2024-01-01') AS dow").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("dow").and_then(Value::as_i64), Some(1));
+
+        // date.dayOfYear
+        let result = engine
+            .execute(
+                &parser.parse("RETURN date.dayOfYear('2024-01-15') AS doy").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("doy").and_then(Value::as_i64), Some(15));
+
+        // date.truncate('month', ...)
+        let result = engine
+            .execute(
+                &parser.parse("RETURN date.truncate('month', '2024-06-15') AS t").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            result.rows[0].get("t").and_then(Value::as_str),
+            Some("2024-06-01")
+        );
+    }
+
+    /// Tests temporal component functions for datetime.
+    #[test]
+    fn test_datetime_components() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // datetime.year()
+        let result = engine
+            .execute(
+                &parser.parse("RETURN datetime.year('2024-06-15T14:30:00Z') AS y").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("y").and_then(Value::as_i64), Some(2024));
+
+        // datetime.month()
+        let result = engine
+            .execute(
+                &parser.parse("RETURN datetime.month('2024-06-15T14:30:00Z') AS mo").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("mo").and_then(Value::as_i64), Some(6));
+
+        // datetime.day()
+        let result = engine
+            .execute(
+                &parser.parse("RETURN datetime.day('2024-06-15T14:30:00Z') AS d").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("d").and_then(Value::as_i64), Some(15));
+
+        // datetime.hour()
+        let result = engine
+            .execute(
+                &parser.parse("RETURN datetime.hour('2024-06-15T14:30:00Z') AS h").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("h").and_then(Value::as_i64), Some(14));
+
+        // datetime.minute()
+        let result = engine
+            .execute(
+                &parser.parse("RETURN datetime.minute('2024-06-15T14:30:00Z') AS mi").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("mi").and_then(Value::as_i64), Some(30));
+
+        // datetime.second()
+        let result = engine
+            .execute(
+                &parser.parse("RETURN datetime.second('2024-06-15T14:30:45Z') AS s").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("s").and_then(Value::as_i64), Some(45));
+
+        // datetime.truncate('hour', ...)
+        let result = engine
+            .execute(
+                &parser.parse("RETURN datetime.truncate('hour', '2024-06-15T14:30:45Z') AS t").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            result.rows[0].get("t").and_then(Value::as_str),
+            Some("2024-06-15T14:00:00Z")
+        );
+    }
+
+    /// Tests time() and localtime() functions.
+    #[test]
+    fn test_time_and_localtime() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // time() returns current time
+        let result = engine
+            .execute(
+                &parser.parse("RETURN time() AS t").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        let t = result.rows[0].get("t").and_then(Value::as_str).unwrap();
+        assert!(t.contains(':'), "time should contain colons: {t}");
+
+        // localtime() returns time without Z
+        let result = engine
+            .execute(
+                &parser.parse("RETURN localtime() AS lt").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        let lt = result.rows[0].get("lt").and_then(Value::as_str).unwrap();
+        assert!(lt.contains(':'), "localtime should contain colons: {lt}");
+
+        // localdatetime() returns datetime without Z
+        let result = engine
+            .execute(
+                &parser.parse("RETURN localdatetime() AS ldt").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        let ldt = result.rows[0].get("ldt").and_then(Value::as_str).unwrap();
+        assert!(ldt.contains('T'), "localdatetime should contain T: {ldt}");
+        assert!(!ldt.ends_with('Z'), "localdatetime should not end with Z: {ldt}");
+    }
+
+    /// Tests time component accessors: time.hour(), time.minute(), time.second().
+    #[test]
+    fn test_time_components() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let result = engine
+            .execute(
+                &parser.parse("RETURN time.hour('14:30:45Z') AS h").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("h").and_then(Value::as_i64), Some(14));
+
+        let result = engine
+            .execute(
+                &parser.parse("RETURN time.minute('14:30:45Z') AS mi").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("mi").and_then(Value::as_i64), Some(30));
+
+        let result = engine
+            .execute(
+                &parser.parse("RETURN time.second('14:30:45Z') AS s").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("s").and_then(Value::as_i64), Some(45));
+    }

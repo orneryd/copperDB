@@ -52,8 +52,14 @@ impl<'a> ParseContext<'a> {
             .ok_or_else(|| CypherError::ParseError("expected identifier, got end of input".into()))
     }
 
-    /// Advance and return the next token as an identifier.
+    /// Advance and return the next token as an identifier, stripping backtick quotes.
     pub(crate) fn advance_identifier(&mut self) -> Result<String, CypherError> {
-        self.expect_identifier().map(str::to_string)
+        self.expect_identifier().map(|s| {
+            if s.len() >= 2 && s.starts_with('`') && s.ends_with('`') {
+                s[1..s.len() - 1].to_string()
+            } else {
+                s.to_string()
+            }
+        })
     }
 }

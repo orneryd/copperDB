@@ -143,6 +143,11 @@ impl<'a> ParseContext<'a> {
                     let clause = self.parse_unwind()?;
                     clauses.push(Clause::Unwind(clause));
                 }
+                token if token.eq_ignore_ascii_case("FOREACH") => {
+                    self.advance();
+                    let clause = self.parse_foreach()?;
+                    clauses.push(Clause::Foreach(clause));
+                }
                 token if token.eq_ignore_ascii_case("DROP") => {
                     self.advance();
                     if self.peek_is("CONSTRAINT") {

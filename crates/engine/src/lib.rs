@@ -43,8 +43,8 @@ use copperdb_cache::QueryCache;
 use copperdb_compliance::{ComplianceManager, ComplianceReporter};
 use copperdb_cypher::{
     can_execute_as_pipeline, detect_query_pattern, match_compound_query_shape, Clause,
-    EdgeDirection, Expression, Parser, Pattern, QueryType, ReturnItem, SetItem, WhereClause,
-    WithClause,
+    EdgeDirection, Expression, LiteralValue, Parser, Pattern, QueryType, ReturnItem, SetItem,
+    WhereClause, WithClause,
 };
 use copperdb_eval::{EvalEngine, QueryStats};
 use copperdb_fabric::{
@@ -191,10 +191,22 @@ fn sort_rows_by_with_order(
 }
 
 fn apply_with_window(rows: &mut Vec<HashMap<String, Value>>, with_clause: &WithClause) {
-    if let Some(skip) = with_clause.skip {
+    let skip_val = with_clause.skip.as_ref().and_then(|e| match e {
+        Expression::Literal(LiteralValue::Integer(i)) => Some(*i),
+        Expression::Parameter(_name) => {
+            // Engine path doesn't have params context; resolve from expression only
+            None
+        }
+        _ => None,
+    });
+    let limit_val = with_clause.limit.as_ref().and_then(|e| match e {
+        Expression::Literal(LiteralValue::Integer(i)) => Some(*i),
+        _ => None,
+    });
+    if let Some(skip) = skip_val {
         *rows = rows.drain(..).skip(skip.max(0) as usize).collect();
     }
-    if let Some(limit) = with_clause.limit {
+    if let Some(limit) = limit_val {
         rows.truncate(limit.max(0) as usize);
     }
 }

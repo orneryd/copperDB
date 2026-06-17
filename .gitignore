@@ -4,3 +4,4 @@ Cargo.lock
 crates/**/data/**/*
 data/**/*
 .DS_Store
+test_output.txt

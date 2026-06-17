@@ -5,6 +5,7 @@ impl EvalEngine {
         &self,
         call: &copperdb_cypher::CallClause,
         params: &HashMap<String, Value>,
+        rows: &[Row],
     ) -> Result<EvalResult, EvalError> {
         let result = if call
             .procedure
@@ -138,9 +139,29 @@ impl EvalEngine {
             self.execute_fulltext_query_nodes_call(call, params)
         } else if call
             .procedure
+            .eq_ignore_ascii_case("db.index.fulltext.queryRelationships")
+        {
+            self.execute_fulltext_query_relationships_call(call, params)
+        } else if call
+            .procedure
             .eq_ignore_ascii_case("db.index.vector.queryNodes")
         {
             self.execute_vector_query_nodes_call(call, params)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("db.index.vector.queryRelationships")
+        {
+            self.execute_vector_query_relationships_call(call, params)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("db.create.setNodeVectorProperty")
+        {
+            self.execute_set_node_vector_property(call, params, rows)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("db.create.setRelationshipVectorProperty")
+        {
+            self.execute_set_relationship_vector_property(call, params, rows)
         } else {
             Err(EvalError::ExecutionError(format!(
                 "CALL {} is not supported yet",
@@ -1293,6 +1314,197 @@ impl EvalEngine {
         })
     }
 
+    fn execute_fulltext_query_relationships_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+        params: &HashMap<String, Value>,
+    ) -> Result<EvalResult, EvalError> {
+        if !(call.args.len() == 2 || call.args.len() == 3) {
+            return Err(EvalError::ExecutionError(
+                "db.index.fulltext.queryRelationships expects 2 or 3 arguments: indexName, queryString, optionsMap"
+                    .to_string(),
+            ));
+        }
+
+        let row = Row::new();
+        let index_name = eval_expression(&call.args[0], &row, params)?;
+        let query_text = eval_expression(&call.args[1], &row, params)?;
+        let options = if call.args.len() == 3 {
+            Some(eval_expression(&call.args[2], &row, params)?)
+        } else {
+            None
+        };
+
+        let index_name = call_arg_string(&index_name, "indexName")?;
+        let query_text = call_arg_string(&query_text, "queryString")?;
+        let options = call_arg_fulltext_options(options.as_ref())?;
+
+        let catalog = IndexCatalog::new(self.storage.as_ref());
+        let all_indexes = catalog.list()?;
+        let rel_indexes: Vec<_> = all_indexes
+            .into_iter()
+            .filter(|idx| idx.entity_type == copperdb_indexing::CatalogIndexEntityType::Relationship
+                && idx.kind == copperdb_indexing::CatalogIndexKind::FullText
+                && idx.name == index_name)
+            .collect();
+
+        if rel_indexes.is_empty() {
+            return Err(EvalError::ExecutionError(format!(
+                "fulltext relationship index not found: {index_name}"
+            )));
+        }
+
+        let query_lower = query_text.to_lowercase();
+        let tokens: Vec<&str> = query_lower.split_whitespace().collect();
+        let mut results: Vec<(EdgeRecord, usize)> = Vec::new();
+
+        for index in &rel_indexes {
+            let edges = if index.label.is_empty() {
+                self.storage.all_edges()?
+            } else {
+                self.storage.get_edges_by_type(&index.label)?
+            };
+            for edge in edges {
+                let mut score = 0usize;
+                for prop in &index.properties {
+                    if let Some(val) = edge.properties.get(prop) {
+                        let text: String = match val {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        let lower = text.to_lowercase();
+                        for tok in &tokens {
+                            if lower.contains(tok) {
+                                score += 1;
+                            }
+                        }
+                    }
+                }
+                if score > 0 {
+                    results.push((edge, score));
+                }
+            }
+        }
+
+        results.sort_by(|(a, a_score), (b, b_score)| {
+            b_score.cmp(a_score).then(a.id.cmp(&b.id))
+        });
+
+        if options.skip > 0 {
+            results = results.into_iter().skip(options.skip).collect();
+        }
+        if let Some(limit) = options.limit {
+            results.truncate(limit);
+        }
+
+        let rows = results
+            .into_iter()
+            .map(|(edge, score)| {
+                let mut row = Row::new();
+                let mut props: HashMap<String, Value> = edge.properties.clone().into_iter().collect();
+                props.insert("_id".to_string(), Value::String(edge.id.clone()));
+                props.insert("_type".to_string(), Value::String(edge.edge_type.clone()));
+                row.insert("relationship".to_string(), Value::Object(props.into_iter().collect()));
+                row.insert("score".to_string(), Value::from(score as f64));
+                row
+            })
+            .collect();
+
+        Ok(EvalResult {
+            columns: vec!["relationship".to_string(), "score".to_string()],
+            rows,
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_vector_query_relationships_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+        params: &HashMap<String, Value>,
+    ) -> Result<EvalResult, EvalError> {
+        if call.args.len() != 3 {
+            return Err(EvalError::ExecutionError(
+                "db.index.vector.queryRelationships expects 3 arguments: indexName, limit, queryVector"
+                    .to_string(),
+            ));
+        }
+        let row = Row::new();
+        let index_name = eval_expression(&call.args[0], &row, params)?;
+        let limit = eval_expression(&call.args[1], &row, params)?;
+        let query_vector = eval_expression(&call.args[2], &row, params)?;
+
+        let index_name = call_arg_string(&index_name, "indexName")?;
+        let limit = call_arg_usize(&limit, "limit")?;
+        let query_vector = call_arg_vector(&query_vector, "queryVector")?;
+
+        let catalog = IndexCatalog::new(self.storage.as_ref());
+        let index = catalog
+            .get(&index_name)?
+            .ok_or_else(|| EvalError::ExecutionError(format!("index not found: {index_name}")))?;
+
+        if index.kind != copperdb_indexing::CatalogIndexKind::Vector {
+            return Err(EvalError::ExecutionError(format!(
+                "index {index_name} is not a vector index"
+            )));
+        }
+        if index.entity_type != copperdb_indexing::CatalogIndexEntityType::Relationship {
+            return Err(EvalError::ExecutionError(format!(
+                "db.index.vector.queryRelationships only supports relationship indexes: {index_name}"
+            )));
+        }
+
+        let property = index.properties.first().ok_or_else(|| {
+            EvalError::ExecutionError(format!(
+                "vector index {index_name} is missing a target property"
+            ))
+        })?;
+
+        let edges = if index.label.is_empty() {
+            self.storage.all_edges()?
+        } else {
+            self.storage.get_edges_by_type(&index.label)?
+        };
+
+        let mut ranked: Vec<(EdgeRecord, f32)> = Vec::new();
+        for edge in edges {
+            if let Some(vector) = edge_vector_for_property(&edge, property) {
+                if let Some(score) = cosine_similarity(&query_vector, &vector) {
+                    ranked.push((edge, score));
+                }
+            }
+        }
+
+        ranked.sort_by(|(left, left_score), (right, right_score)| {
+            right_score
+                .total_cmp(left_score)
+                .then(left.id.cmp(&right.id))
+        });
+        ranked.truncate(limit);
+
+        let rows = ranked
+            .into_iter()
+            .map(|(edge, score)| {
+                let mut row = Row::new();
+                let mut props: HashMap<String, Value> =
+                    edge.properties.clone().into_iter().collect();
+                props.insert("_id".to_string(), Value::String(edge.id));
+                props.insert("_type".to_string(), Value::String(edge.edge_type));
+                row.insert(
+                    "relationship".to_string(),
+                    Value::Object(props.into_iter().collect()),
+                );
+                row.insert("score".to_string(), Value::from(score as f64));
+                row
+            })
+            .collect();
+
+        Ok(EvalResult {
+            columns: vec!["relationship".to_string(), "score".to_string()],
+            rows,
+            stats: QueryStats::default(),
+        })
+    }
+
     fn inspect_knowledge_policy_by_id(
         &self,
         entity_id: &str,
@@ -1660,6 +1872,68 @@ impl EvalEngine {
             now_unix_ms(),
         ))
     }
+
+    fn execute_set_node_vector_property(
+        &self,
+        call: &copperdb_cypher::CallClause,
+        params: &HashMap<String, Value>,
+        rows: &[Row],
+    ) -> Result<EvalResult, EvalError> {
+        if call.args.len() < 3 {
+            return Err(EvalError::ExecutionError(
+                "db.create.setNodeVectorProperty requires 3 arguments: node, propertyName, vector".into(),
+            ));
+        }
+        for row in rows {
+            let prop_name = call_arg_string(
+                &eval_expression(&call.args[1], row, params)?,
+                "propertyName",
+            )?;
+            let vector_val = eval_expression(&call.args[2], row, params)?;
+            if let Value::Object(props) = eval_expression(&call.args[0], row, params)? {
+                let mut persisted: HashMap<String, Value> =
+                    props.clone().into_iter().collect();
+                persisted.insert(prop_name, vector_val);
+                self.persist_node_props(&persisted)?;
+            }
+        }
+        Ok(EvalResult {
+            columns: vec![],
+            rows: rows.to_vec(),
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_set_relationship_vector_property(
+        &self,
+        call: &copperdb_cypher::CallClause,
+        params: &HashMap<String, Value>,
+        rows: &[Row],
+    ) -> Result<EvalResult, EvalError> {
+        if call.args.len() < 3 {
+            return Err(EvalError::ExecutionError(
+                "db.create.setRelationshipVectorProperty requires 3 arguments: rel, propertyName, vector".into(),
+            ));
+        }
+        for row in rows {
+            let prop_name = call_arg_string(
+                &eval_expression(&call.args[1], row, params)?,
+                "propertyName",
+            )?;
+            let vector_val = eval_expression(&call.args[2], row, params)?;
+            if let Value::Object(props) = eval_expression(&call.args[0], row, params)? {
+                let mut persisted: HashMap<String, Value> =
+                    props.clone().into_iter().collect();
+                persisted.insert(prop_name, vector_val);
+                self.persist_edge_props(&persisted)?;
+            }
+        }
+        Ok(EvalResult {
+            columns: vec![],
+            rows: rows.to_vec(),
+            stats: QueryStats::default(),
+        })
+    }
 }
 
 fn call_arg_string(value: &Value, arg_name: &str) -> Result<String, EvalError> {
@@ -1725,6 +1999,18 @@ fn builtin_procedure_rows() -> Vec<Row> {
             "db.index.vector.queryNodes",
             "db.index.vector.queryNodes(indexName :: STRING, numberOfResults :: INTEGER, query :: LIST<FLOAT>|STRING|$param) :: (node :: NODE, score :: FLOAT)",
             "Vector search on nodes",
+            "READ",
+        ),
+        (
+            "db.index.fulltext.queryRelationships",
+            "db.index.fulltext.queryRelationships(indexName :: STRING, query :: STRING, options = {} :: MAP) :: (relationship :: RELATIONSHIP, score :: FLOAT)",
+            "Fulltext search on relationships",
+            "READ",
+        ),
+        (
+            "db.index.vector.queryRelationships",
+            "db.index.vector.queryRelationships(indexName :: STRING, numberOfResults :: INTEGER, query :: LIST<FLOAT>|STRING|$param) :: (relationship :: RELATIONSHIP, score :: FLOAT)",
+            "Vector search on relationships",
             "READ",
         ),
         (
@@ -2040,6 +2326,10 @@ fn node_vector_for_property(node: &NodeRecord, property: &str) -> Option<Vec<f32
         .iter()
         .find(|vector| !vector.is_empty())
         .cloned()
+}
+
+fn edge_vector_for_property(edge: &EdgeRecord, property: &str) -> Option<Vec<f32>> {
+    edge.properties.get(property).and_then(value_to_vector)
 }
 
 fn value_to_vector(value: &Value) -> Option<Vec<f32>> {

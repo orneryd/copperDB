@@ -192,7 +192,8 @@ impl Parser {
     }
 
     pub fn parse(&self, cypher: &str) -> Result<Query, CypherError> {
-        let tokens = self.tokenize_only(cypher)?;
+        let (_, clean) = crate::string_patterns::strip_index_hints(cypher);
+        let tokens = self.tokenize_only(&clean)?;
         self.parse_tokenized(tokens)
     }
 }

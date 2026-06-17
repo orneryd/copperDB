@@ -207,15 +207,15 @@ impl<'a> ParseContext<'a> {
         }
 
         // Optional SKIP / LIMIT (in any order)
-        let mut skip: Option<i64> = None;
-        let mut limit: Option<i64> = None;
+        let mut skip: Option<Expression> = None;
+        let mut limit: Option<Expression> = None;
         loop {
             if self.peek_is("SKIP") {
                 self.advance();
-                skip = Some(self.parse_i64()?);
+                skip = Some(self.parse_expression_item(&["LIMIT", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE"])?);
             } else if self.peek_is("LIMIT") {
                 self.advance();
-                limit = Some(self.parse_i64()?);
+                limit = Some(self.parse_expression_item(&["SKIP", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE"])?);
             } else {
                 break;
             }
@@ -267,6 +267,7 @@ impl<'a> ParseContext<'a> {
         })
     }
 
+    #[allow(dead_code)]
     fn parse_i64(&mut self) -> Result<i64, CypherError> {
         match self.advance() {
             Some(t) => t
@@ -421,15 +422,15 @@ impl<'a> ParseContext<'a> {
             }
         }
 
-        let mut skip: Option<i64> = None;
-        let mut limit: Option<i64> = None;
+        let mut skip: Option<Expression> = None;
+        let mut limit: Option<Expression> = None;
         loop {
             if self.peek_is("SKIP") {
                 self.advance();
-                skip = Some(self.parse_i64()?);
+                skip = Some(self.parse_expression_item(&["LIMIT", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE"])?);
             } else if self.peek_is("LIMIT") {
                 self.advance();
-                limit = Some(self.parse_i64()?);
+                limit = Some(self.parse_expression_item(&["SKIP", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE"])?);
             } else {
                 break;
             }
@@ -453,6 +454,51 @@ impl<'a> ParseContext<'a> {
         Ok(UnwindClause {
             expression,
             variable,
+        })
+    }
+
+    fn parse_foreach(&mut self) -> Result<ForeachClause, CypherError> {
+        self.expect("(")?;
+        let variable = self.advance_identifier()?;
+        self.expect("IN")?;
+        let list = self.parse_expression_item(&["|"])?;
+        self.expect("|")?;
+        // Parse inner update clause — support SET, MERGE, CREATE, DELETE, REMOVE
+        let mut updates = Vec::new();
+        loop {
+            match self.peek() {
+                Some(t) if t.eq_ignore_ascii_case("SET") => {
+                    self.advance();
+                    updates.push(Clause::Set(self.parse_set()?));
+                }
+                Some(t) if t.eq_ignore_ascii_case("MERGE") => {
+                    self.advance();
+                    updates.push(Clause::Merge(self.parse_merge()?));
+                }
+                Some(t) if t.eq_ignore_ascii_case("CREATE") => {
+                    self.advance();
+                    updates.push(Clause::Create(self.parse_create()?));
+                }
+                Some(t) if t.eq_ignore_ascii_case("DELETE") => {
+                    self.advance();
+                    updates.push(Clause::Delete(self.parse_delete(false)?));
+                }
+                Some(t) if t.eq_ignore_ascii_case("DETACH") => {
+                    self.advance();
+                    updates.push(Clause::Delete(self.parse_delete(true)?));
+                }
+                Some(t) if t.eq_ignore_ascii_case("REMOVE") => {
+                    self.advance();
+                    updates.push(Clause::Remove(self.parse_remove()?));
+                }
+                _ => break,
+            }
+        }
+        self.expect(")")?;
+        Ok(ForeachClause {
+            variable,
+            list,
+            updates,
         })
     }
 
@@ -605,28 +651,58 @@ impl<'a> ParseContext<'a> {
             (IndexEntityType::Node, variable, label)
         };
         self.expect("ON")?;
-        self.expect("(")?;
         let mut properties = Vec::new();
-        loop {
-            let (prop_variable, property) = self.parse_qualified_property()?;
-            if prop_variable != variable {
-                return Err(CypherError::ParseError(format!(
-                    "index variable mismatch: expected '{}', got '{}'",
-                    variable, prop_variable
-                )));
+        // Fulltext indexes use ON EACH [prop1, prop2, ...] syntax
+        if self.peek_is("EACH") {
+            self.advance();
+            self.expect("[")?;
+            loop {
+                let prop_variable = self.advance_identifier()?;
+                self.expect(".")?;
+                let property = self.advance_identifier()?;
+                if prop_variable != variable {
+                    return Err(CypherError::ParseError(format!(
+                        "index variable mismatch: expected '{}', got '{}'",
+                        variable, prop_variable
+                    )));
+                }
+                properties.push(property);
+                if self.peek() == Some(",") {
+                    self.advance();
+                    continue;
+                }
+                break;
             }
-            properties.push(property);
-            if self.peek() == Some(",") {
-                self.advance();
-                continue;
+            self.expect("]")?;
+        } else {
+            self.expect("(")?;
+            loop {
+                let (prop_variable, property) = self.parse_qualified_property()?;
+                if prop_variable != variable {
+                    return Err(CypherError::ParseError(format!(
+                        "index variable mismatch: expected '{}', got '{}'",
+                        variable, prop_variable
+                    )));
+                }
+                properties.push(property);
+                if self.peek() == Some(",") {
+                    self.advance();
+                    continue;
+                }
+                break;
             }
-            break;
+            self.expect(")")?;
         }
-        self.expect(")")?;
         if properties.is_empty() {
             return Err(CypherError::ParseError(
                 "index definition must include at least one property".into(),
             ));
+        }
+        // Optional OPTIONS clause (e.g., for VECTOR index config)
+        let mut options = HashMap::new();
+        if self.peek_is("OPTIONS") {
+            self.advance();
+            options = self.parse_options_map()?;
         }
         Ok(CreateIndexClause {
             name,
@@ -635,6 +711,7 @@ impl<'a> ParseContext<'a> {
             entity_type,
             label,
             properties,
+            options,
         })
     }
 
@@ -1049,6 +1126,25 @@ impl<'a> ParseContext<'a> {
         let token = self
             .advance()
             .ok_or_else(|| CypherError::ParseError("expected option value".into()))?;
+        if token == "{" {
+            let mut map = serde_json::Map::new();
+            while self.peek() != Some("}") {
+                let key = self.advance_identifier()?;
+                self.expect(":")?;
+                let value = self.parse_option_value()?;
+                map.insert(key, value);
+                if self.peek() == Some(",") {
+                    self.advance();
+                } else if self.peek() != Some("}") {
+                    return Err(CypherError::ParseError(format!(
+                        "expected ',' or '}}' in nested map, got '{}'",
+                        self.peek().unwrap_or_default()
+                    )));
+                }
+            }
+            self.expect("}")?;
+            return Ok(Value::Object(map));
+        }
         if token == "[" {
             let mut values = Vec::new();
             while self.peek() != Some("]") {
@@ -1366,7 +1462,7 @@ mod tests {
         let p = Parser::new();
         let q = p.parse("MATCH (n) RETURN n LIMIT 5").unwrap();
         if let Some(Clause::Return(r)) = q.clauses.iter().find(|c| matches!(c, Clause::Return(_))) {
-            assert_eq!(r.limit, Some(5));
+            assert_eq!(r.limit, Some(Expression::Literal(LiteralValue::Integer(5))));
         } else {
             panic!("expected Return clause");
         }
@@ -1448,8 +1544,8 @@ mod tests {
         assert!(with_clause.where_clause.is_some());
         assert_eq!(with_clause.order_by.len(), 1);
         assert!(with_clause.order_by[0].descending);
-        assert_eq!(with_clause.skip, Some(2));
-        assert_eq!(with_clause.limit, Some(5));
+        assert_eq!(with_clause.skip, Some(Expression::Literal(LiteralValue::Integer(2))));
+        assert_eq!(with_clause.limit, Some(Expression::Literal(LiteralValue::Integer(5))));
     }
 
     #[test]

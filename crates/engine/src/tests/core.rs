@@ -1,5 +1,5 @@
 use super::*;
-use copperdb_storage::{EdgeRecord, MvccPruneOptions};
+use copperdb_storage::{EdgeRecord, MvccPruneOptions, NodeRecord};
 use copperdb_txsession::{BookmarkMode, SessionConfig};
 use std::collections::BTreeMap;
 
@@ -264,30 +264,44 @@ fn test_local_fulltext_search_respects_bm25_toggle() {
 #[test]
 fn test_execute_routes_simple_edge_property_aggregation_through_fast_path() {
     let db = CopperDb::open_temporary().unwrap();
-    for (id, props) in [
+    for (id, labels, props) in [
         (
             "customer:1",
+            vec!["Customer"],
             BTreeMap::from([("name".to_string(), Value::String("Alice".into()))]),
         ),
         (
             "customer:2",
+            vec!["Customer"],
             BTreeMap::from([("name".to_string(), Value::String("Bob".into()))]),
         ),
         (
             "customer:3",
+            vec!["Customer"],
             BTreeMap::from([("name".to_string(), Value::String("Carol".into()))]),
         ),
         (
             "product:1",
+            vec!["Product"],
             BTreeMap::from([("name".to_string(), Value::String("Widget".into()))]),
         ),
         (
             "product:2",
+            vec!["Product"],
             BTreeMap::from([("name".to_string(), Value::String("Thing".into()))]),
         ),
     ] {
         db.storage()
-            .put_node(id, &rmp_serde::to_vec(&props).unwrap())
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: id.to_string(),
+                labels: labels.iter().map(|l| l.to_string()).collect(),
+                properties: props.clone().into_iter().collect(),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
             .unwrap();
     }
     for edge in [
@@ -346,22 +360,34 @@ fn test_execute_routes_simple_edge_property_aggregation_through_fast_path() {
 #[test]
 fn test_execute_routes_edge_property_aggregation_branch_coverage() {
     let db = CopperDb::open_temporary().unwrap();
-    for (id, props) in [
+    for (id, labels, props) in [
         (
             "customer:1",
+            vec!["Customer"],
             BTreeMap::from([("name".to_string(), Value::String("C1".into()))]),
         ),
         (
             "product:1",
+            vec!["Product"],
             BTreeMap::from([("name".to_string(), Value::String("P1".into()))]),
         ),
         (
             "product:2",
+            vec!["Product"],
             BTreeMap::from([("name".to_string(), Value::String("P2".into()))]),
         ),
     ] {
         db.storage()
-            .put_node(id, &rmp_serde::to_vec(&props).unwrap())
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: id.to_string(),
+                labels: labels.iter().map(|l| l.to_string()).collect(),
+                properties: props.clone().into_iter().collect(),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
             .unwrap();
     }
     for edge in [
@@ -447,30 +473,44 @@ fn test_execute_routes_edge_property_aggregation_branch_coverage() {
 #[test]
 fn test_execute_routes_incoming_count_star_through_fast_path() {
     let db = CopperDb::open_temporary().unwrap();
-    for (id, props) in [
+    for (id, labels, props) in [
         (
             "person:1",
+            vec!["Person"],
             BTreeMap::from([("name".to_string(), Value::String("Alice".into()))]),
         ),
         (
             "person:2",
+            vec!["Person"],
             BTreeMap::from([("name".to_string(), Value::String("Bob".into()))]),
         ),
         (
             "person:3",
+            vec!["Person"],
             BTreeMap::from([("name".to_string(), Value::String("Carol".into()))]),
         ),
         (
             "person:4",
+            vec!["Person"],
             BTreeMap::from([("name".to_string(), Value::String("Dana".into()))]),
         ),
         (
             "person:5",
+            vec!["Person"],
             BTreeMap::from([("name".to_string(), Value::String("Eve".into()))]),
         ),
     ] {
         db.storage()
-            .put_node(id, &rmp_serde::to_vec(&props).unwrap())
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: id.to_string(),
+                labels: labels.iter().map(|l| l.to_string()).collect(),
+                properties: props.clone().into_iter().collect(),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
             .unwrap();
     }
     for edge in [
@@ -532,18 +572,29 @@ fn test_execute_routes_incoming_count_star_through_fast_path() {
 #[test]
 fn test_execute_routes_incoming_count_limit_zero_returns_empty() {
     let db = CopperDb::open_temporary().unwrap();
-    for (id, props) in [
+    for (id, labels, props) in [
         (
             "person:1",
+            vec!["Person"],
             BTreeMap::from([("name".to_string(), Value::String("Alice".into()))]),
         ),
         (
             "person:2",
+            vec!["Person"],
             BTreeMap::from([("name".to_string(), Value::String("Bob".into()))]),
         ),
     ] {
         db.storage()
-            .put_node(id, &rmp_serde::to_vec(&props).unwrap())
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: id.to_string(),
+                labels: labels.iter().map(|l| l.to_string()).collect(),
+                properties: props.clone().into_iter().collect(),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
             .unwrap();
     }
     db.storage()
@@ -1016,19 +1067,21 @@ fn test_execute_large_variable_length_chain_traversal_consistency() {
     let db = CopperDb::open_temporary().unwrap();
 
     for index in 0..25 {
-        let props = BTreeMap::from([
-            ("_id".to_string(), Value::String(format!("Node:{index}"))),
-            (
-                "_labels".to_string(),
-                Value::Array(vec![Value::String("Node".into())]),
-            ),
-            ("name".to_string(), Value::String(format!("n{index:02}"))),
-        ]);
         db.storage()
-            .put_node(
-                &format!("Node:{index}"),
-                &rmp_serde::to_vec(&props).unwrap(),
-            )
+            .put_node_record(&copperdb_storage::NodeRecord {
+                id: format!("Node:{index}"),
+                labels: vec!["Node".to_string()],
+                properties: BTreeMap::from([
+                    ("name".to_string(), Value::String(format!("n{index:02}"))),
+                ])
+                .into_iter()
+                .collect(),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
             .unwrap();
     }
 

@@ -380,6 +380,39 @@ impl MvccStore {
     }
 
     pub fn trigger_prune_now(&self, retain_last_n_versions: u64) -> usize {
+        // Safety guard: when active snapshot readers pin old versions,
+        // only advance the floor to the oldest reader's anchor — never
+        // remove versions the reader may still need.  The explicit
+        // prune_mvcc_versions can still trim when the caller opts in.
+        if let Some(reader_anchor) = self.oldest_active_reader() {
+            let mut new_global_floor: Option<u64> = None;
+            let mut guard = self.values.write();
+            for state in guard.values_mut() {
+                let Some(head) = state.head.as_ref() else {
+                    continue;
+                };
+                if reader_anchor >= head.head {
+                    continue;
+                }
+                // Find the version at-or-just-above the reader for this key.
+                let anchor = state
+                    .archived
+                    .range(..=reader_anchor)
+                    .next_back()
+                    .map(|(v, _)| *v)
+                    .unwrap_or(head.head);
+                new_global_floor = Some(match new_global_floor {
+                    Some(existing) => existing.min(anchor),
+                    None => anchor,
+                });
+            }
+            drop(guard);
+            if let Some(floor) = new_global_floor {
+                self.floor.store(floor, Ordering::SeqCst);
+            }
+            return 0;
+        }
+
         self.prune_mvcc_versions(MvccPruneOptions {
             max_versions_per_key: Some(retain_last_n_versions.saturating_add(1) as usize),
         })

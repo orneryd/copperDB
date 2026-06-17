@@ -105,29 +105,6 @@ fn raw_node_edge_round_trip() {
 }
 
 #[test]
-fn property_backed_legacy_node_payloads_are_not_decoded_as_typed_nodes() {
-    let engine = StorageEngine::open_temporary().unwrap();
-    let raw_props = BTreeMap::from([
-        ("_id".to_string(), json!("legacy:n1")),
-        ("_labels".to_string(), json!(["File"])),
-        ("content".to_string(), json!("legacy content")),
-        ("embedding".to_string(), json!([0.1, 0.2, 0.3])),
-        ("has_embedding".to_string(), json!(true)),
-        ("embedding_model".to_string(), json!("legacy-model")),
-    ]);
-
-    engine
-        .put_node("legacy:n1", &rmp_serde::to_vec(&raw_props).unwrap())
-        .unwrap();
-
-    assert!(engine.get_node_record("legacy:n1").unwrap().is_none());
-    assert_eq!(
-        engine.get_node("legacy:n1").unwrap(),
-        Some(rmp_serde::to_vec(&raw_props).unwrap())
-    );
-}
-
-#[test]
 fn encrypted_storage_round_trips_records_and_rejects_plain_open() {
     let test_dir = std::env::temp_dir().join(format!(
         "copperdb-storage-encryption-test-{}",

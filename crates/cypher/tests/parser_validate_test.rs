@@ -1,4 +1,4 @@
-use copperdb_cypher::{Clause, Expression, Parser};
+use copperdb_cypher::{Clause, Expression, LiteralValue, Parser};
 
 #[test]
 fn validate_accepts_supported_query() {
@@ -53,7 +53,10 @@ fn parse_simple_match_return_fast_path_shape() {
     }
     match &query.clauses[1] {
         Clause::Return(return_clause) => {
-            assert_eq!(return_clause.limit, Some(10));
+            assert_eq!(
+                return_clause.limit,
+                Some(Expression::Literal(LiteralValue::Integer(10)))
+            );
             assert_eq!(return_clause.items.len(), 1);
             assert!(matches!(
                 &return_clause.items[0].expression,
@@ -88,7 +91,13 @@ fn validate_and_parse_with_order_skip_limit() {
 
     assert_eq!(with_clause.order_by.len(), 1);
     assert!(with_clause.order_by[0].descending);
-    assert_eq!(with_clause.skip, Some(1));
-    assert_eq!(with_clause.limit, Some(2));
+    assert_eq!(
+        with_clause.skip,
+        Some(Expression::Literal(LiteralValue::Integer(1)))
+    );
+    assert_eq!(
+        with_clause.limit,
+        Some(Expression::Literal(LiteralValue::Integer(2)))
+    );
     assert!(with_clause.where_clause.is_some());
 }

@@ -662,14 +662,140 @@ fn eval_function(
                 .as_millis() as u64;
             Ok(Value::Number(ts.into()))
         }
-        "date" | "datetime" | "duration" => {
-            // Return current time as ISO string (simplified)
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            Ok(Value::String(ts.to_string()))
+        "date" => {
+            if args.is_empty() {
+                let (y, m, d) = current_date_ymd();
+                return Ok(Value::String(format!("{y:04}-{m:02}-{d:02}")));
+            }
+            let v = eval_arg(0)?;
+            match &v {
+                Value::String(s) => {
+                    if let Some((y, m, d)) = parse_iso_date(s) {
+                        return Ok(Value::String(format!("{y:04}-{m:02}-{d:02}")));
+                    }
+                }
+                Value::Number(n) => {
+                    // Epoch days → date
+                    if let Some(days) = n.as_i64() {
+                        if let Some((y, m, d)) = epoch_days_to_date_opt(days + 719468) {
+                            return Ok(Value::String(format!("{y:04}-{m:02}-{d:02}")));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            Ok(Value::Null)
         }
+        "datetime" => {
+            if args.is_empty() {
+                let (y, mo, d, h, mi, s) = current_datetime_parts();
+                return Ok(Value::String(format!(
+                    "{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z"
+                )));
+            }
+            let v = eval_arg(0)?;
+            match &v {
+                Value::String(s) => {
+                    if s.len() >= 19 {
+                        return Ok(Value::String(s.clone()));
+                    }
+                    // Try date-only → append T00:00:00Z
+                    if s.len() == 10 && s.chars().nth(4) == Some('-') {
+                        return Ok(Value::String(format!("{s}T00:00:00Z")));
+                    }
+                }
+                Value::Number(n) => {
+                    // Epoch seconds → datetime
+                    if let Some(secs) = n.as_i64() {
+                        let days = secs / 86400;
+                        let tod = ((secs % 86400) + 86400) % 86400;
+                        if let Some((y, mo, d)) = epoch_days_to_date_opt(days + 719468) {
+                            let h = tod / 3600;
+                            let mi = (tod % 3600) / 60;
+                            let s = tod % 60;
+                            return Ok(Value::String(format!(
+                                "{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z"
+                            )));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            Ok(Value::Null)
+        }
+        "time" => {
+            if args.is_empty() {
+                let (_, _, _, h, mi, s) = current_datetime_parts();
+                return Ok(Value::String(format!("{h:02}:{mi:02}:{s:02}Z")));
+            }
+            let v = eval_arg(0)?;
+            if let Value::String(s) = &v {
+                if let Some((h, mi, s)) = parse_iso_time(s) {
+                    return Ok(Value::String(format!("{h:02}:{mi:02}:{s:02}Z")));
+                }
+            }
+            Ok(Value::Null)
+        }
+        "localdatetime" => {
+            if args.is_empty() {
+                let (y, mo, d, h, mi, s) = current_datetime_parts();
+                return Ok(Value::String(format!(
+                    "{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}"
+                )));
+            }
+            let v = eval_arg(0)?;
+            if let Value::String(s) = &v {
+                if s.len() >= 19 {
+                    return Ok(Value::String(s.trim_end_matches('Z').to_string()));
+                }
+            }
+            Ok(Value::Null)
+        }
+        "localtime" => {
+            if args.is_empty() {
+                let (_, _, _, h, mi, s) = current_datetime_parts();
+                return Ok(Value::String(format!("{h:02}:{mi:02}:{s:02}")));
+            }
+            let v = eval_arg(0)?;
+            if let Value::String(s) = &v {
+                if let Some((h, mi, s)) = parse_iso_time(s) {
+                    return Ok(Value::String(format!("{h:02}:{mi:02}:{s:02}")));
+                }
+            }
+            Ok(Value::Null)
+        }
+        "duration" => {
+            if args.is_empty() {
+                return Ok(Value::String("PT0S".to_string()));
+            }
+            let v = eval_arg(0)?;
+            if let Value::String(s) = &v {
+                return Ok(Value::String(s.clone()));
+            }
+            Ok(Value::String("PT0S".to_string()))
+        }
+        // ── Date component accessors: date.year(d), date.month(d), etc. ──
+        "date.year" => temporal_date_component(eval_arg(0)?, 0),
+        "date.month" => temporal_date_component(eval_arg(0)?, 1),
+        "date.day" => temporal_date_component(eval_arg(0)?, 2),
+        "date.week" => temporal_date_week(eval_arg(0)?),
+        "date.quarter" => temporal_date_quarter(eval_arg(0)?),
+        "date.dayofweek" | "date.dayOfWeek" => temporal_date_day_of_week(eval_arg(0)?),
+        "date.dayofyear" | "date.dayOfYear" => temporal_date_day_of_year(eval_arg(0)?),
+        "date.truncate" => temporal_date_truncate(eval_arg(0)?, eval_arg(1)?),
+        // ── Datetime component accessors ──
+        "datetime.year" => temporal_datetime_component(eval_arg(0)?, 0),
+        "datetime.month" => temporal_datetime_component(eval_arg(0)?, 1),
+        "datetime.day" => temporal_datetime_component(eval_arg(0)?, 2),
+        "datetime.hour" => temporal_datetime_component(eval_arg(0)?, 3),
+        "datetime.minute" => temporal_datetime_component(eval_arg(0)?, 4),
+        "datetime.second" => temporal_datetime_component(eval_arg(0)?, 5),
+        "datetime.truncate" => temporal_datetime_truncate(eval_arg(0)?, eval_arg(1)?),
+        // ── Time component accessors ──
+        "time.hour" => temporal_time_component(eval_arg(0)?, 0),
+        "time.minute" => temporal_time_component(eval_arg(0)?, 1),
+        "time.second" => temporal_time_component(eval_arg(0)?, 2),
+        "time.truncate" => temporal_time_truncate(eval_arg(0)?, eval_arg(1)?),
         "exists" => {
             let v = eval_arg(0)?;
             Ok(Value::Bool(v != Value::Null))
@@ -1090,6 +1216,21 @@ fn eval_function(
                 Ok(Value::Number((-1).into()))
             }
         }
+        // ── Vector similarity functions ──
+        "vector.similarity.cosine" => {
+            let a = eval_arg(0)?;
+            let b = eval_arg(1)?;
+            vector_cosine(&a, &b)
+        }
+        "vector.similarity.euclidean" => {
+            let a = eval_arg(0)?;
+            let b = eval_arg(1)?;
+            vector_euclidean(&a, &b)
+        }
+        "db.create.setnodevectorproperty" | "db.create.setrelationshipvectorproperty" => {
+            // These are mutations handled by the eval engine; filter just returns null
+            Ok(Value::Null)
+        }
         _ => Err(FilterError::UnknownFunction(name.to_string())),
     }
 }
@@ -1099,6 +1240,295 @@ fn path_component(value: &Value, key: &str) -> Option<Value> {
         return None;
     };
     map.get(key).cloned()
+}
+
+fn vector_cosine(a: &Value, b: &Value) -> Result<Value, FilterError> {
+    let (av, bv) = match (a, b) {
+        (Value::Array(av), Value::Array(bv)) => (av, bv),
+        _ => return Ok(Value::Null),
+    };
+    if av.is_empty() || av.len() != bv.len() {
+        return Ok(Value::Null);
+    }
+    let mut dot = 0.0f64;
+    let mut mag_a = 0.0f64;
+    let mut mag_b = 0.0f64;
+    for i in 0..av.len() {
+        let af = av[i].as_f64().unwrap_or(0.0);
+        let bf = bv[i].as_f64().unwrap_or(0.0);
+        dot += af * bf;
+        mag_a += af * af;
+        mag_b += bf * bf;
+    }
+    let denom = (mag_a * mag_b).sqrt();
+    if denom == 0.0 {
+        return Ok(Value::Null);
+    }
+    let score = (dot / denom).clamp(-1.0, 1.0);
+    Ok(Value::Number(
+        serde_json::Number::from_f64((score * 1_000_000.0).round() / 1_000_000.0)
+            .unwrap_or(serde_json::Number::from(0)),
+    ))
+}
+
+fn vector_euclidean(a: &Value, b: &Value) -> Result<Value, FilterError> {
+    let (av, bv) = match (a, b) {
+        (Value::Array(av), Value::Array(bv)) => (av, bv),
+        _ => return Ok(Value::Null),
+    };
+    if av.is_empty() || av.len() != bv.len() {
+        return Ok(Value::Null);
+    }
+    let mut sum_sq = 0.0f64;
+    for i in 0..av.len() {
+        let af = av[i].as_f64().unwrap_or(0.0);
+        let bf = bv[i].as_f64().unwrap_or(0.0);
+        let diff = af - bf;
+        sum_sq += diff * diff;
+    }
+    let dist = sum_sq.sqrt();
+    let score = 1.0 / (1.0 + dist);
+    Ok(Value::Number(
+        serde_json::Number::from_f64((score * 1_000_000.0).round() / 1_000_000.0)
+            .unwrap_or(serde_json::Number::from(0)),
+    ))
+}
+
+/// Convert days since epoch (1970-01-01 + offset) to (year, month, day).
+/// Uses a simplified Gregorian calendar algorithm.
+fn epoch_days_to_date(days: i64) -> (i64, i64, i64) {
+    // Shift epoch from 0000-03-01 to simplify leap year math
+    let era_cycles = if days >= 0 {
+        days / 146097
+    } else {
+        (days - 146096) / 146097
+    };
+    let day_of_era = days - era_cycles * 146097;
+    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+    let year = year_of_era + era_cycles * 400 + 1;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let mp = (5 * day_of_year + 2) / 153;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let day = day_of_year - (153 * mp + 2) / 5 + 1;
+    let year = if month <= 2 { year + 1 } else { year };
+    (year, month, day)
+}
+
+/// Fallible version returning Option.
+fn epoch_days_to_date_opt(days: i64) -> Option<(i64, i64, i64)> {
+    Some(epoch_days_to_date(days))
+}
+
+fn current_date_ymd() -> (i64, i64, i64) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let days = secs / 86400;
+    epoch_days_to_date(days + 719468)
+}
+
+fn current_datetime_parts() -> (i64, i64, i64, i64, i64, i64) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let days = secs / 86400;
+    let tod = ((secs % 86400) + 86400) % 86400;
+    let (y, mo, d) = epoch_days_to_date(days + 719468);
+    let h = tod / 3600;
+    let mi = (tod % 3600) / 60;
+    let s = tod % 60;
+    (y, mo, d, h, mi, s)
+}
+
+/// Parse ISO date "YYYY-MM-DD" → (y, m, d).
+fn parse_iso_date(s: &str) -> Option<(i64, i64, i64)> {
+    if s.len() < 10 {
+        return None;
+    }
+    let y: i64 = s[0..4].parse().ok()?;
+    let m: i64 = s[5..7].parse().ok()?;
+    let d: i64 = s[8..10].parse().ok()?;
+    if s.as_bytes().get(4) != Some(&b'-') || s.as_bytes().get(7) != Some(&b'-') {
+        return None;
+    }
+    Some((y, m, d))
+}
+
+/// Parse ISO time "HH:MM:SS" or "HH:MM:SSZ" → (h, m, s).
+fn parse_iso_time(s: &str) -> Option<(i64, i64, i64)> {
+    let s = s.trim_end_matches('Z').trim_end_matches('z');
+    if s.len() < 8 {
+        return None;
+    }
+    let h: i64 = s[0..2].parse().ok()?;
+    let m: i64 = s[3..5].parse().ok()?;
+    let sec: i64 = s[6..8].parse().ok()?;
+    Some((h, m, sec))
+}
+
+/// Parse full ISO datetime "YYYY-MM-DDTHH:MM:SS" → (y, mo, d, h, mi, s).
+fn parse_iso_datetime(s: &str) -> Option<(i64, i64, i64, i64, i64, i64)> {
+    let s = s.trim_end_matches('Z').trim_end_matches('z');
+    if s.len() < 19 {
+        return None;
+    }
+    let (y, m, d) = parse_iso_date(&s[..10])?;
+    let (h, mi, sec) = parse_iso_time(&s[11..19])?;
+    Some((y, m, d, h, mi, sec))
+}
+
+fn extract_date_str(v: &Value) -> Option<(i64, i64, i64)> {
+    match v {
+        Value::String(s) => parse_iso_date(s),
+        _ => None,
+    }
+}
+
+fn extract_datetime_str(v: &Value) -> Option<(i64, i64, i64, i64, i64, i64)> {
+    match v {
+        Value::String(s) => parse_iso_datetime(s),
+        _ => None,
+    }
+}
+
+fn extract_time_str(v: &Value) -> Option<(i64, i64, i64)> {
+    match v {
+        Value::String(s) => parse_iso_time(s),
+        _ => None,
+    }
+}
+
+// ── Date component accessors ──
+
+fn temporal_date_component(v: Value, index: usize) -> Result<Value, FilterError> {
+    let (y, m, d) = extract_date_str(&v).ok_or_else(|| {
+        FilterError::TypeError("date.* functions require a date string".into())
+    })?;
+    Ok(Value::from([y, m, d][index]))
+}
+
+fn temporal_date_week(v: Value) -> Result<Value, FilterError> {
+    let (y, m, d) = extract_date_str(&v).ok_or_else(|| {
+        FilterError::TypeError("date.week requires a date string".into())
+    })?;
+    let day_of_year = days_since_epoch(y, m, d) - days_since_epoch(y, 1, 1) + 1;
+    let week = (day_of_year + 6) / 7;
+    Ok(Value::from(week))
+}
+
+fn temporal_date_quarter(v: Value) -> Result<Value, FilterError> {
+    let (_, m, _) = extract_date_str(&v).ok_or_else(|| {
+        FilterError::TypeError("date.quarter requires a date string".into())
+    })?;
+    Ok(Value::from((m + 2) / 3))
+}
+
+fn temporal_date_day_of_week(v: Value) -> Result<Value, FilterError> {
+    // 1970-01-01 was a Thursday. Compute days since then → weekday (1=Mon, 7=Sun).
+    let (y, m, d) = extract_date_str(&v).ok_or_else(|| {
+        FilterError::TypeError("date.dayOfWeek requires a date string".into())
+    })?;
+    let days = days_since_epoch(y, m, d);
+    let dow = ((days + 3) % 7) + 1; // 1970-01-01 was Thursday (dow=4, +3 offset)
+    Ok(Value::from(dow))
+}
+
+fn temporal_date_day_of_year(v: Value) -> Result<Value, FilterError> {
+    let (y, m, d) = extract_date_str(&v).ok_or_else(|| {
+        FilterError::TypeError("date.dayOfYear requires a date string".into())
+    })?;
+    let doy = days_since_epoch(y, m, d) - days_since_epoch(y, 1, 1) + 1;
+    Ok(Value::from(doy))
+}
+
+fn temporal_date_truncate(unit: Value, date: Value) -> Result<Value, FilterError> {
+    let unit = unit.as_str().unwrap_or("day");
+    let (y, m, d) = extract_date_str(&date).ok_or_else(|| {
+        FilterError::TypeError("date.truncate requires (unit, date)".into())
+    })?;
+    match unit.to_lowercase().as_str() {
+        "year" | "years" => Ok(Value::String(format!("{y:04}-01-01"))),
+        "month" | "months" => Ok(Value::String(format!("{y:04}-{m:02}-01"))),
+        _ => Ok(Value::String(format!("{y:04}-{m:02}-{d:02}"))),
+    }
+}
+
+// ── Datetime component accessors ──
+
+fn temporal_datetime_component(v: Value, index: usize) -> Result<Value, FilterError> {
+    let (y, mo, d, h, mi, s) = extract_datetime_str(&v).ok_or_else(|| {
+        FilterError::TypeError("datetime.* functions require a datetime string".into())
+    })?;
+    Ok(Value::from([y, mo, d, h, mi, s][index]))
+}
+
+fn temporal_datetime_truncate(unit: Value, dt: Value) -> Result<Value, FilterError> {
+    let unit = unit.as_str().unwrap_or("second");
+    let (y, mo, d, h, mi, s) = extract_datetime_str(&dt).ok_or_else(|| {
+        FilterError::TypeError("datetime.truncate requires (unit, datetime)".into())
+    })?;
+    match unit.to_lowercase().as_str() {
+        "year" | "years" => Ok(Value::String(format!("{y:04}-01-01T00:00:00Z"))),
+        "month" | "months" => Ok(Value::String(format!("{y:04}-{mo:02}-01T00:00:00Z"))),
+        "day" | "days" => Ok(Value::String(format!("{y:04}-{mo:02}-{d:02}T00:00:00Z"))),
+        "hour" | "hours" => Ok(Value::String(format!("{y:04}-{mo:02}-{d:02}T{h:02}:00:00Z"))),
+        "minute" | "minutes" | "min" => {
+            Ok(Value::String(format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:00Z")))
+        }
+        _ => Ok(Value::String(format!(
+            "{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z"
+        ))),
+    }
+}
+
+// ── Time component accessors ──
+
+fn temporal_time_component(v: Value, index: usize) -> Result<Value, FilterError> {
+    let (h, mi, s) = extract_time_str(&v).ok_or_else(|| {
+        FilterError::TypeError("time.* functions require a time string".into())
+    })?;
+    Ok(Value::from([h, mi, s][index]))
+}
+
+fn temporal_time_truncate(unit: Value, t: Value) -> Result<Value, FilterError> {
+    let unit = unit.as_str().unwrap_or("second");
+    let (h, mi, s) = extract_time_str(&t).ok_or_else(|| {
+        FilterError::TypeError("time.truncate requires (unit, time)".into())
+    })?;
+    match unit.to_lowercase().as_str() {
+        "hour" | "hours" => Ok(Value::String(format!("{h:02}:00:00Z"))),
+        "minute" | "minutes" | "min" => Ok(Value::String(format!("{h:02}:{mi:02}:00Z"))),
+        _ => Ok(Value::String(format!("{h:02}:{mi:02}:{s:02}Z"))),
+    }
+}
+
+fn is_leap(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+/// Days from 1970-01-01 to (y, m, d). Uses the same March-based calendar
+/// as epoch_days_to_date so the two functions are exact inverses.
+fn days_since_epoch(y: i64, m: i64, d: i64) -> i64 {
+    // Convert to March-based year (March = month 0, Jan/Feb = month 10/11 of prev year).
+    let (y_adj, m_adj) = if m <= 2 {
+        (y - 1, m + 12)
+    } else {
+        (y, m)
+    };
+    // Days from year 0-03-01 to (y_adj, m_adj, d).
+    let era = if y_adj >= 0 {
+        y_adj / 400
+    } else {
+        (y_adj - 399) / 400
+    };
+    let yoe = y_adj - era * 400; // year of era (0..399)
+    let doy = (153 * (m_adj - 3) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days_from_0 = era * 146097 + doe;
+    // 1970-01-01 in this system.
+    days_from_0 - 719468
 }
 
 // ─── Legacy predicate trait ──────────────────────────────────────────────────

@@ -72,6 +72,26 @@ pub fn tokenize(input: &str) -> Result<Vec<&str>, CypherError> {
             continue;
         }
 
+        // Backtick-quoted identifier: `anything.here` — treated as single token
+        if b == b'`' {
+            let start = i;
+            i += 1;
+            while i < len {
+                if sb[i] == b'`' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            if i > len || sb.get(i - 1).copied() != Some(b'`') {
+                // Unterminated backtick — fall through to normal scanning
+                i = start;
+            } else {
+                tokens.push(&input[start..i]);
+                continue;
+            }
+        }
+
         if i + 1 < len {
             let pair = (b, sb[i + 1]);
             if matches!(

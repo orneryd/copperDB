@@ -723,8 +723,26 @@ impl<'a> ParseContext<'a> {
                     self.expect(")")?;
                     Ok(())
                 } else if self.peek() == Some(".") {
-                    self.advance();
-                    self.expect_identifier()?;
+                    // Accumulate dotted identifiers (e.g., vector.similarity.cosine)
+                    while self.peek() == Some(".") {
+                        self.advance();
+                        self.expect_identifier()?;
+                    }
+                    // If followed by (, it's a dotted function call
+                    if self.peek() == Some("(") {
+                        self.advance();
+                        if self.peek_is("DISTINCT") {
+                            self.advance();
+                        }
+                        if self.peek() != Some(")") {
+                            self.validate_expression()?;
+                            while self.peek() == Some(",") {
+                                self.advance();
+                                self.validate_expression()?;
+                            }
+                        }
+                        self.expect(")")?;
+                    }
                     Ok(())
                 } else {
                     Ok(())

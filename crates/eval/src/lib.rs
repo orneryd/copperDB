@@ -413,7 +413,6 @@ fn collect_expression_variables(expression: &Expression, variables: &mut HashSet
         Expression::Comparison { operands, .. }
         | Expression::InList { operands, .. }
         | Expression::And(operands)
-        | Expression::And(operands)
         | Expression::Or(operands)
         | Expression::Xor(operands)
         | Expression::Add(operands)
@@ -918,11 +917,15 @@ fn sort_rows_by_return_order(rows: &mut [Row], ret: &copperdb_cypher::ReturnClau
     });
 }
 
-fn apply_return_window(rows: &mut Vec<Row>, ret: &copperdb_cypher::ReturnClause) {
-    if let Some(skip) = ret.skip {
+fn apply_return_window(
+    rows: &mut Vec<Row>,
+    ret: &copperdb_cypher::ReturnClause,
+    params: &HashMap<String, Value>,
+) {
+    if let Some(skip) = resolve_limit(&ret.skip, params) {
         *rows = rows.drain(..).skip(skip.max(0) as usize).collect();
     }
-    if let Some(limit) = ret.limit {
+    if let Some(limit) = resolve_limit(&ret.limit, params) {
         rows.truncate(limit.max(0) as usize);
     }
     if ret.distinct {
@@ -947,12 +950,22 @@ fn sort_rows_by_with_order(rows: &mut [Row], with_clause: &WithClause) {
     });
 }
 
-fn apply_with_window(rows: &mut Vec<Row>, with_clause: &WithClause) {
-    if let Some(skip) = with_clause.skip {
+fn apply_with_window(rows: &mut Vec<Row>, with_clause: &WithClause, params: &HashMap<String, Value>) {
+    if let Some(skip) = resolve_limit(&with_clause.skip, params) {
         *rows = rows.drain(..).skip(skip.max(0) as usize).collect();
     }
-    if let Some(limit) = with_clause.limit {
+    if let Some(limit) = resolve_limit(&with_clause.limit, params) {
         rows.truncate(limit.max(0) as usize);
+    }
+}
+
+/// Resolve a SKIP/LIMIT expression to an i64, supporting literals and $param references.
+fn resolve_limit(expr: &Option<Expression>, params: &HashMap<String, Value>) -> Option<i64> {
+    let expr = expr.as_ref()?;
+    match expr {
+        Expression::Literal(LiteralValue::Integer(i)) => Some(*i),
+        Expression::Parameter(name) => params.get(name)?.as_i64(),
+        _ => None,
     }
 }
 

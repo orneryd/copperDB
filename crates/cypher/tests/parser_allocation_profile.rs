@@ -338,7 +338,8 @@ fn profile_query_shape(query: &Query) -> QueryShapeStats {
             | Clause::ShowPromotionProfiles(_)
             | Clause::AlterPromotionPolicy(_)
             | Clause::DropPromotionPolicy(_)
-            | Clause::ShowPromotionPolicies(_) => {}
+            | Clause::ShowPromotionPolicies(_)
+            | Clause::Foreach(_) => {}
         }
     }
 
@@ -393,7 +394,13 @@ fn profile_return_item(item: &ReturnItem) -> QueryShapeStats {
 }
 
 fn profile_set_item(item: &SetItem) -> QueryShapeStats {
-    profile_expression(&item.value)
+    match item {
+        SetItem::Property { value, .. }
+        | SetItem::MapAssignment { value, .. }
+        | SetItem::MapMerge { value, .. } => profile_expression(value),
+        SetItem::DynamicLabel { expression, .. } => profile_expression(expression),
+        SetItem::Label { .. } => QueryShapeStats::default(),
+    }
 }
 
 fn profile_expression(expression: &Expression) -> QueryShapeStats {
@@ -403,10 +410,19 @@ fn profile_expression(expression: &Expression) -> QueryShapeStats {
     };
 
     match expression {
-        Expression::PropertyAccess { .. } | Expression::Parameter(_) | Expression::Variable(_) => {}
+        Expression::PropertyAccess { .. }
+        | Expression::Parameter(_)
+        | Expression::ParameterPropertyAccess { .. }
+        | Expression::Variable(_) => {}
         Expression::Comparison { operands, .. }
         | Expression::And(operands)
-        | Expression::Or(operands) => {
+        | Expression::Or(operands)
+        | Expression::Add(operands)
+        | Expression::Subtract(operands)
+        | Expression::Multiply(operands)
+        | Expression::Divide(operands)
+        | Expression::Modulo(operands)
+        | Expression::Xor(operands) => {
             stats.boxed_expression_edges += 2;
             stats.merge(profile_expression(&operands.left));
             stats.merge(profile_expression(&operands.right));
@@ -415,6 +431,16 @@ fn profile_expression(expression: &Expression) -> QueryShapeStats {
             stats.boxed_expression_edges += 2;
             stats.merge(profile_expression(&operands.left));
             stats.merge(profile_expression(&operands.right));
+        }
+        Expression::Between {
+            expression,
+            lower,
+            upper,
+        } => {
+            stats.boxed_expression_edges += 3;
+            stats.merge(profile_expression(expression));
+            stats.merge(profile_expression(lower));
+            stats.merge(profile_expression(upper));
         }
         Expression::Literal(_) => {
             stats.literals += 1;
@@ -431,16 +457,44 @@ fn profile_expression(expression: &Expression) -> QueryShapeStats {
                 stats.merge(profile_expression(item));
             }
         }
+        Expression::ListComprehension(lc) => {
+            stats.list_literals += 1;
+            stats.merge(profile_expression(&lc.list));
+            stats.merge(profile_expression(&lc.expression));
+            if let Some(pred) = &lc.predicate {
+                stats.merge(profile_expression(pred));
+            }
+        }
+        Expression::Reduce(re) => {
+            stats.merge(profile_expression(&re.initial));
+            stats.merge(profile_expression(&re.list));
+            stats.merge(profile_expression(&re.expression));
+        }
         Expression::MapLiteral(entries) => {
             stats.map_literals += 1;
             for entry in entries {
                 stats.merge(profile_expression(&entry.value));
             }
         }
-        Expression::Not(inner) | Expression::IsNull(inner) | Expression::IsNotNull(inner) => {
+        Expression::Not(inner)
+        | Expression::IsNull(inner)
+        | Expression::IsNotNull(inner) => {
             stats.boxed_expression_edges += 1;
             stats.merge(profile_expression(inner));
         }
+        Expression::Case(case) => {
+            if let Some(expr) = &case.expression {
+                stats.merge(profile_expression(expr));
+            }
+            for alt in &case.alternatives {
+                stats.merge(profile_expression(&alt.condition));
+                stats.merge(profile_expression(&alt.result));
+            }
+            if let Some(default) = &case.default {
+                stats.merge(profile_expression(default));
+            }
+        }
+        Expression::PatternExists { .. } => {}
     }
 
     stats

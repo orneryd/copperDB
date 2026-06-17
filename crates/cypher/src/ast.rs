@@ -35,6 +35,7 @@ pub enum Clause {
     Merge(MergeClause),
     With(WithClause),
     Unwind(UnwindClause),
+    Foreach(ForeachClause),
     Create(CreateClause),
     CreateConstraint(CreateConstraintClause),
     DropConstraint(DropConstraintClause),
@@ -83,8 +84,8 @@ pub struct CallClause {
 pub struct ReturnClause {
     pub items: Vec<ReturnItem>,
     pub order_by: Vec<OrderItem>,
-    pub skip: Option<i64>,
-    pub limit: Option<i64>,
+    pub skip: Option<Expression>,
+    pub limit: Option<Expression>,
     pub distinct: bool,
 }
 
@@ -113,8 +114,8 @@ pub struct DeleteClause {
 pub struct WithClause {
     pub items: Vec<ReturnItem>,
     pub order_by: Vec<OrderItem>,
-    pub skip: Option<i64>,
-    pub limit: Option<i64>,
+    pub skip: Option<Expression>,
+    pub limit: Option<Expression>,
     pub where_clause: Option<WhereClause>,
 }
 
@@ -122,6 +123,13 @@ pub struct WithClause {
 pub struct UnwindClause {
     pub expression: Expression,
     pub variable: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ForeachClause {
+    pub variable: String,
+    pub list: Expression,
+    pub updates: Vec<Clause>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +164,7 @@ pub struct CreateIndexClause {
     pub entity_type: IndexEntityType,
     pub label: String,
     pub properties: Vec<String>,
+    pub options: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -345,7 +354,7 @@ impl Pattern {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PropertyEntry {
     pub key: String,
     pub value: Expression,
@@ -384,13 +393,13 @@ pub enum LiteralValue {
     Null,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BinaryExpression {
     pub left: Expression,
     pub right: Expression,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expression {
     PropertyAccess {
         variable: String,
@@ -444,7 +453,7 @@ pub enum Expression {
     Case(CaseExpression),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CaseExpression {
     /// For simple CASE: CASE expr WHEN ... (None for searched CASE)
     pub expression: Option<Box<Expression>>,
@@ -454,13 +463,13 @@ pub struct CaseExpression {
     pub default: Option<Box<Expression>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CaseAlternative {
     pub condition: Expression,
     pub result: Expression,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ListComprehension {
     pub variable: String,
     pub list: Box<Expression>,
@@ -468,7 +477,7 @@ pub struct ListComprehension {
     pub expression: Box<Expression>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ReduceExpression {
     pub accumulator: String,
     pub initial: Box<Expression>,

@@ -282,7 +282,7 @@ impl EvalEngine {
                     });
             match clause {
                 Clause::Call(call) => {
-                    let call_result = self.execute_call_clause(call, params)?;
+                    let call_result = self.execute_call_clause(call, params, &current_rows)?;
                     columns = call_result.columns;
                     if clause_index + 1 == query.clauses.len() {
                         result_rows = call_result.rows;
@@ -837,13 +837,14 @@ impl EvalEngine {
                         sort_rows_by_return_order(&mut current_rows, ret);
                     }
 
-                    // SKIP / LIMIT applied before projection so we page over the
-                    // correct pre-projection rows.
-                    if let Some(skip) = ret.skip {
+                    // SKIP / LIMIT — resolve expressions to i64
+                    let skip_val = resolve_limit(&ret.skip, &params);
+                    let limit_val = resolve_limit(&ret.limit, &params);
+                    if let Some(skip) = skip_val {
                         let skip = skip.max(0) as usize;
                         current_rows = current_rows.into_iter().skip(skip).collect();
                     }
-                    if let Some(limit) = ret.limit {
+                    if let Some(limit) = limit_val {
                         let limit = limit.max(0) as usize;
                         current_rows.truncate(limit);
                     }
@@ -900,7 +901,7 @@ impl EvalEngine {
                     if !with.order_by.is_empty() {
                         sort_rows_by_with_order(&mut projected, with);
                     }
-                    apply_with_window(&mut projected, with);
+                    apply_with_window(&mut projected, with, params);
 
                     current_rows = projected;
                 }
@@ -918,6 +919,29 @@ impl EvalEngine {
                         }
                     }
                     replace_binding_rows(&mut current_rows, new_rows);
+                }
+
+                Clause::Foreach(foreach) => {
+                    for row in &mut *current_rows {
+                        let list_val = eval_expression(&foreach.list, row, params)?;
+                        if let Value::Array(items) = list_val {
+                            for item in items {
+                                // Bind loop variable directly on the row
+                                row.insert(foreach.variable.clone(), item);
+                                // Execute each inner SET clause
+                                for update in &foreach.updates {
+                                    if let Clause::Set(set) = update {
+                                        self.execute_set_clause(
+                                            std::slice::from_mut(row),
+                                            &set.items,
+                                            params,
+                                            &mut stats,
+                                        )?;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 Clause::Merge(merge) => {
@@ -1091,7 +1115,7 @@ impl EvalEngine {
             return self.execute_inner(request_context, query, params);
         };
         let ret = return_clause(query)?;
-        let limit = ret.limit.unwrap_or(0).max(0) as usize;
+        let limit = resolve_limit(&ret.limit, params).unwrap_or(0).max(0) as usize;
         let columns: Vec<String> = ret.items.iter().map(column_name).collect();
         if limit == 0 {
             return Ok(EvalResult {
@@ -1199,7 +1223,7 @@ impl EvalEngine {
         if !ret.order_by.is_empty() {
             sort_rows_by_return_order(&mut rows, ret);
         }
-        apply_return_window(&mut rows, ret);
+        apply_return_window(&mut rows, ret, &HashMap::new());
 
         Ok(EvalResult {
             columns,
@@ -1262,7 +1286,7 @@ impl EvalEngine {
                 .reverse()
             });
         }
-        apply_return_window(&mut rows, ret);
+        apply_return_window(&mut rows, ret, &HashMap::new());
 
         Ok(EvalResult {
             columns,
@@ -1361,10 +1385,10 @@ impl EvalEngine {
             });
         }
 
-        if let Some(skip) = ret.skip {
+        if let Some(skip) = resolve_limit(&ret.skip, &HashMap::new()) {
             rows = rows.into_iter().skip(skip.max(0) as usize).collect();
         }
-        if let Some(limit) = ret.limit {
+        if let Some(limit) = resolve_limit(&ret.limit, &HashMap::new()) {
             rows.truncate(limit.max(0) as usize);
         }
         if ret.distinct {
@@ -1711,7 +1735,7 @@ impl EvalEngine {
                     if !with.order_by.is_empty() {
                         sort_rows_by_with_order(&mut projected, with);
                     }
-                    apply_with_window(&mut projected, with);
+                    apply_with_window(&mut projected, with, params);
 
                     current_rows = projected;
                 }
@@ -1746,11 +1770,11 @@ impl EvalEngine {
                         sort_rows_by_return_order(&mut current_rows, ret);
                     }
 
-                    if let Some(skip) = ret.skip {
+                    if let Some(skip) = resolve_limit(&ret.skip, params) {
                         let skip = skip.max(0) as usize;
                         current_rows = current_rows.into_iter().skip(skip).collect();
                     }
-                    if let Some(limit) = ret.limit {
+                    if let Some(limit) = resolve_limit(&ret.limit, params) {
                         current_rows.truncate(limit.max(0) as usize);
                     }
 
@@ -1991,7 +2015,19 @@ impl EvalEngine {
         }
         Ok(())
     }
+}
 
+/// Resolve a SKIP/LIMIT expression to an i64, supporting literals and $param references.
+fn resolve_limit(expr: &Option<Expression>, params: &HashMap<String, Value>) -> Option<i64> {
+    let expr = expr.as_ref()?;
+    match expr {
+        Expression::Literal(LiteralValue::Integer(i)) => Some(*i),
+        Expression::Parameter(name) => params.get(name)?.as_i64(),
+        _ => None,
+    }
+}
+
+impl EvalEngine {
     fn execute_optional_match_clause(
         &self,
         base_rows: &[Row],

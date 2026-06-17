@@ -3454,8 +3454,8 @@ fn promotion_policy_target_key(policy: &PromotionPolicySchema) -> String {
     format!("node:{}", sorted.join("\0"))
 }
 
-fn compat_node_record_from_bytes(id: &str, raw: &[u8]) -> Result<Option<NodeRecord>, StorageError> {
-    let _ = id;
+fn compat_node_record_from_bytes(_id: &str, raw: &[u8]) -> Result<Option<NodeRecord>, StorageError> {
+    // Single format: NodeRecord only (greenfield — no legacy).
     Ok(rmp_serde::from_slice::<NodeRecord>(raw).ok())
 }
 

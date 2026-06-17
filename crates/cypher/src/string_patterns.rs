@@ -490,6 +490,49 @@ fn is_valid_identifier(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// Strip `USING INDEX/JOIN/SCAN` hints from a Cypher query.
+/// These hints are advisory and don't affect query semantics.
+pub fn strip_index_hints(query: &str) -> (Vec<String>, String) {
+    let mut hints = Vec::new();
+    let upper = query.to_uppercase();
+    let bytes = query.as_bytes();
+    let mut result = String::with_capacity(query.len());
+    let mut pos = 0;
+
+    while pos < bytes.len() {
+        // Look for USING keyword at the current position
+        let remaining = &upper[pos..];
+        if remaining.starts_with("USING ") || remaining.starts_with("USING\t") {
+            let _start = pos;
+            pos += 6; // skip "USING "
+
+            // Scan forward to find the end of the hint (before WHERE/RETURN/WITH or end)
+            let hint_start = pos;
+            while pos < bytes.len() {
+                if bytes[pos] == b'\n' || (pos + 5 < bytes.len() &&
+                    (&upper[pos..pos+5] == "WHERE" || &upper[pos..pos+6] == "RETURN"
+                    || &upper[pos..pos+4] == "WITH" || &upper[pos..pos+5] == "MATCH"
+                    || &upper[pos..pos+6] == "CREATE" || &upper[pos..pos+5] == "MERGE"))
+                {
+                    break;
+                }
+                pos += 1;
+            }
+
+            hints.push(query[hint_start..pos].trim().to_string());
+            continue;
+        }
+
+        // Copy normal characters
+        if pos < bytes.len() {
+            result.push(bytes[pos] as char);
+        }
+        pos += 1;
+    }
+
+    (hints, result.trim().to_string())
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

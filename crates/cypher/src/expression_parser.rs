@@ -298,6 +298,53 @@ impl<'a> ParseContext<'a> {
                     return self.parse_reduce_expression();
                 }
 
+                // Dotted function call: vector.similarity.cosine(args)
+                if self.peek() == Some(".") {
+                    let mut full_name = name;
+                    // Accumulate dotted name components
+                    while self.peek() == Some(".") {
+                        self.advance();
+                        full_name.push('.');
+                        full_name.push_str(self.advance_identifier()?.as_str());
+                    }
+                    // If followed by (, it's a function call
+                    if self.peek() == Some("(") {
+                        self.advance();
+                        let distinct = if self.peek_is("DISTINCT") {
+                            self.advance();
+                            true
+                        } else {
+                            false
+                        };
+                        let mut args: Vec<Expression> = Vec::new();
+                        if self.peek() != Some(")") {
+                            args.push(self.parse_expression_item(&[",", ")"])?);
+                            while self.peek() == Some(",") {
+                                self.advance();
+                                args.push(self.parse_expression_item(&[",", ")"])?);
+                            }
+                        }
+                        self.expect(")")?;
+                        return Ok(Expression::FunctionCall {
+                            name: full_name,
+                            args,
+                            distinct,
+                        });
+                    }
+                    // Otherwise, it's a nested property access
+                    // Parse back: split into variable + property chain
+                    // For now, return the last dotted pair as PropertyAccess
+                    if let Some(last_dot) = full_name.rfind('.') {
+                        let variable = full_name[..last_dot].to_string();
+                        let property = full_name[last_dot + 1..].to_string();
+                        return Ok(Expression::PropertyAccess {
+                            variable,
+                            property,
+                        });
+                    }
+                    return Ok(Expression::Variable(full_name));
+                }
+
                 if self.peek() == Some("(") {
                     self.advance();
                     let distinct = if self.peek_is("DISTINCT") {
