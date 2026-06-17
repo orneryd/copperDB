@@ -227,9 +227,23 @@ impl<'a> ParseContext<'a> {
             self.validate_where()?;
         }
 
-        if self.peek_is("LIMIT") {
+        if self.peek_is("ORDER") {
             self.advance();
-            self.validate_i64()?;
+            self.expect("BY")?;
+            self.validate_order_item()?;
+            while self.peek() == Some(",") {
+                self.advance();
+                self.validate_order_item()?;
+            }
+        }
+
+        loop {
+            if self.peek_is("SKIP") || self.peek_is("LIMIT") {
+                self.advance();
+                self.validate_i64()?;
+            } else {
+                break;
+            }
         }
 
         Ok(())

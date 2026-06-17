@@ -63,3 +63,32 @@ fn parse_simple_match_return_fast_path_shape() {
         other => panic!("expected RETURN clause, got {other:?}"),
     }
 }
+
+#[test]
+fn validate_and_parse_with_order_skip_limit() {
+    let parser = Parser::new();
+    let query_text = "MATCH (n) WITH n AS person WHERE person.age > 18 ORDER BY person.name DESC SKIP 1 LIMIT 2 RETURN person";
+
+    parser
+        .validate(query_text)
+        .expect("validation should accept WITH ORDER BY SKIP LIMIT");
+
+    let query = parser
+        .parse(query_text)
+        .expect("parser should accept WITH ORDER BY SKIP LIMIT");
+
+    let with_clause = query
+        .clauses
+        .iter()
+        .find_map(|clause| match clause {
+            Clause::With(with_clause) => Some(with_clause),
+            _ => None,
+        })
+        .expect("expected WITH clause");
+
+    assert_eq!(with_clause.order_by.len(), 1);
+    assert!(with_clause.order_by[0].descending);
+    assert_eq!(with_clause.skip, Some(1));
+    assert_eq!(with_clause.limit, Some(2));
+    assert!(with_clause.where_clause.is_some());
+}

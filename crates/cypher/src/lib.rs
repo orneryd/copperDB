@@ -371,17 +371,37 @@ impl<'a> ParseContext<'a> {
             None
         };
 
-        let limit = if self.peek_is("LIMIT") {
+        let mut order_by: Vec<OrderItem> = Vec::new();
+        if self.peek_is("ORDER") {
             self.advance();
-            Some(self.parse_i64()?)
-        } else {
-            None
-        };
+            self.expect("BY")?;
+            order_by.push(self.parse_order_item()?);
+            while self.peek() == Some(",") {
+                self.advance();
+                order_by.push(self.parse_order_item()?);
+            }
+        }
+
+        let mut skip: Option<i64> = None;
+        let mut limit: Option<i64> = None;
+        loop {
+            if self.peek_is("SKIP") {
+                self.advance();
+                skip = Some(self.parse_i64()?);
+            } else if self.peek_is("LIMIT") {
+                self.advance();
+                limit = Some(self.parse_i64()?);
+            } else {
+                break;
+            }
+        }
 
         Ok(WithClause {
             items,
-            where_clause,
+            order_by,
+            skip,
             limit,
+            where_clause,
         })
     }
 
@@ -1345,6 +1365,52 @@ mod tests {
         assert_eq!(call.yield_items.len(), 2);
         assert_eq!(call.yield_items[0].alias.as_deref(), Some("hit"));
         assert_eq!(call.yield_items[1].alias.as_deref(), Some("similarity"));
+    }
+
+    #[test]
+    fn test_parse_call_with_yield_wildcard() {
+        let p = Parser::new();
+        let q = p
+            .parse(
+                "CALL db.index.vector.queryNodes('title_idx', 5, [1,0,0]) YIELD * RETURN score",
+            )
+            .unwrap();
+
+        let Some(Clause::Call(call)) = q.clauses.first() else {
+            panic!("expected Call clause");
+        };
+
+        assert_eq!(call.yield_items.len(), 1);
+        assert!(matches!(
+            &call.yield_items[0].expression,
+            Expression::Variable(name) if name == "*"
+        ));
+        assert!(call.yield_items[0].alias.is_none());
+    }
+
+    #[test]
+    fn test_parse_with_order_skip_limit() {
+        let p = Parser::new();
+        let q = p
+            .parse("MATCH (n) WITH n AS person WHERE person.age > 18 ORDER BY person.name DESC SKIP 2 LIMIT 5 RETURN person")
+            .unwrap();
+
+        let with_clause = q
+            .clauses
+            .iter()
+            .find_map(|clause| match clause {
+                Clause::With(with_clause) => Some(with_clause),
+                _ => None,
+            })
+            .expect("expected WITH clause");
+
+        assert_eq!(with_clause.items.len(), 1);
+        assert_eq!(with_clause.items[0].alias.as_deref(), Some("person"));
+        assert!(with_clause.where_clause.is_some());
+        assert_eq!(with_clause.order_by.len(), 1);
+        assert!(with_clause.order_by[0].descending);
+        assert_eq!(with_clause.skip, Some(2));
+        assert_eq!(with_clause.limit, Some(5));
     }
 
     #[test]

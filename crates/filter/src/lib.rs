@@ -309,7 +309,7 @@ fn eval_function(
             let v = eval_arg(0)?;
             Ok(path_component(&v, "length").unwrap_or(Value::Null))
         }
-        "id" => {
+        "id" | "elementid" => {
             let v = eval_arg(0)?;
             if let Value::Object(map) = &v {
                 Ok(map.get("_id").cloned().unwrap_or(Value::Null))

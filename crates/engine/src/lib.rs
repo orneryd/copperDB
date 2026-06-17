@@ -143,6 +143,61 @@ impl From<copperdb_compliance::ComplianceError> for CopperDbError {
     }
 }
 
+fn compare_json(a: &Value, b: &Value) -> std::cmp::Ordering {
+    match (a, b) {
+        (Value::Number(n1), Value::Number(n2)) => {
+            let f1 = n1.as_f64().unwrap_or(f64::NAN);
+            let f2 = n2.as_f64().unwrap_or(f64::NAN);
+            f1.partial_cmp(&f2).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        (Value::String(s1), Value::String(s2)) => s1.cmp(s2),
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
+fn sort_rows_by_with_order(
+    rows: &mut Vec<HashMap<String, Value>>,
+    with_clause: &WithClause,
+    params: &HashMap<String, Value>,
+) -> Result<(), CopperDbError> {
+    let mut rows_with_keys: Vec<(HashMap<String, Value>, Vec<Value>)> = rows
+        .drain(..)
+        .map(|row| {
+            let keys = with_clause
+                .order_by
+                .iter()
+                .map(|item| {
+                    eval_expression(&item.expression, &row, params)
+                        .map_err(|err| CopperDbError::Eval(err.to_string()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((row, keys))
+        })
+        .collect::<Result<Vec<_>, CopperDbError>>()?;
+
+    rows_with_keys.sort_by(|(_, keys_a), (_, keys_b)| {
+        for (idx, item) in with_clause.order_by.iter().enumerate() {
+            let ord = compare_json(&keys_a[idx], &keys_b[idx]);
+            if ord != std::cmp::Ordering::Equal {
+                return if item.descending { ord.reverse() } else { ord };
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+
+    *rows = rows_with_keys.into_iter().map(|(row, _)| row).collect();
+    Ok(())
+}
+
+fn apply_with_window(rows: &mut Vec<HashMap<String, Value>>, with_clause: &WithClause) {
+    if let Some(skip) = with_clause.skip {
+        *rows = rows.drain(..).skip(skip.max(0) as usize).collect();
+    }
+    if let Some(limit) = with_clause.limit {
+        rows.truncate(limit.max(0) as usize);
+    }
+}
+
 impl From<ReplicationError> for CopperDbError {
     fn from(e: ReplicationError) -> Self {
         CopperDbError::Replication(e.to_string())
@@ -319,6 +374,9 @@ fn collect_compliance_terms(
             }
             Clause::With(clause) => {
                 for item in &clause.items {
+                    collect_expression_properties(&item.expression, properties);
+                }
+                for item in &clause.order_by {
                     collect_expression_properties(&item.expression, properties);
                 }
                 if let Some(where_clause) = &clause.where_clause {

@@ -112,8 +112,10 @@ pub struct DeleteClause {
 #[derive(Debug, Clone)]
 pub struct WithClause {
     pub items: Vec<ReturnItem>,
-    pub where_clause: Option<WhereClause>,
+    pub order_by: Vec<OrderItem>,
+    pub skip: Option<i64>,
     pub limit: Option<i64>,
+    pub where_clause: Option<WhereClause>,
 }
 
 #[derive(Debug, Clone)]

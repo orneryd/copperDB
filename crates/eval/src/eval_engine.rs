@@ -864,10 +864,6 @@ impl EvalEngine {
                         .map(|row| project_row(row, items, params))
                         .collect::<Result<Vec<_>, _>>()?;
 
-                    if let Some(limit) = with.limit {
-                        projected.truncate(limit.max(0) as usize);
-                    }
-
                     if let Some(where_clause) = &with.where_clause {
                         let mut filtered_rows = pooled_binding_rows();
                         for row in projected {
@@ -877,10 +873,15 @@ impl EvalEngine {
                                 filtered_rows.push(row);
                             }
                         }
-                        current_rows = filtered_rows;
-                    } else {
-                        current_rows = projected;
+                        projected = filtered_rows;
                     }
+
+                    if !with.order_by.is_empty() {
+                        sort_rows_by_with_order(&mut projected, with);
+                    }
+                    apply_with_window(&mut projected, with);
+
+                    current_rows = projected;
                 }
 
                 Clause::Unwind(unwind) => {
@@ -1674,10 +1675,6 @@ impl EvalEngine {
                         .map(|row| project_row(row, &with.items, params))
                         .collect::<Result<Vec<_>, _>>()?;
 
-                    if let Some(limit) = with.limit {
-                        projected.truncate(limit.max(0) as usize);
-                    }
-
                     if let Some(where_clause) = &with.where_clause {
                         let mut filtered = pooled_binding_rows();
                         for row in projected {
@@ -1687,10 +1684,15 @@ impl EvalEngine {
                                 filtered.push(row);
                             }
                         }
-                        current_rows = filtered;
-                    } else {
-                        current_rows = projected;
+                        projected = filtered;
                     }
+
+                    if !with.order_by.is_empty() {
+                        sort_rows_by_with_order(&mut projected, with);
+                    }
+                    apply_with_window(&mut projected, with);
+
+                    current_rows = projected;
                 }
                 Clause::Unwind(unwind) => {
                     let mut new_rows = pooled_binding_rows();

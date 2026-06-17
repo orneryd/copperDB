@@ -850,10 +850,6 @@ impl CopperDb {
                         .map(|row| distributed_project_row(&row, &with_clause.items, params))
                         .collect::<Result<Vec<_>, CopperDbError>>()?;
 
-                    if let Some(limit) = with_clause.limit {
-                        projected_rows.truncate(limit.max(0) as usize);
-                    }
-
                     if let Some(where_clause) = &with_clause.where_clause {
                         let mut filtered_rows = Vec::new();
                         for row in projected_rows {
@@ -863,10 +859,15 @@ impl CopperDb {
                                 filtered_rows.push(row);
                             }
                         }
-                        base_rows = filtered_rows;
-                    } else {
-                        base_rows = projected_rows;
+                        projected_rows = filtered_rows;
                     }
+
+                    if !with_clause.order_by.is_empty() {
+                        sort_rows_by_with_order(&mut projected_rows, with_clause, params)?;
+                    }
+                    apply_with_window(&mut projected_rows, with_clause);
+
+                    base_rows = projected_rows;
                 }
             }
             if base_rows.is_empty() {

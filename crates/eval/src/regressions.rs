@@ -206,6 +206,23 @@ use super::*;
         assert_eq!(result.rows[1].get("name"), Some(&Value::from("Linus")));
     }
 
+    #[test]
+    fn test_with_where_order_skip_limit_projects_in_pipeline_order() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        let query = parser
+            .parse(
+                "UNWIND [3, 1, 2, 0] AS value WITH value WHERE value > 0 ORDER BY value DESC SKIP 1 LIMIT 1 RETURN value",
+            )
+            .unwrap();
+
+        let result = engine.execute(&query, &HashMap::new()).unwrap();
+
+        assert_eq!(result.columns, vec!["value"]);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("value"), Some(&Value::from(2)));
+    }
+
     /// UNWIND + MERGE should execute a MERGE for each unwound item, but must
     /// not create duplicate nodes when the same label+property is encountered.
     ///
@@ -2891,6 +2908,430 @@ use super::*;
                     .get("value")
                     .and_then(Value::as_f64)
                     .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_call_vector_query_nodes_yield_wildcard_flows_into_return() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for (id, vector) in [("doc-1", vec![1.0, 0.0, 0.0]), ("doc-2", vec![0.8, 0.2, 0.0])] {
+            engine
+                .storage
+                .put_node_record(&NodeRecord {
+                    id: id.to_string(),
+                    labels: vec!["Doc".to_string()],
+                    properties: BTreeMap::new(),
+                    named_embeddings: BTreeMap::from([("title".to_string(), vector)]),
+                    chunk_embeddings: Vec::new(),
+                    embed_meta: Default::default(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE VECTOR INDEX title_idx FOR (n:Doc) ON (n.title)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "CALL db.index.vector.queryNodes('title_idx', 5, [1,0,0]) YIELD * RETURN node._id AS id, score ORDER BY score DESC",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["id", "score"]);
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0].get("id"), Some(&Value::String("doc-1".to_string())));
+        assert_eq!(result.rows[1].get("id"), Some(&Value::String("doc-2".to_string())));
+        assert!(
+            result.rows[0]
+                .get("score")
+                .and_then(Value::as_f64)
+                .unwrap()
+                > result.rows[1]
+                    .get("score")
+                    .and_then(Value::as_f64)
+                    .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_call_vector_query_nodes_yield_where_elementid_filters_rows() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for (id, vector) in [("doc-1", vec![1.0, 0.0, 0.0]), ("doc-2", vec![0.8, 0.2, 0.0])] {
+            engine
+                .storage
+                .put_node_record(&NodeRecord {
+                    id: id.to_string(),
+                    labels: vec!["Doc".to_string()],
+                    properties: BTreeMap::from([(
+                        "title".to_string(),
+                        Value::String(id.to_string()),
+                    )]),
+                    named_embeddings: BTreeMap::from([("title".to_string(), vector)]),
+                    chunk_embeddings: Vec::new(),
+                    embed_meta: Default::default(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE VECTOR INDEX title_idx FOR (n:Doc) ON (n.title)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let mut params = HashMap::new();
+        params.insert("rootID".to_string(), Value::String("doc-1".to_string()));
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "CALL db.index.vector.queryNodes('title_idx', 10, [1,0,0]) YIELD node, score WHERE elementId(node) = $rootID RETURN node.title AS title, score",
+                    )
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["title", "score"]);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get("title"),
+            Some(&Value::String("doc-1".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_call_db_labels_yield_where_return_filters_rows() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for node in [
+            NodeRecord {
+                id: "memory:1".to_string(),
+                labels: vec!["Memory".to_string()],
+                properties: BTreeMap::new(),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            NodeRecord {
+                id: "todo:1".to_string(),
+                labels: vec!["Todo".to_string()],
+                properties: BTreeMap::new(),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+        ] {
+            engine.storage.put_node_record(&node).unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL db.labels() YIELD label WHERE label = 'Memory' RETURN label")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["label"]);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get("label"),
+            Some(&Value::String("Memory".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_call_db_relationship_types_yield_return_orders_rows() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for node in [
+            NodeRecord {
+                id: "person:1".to_string(),
+                labels: vec!["Person".to_string()],
+                properties: BTreeMap::new(),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            NodeRecord {
+                id: "person:2".to_string(),
+                labels: vec!["Person".to_string()],
+                properties: BTreeMap::new(),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+        ] {
+            engine.storage.put_node_record(&node).unwrap();
+        }
+        for edge in [
+            EdgeRecord {
+                id: "edge:1".to_string(),
+                start_node: "person:1".to_string(),
+                end_node: "person:2".to_string(),
+                edge_type: "WORKS_WITH".to_string(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+            EdgeRecord {
+                id: "edge:2".to_string(),
+                start_node: "person:2".to_string(),
+                end_node: "person:1".to_string(),
+                edge_type: "KNOWS".to_string(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            },
+        ] {
+            engine.storage.put_edge_record(&edge).unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType ORDER BY relationshipType ASC",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["relationshipType"]);
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(
+            result.rows[0].get("relationshipType"),
+            Some(&Value::String("KNOWS".to_string()))
+        );
+        assert_eq!(
+            result.rows[1].get("relationshipType"),
+            Some(&Value::String("WORKS_WITH".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_call_dbms_procedures_yield_projection_and_limit() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "CALL dbms.procedures() YIELD name, signature RETURN name, signature ORDER BY name ASC LIMIT 5",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["name", "signature"]);
+        assert_eq!(result.rows.len(), 5);
+        assert_eq!(
+            result.rows[0].get("name"),
+            Some(&Value::String("db.index.fulltext.queryNodes".to_string()))
+        );
+        assert_eq!(
+            result.rows[1].get("name"),
+            Some(&Value::String("db.index.vector.queryNodes".to_string()))
+        );
+        assert_eq!(
+            result.rows[2].get("name"),
+            Some(&Value::String("db.labels".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_call_fulltext_query_nodes_accepts_third_options_map() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser.parse("CREATE (:Doc {content: 'alpha first'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser.parse("CREATE (:Doc {content: 'alpha second'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE FULLTEXT INDEX idx_ft FOR (n:Doc) ON (n.content)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "CALL db.index.fulltext.queryNodes('idx_ft', 'alpha', {skip: 1, limit: 1}) YIELD node, score RETURN node.content AS content, score",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["content", "score"]);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get("content"),
+            Some(&Value::String("alpha second".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_call_fulltext_query_nodes_rejects_non_map_third_arg() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser.parse("CREATE (:Doc {content: 'alpha first'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE FULLTEXT INDEX idx_ft FOR (n:Doc) ON (n.content)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let error = match engine.execute(
+            &parser
+                .parse("CALL db.index.fulltext.queryNodes('idx_ft', 'alpha', 5) YIELD node, score RETURN node, score")
+                .unwrap(),
+            &HashMap::new(),
+        ) {
+            Ok(_) => panic!("expected non-map third arg to fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("MAP"));
+    }
+
+    #[test]
+    fn test_call_fulltext_query_nodes_node_search_alias_uses_declared_indexes() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser.parse("CREATE (:Doc {content: 'alpha first'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser.parse("CREATE (:Doc {content: 'alpha second'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE FULLTEXT INDEX idx_ft FOR (n:Doc) ON (n.content)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "CALL db.index.fulltext.queryNodes('node_search', 'alpha', {limit: 1}) YIELD node, score RETURN node.content AS content, score",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["content", "score"]);
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_call_fulltext_query_nodes_default_alias_uses_declared_indexes() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser.parse("CREATE (:Doc {content: 'alpha only'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE FULLTEXT INDEX idx_ft FOR (n:Doc) ON (n.content)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "CALL db.index.fulltext.queryNodes('default', 'alpha') YIELD node, score RETURN node.content AS content, score",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["content", "score"]);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get("content"),
+            Some(&Value::String("alpha only".to_string()))
         );
     }
 

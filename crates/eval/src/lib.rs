@@ -6,7 +6,7 @@ use copperdb_cypher::{
     hot_path_trace::{HotPathTrace, HotPathTraceState},
     Clause, ConstraintKind, EdgeDirection, EdgePattern, Expression, LiteralValue, NodePattern,
     Pattern, PatternInfo, PipelineClause, PipelineClauseKind, PropertyEntry, Query, QueryPattern,
-    RemoveItem, ReturnItem, SetItem, ShapeKind, ShapeMatch, ShapeValue,
+    RemoveItem, ReturnItem, SetItem, ShapeKind, ShapeMatch, ShapeValue, WithClause,
 };
 use copperdb_filter::{eval_expression, eval_predicate};
 use copperdb_indexing::{CatalogRangeIndexComparison, IndexCatalog, IndexError};
@@ -854,6 +854,29 @@ fn apply_return_window(rows: &mut Vec<Row>, ret: &copperdb_cypher::ReturnClause)
     if ret.distinct {
         let mut seen = HashSet::new();
         rows.retain(|row| seen.insert(row_key(row)));
+    }
+}
+
+fn sort_rows_by_with_order(rows: &mut [Row], with_clause: &WithClause) {
+    rows.sort_by(|left, right| {
+        for item in &with_clause.order_by {
+            let left_key = optimized_order_key(left, &item.expression);
+            let right_key = optimized_order_key(right, &item.expression);
+            let ord = compare_json(&left_key, &right_key);
+            if ord != std::cmp::Ordering::Equal {
+                return if item.descending { ord.reverse() } else { ord };
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+}
+
+fn apply_with_window(rows: &mut Vec<Row>, with_clause: &WithClause) {
+    if let Some(skip) = with_clause.skip {
+        *rows = rows.drain(..).skip(skip.max(0) as usize).collect();
+    }
+    if let Some(limit) = with_clause.limit {
+        rows.truncate(limit.max(0) as usize);
     }
 }
 

@@ -8,9 +8,29 @@ impl EvalEngine {
     ) -> Result<EvalResult, EvalError> {
         let result = if call
             .procedure
+            .eq_ignore_ascii_case("db.labels")
+        {
+            self.execute_db_labels_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("db.relationshipTypes")
+        {
+            self.execute_db_relationship_types_call(call)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("dbms.procedures")
+        {
+            self.execute_dbms_procedures_call(call)
+        } else if call
+            .procedure
             .eq_ignore_ascii_case("nornicdb.knowledgepolicy.resolve")
         {
             self.execute_knowledge_policy_resolve_call(call, params)
+        } else if call
+            .procedure
+            .eq_ignore_ascii_case("db.index.fulltext.queryNodes")
+        {
+            self.execute_fulltext_query_nodes_call(call, params)
         } else if call
             .procedure
             .eq_ignore_ascii_case("db.index.vector.queryNodes")
@@ -26,6 +46,98 @@ impl EvalEngine {
         self.project_call_result(call, result, params)
     }
 
+    fn execute_db_labels_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError(
+                "db.labels expects no arguments".to_string(),
+            ));
+        }
+
+        let mut labels = self
+            .storage
+            .all_node_records()?
+            .into_iter()
+            .flat_map(|node| node.labels)
+            .collect::<Vec<_>>();
+        labels.sort();
+        labels.dedup();
+
+        Ok(EvalResult {
+            columns: vec!["label".to_string()],
+            rows: labels
+                .into_iter()
+                .map(|label| {
+                    let mut row = Row::new();
+                    row.insert("label".to_string(), Value::String(label));
+                    row
+                })
+                .collect(),
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_db_relationship_types_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError(
+                "db.relationshipTypes expects no arguments".to_string(),
+            ));
+        }
+
+        let mut relationship_types = self
+            .storage
+            .all_edges()?
+            .into_iter()
+            .map(|edge| edge.edge_type)
+            .collect::<Vec<_>>();
+        relationship_types.sort();
+        relationship_types.dedup();
+
+        Ok(EvalResult {
+            columns: vec!["relationshipType".to_string()],
+            rows: relationship_types
+                .into_iter()
+                .map(|relationship_type| {
+                    let mut row = Row::new();
+                    row.insert(
+                        "relationshipType".to_string(),
+                        Value::String(relationship_type),
+                    );
+                    row
+                })
+                .collect(),
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_dbms_procedures_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+    ) -> Result<EvalResult, EvalError> {
+        if !call.args.is_empty() {
+            return Err(EvalError::ExecutionError(
+                "dbms.procedures expects no arguments".to_string(),
+            ));
+        }
+
+        let rows = builtin_procedure_rows();
+        Ok(EvalResult {
+            columns: vec![
+                "name".to_string(),
+                "signature".to_string(),
+                "description".to_string(),
+                "mode".to_string(),
+            ],
+            rows,
+            stats: QueryStats::default(),
+        })
+    }
+
     fn project_call_result(
         &self,
         call: &copperdb_cypher::CallClause,
@@ -33,6 +145,16 @@ impl EvalEngine {
         params: &HashMap<String, Value>,
     ) -> Result<EvalResult, EvalError> {
         if call.yield_items.is_empty() {
+            return Ok(result);
+        }
+
+        if call.yield_items.len() == 1
+            && call.yield_items[0].alias.is_none()
+            && matches!(
+                &call.yield_items[0].expression,
+                Expression::Variable(name) if name == "*"
+            )
+        {
             return Ok(result);
         }
 
@@ -178,6 +300,94 @@ impl EvalEngine {
         let rows = ranked
             .into_iter()
             .map(|(node, score)| {
+                let mut row = Row::new();
+                row.insert(
+                    "node".to_string(),
+                    Value::Object(node_record_to_props(&node).into_iter().collect()),
+                );
+                row.insert("score".to_string(), Value::from(score as f64));
+                row
+            })
+            .collect();
+
+        Ok(EvalResult {
+            columns: vec!["node".to_string(), "score".to_string()],
+            rows,
+            stats: QueryStats::default(),
+        })
+    }
+
+    fn execute_fulltext_query_nodes_call(
+        &self,
+        call: &copperdb_cypher::CallClause,
+        params: &HashMap<String, Value>,
+    ) -> Result<EvalResult, EvalError> {
+        if !(call.args.len() == 2 || call.args.len() == 3) {
+            return Err(EvalError::ExecutionError(
+                "db.index.fulltext.queryNodes expects 2 or 3 arguments: indexName, queryString, optionsMap"
+                    .to_string(),
+            ));
+        }
+
+        let row = Row::new();
+        let index_name = eval_expression(&call.args[0], &row, params)?;
+        let query_text = eval_expression(&call.args[1], &row, params)?;
+        let options = if call.args.len() == 3 {
+            Some(eval_expression(&call.args[2], &row, params)?)
+        } else {
+            None
+        };
+
+        let index_name = call_arg_string(&index_name, "indexName")?;
+        let query_text = call_arg_string(&query_text, "queryString")?;
+        let options = call_arg_fulltext_options(options.as_ref())?;
+
+        let indexes = resolve_fulltext_node_indexes(self.storage.as_ref(), &index_name)?;
+
+        let fetch_limit = options
+            .limit
+            .map(|limit| options.skip.saturating_add(limit))
+            .unwrap_or(usize::MAX);
+
+        let mut merged: HashMap<String, (NodeRecord, usize, usize)> = HashMap::new();
+        let mut ordinal = 0usize;
+        for index in indexes {
+            for (node, score) in self.storage.search_fulltext_nodes_by_properties(
+                &index.label,
+                &index.properties,
+                &query_text,
+                fetch_limit,
+            )? {
+                let first_seen = ordinal;
+                ordinal = ordinal.saturating_add(1);
+                merged
+                    .entry(node.id.clone())
+                    .and_modify(|(_, existing_score, existing_ordinal)| {
+                        *existing_score += score;
+                        *existing_ordinal = (*existing_ordinal).min(first_seen);
+                    })
+                    .or_insert((node, score, first_seen));
+            }
+        }
+
+        let mut ranked: Vec<(NodeRecord, usize, usize)> = merged.into_values().collect();
+        ranked.sort_by(|(left_node, left_score, left_ordinal), (right_node, right_score, right_ordinal)| {
+            right_score
+                .cmp(left_score)
+                .then(left_ordinal.cmp(right_ordinal))
+                .then(left_node.id.cmp(&right_node.id))
+        });
+
+        if options.skip > 0 {
+            ranked = ranked.into_iter().skip(options.skip).collect();
+        }
+        if let Some(limit) = options.limit {
+            ranked.truncate(limit);
+        }
+
+        let rows = ranked
+            .into_iter()
+            .map(|(node, score, _)| {
                 let mut row = Row::new();
                 row.insert(
                     "node".to_string(),
@@ -596,6 +806,135 @@ fn call_arg_vector(value: &Value, arg_name: &str) -> Result<Vec<f32>, EvalError>
     }
 
     Ok(vector)
+}
+
+struct FulltextCallOptions {
+    skip: usize,
+    limit: Option<usize>,
+}
+
+fn builtin_procedure_rows() -> Vec<Row> {
+    let mut procedures = vec![
+        (
+            "db.index.fulltext.queryNodes",
+            "db.index.fulltext.queryNodes(indexName :: STRING, query :: STRING, options = {} :: MAP) :: (node :: NODE, score :: FLOAT)",
+            "Fulltext search on nodes",
+            "READ",
+        ),
+        (
+            "db.index.vector.queryNodes",
+            "db.index.vector.queryNodes(indexName :: STRING, numberOfResults :: INTEGER, query :: LIST<FLOAT>|STRING|$param) :: (node :: NODE, score :: FLOAT)",
+            "Vector search on nodes",
+            "READ",
+        ),
+        (
+            "db.labels",
+            "db.labels() :: (label :: STRING)",
+            "Lists all labels in the database",
+            "READ",
+        ),
+        (
+            "db.relationshipTypes",
+            "db.relationshipTypes() :: (relationshipType :: STRING)",
+            "Lists all relationship types in the database",
+            "READ",
+        ),
+        (
+            "dbms.procedures",
+            "dbms.procedures() :: (name :: STRING, signature :: STRING, description :: STRING, mode :: STRING)",
+            "Lists procedures",
+            "DBMS",
+        ),
+        (
+            "nornicdb.knowledgepolicy.resolve",
+            "nornicdb.knowledgepolicy.resolve(entityId :: STRING = '', labelsCsv :: STRING = '', edgeType :: STRING = '') :: (entityId :: STRING, targetKind :: STRING, targetLabels :: STRING, targetEdgeType :: STRING, decayBinding :: STRING, promotionPolicy :: STRING, matchedPromotionProfile :: STRING, matchedPromotionPredicate :: STRING, scoreFrom :: STRING, anchorUnixMs :: INTEGER, accessCount :: INTEGER, lastAccessedAtUnixMs :: INTEGER, baseScore :: FLOAT, finalScore :: FLOAT, visibilityThreshold :: FLOAT, suppressed :: BOOLEAN, dryRun :: BOOLEAN, explanation :: STRING)",
+            "Resolves the effective knowledge-layer scoring policy for an entity, label set, or edge type",
+            "READ",
+        ),
+    ];
+    procedures.sort_by(|left, right| left.0.cmp(right.0));
+
+    procedures
+        .into_iter()
+        .map(|(name, signature, description, mode)| {
+            let mut row = Row::new();
+            row.insert("name".to_string(), Value::String(name.to_string()));
+            row.insert(
+                "signature".to_string(),
+                Value::String(signature.to_string()),
+            );
+            row.insert(
+                "description".to_string(),
+                Value::String(description.to_string()),
+            );
+            row.insert("mode".to_string(), Value::String(mode.to_string()));
+            row
+        })
+        .collect()
+}
+
+fn resolve_fulltext_node_indexes(
+    storage: &StorageEngine,
+    index_name: &str,
+) -> Result<Vec<copperdb_indexing::CatalogIndexDefinition>, EvalError> {
+    let catalog = IndexCatalog::new(storage);
+    if let Some(index) = catalog.get(index_name)? {
+        if index.kind != copperdb_indexing::CatalogIndexKind::FullText {
+            return Err(EvalError::ExecutionError(format!(
+                "index {index_name} is not a fulltext index"
+            )));
+        }
+        if index.entity_type != copperdb_indexing::CatalogIndexEntityType::Node {
+            return Err(EvalError::ExecutionError(format!(
+                "db.index.fulltext.queryNodes only supports node indexes: {index_name}"
+            )));
+        }
+        return Ok(vec![index]);
+    }
+
+    if index_name.eq_ignore_ascii_case("default") || index_name.eq_ignore_ascii_case("node_search") {
+        let indexes = catalog
+            .list()?
+            .into_iter()
+            .filter(|index| {
+                index.kind == copperdb_indexing::CatalogIndexKind::FullText
+                    && index.entity_type == copperdb_indexing::CatalogIndexEntityType::Node
+            })
+            .collect::<Vec<_>>();
+        if !indexes.is_empty() {
+            return Ok(indexes);
+        }
+    }
+
+    Err(EvalError::ExecutionError(format!(
+        "there is no such fulltext schema index: {index_name}"
+    )))
+}
+
+fn call_arg_fulltext_options(value: Option<&Value>) -> Result<FulltextCallOptions, EvalError> {
+    let Some(value) = value else {
+        return Ok(FulltextCallOptions {
+            skip: 0,
+            limit: None,
+        });
+    };
+
+    let map = value.as_object().ok_or_else(|| {
+        EvalError::ExecutionError(
+            "CALL argument optionsMap must be a MAP with optional skip/limit keys".to_string(),
+        )
+    })?;
+
+    let skip = match map.get("skip") {
+        Some(value) => call_arg_usize(value, "optionsMap.skip")?,
+        None => 0,
+    };
+    let limit = match map.get("limit") {
+        Some(value) => Some(call_arg_usize(value, "optionsMap.limit")?),
+        None => None,
+    };
+
+    Ok(FulltextCallOptions { skip, limit })
 }
 
 fn node_vector_for_property(node: &NodeRecord, property: &str) -> Option<Vec<f32>> {
