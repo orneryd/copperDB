@@ -1504,10 +1504,6 @@ fn temporal_time_truncate(unit: Value, t: Value) -> Result<Value, FilterError> {
     }
 }
 
-fn is_leap(y: i64) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
-}
-
 /// Days from 1970-01-01 to (y, m, d). Uses the same March-based calendar
 /// as epoch_days_to_date so the two functions are exact inverses.
 fn days_since_epoch(y: i64, m: i64, d: i64) -> i64 {

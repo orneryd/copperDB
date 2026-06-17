@@ -19,6 +19,8 @@ fn is_single_char_token(byte: u8) -> bool {
             | b'+'
             | b'*'
             | b'/'
+            | b';'
+            | b'|'
     )
 }
 
@@ -96,8 +98,13 @@ pub fn tokenize(input: &str) -> Result<Vec<&str>, CypherError> {
             let pair = (b, sb[i + 1]);
             if matches!(
                 pair,
-                (b'<', b'>') | (b'<', b'=') | (b'>', b'=') | (b'!', b'=') | (b'=', b'~')
-                | (b'+', b'=')
+                (b'<', b'>')
+                    | (b'<', b'=')
+                    | (b'>', b'=')
+                    | (b'!', b'=')
+                    | (b'=', b'~')
+                    | (b'+', b'=')
+                    | (b':', b':')
             ) {
                 tokens.push(&input[i..i + 2]);
                 i += 2;

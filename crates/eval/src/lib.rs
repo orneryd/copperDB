@@ -4,9 +4,10 @@
 
 use copperdb_cypher::{
     hot_path_trace::{HotPathTrace, HotPathTraceState},
-    Clause, ConstraintKind, EdgeDirection, EdgePattern, Expression, LiteralValue, NodePattern,
-    Pattern, PatternInfo, PipelineClause, PipelineClauseKind, PropertyEntry, Query, QueryPattern,
-    RemoveItem, ReturnItem, SetItem, ShapeKind, ShapeMatch, ShapeValue, WithClause,
+    Clause, ConstraintEntityType as CypherConstraintEntityType, ConstraintKind, EdgeDirection,
+    EdgePattern, Expression, LiteralValue, NodePattern, Pattern, PatternInfo, PipelineClause,
+    PipelineClauseKind, PropertyEntry, Query, QueryPattern, RemoveItem, ReturnItem, SetItem,
+    ShapeKind, ShapeMatch, ShapeValue, WithClause,
 };
 use copperdb_filter::{eval_expression, eval_predicate};
 use copperdb_indexing::{CatalogRangeIndexComparison, IndexCatalog, IndexError};
@@ -841,6 +842,13 @@ fn project_row(
 ) -> Result<Row, EvalError> {
     let mut result = HashMap::new();
     for item in items {
+        // Wildcard: RETURN * or implicit RETURN after CALL YIELD LIMIT
+        if matches!(&item.expression, Expression::Variable(v) if v == "*") {
+            for (key, val) in row.iter() {
+                result.insert(key.clone(), val.clone());
+            }
+            continue;
+        }
         let col = column_name(item);
         let val = eval_expression(&item.expression, row, params)
             .map_err(|e| EvalError::FilterError(e.to_string()))?;

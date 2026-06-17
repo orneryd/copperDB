@@ -1787,3 +1787,266 @@
             .unwrap();
         assert_eq!(result.rows[0].get("s").and_then(Value::as_i64), Some(45));
     }
+
+    /// Tests CALL YIELD with implicit RETURN SKIP/LIMIT (no RETURN keyword).
+    #[test]
+    fn test_call_yield_implicit_return_skip_limit() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        engine
+            .execute(
+                &parser.parse("CREATE (n:Person {name: 'Alice'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser.parse("CREATE (n:Person:Dog {name: 'Rover'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // CALL YIELD with implicit LIMIT (no RETURN keyword)
+        let result = engine
+            .execute(
+                &parser.parse("CALL db.labels() YIELD label LIMIT 1").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert!(result.columns.contains(&"label".to_string()));
+
+        // CALL YIELD with implicit SKIP + LIMIT
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL db.labels() YIELD label SKIP 0 LIMIT 2")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert!(result.rows.len() >= 2, "expected >=2 labels, got {}", result.rows.len());
+    }
+
+    /// Tests CALL YIELD * (wildcard) passthrough.
+    #[test]
+    fn test_call_yield_wildcard() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL db.constraints() YIELD * RETURN name, type")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert!(!result.columns.is_empty());
+        assert!(result.columns.contains(&"name".to_string()));
+        assert!(result.columns.contains(&"type".to_string()));
+    }
+
+    /// Tests CALL YIELD with explicit RETURN + SKIP.
+    #[test]
+    fn test_call_yield_return_skip() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser.parse("CREATE (n:Alpha {name: 'A'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser.parse("CREATE (n:Beta {name: 'B'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL db.labels() YIELD label RETURN label SKIP 1")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert!(result.rows.len() >= 1);
+    }
+
+    /// Tests temporal $param round-trip: datetime string survives CREATE + READ.
+    #[test]
+    fn test_temporal_param_round_trip() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        let mut params = HashMap::new();
+        params.insert(
+            "dt".to_string(),
+            Value::String("2026-06-09T12:00:00+02:00".to_string()),
+        );
+
+        // Create node with datetime param
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (n:TemporalTest {uuid: 't', created_at: $dt})")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+
+        // Read back and verify the datetime string survived
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:TemporalTest {uuid: 't'}) RETURN n.created_at AS created_at")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        let created_at = result.rows[0]
+            .get("created_at")
+            .and_then(Value::as_str);
+        assert!(
+            created_at.is_some(),
+            "datetime should survive round-trip"
+        );
+        assert!(created_at.unwrap().contains("2026-06-09"));
+
+        // Verify datetime.year() can parse the stored value
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:TemporalTest {uuid: 't'}) RETURN datetime.year(n.created_at) AS y")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("y").and_then(Value::as_i64), Some(2026));
+    }
+
+    /// Tests MERGE idempotency: repeated MERGE creates only one node.
+    #[test]
+    fn test_merge_node_idempotent() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("MERGE (n:Singleton {key: 'unique-key'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MERGE (n:Singleton {key: 'unique-key'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Singleton {key: 'unique-key'}) RETURN count(n) AS c")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("c"), Some(&Value::from(1)));
+    }
+
+    /// Tests MATCH two nodes + MERGE relationship between them.
+    #[test]
+    fn test_match_merge_relationship() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) MERGE (a)-[r:KNOWS]->(b) RETURN type(r)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.stats.relationships_created, 1);
+
+        // Idempotent: second MERGE should not create duplicate
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) MERGE (a)-[r:KNOWS]->(b) RETURN count(r) AS c")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("c"), Some(&Value::from(1)));
+        assert_eq!(result.stats.relationships_created, 0);
+    }
+
+    /// Tests OPTIONAL MATCH → MERGE edge case.
+    #[test]
+    fn test_optional_match_merge() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // OPTIONAL MATCH on missing node; MERGE still executes
+        let result = engine
+            .execute(
+                &parser
+                    .parse("OPTIONAL MATCH (a:Missing) MERGE (m:Merged {id: 'opt'}) RETURN m.id")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get("m.id"),
+            Some(&Value::String("opt".into()))
+        );
+    }
+
+    /// Tests MERGE before MATCH chain.
+    #[test]
+    fn test_merge_before_match_chain() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser.parse("CREATE (p:P {name: 'exists'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MERGE (pre:Scratch {id: 'pre'}) MATCH (a:P) MERGE (m:Merged {id: 'ok'}) RETURN m.id")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get("m.id"),
+            Some(&Value::String("ok".into()))
+        );
+    }

@@ -71,6 +71,8 @@ pub struct CreateClause {
 #[derive(Debug, Clone)]
 pub struct MergeClause {
     pub pattern: Pattern,
+    pub on_create: Vec<SetItem>,
+    pub on_match: Vec<SetItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,15 +138,30 @@ pub struct ForeachClause {
 pub enum ConstraintKind {
     Unique,
     Exists,
+    NodeKey,
+    RelationshipKey,
+    Type(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConstraintEntityType {
+    Node,
+    Relationship,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConstraintEntry {
+    pub properties: Vec<String>,
+    pub kind: ConstraintKind,
 }
 
 #[derive(Debug, Clone)]
 pub struct CreateConstraintClause {
     pub name: String,
     pub if_not_exists: bool,
+    pub entity_type: ConstraintEntityType,
     pub label: String,
-    pub property: String,
-    pub kind: ConstraintKind,
+    pub entries: Vec<ConstraintEntry>,
 }
 
 #[derive(Debug, Clone)]

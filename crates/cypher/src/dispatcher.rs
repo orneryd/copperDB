@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use crate::{
-    parse_context::ParseContext, parser_support::dominant_query_type, Clause, CypherError, Query,
+    parse_context::ParseContext, parser_support::dominant_query_type, Clause, CypherError,
+    Expression, Query, ReturnClause, ReturnItem,
 };
 
 impl<'a> ParseContext<'a> {
@@ -18,7 +19,37 @@ impl<'a> ParseContext<'a> {
                 token if token.eq_ignore_ascii_case("CALL") => {
                     self.advance();
                     let clause = self.parse_call()?;
+                    let has_yield = !clause.yield_items.is_empty();
                     clauses.push(Clause::Call(clause));
+
+                    // Neo4j-compatible: CALL ... YIELD x SKIP n / LIMIT n
+                    // generates an implicit RETURN * with those modifiers
+                    if has_yield && self.peek_is_one_of(&["SKIP", "LIMIT"]) {
+                        let mut skip: Option<Expression> = None;
+                        let mut limit: Option<Expression> = None;
+                        loop {
+                            if self.peek_is("SKIP") {
+                                self.advance();
+                                skip = Some(self.parse_expression_item(&["LIMIT", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE"])?);
+                            } else if self.peek_is("LIMIT") {
+                                self.advance();
+                                limit = Some(self.parse_expression_item(&["SKIP", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE"])?);
+                            } else {
+                                break;
+                            }
+                        }
+                        let wildcard = ReturnItem {
+                            expression: Expression::Variable("*".to_string()),
+                            alias: None,
+                        };
+                        clauses.push(Clause::Return(ReturnClause {
+                            items: vec![wildcard],
+                            order_by: vec![],
+                            skip,
+                            limit,
+                            distinct: false,
+                        }));
+                    }
                 }
                 token if token.eq_ignore_ascii_case("MATCH") => {
                     self.advance();

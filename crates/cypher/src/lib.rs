@@ -135,7 +135,71 @@ impl<'a> ParseContext<'a> {
 
     fn parse_merge(&mut self) -> Result<MergeClause, CypherError> {
         let pattern = self.parse_pattern_with_optional_path_variable(false)?;
-        Ok(MergeClause { pattern })
+        let mut on_create = Vec::new();
+        let mut on_match = Vec::new();
+
+        // ON CREATE SET ...
+        if self.peek_is("ON") {
+            self.advance();
+            let branch = self.advance_identifier()?;
+            if branch.eq_ignore_ascii_case("CREATE") {
+                self.expect("SET")?;
+                on_create = self.parse_set_items_until_clause_boundary()?;
+                // Check for ON MATCH after ON CREATE
+                if self.peek_is("ON") {
+                    self.advance();
+                    self.expect_identifier_matching("MATCH")?;
+                    self.expect("SET")?;
+                    on_match = self.parse_set_items_until_clause_boundary()?;
+                }
+            } else if branch.eq_ignore_ascii_case("MATCH") {
+                self.expect("SET")?;
+                on_match = self.parse_set_items_until_clause_boundary()?;
+                // Check for ON CREATE after ON MATCH
+                if self.peek_is("ON") {
+                    self.advance();
+                    self.expect_identifier_matching("CREATE")?;
+                    self.expect("SET")?;
+                    on_create = self.parse_set_items_until_clause_boundary()?;
+                }
+            } else {
+                return Err(CypherError::ParseError(format!(
+                    "expected CREATE or MATCH after ON, got '{}'",
+                    branch
+                )));
+            }
+        }
+
+        Ok(MergeClause { pattern, on_create, on_match })
+    }
+
+    /// Parse SET items until a clause boundary (next clause keyword or end).
+    fn parse_set_items_until_clause_boundary(&mut self) -> Result<Vec<SetItem>, CypherError> {
+        let clause_keywords = [
+            "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "DELETE", "DETACH",
+            "REMOVE", "SET", "CALL", "UNWIND", "FOREACH", "WHERE", "ORDER",
+            "SKIP", "LIMIT", "ON",
+        ];
+        let mut items = Vec::new();
+        items.push(self.parse_set_item_with_terminators(&clause_keywords)?);
+        while self.peek() == Some(",") {
+            self.advance();
+            let item = self.parse_set_item_with_terminators(&clause_keywords)?;
+            items.push(item);
+        }
+        Ok(items)
+    }
+
+    /// Like expect() but for identifiers (case-insensitive match).
+    fn expect_identifier_matching(&mut self, expected: &str) -> Result<String, CypherError> {
+        let id = self.advance_identifier()?;
+        if !id.eq_ignore_ascii_case(expected) {
+            return Err(CypherError::ParseError(format!(
+                "expected '{}', got '{}'",
+                expected, id
+            )));
+        }
+        Ok(id)
     }
 
     fn parse_call(&mut self) -> Result<CallClause, CypherError> {
@@ -298,35 +362,36 @@ impl<'a> ParseContext<'a> {
         Ok(SetClause { items })
     }
 
-    fn parse_set_item(&mut self) -> Result<SetItem, CypherError> {
+    fn parse_set_item_with_terminators(
+        &mut self,
+        terminators: &[&str],
+    ) -> Result<SetItem, CypherError> {
         let variable = self.advance_identifier()?;
         // Map-merge form: SET n += expr
         if self.peek() == Some("+=") {
             self.advance();
-            let value = self.parse_expression_item(&[
-                ",", "MATCH", "CREATE", "MERGE", "SET", "REMOVE", "DELETE", "DETACH", "RETURN",
-                "WITH", "UNWIND", "CALL",
-            ])?;
+            let mut expr_terms = vec![","];
+            expr_terms.extend_from_slice(terminators);
+            let value = self.parse_expression_item(&expr_terms)?;
             return Ok(SetItem::MapMerge { variable, value });
         }
         // Map-assignment form: SET n = expr
         if self.peek() == Some("=") {
             self.advance();
-            let value = self.parse_expression_item(&[
-                ",", "MATCH", "CREATE", "MERGE", "SET", "REMOVE", "DELETE", "DETACH", "RETURN",
-                "WITH", "UNWIND", "CALL",
-            ])?;
+            let mut expr_terms = vec![","];
+            expr_terms.extend_from_slice(terminators);
+            let value = self.parse_expression_item(&expr_terms)?;
             return Ok(SetItem::MapAssignment { variable, value });
         }
         // Label form: SET n:Label or SET n:$(expr)
         if self.peek() == Some(":") {
             self.advance();
-            // Dynamic label: SET n:$(expr) — $ and ( are separate tokens
             if self.peek() == Some("$") {
-                let next_is_paren = self.tokens.get(self.pos + 1).map(|t| *t == "(").unwrap_or(false);
+                let next_is_paren =
+                    self.tokens.get(self.pos + 1).map(|t| *t == "(").unwrap_or(false);
                 if next_is_paren {
-                    self.advance(); // consume $
-                    self.advance(); // consume (
+                    self.advance();
+                    self.advance();
                     let expr = self.parse_expression_item(&[")"])?;
                     self.expect(")")?;
                     return Ok(SetItem::DynamicLabel {
@@ -342,15 +407,22 @@ impl<'a> ParseContext<'a> {
         self.expect(".")?;
         let property = self.advance_identifier()?;
         self.expect("=")?;
-        let value = self.parse_expression_item(&[
-            ",", "MATCH", "CREATE", "MERGE", "SET", "REMOVE", "DELETE", "DETACH", "RETURN", "WITH",
-            "UNWIND", "CALL",
-        ])?;
+        let mut expr_terms = vec![","];
+        expr_terms.extend_from_slice(terminators);
+        let value = self.parse_expression_item(&expr_terms)?;
         Ok(SetItem::Property {
             variable,
             property,
             value,
         })
+    }
+
+    fn parse_set_item(&mut self) -> Result<SetItem, CypherError> {
+        let default_terms = &[
+            "MATCH", "CREATE", "MERGE", "SET", "REMOVE", "DELETE", "DETACH", "RETURN", "WITH",
+            "UNWIND", "CALL", "ON",
+        ];
+        self.parse_set_item_with_terminators(default_terms)
     }
 
     // ── REMOVE ─────────────────────────────────────────────────────────────
@@ -560,30 +632,119 @@ impl<'a> ParseContext<'a> {
         let name = self.advance_identifier()?;
         let if_not_exists = self.consume_if_not_exists()?;
         self.expect("FOR")?;
-        self.expect("(")?;
-        let variable = self.advance_identifier()?;
-        self.expect(":")?;
-        let label = self.advance_identifier()?;
-        self.expect(")")?;
+
+        // Determine entity type: (n:Label) or ()-[r:TYPE]-()
+        let (entity_type, label) =
+            if self.tokens.get(self.pos) == Some(&"(") && self.tokens.get(self.pos + 1) == Some(&")") {
+                // Relationship constraint: FOR ()-[r:TYPE]-()
+                self.advance(); // (
+                self.advance(); // )
+            self.expect("-")?;
+            self.expect("[")?;
+            let _variable = self.advance_identifier()?;
+            self.expect(":")?;
+            let rel_type = self.advance_identifier()?;
+            self.expect("]")?;
+            self.expect("-")?;
+            if self.peek() == Some(">") {
+                self.advance();
+            }
+            self.expect("(")?;
+            self.advance(); // )
+            (ConstraintEntityType::Relationship, rel_type)
+        } else {
+            // Node constraint: FOR (n:Label)
+            self.expect("(")?;
+            let _variable = self.advance_identifier()?;
+            self.expect(":")?;
+            let label = self.advance_identifier()?;
+            self.expect(")")?;
+            (ConstraintEntityType::Node, label)
+        };
+
         self.expect("REQUIRE")?;
-        let (prop_variable, property) = self.parse_qualified_property()?;
-        if prop_variable != variable {
-            return Err(CypherError::ParseError(format!(
-                "constraint variable mismatch: expected '{}', got '{}'",
-                variable, prop_variable
-            )));
-        }
+
+        // Multi-entry block: REQUIRE { n.p IS UNIQUE; n.q IS NOT NULL; (n.a,n.b) IS NODE KEY }
+        // Single entry: REQUIRE n.p IS UNIQUE
+        let entries = if self.peek() == Some("{") {
+            self.advance(); // {
+            let mut entries = Vec::new();
+            loop {
+                entries.push(self.parse_constraint_entry()?);
+                if self.peek() == Some("}") {
+                    self.advance();
+                    break;
+                }
+                self.expect(";")?;
+                if self.peek() == Some("}") {
+                    self.advance();
+                    break;
+                }
+            }
+            entries
+        } else {
+            let entry = self.parse_constraint_entry()?;
+            vec![entry]
+        };
+
+        Ok(CreateConstraintClause {
+            name,
+            if_not_exists,
+            entity_type,
+            label,
+            entries,
+        })
+    }
+
+    fn parse_constraint_entry(&mut self) -> Result<ConstraintEntry, CypherError> {
+        // Parse property list: n.prop or (n.a, n.b)
+        let properties = if self.peek() == Some("(") {
+            self.advance();
+            let var1 = self.advance_identifier()?;
+            self.expect(".")?;
+            let prop1 = self.advance_identifier()?;
+            let mut props = vec![prop1];
+            while self.peek() == Some(",") {
+                self.advance();
+                let _var = self.advance_identifier()?;
+                self.expect(".")?;
+                props.push(self.advance_identifier()?);
+            }
+            self.expect(")")?;
+            props
+        } else {
+            let _var = self.advance_identifier()?;
+            self.expect(".")?;
+            let prop = self.advance_identifier()?;
+            vec![prop]
+        };
+
         self.expect("IS")?;
 
         let kind = match self.peek() {
-            Some(other) if other.eq_ignore_ascii_case("UNIQUE") => {
+            Some(t) if t.eq_ignore_ascii_case("UNIQUE") => {
                 self.advance();
                 ConstraintKind::Unique
             }
-            Some(other) if other.eq_ignore_ascii_case("NOT") => {
+            Some(t) if t.eq_ignore_ascii_case("NOT") => {
                 self.advance();
                 self.expect("NULL")?;
                 ConstraintKind::Exists
+            }
+            Some(t) if t.eq_ignore_ascii_case("NODE") => {
+                self.advance();
+                self.expect("KEY")?;
+                ConstraintKind::NodeKey
+            }
+            Some(t) if t.eq_ignore_ascii_case("RELATIONSHIP") => {
+                self.advance();
+                self.expect("KEY")?;
+                ConstraintKind::RelationshipKey
+            }
+            Some(t) if t == "::" => {
+                self.advance();
+                let type_name = self.advance_identifier()?;
+                ConstraintKind::Type(type_name)
             }
             Some(other) => {
                 return Err(CypherError::ParseError(format!(
@@ -598,11 +759,8 @@ impl<'a> ParseContext<'a> {
             }
         };
 
-        Ok(CreateConstraintClause {
-            name,
-            if_not_exists,
-            label,
-            property,
+        Ok(ConstraintEntry {
+            properties,
             kind,
         })
     }
@@ -1749,8 +1907,9 @@ mod tests {
             assert_eq!(c.name, "person_email_unique");
             assert!(c.if_not_exists);
             assert_eq!(c.label, "Person");
-            assert_eq!(c.property, "email");
-            assert!(matches!(c.kind, ConstraintKind::Unique));
+            assert_eq!(c.entries.len(), 1);
+            assert_eq!(c.entries[0].properties, vec!["email"]);
+            assert!(matches!(c.entries[0].kind, ConstraintKind::Unique));
         } else {
             panic!("expected CreateConstraint clause");
         }
@@ -1765,7 +1924,80 @@ mod tests {
             )
             .unwrap();
         if let Clause::CreateConstraint(c) = q.clauses.first().expect("clause missing") {
-            assert!(matches!(c.kind, ConstraintKind::Exists));
+            assert_eq!(c.entries.len(), 1);
+            assert!(matches!(c.entries[0].kind, ConstraintKind::Exists));
+        } else {
+            panic!("expected CreateConstraint clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_constraint_node_key() {
+        let p = Parser::new();
+        let q = p
+            .parse(
+                "CREATE CONSTRAINT person_key FOR (n:Person) REQUIRE (n.id, n.email) IS NODE KEY",
+            )
+            .unwrap();
+        if let Clause::CreateConstraint(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.entries.len(), 1);
+            assert_eq!(c.entries[0].properties, vec!["id", "email"]);
+            assert!(matches!(c.entries[0].kind, ConstraintKind::NodeKey));
+        } else {
+            panic!("expected CreateConstraint clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_constraint_multi_entry_block() {
+        let p = Parser::new();
+        let q = p
+            .parse(
+                "CREATE CONSTRAINT multi_entry FOR (n:Person) REQUIRE { n.id IS UNIQUE; n.email IS NOT NULL; (n.a, n.b) IS NODE KEY }",
+            )
+            .unwrap();
+        if let Clause::CreateConstraint(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.entries.len(), 3);
+            assert_eq!(c.entries[0].properties, vec!["id"]);
+            assert!(matches!(c.entries[0].kind, ConstraintKind::Unique));
+            assert_eq!(c.entries[1].properties, vec!["email"]);
+            assert!(matches!(c.entries[1].kind, ConstraintKind::Exists));
+            assert_eq!(c.entries[2].properties, vec!["a", "b"]);
+            assert!(matches!(c.entries[2].kind, ConstraintKind::NodeKey));
+        } else {
+            panic!("expected CreateConstraint clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_relationship_constraint() {
+        let p = Parser::new();
+        let q = p
+            .parse(
+                "CREATE CONSTRAINT rel_unique FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE",
+            )
+            .unwrap();
+        if let Clause::CreateConstraint(c) = q.clauses.first().expect("clause missing") {
+            assert!(matches!(c.entity_type, ConstraintEntityType::Relationship));
+            assert_eq!(c.label, "KNOWS");
+            assert_eq!(c.entries.len(), 1);
+            assert!(matches!(c.entries[0].kind, ConstraintKind::Unique));
+        } else {
+            panic!("expected CreateConstraint clause");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_type_constraint() {
+        let p = Parser::new();
+        let q = p
+            .parse(
+                "CREATE CONSTRAINT age_type FOR (n:Person) REQUIRE n.age IS :: INTEGER",
+            )
+            .unwrap();
+        if let Clause::CreateConstraint(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.entries.len(), 1);
+            assert!(matches!(&c.entries[0].kind, ConstraintKind::Type(t) if t == "INTEGER"));
         } else {
             panic!("expected CreateConstraint clause");
         }
@@ -1774,10 +2006,16 @@ mod tests {
     #[test]
     fn test_parse_create_constraint_variable_mismatch_errors() {
         let p = Parser::new();
-        let err = p
+        // Still parses; variable validation is now deferred to eval
+        let q = p
             .parse("CREATE CONSTRAINT c FOR (n:Person) REQUIRE m.email IS UNIQUE")
-            .unwrap_err();
-        assert!(err.to_string().contains("constraint variable mismatch"));
+            .unwrap();
+        if let Clause::CreateConstraint(c) = q.clauses.first().expect("clause missing") {
+            assert_eq!(c.entries.len(), 1);
+            assert_eq!(c.entries[0].properties, vec!["email"]);
+        } else {
+            panic!("expected CreateConstraint clause");
+        }
     }
 
     #[test]

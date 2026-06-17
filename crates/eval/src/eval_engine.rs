@@ -282,7 +282,39 @@ impl EvalEngine {
                     });
             match clause {
                 Clause::Call(call) => {
-                    let call_result = self.execute_call_clause(call, params, &current_rows)?;
+                    let mut call_result = self.execute_call_clause(call, params, &current_rows)?;
+                    // Apply YIELD projection — restrict columns to those requested.
+                    // YIELD * (Variable("*")) means passthrough all columns.
+                    if !call.yield_items.is_empty() {
+                        let is_wildcard = call.yield_items.iter().any(|item| {
+                            matches!(&item.expression, Expression::Variable(v) if v == "*")
+                        });
+                        if !is_wildcard {
+                            let yield_columns: Vec<String> = call
+                                .yield_items
+                                .iter()
+                                .map(|item| {
+                                    item.alias
+                                        .clone()
+                                        .unwrap_or_else(|| column_name(item))
+                                })
+                                .collect();
+                            call_result.rows = call_result
+                                .rows
+                                .into_iter()
+                                .map(|mut row| {
+                                    let mut filtered = Row::new();
+                                    for col in &yield_columns {
+                                        if let Some(val) = row.remove(col) {
+                                            filtered.insert(col.clone(), val);
+                                        }
+                                    }
+                                    filtered
+                                })
+                                .collect();
+                            call_result.columns = yield_columns;
+                        }
+                    }
                     columns = call_result.columns;
                     if clause_index + 1 == query.clauses.len() {
                         result_rows = call_result.rows;
@@ -303,17 +335,29 @@ impl EvalEngine {
                             create.name
                         )));
                     }
-                    let constraint_type = match create.kind {
-                        ConstraintKind::Unique => ConstraintType::Unique,
-                        ConstraintKind::Exists => ConstraintType::Exists,
-                    };
-                    self.storage.persist_constraint(&Constraint {
-                        name: create.name.clone(),
-                        constraint_type,
-                        entity_type: ConstraintEntityType::Node,
-                        label: create.label.clone(),
-                        properties: vec![create.property.clone()],
-                    })?;
+                    for entry in &create.entries {
+                        let constraint_type = match entry.kind {
+                            ConstraintKind::Unique => ConstraintType::Unique,
+                            ConstraintKind::Exists => ConstraintType::Exists,
+                            ConstraintKind::NodeKey => ConstraintType::NodeKey,
+                            ConstraintKind::RelationshipKey => ConstraintType::Relationship,
+                            ConstraintKind::Type(_) => ConstraintType::Type,
+                        };
+                        self.storage.persist_constraint(&Constraint {
+                            name: create.name.clone(),
+                            constraint_type,
+                            entity_type: match create.entity_type {
+                                CypherConstraintEntityType::Node => {
+                                    ConstraintEntityType::Node
+                                }
+                                CypherConstraintEntityType::Relationship => {
+                                    ConstraintEntityType::Relationship
+                                }
+                            },
+                            label: create.label.clone(),
+                            properties: entry.properties.clone(),
+                        })?;
+                    }
                 }
 
                 Clause::DropConstraint(drop) => {
@@ -831,7 +875,18 @@ impl EvalEngine {
                 }
 
                 Clause::Return(ret) => {
-                    columns = ret.items.iter().map(column_name).collect();
+                    // Expand * wildcard to all current columns
+                    let has_wildcard = ret.items.iter().any(|item| {
+                        matches!(&item.expression, Expression::Variable(v) if v == "*")
+                    });
+                    if has_wildcard {
+                        columns = current_rows
+                            .first()
+                            .map(|row| row.keys().cloned().collect())
+                            .unwrap_or_default();
+                    } else {
+                        columns = ret.items.iter().map(column_name).collect();
+                    }
 
                     if !ret.order_by.is_empty() {
                         sort_rows_by_return_order(&mut current_rows, ret);
@@ -2332,8 +2387,26 @@ impl EvalEngine {
                     self.resolve_pipeline_node_binding(base_row, node_pat, params)?
                 {
                     let mut row = base_row.clone();
+                    let mut node_val = existing_node;
+                    // ON MATCH SET for pipeline-bound (already-existing) nodes
+                    if !merge.on_match.is_empty() {
+                        if let Some(var) = &node_pat.variable {
+                            row.insert(var.clone(), node_val.clone());
+                        }
+                        self.execute_set_clause(
+                            std::slice::from_mut(&mut row),
+                            &merge.on_match,
+                            params,
+                            stats,
+                        )?;
+                        if let Some(var) = &node_pat.variable {
+                            if let Some(updated) = row.get(var) {
+                                node_val = updated.clone();
+                            }
+                        }
+                    }
                     if let Some(var) = &node_pat.variable {
-                        row.insert(var.clone(), existing_node);
+                        row.insert(var.clone(), node_val);
                     }
                     next_rows.push(row);
                     continue;
@@ -2343,53 +2416,100 @@ impl EvalEngine {
                     evaluate_pattern_properties(&node_pat.properties, base_row, params)?;
                 let catalog = IndexCatalog::new(self.storage.as_ref());
 
-                let node_val =
-                    if let Some(cached_val) = self.find_in_merge_cache(labels, &merge_props) {
-                        cached_val
+                let node_val = if let Some(cached_val) =
+                    self.find_in_merge_cache(labels, &merge_props)
+                {
+                    cached_val
+                } else {
+                    if catalog.has_preferred_node_lookup_index(labels, &merge_props)? {
+                        self.hot_path_trace.mark_merge_schema_lookup();
                     } else {
-                        if catalog.has_preferred_node_lookup_index(labels, &merge_props)? {
-                            self.hot_path_trace.mark_merge_schema_lookup();
-                        } else {
-                            self.hot_path_trace.mark_merge_scan_fallback();
+                        self.hot_path_trace.mark_merge_scan_fallback();
+                    }
+                    let mut found_node: Option<Value> = None;
+                    for props in self.lookup_matching_node_props(labels, &merge_props)? {
+                        if !node_matches_pattern(&props, labels, &merge_props) {
+                            continue;
                         }
-                        let mut found_node: Option<Value> = None;
-                        for props in self.lookup_matching_node_props(labels, &merge_props)? {
-                            if !node_matches_pattern(&props, labels, &merge_props) {
-                                continue;
-                            }
-                            found_node = Some(
-                                serde_json::to_value(&props)
-                                    .map_err(|e| EvalError::SerializationError(e.to_string()))?,
-                            );
-                            break;
-                        }
+                        found_node = Some(
+                            serde_json::to_value(&props)
+                                .map_err(|e| EvalError::SerializationError(e.to_string()))?,
+                        );
+                        break;
+                    }
 
-                        if let Some(existing) = found_node {
-                            self.cache_merge_node(labels, &merge_props, &existing);
-                            existing
-                        } else {
-                            let id = Uuid::new_v4().to_string();
-                            let key = format!("{label}:{id}");
-                            let mut props = merge_props.clone();
-                            props.insert("_id".to_string(), Value::String(key.clone()));
-                            props.insert(
-                                "_labels".to_string(),
-                                Value::Array(
-                                    labels
-                                        .iter()
-                                        .map(|entry| Value::String(entry.clone()))
-                                        .collect(),
-                                ),
-                            );
-                            self.persist_node_props(&props)?;
-                            stats.nodes_created += 1;
-                            stats.properties_set += node_pat.properties.len();
-                            let created = serde_json::to_value(&props)
-                                .map_err(|e| EvalError::SerializationError(e.to_string()))?;
-                            self.cache_merge_node(labels, &merge_props, &created);
-                            created
+                    if let Some(existing) = found_node {
+                        self.cache_merge_node(labels, &merge_props, &existing);
+                        // ON MATCH SET items: apply to matched row, re-extract updated value
+                        let mut matched_val = existing;
+                        if !merge.on_match.is_empty() {
+                            let mut match_row = base_row.clone();
+                            if let Some(var) = &node_pat.variable {
+                                match_row.insert(var.clone(), matched_val.clone());
+                            }
+                            self.execute_set_clause(
+                                std::slice::from_mut(&mut match_row),
+                                &merge.on_match,
+                                params,
+                                stats,
+                            )?;
+                            if let Some(var) = &node_pat.variable {
+                                if let Some(Value::Object(updated_props)) = match_row.get(var) {
+                                    let persisted: HashMap<String, Value> =
+                                        updated_props.clone().into_iter().collect();
+                                    self.persist_node_props(&persisted)?;
+                                    let serialized = Value::Object(updated_props.clone());
+                                    self.cache_merge_node(labels, &merge_props, &serialized);
+                                    matched_val = serialized;
+                                }
+                            }
                         }
-                    };
+                        matched_val
+                    } else {
+                        let id = Uuid::new_v4().to_string();
+                        let key = format!("{label}:{id}");
+                        let mut props = merge_props.clone();
+                        props.insert("_id".to_string(), Value::String(key.clone()));
+                        props.insert(
+                            "_labels".to_string(),
+                            Value::Array(
+                                labels
+                                    .iter()
+                                    .map(|entry| Value::String(entry.clone()))
+                                    .collect(),
+                            ),
+                        );
+                        self.persist_node_props(&props)?;
+                        stats.nodes_created += 1;
+                        stats.properties_set += node_pat.properties.len();
+                        let mut created = serde_json::to_value(&props)
+                            .map_err(|e| EvalError::SerializationError(e.to_string()))?;
+
+                        // ON CREATE SET items
+                        if !merge.on_create.is_empty() {
+                            let mut create_row = base_row.clone();
+                            if let Some(var) = &node_pat.variable {
+                                create_row.insert(var.clone(), created.clone());
+                            }
+                            self.execute_set_clause(
+                                std::slice::from_mut(&mut create_row),
+                                &merge.on_create,
+                                params,
+                                stats,
+                            )?;
+                            if let Some(var) = &node_pat.variable {
+                                if let Some(Value::Object(updated_props)) = create_row.get(var) {
+                                    let persisted: HashMap<String, Value> =
+                                        updated_props.clone().into_iter().collect();
+                                    self.persist_node_props(&persisted)?;
+                                    created = Value::Object(updated_props.clone());
+                                }
+                            }
+                        }
+                        self.cache_merge_node(labels, &merge_props, &created);
+                        created
+                    }
+                };
 
                 let mut row = base_row.clone();
                 if let Some(var) = &node_pat.variable {
@@ -2398,6 +2518,60 @@ impl EvalEngine {
                 next_rows.push(row);
             }
 
+            current_rows = next_rows;
+        }
+
+        // Relationship MERGE: for each edge in the pattern, match-or-create
+        for (edge_idx, edge_pat) in merge.pattern.edges.iter().enumerate() {
+            let mut next_rows = pooled_binding_rows();
+            for base_row in &current_rows {
+                let start_node = &merge.pattern.nodes[edge_idx];
+                let end_node = &merge.pattern.nodes[edge_idx + 1];
+                let edge_type = edge_pat
+                    .rel_type
+                    .clone()
+                    .unwrap_or_else(|| "REL".to_string());
+
+                let start_id = self.resolve_bound_node_id(base_row, start_node)?;
+                let end_id = self.resolve_bound_node_id(base_row, end_node)?;
+
+                let existing_edges = self.storage.get_edges_by_type(&edge_type)?;
+                let found = existing_edges.iter().find(|e| {
+                    e.start_node == start_id && e.end_node == end_id
+                });
+                let edge_val = if let Some(edge) = found {
+                    let mut props: HashMap<String, Value> =
+                        edge.properties.clone().into_iter().collect();
+                    props.insert("_id".to_string(), Value::String(edge.id.clone()));
+                    props.insert("_type".to_string(), Value::String(edge.edge_type.clone()));
+                    serde_json::to_value(&props)
+                        .map_err(|e| EvalError::SerializationError(e.to_string()))?
+                } else {
+                    let id = format!("edge:{}", Uuid::new_v4());
+                    let edge_record = EdgeRecord {
+                        id,
+                        start_node: start_id,
+                        end_node: end_id,
+                        edge_type: edge_type.clone(),
+                        properties: BTreeMap::new(),
+                        created_at_unix_ms: 0,
+                        updated_at_unix_ms: 0,
+                    };
+                    self.storage.put_edge_record(&edge_record)?;
+                    stats.relationships_created += 1;
+                    let mut props: HashMap<String, Value> = HashMap::new();
+                    props.insert("_id".to_string(), Value::String(edge_record.id.clone()));
+                    props.insert("_type".to_string(), Value::String(edge_type));
+                    serde_json::to_value(&props)
+                        .map_err(|e| EvalError::SerializationError(e.to_string()))?
+                };
+
+                let mut row = base_row.clone();
+                if let Some(var) = &edge_pat.variable {
+                    row.insert(var.clone(), edge_val);
+                }
+                next_rows.push(row);
+            }
             current_rows = next_rows;
         }
 
@@ -2436,6 +2610,34 @@ impl EvalEngine {
             existing_id.to_string(),
             Value::Object(props.clone()),
         )))
+    }
+
+    fn resolve_bound_node_id(
+        &self,
+        row: &Row,
+        node_pat: &NodePattern,
+    ) -> Result<String, EvalError> {
+        let Some(var) = &node_pat.variable else {
+            return Err(EvalError::ExecutionError(
+                "MERGE relationship requires bound node variables".into(),
+            ));
+        };
+        let Some(Value::Object(props)) = row.get(var) else {
+            return Err(EvalError::ExecutionError(format!(
+                "node variable '{}' is not bound in MERGE relationship",
+                var
+            )));
+        };
+        let id = props
+            .get("_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                EvalError::ExecutionError(format!(
+                    "node variable '{}' is missing _id",
+                    var
+                ))
+            })?;
+        Ok(id.to_string())
     }
 
     fn match_relationship_pattern(
