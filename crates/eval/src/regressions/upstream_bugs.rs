@@ -2050,3 +2050,206 @@
             Some(&Value::String("ok".into()))
         );
     }
+
+    /// Tests CREATE SET CREATE boundary: SET terminates before next CREATE.
+    #[test]
+    fn test_create_set_create_clause_boundary() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CREATE (t:Foo) SET t.x = 'wyrd' CREATE (u:Foo) RETURN t.x")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get("t.x"),
+            Some(&Value::String("wyrd".into()))
+        );
+        assert_eq!(result.stats.nodes_created, 2);
+    }
+
+    /// Tests inline property filter on relationship edge itself: [r:TYPE {prop: val}].
+    #[test]
+    fn test_relationship_inline_property_filter() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (a:A {name: 'a'}), (b:B {name: 'b'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:A), (b:B) CREATE (a)-[:REL {score: 42}]->(b)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH ()-[r:REL {score: 42}]->() RETURN count(r) AS c")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("c"), Some(&Value::from(1)));
+
+        // With param
+        let mut params = HashMap::new();
+        params.insert("v".to_string(), Value::from(42));
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH ()-[r:REL {score: $v}]->() RETURN r.score")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("r.score"), Some(&Value::from(42)));
+    }
+
+    /// Tests inline property filter on relationship target with special characters.
+    #[test]
+    fn test_relationship_target_inline_filter_special_chars() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (e:Entry {name: 'test'}), (i:Type {name: 'Other Issue'}) CREATE (e)-[:HAS]->(i)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (e:Entry)-[:HAS]->(i:Type {name: 'Other Issue'}) RETURN count(e) AS c")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("c"), Some(&Value::from(1)));
+    }
+
+    /// Tests AVG aggregation on relationship property through generic eval path.
+    #[test]
+    fn test_avg_relationship_property_aggregation() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (n1:Node {id: 1}), (n2:Node {id: 2})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        for (from, to, weight) in [(1, 2, 10), (2, 1, 20), (1, 2, 30)] {
+            engine
+                .execute(
+                    &parser
+                        .parse(&format!(
+                            "MATCH (a:Node {{id: {from}}}), (b:Node {{id: {to}}}) CREATE (a)-[:EDGE {{weight: {weight}}}]->(b)"
+                        ))
+                        .unwrap(),
+                    &HashMap::new(),
+                )
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {id: 1})-[r:EDGE]->(b:Node {id: 2}) RETURN avg(r.weight) AS avgWeight")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("avgWeight"), Some(&Value::from(20.0)));
+    }
+
+    /// Tests multiple aggregation functions in RETURN.
+    #[test]
+    fn test_aggregation_count_sum_min_max() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for (cat, val) in [("a", 10), ("a", 30), ("b", 5)] {
+            engine
+                .execute(
+                    &parser
+                        .parse(&format!("CREATE (:Item {{cat: '{cat}', val: {val}}})"))
+                        .unwrap(),
+                    &HashMap::new(),
+                )
+                .unwrap();
+        }
+
+        // Full aggregation (no group by)
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Item) RETURN count(n) AS cnt, sum(n.val) AS total, min(n.val) AS lo, max(n.val) AS hi")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("cnt"), Some(&Value::from(3)));
+        assert_eq!(result.rows[0].get("total"), Some(&Value::from(45.0)));
+        assert_eq!(result.rows[0].get("lo"), Some(&Value::from(5.0)));
+        assert_eq!(result.rows[0].get("hi"), Some(&Value::from(30.0)));
+    }
+
+    /// Tests aggregation with GROUP BY implicit via non-aggregate RETURN column.
+    #[test]
+    fn test_aggregation_implicit_group_by() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for (cat, val) in [("a", 10), ("a", 30), ("b", 5)] {
+            engine
+                .execute(
+                    &parser
+                        .parse(&format!("CREATE (:Item {{cat: '{cat}', val: {val}}})"))
+                        .unwrap(),
+                    &HashMap::new(),
+                )
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Item) RETURN n.cat AS cat, count(n) AS cnt, avg(n.val) AS avgVal ORDER BY cat")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 2);
+        // Order by cat → a then b
+        assert_eq!(result.rows[0].get("cat"), Some(&Value::String("a".into())));
+        assert_eq!(result.rows[0].get("cnt"), Some(&Value::from(2)));
+        assert_eq!(result.rows[0].get("avgVal"), Some(&Value::from(20.0)));
+        assert_eq!(result.rows[1].get("cat"), Some(&Value::String("b".into())));
+        assert_eq!(result.rows[1].get("cnt"), Some(&Value::from(1)));
+        assert_eq!(result.rows[1].get("avgVal"), Some(&Value::from(5.0)));
+    }

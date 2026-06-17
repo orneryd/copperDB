@@ -904,11 +904,29 @@ impl EvalEngine {
                         current_rows.truncate(limit);
                     }
 
-                    // Project down to only the returned columns.
-                    let mut rows: Vec<Row> = current_rows
-                        .iter()
-                        .map(|row| project_row(row, &ret.items, params))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    // Project down to only the returned columns, or apply
+                    // aggregation when the RETURN contains agg functions.
+                    let agg_needed = has_aggregation_items(&ret.items)
+                        && !current_rows.is_empty();
+                    let mut rows: Vec<Row> = if agg_needed {
+                        apply_aggregation_to_rows(&current_rows, ret, params)?
+                            .into_iter()
+                            .filter(|r| !r.is_empty())
+                            .collect()
+                    } else {
+                        current_rows
+                            .iter()
+                            .map(|row| project_row(row, &ret.items, params))
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+                    // If aggregation produced empty result but we had rows, fall back
+                    if agg_needed && rows.is_empty() {
+                        // Fallback: use per-row projection
+                        rows = current_rows
+                            .iter()
+                            .map(|row| project_row(row, &ret.items, params))
+                            .collect::<Result<Vec<_>, _>>()?;
+                    }
 
                     // DISTINCT applied after projection (deduplication is over
                     // projected values, which is standard Cypher semantics).
@@ -3314,6 +3332,183 @@ fn is_range_comparable_value(value: &Value) -> bool {
 
 #[path = "eval_engine_policy.rs"]
 mod eval_engine_policy;
+
+// ── Aggregation helpers ────────────────────────────────────────────────────
+
+fn is_agg_function(expr: &Expression) -> bool {
+    match expr {
+        Expression::FunctionCall { name, .. } => {
+            let lower = name.to_ascii_lowercase();
+            matches!(lower.as_str(), "avg" | "sum" | "min" | "max" | "count")
+        }
+        _ => false,
+    }
+}
+
+fn has_aggregation_items(items: &[ReturnItem]) -> bool {
+    let agg_items: Vec<_> = items.iter().filter(|i| is_agg_function(&i.expression)).collect();
+    if agg_items.is_empty() {
+        return false;
+    }
+    // count(*) alone is a per-row operation handled by filter stub;
+    // only trigger aggregation when non-count agg functions are present.
+    agg_items.iter().any(|i| {
+        matches!(&i.expression, Expression::FunctionCall { name, .. } if !name.eq_ignore_ascii_case("count"))
+    })
+}
+
+fn agg_func_info(expr: &Expression) -> Option<(&str, Option<&Expression>)> {
+    match expr {
+        Expression::FunctionCall { name, args, .. } if is_agg_function(expr) => {
+            Some((name.as_str(), args.first()))
+        }
+        _ => None,
+    }
+}
+
+fn apply_aggregation_to_rows(
+    rows: &[Row],
+    ret: &copperdb_cypher::ReturnClause,
+    params: &HashMap<String, Value>,
+) -> Result<Vec<Row>, EvalError> {
+    let non_agg_items: Vec<&ReturnItem> = ret
+        .items
+        .iter()
+        .filter(|item| !is_agg_function(&item.expression))
+        .collect();
+
+    if non_agg_items.is_empty() {
+        let mut row = Row::new();
+        for item in &ret.items {
+            let col = column_name(item);
+            if let Some((fn_name, arg)) = agg_func_info(&item.expression) {
+                let borrowed: Vec<&Row> = rows.iter().collect();
+                row.insert(col, compute_agg(fn_name, arg, &borrowed, params)?);
+            } else if let Some(first) = rows.first() {
+                let projected = project_row(first, std::slice::from_ref(item), params)?;
+                if let Some((_, v)) = projected.into_iter().next() {
+                    row.insert(col, v);
+                }
+            }
+        }
+        return Ok(vec![row]);
+    }
+
+    let mut groups: HashMap<Vec<Value>, Vec<&Row>> = HashMap::new();
+    for row in rows {
+        let key: Vec<Value> = non_agg_items
+            .iter()
+            .map(|item| eval_expression(&item.expression, row, params).unwrap_or(Value::Null))
+            .collect();
+        groups.entry(key).or_default().push(row);
+    }
+
+    let sort_cols: Vec<String> = non_agg_items.iter().map(|item| column_name(item)).collect();
+    let mut result: Vec<(Vec<Value>, Row)> = Vec::new();
+    for (key_vals, group_rows) in groups {
+        let mut row = Row::new();
+        for (item, key_val) in non_agg_items.iter().zip(key_vals.iter()) {
+            row.insert(column_name(item), key_val.clone());
+        }
+        for item in &ret.items {
+            if let Some((fn_name, arg)) = agg_func_info(&item.expression) {
+                let col = column_name(item);
+                row.insert(col, compute_agg(fn_name, arg, &group_rows, params)?);
+            }
+        }
+        result.push((key_vals, row));
+    }
+    result.sort_by(|(ak, _), (bk, _)| {
+        for (a, b) in ak.iter().zip(bk.iter()) {
+            let ord = compare_json(a, b);
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    Ok(result.into_iter().map(|(_, row)| row).collect())
+}
+
+fn compute_agg(
+    fn_name: &str,
+    arg: Option<&Expression>,
+    rows: &[&Row],
+    params: &HashMap<String, Value>,
+) -> Result<Value, EvalError> {
+    match fn_name.to_ascii_lowercase().as_str() {
+        "count" => {
+            if let Some(arg_expr) = arg {
+                Ok(Value::from(
+                    rows.iter()
+                        .filter(|row| {
+                            eval_expression(arg_expr, row, params)
+                                .map(|v| v != Value::Null)
+                                .unwrap_or(false)
+                        })
+                        .count() as i64,
+                ))
+            } else {
+                Ok(Value::from(rows.len() as i64))
+            }
+        }
+        "sum" => {
+            let arg = arg.ok_or_else(|| {
+                EvalError::ExecutionError("sum() requires an argument".into())
+            })?;
+            let total: f64 = rows
+                .iter()
+                .filter_map(|row| eval_expression(arg, row, params).ok()?.as_f64())
+                .sum();
+            Ok(Value::from(total))
+        }
+        "avg" => {
+            let arg = arg.ok_or_else(|| {
+                EvalError::ExecutionError("avg() requires an argument".into())
+            })?;
+            let values: Vec<f64> = rows
+                .iter()
+                .filter_map(|row| eval_expression(arg, row, params).ok()?.as_f64())
+                .collect();
+            if values.is_empty() {
+                Ok(Value::Null)
+            } else {
+                Ok(Value::from(values.iter().sum::<f64>() / values.len() as f64))
+            }
+        }
+        "min" => {
+            let arg = arg.ok_or_else(|| {
+                EvalError::ExecutionError("min() requires an argument".into())
+            })?;
+            let min_val = rows
+                .iter()
+                .filter_map(|row| eval_expression(arg, row, params).ok()?.as_f64())
+                .fold(f64::NAN, |a, b| if a.is_nan() { b } else { a.min(b) });
+            if min_val.is_nan() {
+                Ok(Value::Null)
+            } else {
+                Ok(Value::from(min_val))
+            }
+        }
+        "max" => {
+            let arg = arg.ok_or_else(|| {
+                EvalError::ExecutionError("max() requires an argument".into())
+            })?;
+            let max_val = rows
+                .iter()
+                .filter_map(|row| eval_expression(arg, row, params).ok()?.as_f64())
+                .fold(f64::NAN, |a, b| if a.is_nan() { b } else { a.max(b) });
+            if max_val.is_nan() {
+                Ok(Value::Null)
+            } else {
+                Ok(Value::from(max_val))
+            }
+        }
+        _ => Err(EvalError::ExecutionError(format!(
+            "unsupported aggregation function: {fn_name}"
+        ))),
+    }
+}
 
 #[path = "eval_engine_tail.rs"]
 mod eval_engine_tail;

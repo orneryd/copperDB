@@ -498,8 +498,16 @@ fn eval_function(
             if args.is_empty() {
                 return Ok(Value::Number(0.into()));
             }
-            // count(*) or count(expr) — for per-row evaluation just return 1
+            // count(*) or count(expr) — per-row: return 1 (aggregation handles totals)
             Ok(Value::Number(1.into()))
+        }
+        "avg" | "sum" | "min" | "max" => {
+            // Aggregation functions: return the argument value per-row.
+            // Actual aggregation is applied as post-processing by the eval engine.
+            if args.is_empty() {
+                return Ok(Value::Null);
+            }
+            eval_arg(0)
         }
         "size" => {
             let v = eval_arg(0)?;
