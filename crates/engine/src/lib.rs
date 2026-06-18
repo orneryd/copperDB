@@ -498,7 +498,8 @@ fn collect_expression_properties(expression: &Expression, properties: &mut Vec<S
         | Expression::Parameter(_)
         | Expression::ParameterPropertyAccess { .. }
         | Expression::Variable(_)
-        | Expression::PatternExists { .. } => {}
+        | Expression::PatternExists { .. }
+        | Expression::BracketAccess { .. } => {}
         Expression::Case(case) => {
             if let Some(ref expr) = case.expression {
                 collect_expression_properties(expr, properties);

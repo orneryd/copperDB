@@ -161,6 +161,17 @@ impl<'a> ParseContext<'a> {
     fn parse_multiplication(&mut self) -> Result<Expression, CypherError> {
         let mut left = self.parse_primary()?;
         loop {
+            // Bracket access: expr[key]
+            if self.peek() == Some("[") {
+                self.advance(); // consume [
+                let key = self.parse_expression_item(&["]"])?;
+                self.expect("]")?;
+                left = Expression::BracketAccess {
+                    expression: Box::new(left),
+                    key: Box::new(key),
+                };
+                continue;
+            }
             if self.peek() == Some("*") {
                 self.advance();
                 let right = self.parse_primary()?;

@@ -80,6 +80,7 @@ pub struct QueryStats {
 }
 
 /// The result of executing a query.
+#[derive(Debug)]
 pub struct EvalResult {
     pub columns: Vec<String>,
     pub rows: Vec<Row>,
@@ -462,6 +463,13 @@ fn collect_expression_variables(expression: &Expression, variables: &mut HashSet
         | Expression::Parameter(_)
         | Expression::ParameterPropertyAccess { .. }
         | Expression::PatternExists { .. } => {}
+        Expression::BracketAccess {
+            expression,
+            key,
+        } => {
+            collect_expression_variables(expression, variables);
+            collect_expression_variables(key, variables);
+        }
         Expression::Case(case) => {
             if let Some(ref expr) = case.expression {
                 collect_expression_variables(expr, variables);

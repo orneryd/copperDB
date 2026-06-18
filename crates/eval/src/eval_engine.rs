@@ -262,6 +262,8 @@ impl EvalEngine {
         query: &Query,
         params: &HashMap<String, Value>,
     ) -> Result<EvalResult, EvalError> {
+        // Clear per-query caches so MERGE ON MATCH fires across statements
+        self.invalidate_node_lookup_cache();
         let mut current_rows = pooled_binding_rows();
         current_rows.push(HashMap::new());
         let mut stats = QueryStats::default();
@@ -906,13 +908,16 @@ impl EvalEngine {
 
                     // Project down to only the returned columns, or apply
                     // aggregation when the RETURN contains agg functions.
-                    let agg_needed = has_aggregation_items(&ret.items)
-                        && !current_rows.is_empty();
-                    let mut rows: Vec<Row> = if agg_needed {
-                        apply_aggregation_to_rows(&current_rows, ret, params)?
-                            .into_iter()
-                            .filter(|r| !r.is_empty())
-                            .collect()
+                    // NornicDB-style: aggregations always produce 1 row on
+                    // empty input with identity values (count→0, sum→0,
+                    // avg→null, min→null, max→null).
+                    let any_agg = has_aggregation_items(&ret.items);
+                    let non_count_agg = has_non_count_aggregation(&ret.items);
+                    let mut rows: Vec<Row> = if current_rows.is_empty() && any_agg {
+                        // Empty rows + aggregation → produce identity row
+                        vec![aggregate_identity_row(&ret.items, params)?]
+                    } else if non_count_agg && !current_rows.is_empty() {
+                        apply_aggregation_to_rows(&current_rows, &ret.items, params)?
                     } else {
                         current_rows
                             .iter()
@@ -920,8 +925,7 @@ impl EvalEngine {
                             .collect::<Result<Vec<_>, _>>()?
                     };
                     // If aggregation produced empty result but we had rows, fall back
-                    if agg_needed && rows.is_empty() {
-                        // Fallback: use per-row projection
+                    if non_count_agg && rows.is_empty() && !current_rows.is_empty() {
                         rows = current_rows
                             .iter()
                             .map(|row| project_row(row, &ret.items, params))
@@ -952,12 +956,17 @@ impl EvalEngine {
                 }
 
                 Clause::With(with) => {
-                    // Project rows like RETURN but continue pipeline
-                    let items = &with.items;
-                    let mut projected: Vec<Row> = current_rows
-                        .iter()
-                        .map(|row| project_row(row, items, params))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    // Project rows like RETURN but continue pipeline;
+                    // WITH always triggers aggregation when agg functions present
+                    let with_agg = has_aggregation_items(&with.items) && !current_rows.is_empty();
+                    let mut projected: Vec<Row> = if with_agg {
+                        apply_aggregation_to_rows(&current_rows, &with.items, params)?
+                    } else {
+                        current_rows
+                            .iter()
+                            .map(|row| project_row(row, &with.items, params))
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
 
                     if let Some(where_clause) = &with.where_clause {
                         let mut filtered_rows = pooled_binding_rows();
@@ -1941,10 +1950,17 @@ impl EvalEngine {
                         let new_val = eval_expression(value, row, params)?;
                         if let Value::Object(map) = &new_val {
                             if let Some(Value::Object(props)) = row.get_mut(variable) {
+                                let mut merged = 0usize;
                                 for (k, v) in map {
+                                    // Nil/null values must not clobber existing properties
+                                    // (NornicDB parity: applySetMapMergeToNode skips nil).
+                                    if matches!(v, Value::Null) {
+                                        continue;
+                                    }
                                     props.insert(k.clone(), v.clone());
+                                    merged += 1;
                                 }
-                                stats.properties_set += map.len();
+                                stats.properties_set += merged;
                                 let persisted_props: HashMap<String, Value> =
                                     props.clone().into_iter().collect();
                                 self.persist_bound_props(&persisted_props)?;
@@ -2252,6 +2268,59 @@ impl EvalEngine {
         Ok(current_rows)
     }
 
+    /// Validate node properties against stored constraints (unique, exists).
+    /// Returns an error if a constraint is violated.
+    fn check_node_constraints(
+        &self,
+        labels: &[String],
+        props: &HashMap<String, Value>,
+    ) -> Result<(), EvalError> {
+        let constraints = self.storage.load_constraints()?;
+        for c in &constraints {
+            if c.entity_type != ConstraintEntityType::Node {
+                continue;
+            }
+            if !labels.contains(&c.label) {
+                continue;
+            }
+            match c.constraint_type {
+                ConstraintType::Unique => {
+                    let Some(prop) = c.properties.first() else { continue };
+                    let val = match props.get(prop) {
+                        None | Some(Value::Null) => continue,
+                        Some(v) => v,
+                    };
+                    // Scan nodes with matching label to find duplicate
+                    if let Ok(nodes) = self.storage.get_nodes_by_label(&c.label) {
+                        for node in &nodes {
+                            if node.properties.get(prop) == Some(val) {
+                                return Err(EvalError::ExecutionError(format!(
+                                    "Node already exists with label `{}` and property `{}` = {:?}",
+                                    c.label, prop, val
+                                )));
+                            }
+                        }
+                    }
+                }
+                ConstraintType::Exists => {
+                    for prop in &c.properties {
+                        match props.get(prop) {
+                            None | Some(Value::Null) => {
+                                return Err(EvalError::ExecutionError(format!(
+                                    "Required property `{}` is missing on node with label `{}`",
+                                    prop, c.label
+                                )));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn execute_pattern_create_segment(
         &self,
         row: &mut Row,
@@ -2295,6 +2364,7 @@ impl EvalEngine {
                         .collect(),
                 ),
             );
+            self.check_node_constraints(&node_pat.labels, &props)?;
             self.persist_node_props(&props)?;
             stats.nodes_created += 1;
             stats.properties_set += node_pat.properties.len();
@@ -2497,6 +2567,7 @@ impl EvalEngine {
                                     .collect(),
                             ),
                         );
+                        self.check_node_constraints(labels, &props)?;
                         self.persist_node_props(&props)?;
                         stats.nodes_created += 1;
                         stats.properties_set += node_pat.properties.len();
@@ -2557,19 +2628,22 @@ impl EvalEngine {
                 let found = existing_edges.iter().find(|e| {
                     e.start_node == start_id && e.end_node == end_id
                 });
-                let edge_val = if let Some(edge) = found {
+                let (edge_val, is_new) = if let Some(edge) = found {
                     let mut props: HashMap<String, Value> =
                         edge.properties.clone().into_iter().collect();
                     props.insert("_id".to_string(), Value::String(edge.id.clone()));
                     props.insert("_type".to_string(), Value::String(edge.edge_type.clone()));
-                    serde_json::to_value(&props)
-                        .map_err(|e| EvalError::SerializationError(e.to_string()))?
+                    props.insert("_start".to_string(), Value::String(edge.start_node.clone()));
+                    props.insert("_end".to_string(), Value::String(edge.end_node.clone()));
+                    (serde_json::to_value(&props)
+                        .map_err(|e| EvalError::SerializationError(e.to_string()))?,
+                     false)
                 } else {
                     let id = format!("edge:{}", Uuid::new_v4());
                     let edge_record = EdgeRecord {
                         id,
-                        start_node: start_id,
-                        end_node: end_id,
+                        start_node: start_id.clone(),
+                        end_node: end_id.clone(),
                         edge_type: edge_type.clone(),
                         properties: BTreeMap::new(),
                         created_at_unix_ms: 0,
@@ -2580,14 +2654,35 @@ impl EvalEngine {
                     let mut props: HashMap<String, Value> = HashMap::new();
                     props.insert("_id".to_string(), Value::String(edge_record.id.clone()));
                     props.insert("_type".to_string(), Value::String(edge_type));
-                    serde_json::to_value(&props)
-                        .map_err(|e| EvalError::SerializationError(e.to_string()))?
+                    props.insert("_start".to_string(), Value::String(start_id));
+                    props.insert("_end".to_string(), Value::String(end_id));
+                    (serde_json::to_value(&props)
+                        .map_err(|e| EvalError::SerializationError(e.to_string()))?,
+                     true)
                 };
 
                 let mut row = base_row.clone();
                 if let Some(var) = &edge_pat.variable {
                     row.insert(var.clone(), edge_val);
                 }
+
+                // Apply ON CREATE/ON MATCH SET for relationship
+                if is_new && !merge.on_create.is_empty() {
+                    self.execute_set_clause(
+                        std::slice::from_mut(&mut row),
+                        &merge.on_create,
+                        params,
+                        stats,
+                    )?;
+                } else if !is_new && !merge.on_match.is_empty() {
+                    self.execute_set_clause(
+                        std::slice::from_mut(&mut row),
+                        &merge.on_match,
+                        params,
+                        stats,
+                    )?;
+                }
+
                 next_rows.push(row);
             }
             current_rows = next_rows;
@@ -3346,14 +3441,14 @@ fn is_agg_function(expr: &Expression) -> bool {
 }
 
 fn has_aggregation_items(items: &[ReturnItem]) -> bool {
-    let agg_items: Vec<_> = items.iter().filter(|i| is_agg_function(&i.expression)).collect();
-    if agg_items.is_empty() {
-        return false;
-    }
-    // count(*) alone is a per-row operation handled by filter stub;
-    // only trigger aggregation when non-count agg functions are present.
-    agg_items.iter().any(|i| {
-        matches!(&i.expression, Expression::FunctionCall { name, .. } if !name.eq_ignore_ascii_case("count"))
+    items.iter().any(|item| is_agg_function(&item.expression))
+}
+
+/// Like has_aggregation_items but count-only doesn't qualify (for final RETURN).
+fn has_non_count_aggregation(items: &[ReturnItem]) -> bool {
+    items.iter().any(|item| {
+        matches!(&item.expression, Expression::FunctionCall { name, .. }
+            if is_agg_function(&item.expression) && !name.eq_ignore_ascii_case("count"))
     })
 }
 
@@ -3366,20 +3461,42 @@ fn agg_func_info(expr: &Expression) -> Option<(&str, Option<&Expression>)> {
     }
 }
 
+/// Build a single row with identity values for aggregation on empty input.
+/// count→0, sum→0, avg→null, min→null, max→null
+fn aggregate_identity_row(
+    items: &[ReturnItem],
+    params: &HashMap<String, Value>,
+) -> Result<Row, EvalError> {
+    let mut row = Row::new();
+    for item in items {
+        let col = column_name(item);
+        let val = match &item.expression {
+            Expression::FunctionCall { name, .. } => match name.to_ascii_lowercase().as_str() {
+                "count" => Value::from(0),
+                "sum" => Value::from(0),
+                "avg" | "min" | "max" => Value::Null,
+                _ => Value::Null,
+            },
+            _ => Value::Null,
+        };
+        row.insert(col, val);
+    }
+    Ok(row)
+}
+
 fn apply_aggregation_to_rows(
     rows: &[Row],
-    ret: &copperdb_cypher::ReturnClause,
+    items: &[ReturnItem],
     params: &HashMap<String, Value>,
 ) -> Result<Vec<Row>, EvalError> {
-    let non_agg_items: Vec<&ReturnItem> = ret
-        .items
+    let non_agg_items: Vec<&ReturnItem> = items
         .iter()
         .filter(|item| !is_agg_function(&item.expression))
         .collect();
 
     if non_agg_items.is_empty() {
         let mut row = Row::new();
-        for item in &ret.items {
+        for item in items {
             let col = column_name(item);
             if let Some((fn_name, arg)) = agg_func_info(&item.expression) {
                 let borrowed: Vec<&Row> = rows.iter().collect();
@@ -3410,7 +3527,7 @@ fn apply_aggregation_to_rows(
         for (item, key_val) in non_agg_items.iter().zip(key_vals.iter()) {
             row.insert(column_name(item), key_val.clone());
         }
-        for item in &ret.items {
+        for item in items {
             if let Some((fn_name, arg)) = agg_func_info(&item.expression) {
                 let col = column_name(item);
                 row.insert(col, compute_agg(fn_name, arg, &group_rows, params)?);

@@ -441,6 +441,10 @@ pub enum Expression {
         parameter: String,
         property: String,
     },
+    BracketAccess {
+        expression: Box<Expression>,
+        key: Box<Expression>,
+    },
     FunctionCall {
         name: String,
         args: Vec<Expression>,

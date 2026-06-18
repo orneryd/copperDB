@@ -2253,3 +2253,598 @@
         assert_eq!(result.rows[1].get("cnt"), Some(&Value::from(1)));
         assert_eq!(result.rows[1].get("avgVal"), Some(&Value::from(5.0)));
     }
+
+    /// Tests MERGE chain: MERGE→WITH→MATCH→MERGE relationship.
+    #[test]
+    fn test_merge_chain_with_match() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser.parse("CREATE (b:Node {id: 'b-exists'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MERGE (a:Node {id: 'a1'}) WITH a MATCH (b:Node {id: 'b-exists'}) MERGE (a)-[:REL]->(b) RETURN a.id AS aid")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get("aid"),
+            Some(&Value::String("a1".into()))
+        );
+        assert!(result.stats.relationships_created >= 1 || result.stats.nodes_created >= 1);
+    }
+
+    /// Tests MERGE→WITH→OPTIONAL MATCH chain.
+    #[test]
+    fn test_merge_with_optional_match() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MERGE (a:Node {id: 'a2'}) WITH a OPTIONAL MATCH (b:Node {id: 'missing'}) RETURN a.id AS aid, b.id AS bid")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get("aid"),
+            Some(&Value::String("a2".into()))
+        );
+        assert_eq!(result.rows[0].get("bid"), Some(&Value::Null));
+    }
+
+    /// Tests FOREACH inside MERGE chain.
+    #[test]
+    fn test_merge_chain_foreach() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MERGE (a:Node {id: 'a4'}) WITH a FOREACH (i IN [1,2] | CREATE (:Tmp {k: i})) RETURN a.id AS aid")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get("aid"),
+            Some(&Value::String("a4".into()))
+        );
+    }
+
+    /// Tests MERGE with context variable: MERGE (n:Doc {k: s.name}) where s is from prior clause.
+    #[test]
+    fn test_merge_with_context_variable() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        let mut params = HashMap::new();
+        params.insert(
+            "node".to_string(),
+            serde_json::json!({"name": "context-test", "val": 42}),
+        );
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("UNWIND [$node] AS s MERGE (n:Doc {name: s.name}) ON CREATE SET n.val = s.val RETURN n.name AS name, n.val AS val")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get("name"),
+            Some(&Value::String("context-test".into()))
+        );
+        assert_eq!(result.rows[0].get("val"), Some(&Value::from(42)));
+    }
+
+    /// Tests chained MATCH→WITH aggregation: aggregation in WITH clauses.
+    #[test]
+    fn test_chained_match_with_aggregation() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser.parse("CREATE (:A {x: 1}), (:A {x: 2}), (:B {z: 10}), (:B {z: 20})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:A) WITH count(a) AS aCount MATCH (b:B) WITH aCount, count(b) AS bCount RETURN aCount, bCount")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("aCount"), Some(&Value::from(2)));
+        assert_eq!(result.rows[0].get("bCount"), Some(&Value::from(2)));
+    }
+
+    /// Tests aggregation identity: MATCH with no results + aggregation returns identity.
+    #[test]
+    fn test_aggregation_identity_on_empty_match() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // count(n) on empty match → 1 row with count=0
+        let r = engine
+            .execute(
+                &parser.parse("MATCH (n:Missing) RETURN count(n) AS c").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0].get("c"), Some(&Value::from(0)));
+
+        // avg(n.x) on empty match → 1 row with null
+        let r = engine
+            .execute(
+                &parser.parse("MATCH (n:Missing) RETURN avg(n.x) AS a").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0].get("a"), Some(&Value::Null));
+
+        // sum(n.x) on empty → 0
+        let r = engine
+            .execute(
+                &parser.parse("MATCH (n:Missing) RETURN sum(n.x) AS s").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0].get("s"), Some(&Value::from(0)));
+
+        // No aggregation on empty match → 0 rows
+        let r = engine
+            .execute(
+                &parser.parse("MATCH (n:Missing) RETURN n.x AS x").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(r.rows.len(), 0);
+    }
+
+    /// Tests MATCH→WITH count→MATCH pattern where no B nodes exist.
+    /// Standard Cypher: MATCH fails → 0 rows → aggregation identity row.
+    #[test]
+    fn test_chained_match_with_aggregation_no_second_match() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser.parse("CREATE (:A {x: 1}), (:A {x: 2})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // MATCH fails → 0 rows → RETURN count(b) produces identity row (count=0)
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:A) WITH count(a) AS aCount MATCH (b:Missing) RETURN aCount, count(b) AS bCount")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        // Aggregation on empty input: 1 row with identity values
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("aCount"), Some(&Value::Null));
+        assert_eq!(result.rows[0].get("bCount"), Some(&Value::from(0)));
+    }
+
+    /// Tests MATCH→WITH count→OPTIONAL MATCH: aggregation survives OPTIONAL.
+    #[test]
+    fn test_chained_match_with_aggregation_optional_match() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser.parse("CREATE (:A {x: 1}), (:A {x: 2})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:A) WITH count(a) AS aCount OPTIONAL MATCH (b:Missing) RETURN aCount, count(b) AS bCount")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        // OPTIONAL MATCH preserves the WITH aggregation row
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("aCount"), Some(&Value::from(2)));
+        assert_eq!(result.rows[0].get("bCount"), Some(&Value::from(0)));
+    }
+
+    /// Tests bracket access: $d['uuid'] and d['uuid'] syntax.
+    #[test]
+    fn test_bracket_access() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        let mut params = HashMap::new();
+        params.insert(
+            "d".to_string(),
+            serde_json::json!({"uuid": "abc-123", "name": "Test"}),
+        );
+
+        // $d['uuid'] on param
+        let result = engine
+            .execute(
+                &parser.parse("RETURN $d['uuid'] AS uuid").unwrap(),
+                &params,
+            )
+            .unwrap();
+        assert_eq!(
+            result.rows[0].get("uuid"),
+            Some(&Value::String("abc-123".into()))
+        );
+
+        // Bracket access through WITH alias
+        let result = engine
+            .execute(
+                &parser.parse("WITH $d AS d RETURN d['uuid'] AS uuid").unwrap(),
+                &params,
+            )
+            .unwrap();
+        assert_eq!(
+            result.rows[0].get("uuid"),
+            Some(&Value::String("abc-123".into()))
+        );
+    }
+
+    /// Tests `+=` map merge on matched node (SET-only, no MERGE).
+    #[test]
+    fn test_set_map_merge_on_matched_node() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser.parse("CREATE (n:Test {name: 'Alice', age: 30})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // SET += should merge new keys and overwrite existing
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Test {name: 'Alice'}) SET n += {name: 'Bob', city: 'NYC'} RETURN n.name AS name, n.city AS city")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("name"), Some(&Value::String("Bob".into())));
+        assert_eq!(result.rows[0].get("city"), Some(&Value::String("NYC".into())));
+    }
+
+    /// Tests `+=` map merge inside MERGE ON CREATE/ON MATCH.
+    #[test]
+    fn test_merge_on_create_map_merge() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        let mut params = HashMap::new();
+        params.insert(
+            "node".to_string(),
+            serde_json::json!({"url": "https://example.com", "name": "First"}),
+        );
+
+        // ON CREATE: map merge
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MERGE (p:Pds {url: $node.url}) ON CREATE SET p += $node RETURN p.name AS name")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("name"), Some(&Value::String("First".into())));
+
+        // ON MATCH: map merge should overwrite
+        params.insert("node".to_string(), serde_json::json!({"url": "https://example.com", "name": "Updated"}));
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MERGE (p:Pds {url: $node.url}) ON MATCH SET p += $node RETURN p.name AS name")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("name"), Some(&Value::String("Updated".into())));
+    }
+
+    /// Tests chain break: MATCH fails → skips subsequent FOREACH/CREATE.
+    #[test]
+    fn test_chain_break_match_fails_skips_foreach() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // Set up: create nodes, then run a chain where MATCH fails
+        engine
+            .execute(
+                &parser
+                    .parse("MERGE (a:Node {id: 'a-skip'}) MERGE (b:Node {id: 'b-skip'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // MATCH on Missing fails → FOREACH should NOT execute
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MERGE (a:Node {id: 'a-skip'}) MERGE (b:Node {id: 'b-skip'}) WITH a, b MATCH (m:Missing {id: 'none'}) FOREACH (i IN [1,2] | CREATE (:Tmp {k: i})) RETURN a.id AS aid")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        // MATCH fails → 0 rows, FOREACH never runs
+        assert_eq!(result.rows.len(), 0);
+    }
+
+    /// Tests multi-label MERGE: MERGE with two labels only matches nodes with all.
+    #[test]
+    fn test_merge_multi_label_matching() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // Single-label node
+        engine
+            .execute(
+                &parser.parse("CREATE (c:FileChunk {id: 'single'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // Basic single-label MATCH works
+        let r = engine
+            .execute(
+                &parser.parse("MATCH (n:FileChunk) RETURN n.id AS id ORDER BY id")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0].get("id"), Some(&Value::String("single".into())));
+
+        // MERGE dual-label on single-label node → should create new
+        let r = engine
+            .execute(
+                &parser
+                    .parse("MERGE (n:FileChunk:Node {id: 'single'}) RETURN n.id AS id")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.stats.nodes_created, 1,
+            "MERGE with extra label should create new node when existing lacks that label");
+
+        // Now 2 FileChunk nodes
+        let r = engine
+            .execute(
+                &parser.parse("MATCH (n:FileChunk) RETURN n.id AS id ORDER BY id")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(r.rows.len(), 2);
+    }
+
+    /// Tests inline property match after SET mutation.
+    #[test]
+    fn test_inline_property_match_after_set() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser.parse("CREATE (h:Heuristic {title: 'T'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // SET a property, then verify inline {prop: val} match finds it
+        engine
+            .execute(
+                &parser.parse("MATCH (h:Heuristic {title: 'T'}) SET h.tested_against = 'v'")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (h:Heuristic {tested_against: 'v'}) RETURN count(h) AS c")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("c"), Some(&Value::from(1)));
+    }
+
+    /// Tests MERGE relationship with ON CREATE/ON MATCH SET.
+    #[test]
+    fn test_chained_relationship_merge_with_set() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // MERGE nodes + MERGE relationship + ON CREATE SET
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MERGE (a:A {name: 'a'}) MERGE (b:B {name: 'b'}) WITH a, b MERGE (a)-[r:KNOWS]->(b) ON CREATE SET r.weight = 1 RETURN r.weight AS rw")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("rw"), Some(&Value::from(1)));
+        assert_eq!(result.stats.relationships_created, 1);
+
+        // Second MERGE should match existing + ON MATCH SET update
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MERGE (a:A {name: 'a'}) MERGE (b:B {name: 'b'}) WITH a, b MERGE (a)-[r:KNOWS]->(b) ON MATCH SET r.weight = 2 RETURN r.weight AS rw")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("rw"), Some(&Value::from(2)));
+        assert_eq!(result.stats.relationships_created, 0);
+    }
+
+    /// Tests multi-MERGE chain: MERGE→WITH→MERGE→WITH→MERGE relationship.
+    #[test]
+    fn test_multi_merge_chain_with_relationship() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MERGE (a:Node {id: 'a3'}) WITH a MERGE (b:Node {id: 'b3'}) WITH a, b MERGE (a)-[:REL]->(b) RETURN a.id AS aid, b.id AS bid")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("aid"), Some(&Value::String("a3".into())));
+        assert_eq!(result.rows[0].get("bid"), Some(&Value::String("b3".into())));
+        assert!(result.stats.nodes_created >= 2);
+        assert_eq!(result.stats.relationships_created, 1);
+    }
+
+    /// Tests `+=` map merge with nil audit keys — nil values must not clobber explicit SET.
+    #[test]
+    fn test_merge_on_create_map_merge_nil_keys() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        let mut params = HashMap::new();
+        // Input has `created: null` — must not overwrite `p.created` set explicitly
+        params.insert(
+            "node".to_string(),
+            serde_json::json!({"url": "https://example.com", "created": null, "name": "first"}),
+        );
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MERGE (p:Pds {url: $node.url}) ON CREATE SET p.created = timestamp(), p += $node RETURN p.name, p.created")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("p.name"), Some(&Value::String("first".into())));
+        // p.created should be set (not null) since ON CREATE explicitly sets it
+        assert!(
+            result.rows[0].get("p.created").and_then(Value::as_u64).unwrap_or(0) > 0,
+            "created should be a timestamp, not null"
+        );
+    }
+
+    /// Tests unique constraint enforcement.
+    #[test]
+    fn test_unique_constraint_enforcement() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // Create constraint
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE CONSTRAINT node_id_unique IF NOT EXISTS FOR (n:Node) REQUIRE n.id IS UNIQUE")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // First insert should succeed
+        engine
+            .execute(
+                &parser.parse("CREATE (n:Node {id: 'u1'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // Second insert with same id should fail
+        let err = engine
+            .execute(
+                &parser.parse("CREATE (n:Node {id: 'u1'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("already exists") || msg.contains("unique"));
+
+        // Duplicate assertion removed
+    }
+
+    /// Tests exists constraint enforcement.
+    #[test]
+    fn test_exists_constraint_enforcement() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE CONSTRAINT person_name_required IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS NOT NULL")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // CREATE without required property should fail
+        let err = engine
+            .execute(
+                &parser.parse("CREATE (p:Person {age: 30})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing") || msg.contains("required") || msg.contains("null"));
+
+        // CREATE with required property should succeed
+        engine
+            .execute(
+                &parser.parse("CREATE (p:Person {name: 'Alice', age: 30})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+    }

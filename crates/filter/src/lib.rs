@@ -60,6 +60,24 @@ pub fn eval_expression(
             }
         }
 
+        Expression::BracketAccess { expression, key } => {
+            let base = eval_expression(expression, row, params)?;
+            let key_val = eval_expression(key, row, params)?;
+            match (&base, &key_val) {
+                (Value::Object(map), Value::String(k)) => {
+                    Ok(map.get(k.as_str()).cloned().unwrap_or(Value::Null))
+                }
+                (Value::Array(arr), Value::Number(idx)) => {
+                    idx.as_u64()
+                        .and_then(|i| arr.get(i as usize).cloned())
+                        .ok_or_else(|| {
+                            FilterError::TypeError(format!("index out of bounds: {idx}"))
+                        })
+                }
+                _ => Ok(Value::Null),
+            }
+        }
+
         Expression::Variable(name) => row
             .get(name)
             .cloned()
@@ -498,8 +516,14 @@ fn eval_function(
             if args.is_empty() {
                 return Ok(Value::Number(0.into()));
             }
-            // count(*) or count(expr) — per-row: return 1 (aggregation handles totals)
-            Ok(Value::Number(1.into()))
+            // count(*): count all rows (return 1)
+            let first = &args[0];
+            if matches!(first, Expression::Variable(v) if v == "*") {
+                return Ok(Value::Number(1.into()));
+            }
+            // count(expr): per-row, return 1 if non-null, 0 if null
+            let v = eval_arg(0)?;
+            Ok(Value::Number(if matches!(v, Value::Null) { 0 } else { 1 }.into()))
         }
         "avg" | "sum" | "min" | "max" => {
             // Aggregation functions: return the argument value per-row.

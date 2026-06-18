@@ -495,6 +495,7 @@ fn profile_expression(expression: &Expression) -> QueryShapeStats {
             }
         }
         Expression::PatternExists { .. } => {}
+        Expression::BracketAccess { .. } => {}
     }
 
     stats
