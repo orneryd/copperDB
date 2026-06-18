@@ -391,6 +391,8 @@ fn namespace_scoped_schema_is_isolated_from_global_catalog() {
         entity_type: ConstraintEntityType::Node,
         label: "Person".to_string(),
         properties: vec!["email".to_string()],
+        type_name: None,
+            allowed_values: Vec::new(),
     };
     let alpha_constraint = Constraint {
         name: "alpha_person_name_exists".to_string(),
@@ -398,6 +400,8 @@ fn namespace_scoped_schema_is_isolated_from_global_catalog() {
         entity_type: ConstraintEntityType::Node,
         label: "Person".to_string(),
         properties: vec!["name".to_string()],
+        type_name: None,
+            allowed_values: Vec::new(),
     };
     let alpha_index = IndexDefinition {
         name: "alpha_person_name_idx".to_string(),
@@ -462,6 +466,8 @@ fn delete_by_prefix_removes_namespace_records_indexes_stats_and_schema() {
         entity_type: ConstraintEntityType::Node,
         label: "Person".to_string(),
         properties: vec!["name".to_string()],
+        type_name: None,
+            allowed_values: Vec::new(),
     };
     let alpha_index = IndexDefinition {
         name: "alpha_person_name_idx".to_string(),
@@ -864,6 +870,8 @@ fn namespaced_storage_engine_streams_schema_and_deletes_within_namespace() {
         entity_type: ConstraintEntityType::Node,
         label: "Person".to_string(),
         properties: vec!["name".to_string()],
+        type_name: None,
+            allowed_values: Vec::new(),
     };
     let tenant_a_index = IndexDefinition {
         name: "tenant_a_person_name_idx".to_string(),
@@ -3844,6 +3852,8 @@ fn schema_constraints_validate_and_persist() {
             entity_type: ConstraintEntityType::Node,
             label: "Person".to_string(),
             properties: vec!["email".to_string()],
+            type_name: None,
+            allowed_values: Vec::new(),
         })
         .unwrap();
     schema
@@ -3853,6 +3863,8 @@ fn schema_constraints_validate_and_persist() {
             entity_type: ConstraintEntityType::Node,
             label: "Person".to_string(),
             properties: vec!["email".to_string()],
+            type_name: None,
+            allowed_values: Vec::new(),
         })
         .unwrap();
 

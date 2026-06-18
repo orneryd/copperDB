@@ -447,6 +447,8 @@ impl EvalEngine {
                     ConstraintType::NodeKey => "NODE_KEY",
                     ConstraintType::Type => "RELATIONSHIP_PROPERTY_TYPE",
                     ConstraintType::Relationship => "RELATIONSHIP_PROPERTY_EXISTENCE",
+                    ConstraintType::Temporal => "TEMPORAL_NO_OVERLAP",
+                    ConstraintType::Domain => "DOMAIN",
                 };
                 row.insert(
                     "type".to_string(),

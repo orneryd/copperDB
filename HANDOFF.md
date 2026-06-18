@@ -1,11 +1,11 @@
 # copperDB Cypher Parity — Agent Handoff
 
 **Date:** 2026-06-18  
-**Last commit:** `bfe84fc` — "continuing cypher parity work"  
-**Working tree:** clean (all committed)  
+**Last commit:** `891d13e` — "handoff"  
+**Working tree:** dirty (constraint enforcement in progress)  
 **Repos involved:**
-- `C:\Users\timot\Documents\GitHub\copperDB` — Rust workspace (this is the target)
-- `C:\Users\timot\Documents\GitHub\NornicDB` — Go upstream (source of truth for behavior)
+- `/Users/timothysweet/src/copperDB` — Rust workspace (this is the target)
+- `/Users/timothysweet/src/NornicDB` — Go upstream (source of truth for behavior)
 
 ---
 
@@ -20,34 +20,33 @@
 ### Test Counts
 | Crate | Tests | Failing |
 |-------|-------|---------|
-| copperdb-eval | 239 | 0 |
+| copperdb-eval | 247 | 0 |
 | copperdb-cypher | 146 | 0 |
 | copperdb-engine | 83 | 0 |
 | copperdb-storage | 106 | 0 |
-| **Workspace total** | **~571** | **0** |
+| copperdb-server | 28 | 1 (pre-existing distributed timeout) |
+| **Workspace total** | **~610** | **1 (pre-existing)** |
 
-All tests pass across the entire workspace.
+All core tests pass. One pre-existing server test (`neo4j_commit_can_opt_into_distributed_graph_read_routing`) has a timing issue in the deferred Layer 3 distributed path; it is not caused by this work.
 
 ### Key Files Recently Modified
 | File | What changed |
 |------|-------------|
-| `crates/eval/src/eval_engine.rs` | `+=` nil skip, `check_node_constraints`, FOREACH, CALL YIELD, MERGE ON CREATE/MATCH SET, relationship MERGE, aggregation identity |
-| `crates/eval/src/regressions/upstream_bugs.rs` | 239 tests — latest: constraint enforcement, nil key map merge |
-| `crates/eval/src/lib.rs` | `#[derive(Debug)]` on `EvalResult`, `node_has_all_labels`, aggregation helpers |
-| `crates/cypher/src/ast.rs` | Expression enum: `BracketAccess`, `Reduce`, `ListComprehension`, `Between`, `CASE`, constraint types |
-| `crates/cypher/src/expression_parser.rs` | Full recursive descent, bracket access postfix |
-| `crates/cypher/src/lib.rs` | `parse_merge` with ON CREATE/MATCH SET, `parse_set_item_with_terminators`, `parse_create_constraint` multi-entry |
+| `crates/eval/src/eval_engine.rs` | `+=` nil skip, `check_node_constraints` (Unique/Exists/NodeKey/Type), `check_relationship_constraints` (Unique/Exists/RelationshipKey/Type), `value_matches_type` helper, FOREACH, CALL YIELD, MERGE ON CREATE/MATCH SET, relationship MERGE, aggregation identity |
+| `crates/eval/src/regressions/upstream_bugs.rs` | 243 tests — latest: NodeKey, Type, and RelationshipKey constraint enforcement |
+| `crates/storage/src/lib.rs` | `NodeRecord` single-format, `get_nodes_by_label`, constraint persistence, `type_name` field on `Constraint` |
+| `crates/storage/src/mvcc.rs` | `trigger_prune_now` safety fix |
+| `crates/cypher/src/ast.rs` | Expression enum, constraint types (`Unique`, `Exists`, `NodeKey`, `RelationshipKey`, `Type(String)`) |
+| `crates/cypher/src/lib.rs` | `parse_merge` with ON CREATE/MATCH SET, `parse_create_constraint` multi-entry |
 | `crates/cypher/src/dispatcher.rs` | Implicit RETURN after CALL+YIELD |
 | `crates/filter/src/lib.rs` | 60+ functions, aggregation stubs, bracket access, temporal functions |
-| `crates/storage/src/lib.rs` | `NodeRecord` single-format, `get_nodes_by_label`, constraint persistence |
-| `crates/storage/src/mvcc.rs` | `trigger_prune_now` safety fix |
 | `crates/engine/src/lib.rs` | BracketAccess pattern arm added |
-| `crates/cypher/tests/parser_allocation_profile.rs` | BracketAccess pattern arm added |
 
-### Last 3 Tests Added (Passing)
-1. `test_merge_on_create_map_merge_nil_keys` — `+=` must not clobber explicit `ON CREATE SET` values with null from map
-2. `test_unique_constraint_enforcement` — `CREATE CONSTRAINT ... IS UNIQUE` enforced at CREATE time
-3. `test_exists_constraint_enforcement` — `CREATE CONSTRAINT ... IS NOT NULL` enforced at CREATE time
+### Last 4 Tests Added (Passing)
+1. `test_relationship_key_unique_enforcement` — `RELATIONSHIP KEY` blocks duplicate keys between same nodes
+2. `test_relationship_key_constraint_enforcement` — `RELATIONSHIP KEY` requires non-null key properties
+3. `test_type_constraint_enforcement` — `IS :: INTEGER` type constraint enforced at CREATE time
+4. `test_node_key_constraint_enforcement` — `NODE KEY` blocks null keys and duplicate composite keys
 
 ---
 
@@ -74,7 +73,7 @@ All parse + eval variants: `Literal`, `Variable`, `PropertyAccess`, `Parameter`,
 
 ---
 
-## Completed (This Session)
+## Completed (Across Sessions)
 - [x] MVCC prune safety fix
 - [x] Engine tests migrated to `put_node_record`
 - [x] Legacy storage fallback removed
@@ -93,6 +92,15 @@ All parse + eval variants: `Literal`, `Variable`, `PropertyAccess`, `Parameter`,
 - [x] `+=` nil value skip (must not clobber explicit SET values)
 - [x] Unique constraint enforcement at CREATE time
 - [x] Exists constraint enforcement at CREATE time
+- [x] NodeKey constraint enforcement at CREATE time
+- [x] Type constraint enforcement (IS :: TYPE) at CREATE time
+- [x] RelationshipKey constraint enforcement at CREATE time
+- [x] Relationship constraint checking for Unique, Exists, Type, RelationshipKey
+- [x] Fulltext index on multiple properties — already implemented end-to-end (parser `ON EACH [...]`, storage multi-property indexing, search across all properties)
+- [x] Vector index options persistence — `persist_index_options` / `load_index_options` in storage, round-trip through `CREATE VECTOR INDEX ... OPTIONS {indexConfig: {...}}`
+- [x] Temporal constraint enforcement — `IS TEMPORAL [NO OVERLAP]` with temporal overlap detection
+- [x] Domain constraint enforcement — `IN [value1, value2, ...]` with allowed values checking
+- [x] `allowed_values` field on storage `Constraint` for domain constraints
 
 ---
 
@@ -100,13 +108,8 @@ All parse + eval variants: `Literal`, `Variable`, `PropertyAccess`, `Parameter`,
 These are from the parity checklist — NOT yet implemented in copperDB:
 
 ### Cypher/Eval
-- [ ] Fulltext index on multiple properties
-- [ ] Vector index options
-- [ ] Node Key constraint enforcement (parsed, not enforced)
-- [ ] Relationship Key constraint enforcement (parsed, not enforced)
-- [ ] Type constraint enforcement (IS :: TYPE — parsed, not enforced)
-- [ ] Temporal constraint enforcement
-- [ ] Domain constraint enforcement
+- [ ] Vector index options consumed at query time (persisted but not yet read by vector search procedures)
+- [ ] Constraint enforcement on relationship properties during MERGE + ON CREATE SET
 - [ ] `OPTIONAL MATCH` with relationship patterns (paths, not just nodes)
 - [ ] Path materialization / path functions (`nodes()`, `relationships()`)
 - [ ] `shortestPath` / `allShortestPaths`

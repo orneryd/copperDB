@@ -141,6 +141,8 @@ pub enum ConstraintKind {
     NodeKey,
     RelationshipKey,
     Type(String),
+    Temporal,
+    Domain(Vec<Value>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

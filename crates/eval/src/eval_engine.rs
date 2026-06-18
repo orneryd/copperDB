@@ -338,12 +338,14 @@ impl EvalEngine {
                         )));
                     }
                     for entry in &create.entries {
-                        let constraint_type = match entry.kind {
-                            ConstraintKind::Unique => ConstraintType::Unique,
-                            ConstraintKind::Exists => ConstraintType::Exists,
-                            ConstraintKind::NodeKey => ConstraintType::NodeKey,
-                            ConstraintKind::RelationshipKey => ConstraintType::Relationship,
-                            ConstraintKind::Type(_) => ConstraintType::Type,
+                        let (constraint_type, type_name, allowed_values) = match &entry.kind {
+                            ConstraintKind::Unique => (ConstraintType::Unique, None, Vec::new()),
+                            ConstraintKind::Exists => (ConstraintType::Exists, None, Vec::new()),
+                            ConstraintKind::NodeKey => (ConstraintType::NodeKey, None, Vec::new()),
+                            ConstraintKind::RelationshipKey => (ConstraintType::Relationship, None, Vec::new()),
+                            ConstraintKind::Type(name) => (ConstraintType::Type, Some(name.clone()), Vec::new()),
+                            ConstraintKind::Temporal => (ConstraintType::Temporal, None, Vec::new()),
+                            ConstraintKind::Domain(values) => (ConstraintType::Domain, None, values.clone()),
                         };
                         self.storage.persist_constraint(&Constraint {
                             name: create.name.clone(),
@@ -358,6 +360,8 @@ impl EvalEngine {
                             },
                             label: create.label.clone(),
                             properties: entry.properties.clone(),
+                            type_name,
+                            allowed_values,
                         })?;
                     }
                 }
@@ -395,6 +399,8 @@ impl EvalEngine {
                                         ConstraintType::NodeKey => "NODE_KEY",
                                         ConstraintType::Type => "TYPE",
                                         ConstraintType::Relationship => "RELATIONSHIP",
+                                        ConstraintType::Temporal => "TEMPORAL",
+                                        ConstraintType::Domain => "DOMAIN",
                                     }
                                     .to_string(),
                                 ),
@@ -453,6 +459,14 @@ impl EvalEngine {
                     } else {
                         catalog.create(definition)?;
                     }
+
+                    // Persist vector index options separately
+                    if matches!(create.kind, copperdb_cypher::IndexKind::Vector)
+                        && !create.options.is_empty()
+                    {
+                        self.storage
+                            .persist_index_options(&create.name, &create.options)?;
+                    }
                 }
 
                 Clause::DropIndex(drop) => {
@@ -462,6 +476,8 @@ impl EvalEngine {
                     } else {
                         catalog.drop(&drop.name)?;
                     }
+                    // Clean up any associated index options
+                    self.storage.delete_index_options(&drop.name)?;
                 }
 
                 Clause::ShowIndexes(show) => {
@@ -2268,8 +2284,82 @@ impl EvalEngine {
         Ok(current_rows)
     }
 
-    /// Validate node properties against stored constraints (unique, exists).
-    /// Returns an error if a constraint is violated.
+    /// Returns whether a JSON value matches an expected Cypher type name.
+    /// Type names are case-insensitive.
+    fn value_matches_type(value: &Value, type_name: &str) -> bool {
+        let normalized = type_name.to_uppercase();
+        match &normalized[..] {
+            "INTEGER" | "INT" => value.is_i64() || value.is_u64() || value.is_number(),
+            "FLOAT" | "DOUBLE" => value.is_f64() || value.is_number(),
+            "NUMBER" => value.is_number(),
+            "STRING" => value.is_string(),
+            "BOOLEAN" | "BOOL" => value.is_boolean(),
+            "NULL" => value.is_null(),
+            "LIST" | "ARRAY" => value.is_array(),
+            "MAP" | "OBJECT" => value.is_object(),
+            "DATE" => {
+                value.as_str()
+                    .map(|s| s.len() >= 10 && s.chars().filter(|&c| c == '-').count() == 2)
+                    .unwrap_or(false)
+            }
+            "DATETIME" | "TIMESTAMP" => {
+                value.as_str()
+                    .map(|s| s.len() >= 19 && s.contains('T'))
+                    .unwrap_or(false)
+                    || value.is_number()
+            }
+            "POINT" | "GEOMETRY" => {
+                value.as_object()
+                    .map(|o| o.contains_key("x") || o.contains_key("latitude"))
+                    .unwrap_or(false)
+            }
+            _ => true, // Unknown types pass through
+        }
+    }
+
+    /// Parse a JSON value as a temporal (i64) timestamp for temporal constraint comparison.
+    fn parse_temporal_value(value: Option<&Value>) -> Option<i64> {
+        match value {
+            None | Some(Value::Null) => None,
+            Some(Value::Number(n)) => n.as_i64(),
+            Some(Value::String(s)) => s.parse::<i64>().ok(),
+            _ => None,
+        }
+    }
+
+    /// Check if two temporal ranges overlap.
+    fn temporal_ranges_overlap(
+        new_from: Option<i64>,
+        new_to: Option<i64>,
+        existing_from: Option<i64>,
+        existing_to: Option<i64>,
+    ) -> bool {
+        // Unbounded new range overlaps everything
+        if new_from.is_none() && new_to.is_none() {
+            return true;
+        }
+        let start_before_existing_end = match (new_from, existing_to) {
+            (_, None) | (None, _) => true,
+            (Some(nf), Some(et)) => nf < et,
+        };
+        let end_after_existing_start = match (new_to, existing_from) {
+            (_, None) | (None, _) => true,
+            (Some(nt), Some(ef)) => nt > ef,
+        };
+        start_before_existing_end && end_after_existing_start
+    }
+
+    /// Compare two JSON values for equality (domain constraint checking).
+    fn values_equal(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Number(a_num), Value::Number(b_num)) => {
+                a_num.as_f64() == b_num.as_f64() && a_num.as_i64() == b_num.as_i64()
+            }
+            _ => a == b,
+        }
+    }
+
+    /// Validate node properties against stored constraints (unique, exists, node key, type, temporal, domain).
     fn check_node_constraints(
         &self,
         labels: &[String],
@@ -2312,6 +2402,279 @@ impl EvalEngine {
                                 )));
                             }
                             _ => {}
+                        }
+                    }
+                }
+                ConstraintType::NodeKey => {
+                    // All key properties must be non-null
+                    let mut key_vals: Vec<(&String, &Value)> = Vec::new();
+                    for prop in &c.properties {
+                        match props.get(prop) {
+                            None | Some(Value::Null) => {
+                                return Err(EvalError::ExecutionError(format!(
+                                    "NODE KEY property `{}` cannot be null on node with label `{}`",
+                                    prop, c.label
+                                )));
+                            }
+                            Some(v) => key_vals.push((prop, v)),
+                        };
+                    }
+                    // Scan for existing node with all matching key properties
+                    if let Ok(nodes) = self.storage.get_nodes_by_label(&c.label) {
+                        for node in &nodes {
+                            let all_match = c.properties.iter().all(|prop| {
+                                node.properties.get(prop)
+                                    == props.get(prop)
+                            });
+                            if all_match {
+                                return Err(EvalError::ExecutionError(format!(
+                                    "Node already exists with label `{}` and key {:?}",
+                                    c.label,
+                                    c.properties.iter()
+                                        .map(|p| format!("{}={:?}", p, props.get(p)))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )));
+                            }
+                        }
+                    }
+                }
+                ConstraintType::Type => {
+                    let Some(type_name) = &c.type_name else { continue };
+                    for prop in &c.properties {
+                        if let Some(val) = props.get(prop) {
+                            if !Self::value_matches_type(val, type_name) {
+                                return Err(EvalError::ExecutionError(format!(
+                                    "Property `{}` must be of type `{}` on node with label `{}`",
+                                    prop, type_name, c.label
+                                )));
+                            }
+                        }
+                    }
+                }
+                ConstraintType::Temporal => {
+                    if c.properties.len() < 3 {
+                        continue;
+                    }
+                    let key_prop = &c.properties[0];
+                    let from_prop = &c.properties[1];
+                    let to_prop = &c.properties[2];
+                    match props.get(key_prop) {
+                        None | Some(Value::Null) => {
+                            return Err(EvalError::ExecutionError(format!(
+                                "TEMPORAL key property `{}` cannot be null on node with label `{}`",
+                                key_prop, c.label
+                            )));
+                        }
+                        _ => {}
+                    }
+                    if let Ok(nodes) = self.storage.get_nodes_by_label(&c.label) {
+                        let new_from =
+                            Self::parse_temporal_value(props.get(from_prop));
+                        let new_to =
+                            Self::parse_temporal_value(props.get(to_prop));
+                        for node in &nodes {
+                            if node.properties.get(key_prop) != props.get(key_prop) {
+                                continue;
+                            }
+                            let existing_from =
+                                Self::parse_temporal_value(node.properties.get(from_prop));
+                            let existing_to =
+                                Self::parse_temporal_value(node.properties.get(to_prop));
+                            if Self::temporal_ranges_overlap(
+                                new_from, new_to, existing_from, existing_to,
+                            ) {
+                                return Err(EvalError::ExecutionError(format!(
+                                    "TEMPORAL overlap on node with label `{}` and key `{}`",
+                                    c.label,
+                                    props.get(key_prop)
+                                        .map(|v| format!("{:?}", v))
+                                        .unwrap_or_default()
+                                )));
+                            }
+                        }
+                    }
+                }
+                ConstraintType::Domain => {
+                    if c.allowed_values.is_empty() {
+                        continue;
+                    }
+                    for prop in &c.properties {
+                        if let Some(val) = props.get(prop) {
+                            if matches!(val, Value::Null) {
+                                continue;
+                            }
+                            if !c.allowed_values.iter().any(|a| Self::values_equal(a, val))
+                            {
+                                return Err(EvalError::ExecutionError(format!(
+                                    "Property `{}` value {:?} is not in allowed domain for label `{}`",
+                                    prop, val, c.label
+                                )));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate relationship properties against stored constraints.
+    fn check_relationship_constraints(
+        &self,
+        rel_type: &str,
+        props: &HashMap<String, Value>,
+        start_id: &str,
+        end_id: &str,
+    ) -> Result<(), EvalError> {
+        let constraints = self.storage.load_constraints()?;
+        for c in &constraints {
+            if c.entity_type != ConstraintEntityType::Relationship {
+                continue;
+            }
+            if c.label != rel_type {
+                continue;
+            }
+            match c.constraint_type {
+                ConstraintType::Unique => {
+                    let Some(prop) = c.properties.first() else { continue };
+                    let val = match props.get(prop) {
+                        None | Some(Value::Null) => continue,
+                        Some(v) => v,
+                    };
+                    if let Ok(edges) = self.storage.get_edges_by_type(rel_type) {
+                        for edge in &edges {
+                            if edge.start_node == start_id
+                                && edge.end_node == end_id
+                                && edge.properties.get(prop) == Some(val)
+                            {
+                                return Err(EvalError::ExecutionError(format!(
+                                    "Relationship already exists with type `{}` and property `{}` = {:?}",
+                                    rel_type, prop, val
+                                )));
+                            }
+                        }
+                    }
+                }
+                ConstraintType::Exists => {
+                    for prop in &c.properties {
+                        match props.get(prop) {
+                            None | Some(Value::Null) => {
+                                return Err(EvalError::ExecutionError(format!(
+                                    "Required property `{}` is missing on relationship with type `{}`",
+                                    prop, rel_type
+                                )));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                ConstraintType::Relationship => {
+                    // Relationship key: all key properties must be non-null
+                    for prop in &c.properties {
+                        match props.get(prop) {
+                            None | Some(Value::Null) => {
+                                return Err(EvalError::ExecutionError(format!(
+                                    "RELATIONSHIP KEY property `{}` cannot be null on relationship with type `{}`",
+                                    prop, rel_type
+                                )));
+                            }
+                            _ => {}
+                        };
+                    }
+                    // Check for existing relationship with matching key
+                    if let Ok(edges) = self.storage.get_edges_by_type(rel_type) {
+                        for edge in &edges {
+                            if edge.start_node == start_id
+                                && edge.end_node == end_id
+                                && c.properties.iter().all(|prop| {
+                                    edge.properties.get(prop)
+                                        == props.get(prop)
+                                })
+                            {
+                                return Err(EvalError::ExecutionError(format!(
+                                    "Relationship already exists with type `{}` and key {:?}",
+                                    rel_type,
+                                    c.properties.iter()
+                                        .map(|p| format!("{}={:?}", p, props.get(p)))
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )));
+                            }
+                        }
+                    }
+                }
+                ConstraintType::Type => {
+                    let Some(type_name) = &c.type_name else { continue };
+                    for prop in &c.properties {
+                        if let Some(val) = props.get(prop) {
+                            if !Self::value_matches_type(val, type_name) {
+                                return Err(EvalError::ExecutionError(format!(
+                                    "Property `{}` must be of type `{}` on relationship with type `{}`",
+                                    prop, type_name, rel_type
+                                )));
+                            }
+                        }
+                    }
+                }
+                ConstraintType::Temporal => {
+                    if c.properties.len() < 3 {
+                        continue;
+                    }
+                    let key_prop = &c.properties[0];
+                    let from_prop = &c.properties[1];
+                    let to_prop = &c.properties[2];
+                    match props.get(key_prop) {
+                        None | Some(Value::Null) => {
+                            return Err(EvalError::ExecutionError(format!(
+                                "TEMPORAL key property `{}` cannot be null on relationship `{}`",
+                                key_prop, rel_type
+                            )));
+                        }
+                        _ => {}
+                    }
+                    let new_from = Self::parse_temporal_value(props.get(from_prop));
+                    let new_to = Self::parse_temporal_value(props.get(to_prop));
+                    if let Ok(edges) = self.storage.get_edges_by_type(rel_type) {
+                        for edge in &edges {
+                            if edge.properties.get(key_prop) != props.get(key_prop) {
+                                continue;
+                            }
+                            let existing_from =
+                                Self::parse_temporal_value(edge.properties.get(from_prop));
+                            let existing_to =
+                                Self::parse_temporal_value(edge.properties.get(to_prop));
+                            if Self::temporal_ranges_overlap(
+                                new_from, new_to, existing_from, existing_to,
+                            ) {
+                                return Err(EvalError::ExecutionError(format!(
+                                    "TEMPORAL overlap on relationship `{}` with key `{}`",
+                                    rel_type,
+                                    props.get(key_prop)
+                                        .map(|v| format!("{:?}", v))
+                                        .unwrap_or_default()
+                                )));
+                            }
+                        }
+                    }
+                }
+                ConstraintType::Domain => {
+                    if c.allowed_values.is_empty() {
+                        continue;
+                    }
+                    for prop in &c.properties {
+                        if let Some(val) = props.get(prop) {
+                            if matches!(val, Value::Null) {
+                                continue;
+                            }
+                            if !c.allowed_values.iter().any(|a| Self::values_equal(a, val))
+                            {
+                                return Err(EvalError::ExecutionError(format!(
+                                    "Property `{}` value {:?} is not in allowed domain for relationship `{}`",
+                                    prop, val, rel_type
+                                )));
+                            }
                         }
                     }
                 }
@@ -2396,14 +2759,22 @@ impl EvalEngine {
                 .clone()
                 .unwrap_or_else(|| "REL".to_string());
             let id = format!("{}:{}", rel_type, Uuid::new_v4());
+            let edge_props: HashMap<String, Value> =
+                evaluate_pattern_properties(&edge_pat.properties, row, params)?
+                    .into_iter()
+                    .collect();
+            self.check_relationship_constraints(
+                &rel_type,
+                &edge_props,
+                start_node,
+                end_node,
+            )?;
             let edge = self.persist_edge_record(EdgeRecord {
                 id: id.clone(),
                 start_node: start_node.clone(),
                 end_node: end_node.clone(),
-                edge_type: rel_type,
-                properties: evaluate_pattern_properties(&edge_pat.properties, row, params)?
-                    .into_iter()
-                    .collect(),
+                edge_type: rel_type.clone(),
+                properties: edge_props.into_iter().collect(),
                 created_at_unix_ms: 0,
                 updated_at_unix_ms: 0,
             })?;

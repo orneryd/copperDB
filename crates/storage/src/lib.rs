@@ -53,6 +53,7 @@ const META_NAMESPACE_NODE_COUNT_PREFIX: &[u8] = b"namespace_node_count/";
 const META_NAMESPACE_EDGE_COUNT_PREFIX: &[u8] = b"namespace_edge_count/";
 const META_NAMESPACE_LABEL_COUNT_PREFIX: &[u8] = b"namespace_label_count/";
 const META_PENDING_EMBEDDING_PREFIX: &[u8] = b"pending_embedding/";
+const META_INDEX_OPTIONS_PREFIX: &[u8] = b"index_options/";
 const META_KP_DECAY_PROFILE_PREFIX: &[u8] = b"kp_decay_profile/";
 const META_KP_DECAY_BINDING_PREFIX: &[u8] = b"kp_decay_binding/";
 const META_KP_PROMOTION_PROFILE_PREFIX: &[u8] = b"kp_promotion_profile/";
@@ -472,6 +473,8 @@ pub enum ConstraintType {
     NodeKey,
     Type,
     Relationship,
+    Temporal,
+    Domain,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -502,6 +505,12 @@ pub struct Constraint {
     pub entity_type: ConstraintEntityType,
     pub label: String,
     pub properties: Vec<String>,
+    /// Expected type name for `ConstraintType::Type` (e.g. "INTEGER", "STRING").
+    #[serde(default)]
+    pub type_name: Option<String>,
+    /// Allowed values for `ConstraintType::Domain`.
+    #[serde(default)]
+    pub allowed_values: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -670,7 +679,7 @@ impl SchemaManager {
                         }
                     }
                 }
-                ConstraintType::Type | ConstraintType::Relationship => {}
+                ConstraintType::Type | ConstraintType::Relationship | ConstraintType::Temporal | ConstraintType::Domain => {}
             }
         }
         Ok(())
@@ -2066,6 +2075,38 @@ impl StorageEngine {
         } else if is_relationship_property_index(index) {
             self.rebuild_relationship_property_index(index)?;
         }
+        Ok(())
+    }
+
+    /// Persist vector index options (separate from the main index definition to avoid
+    /// changing the widely-used IndexDefinition struct).
+    pub fn persist_index_options(
+        &self,
+        index_name: &str,
+        options: &HashMap<String, serde_json::Value>,
+    ) -> Result<(), StorageError> {
+        let key = [META_INDEX_OPTIONS_PREFIX, index_name.as_bytes()].concat();
+        self.meta
+            .insert(key, rmp_serde::to_vec(options)?)?;
+        Ok(())
+    }
+
+    /// Load vector index options for a named index.
+    pub fn load_index_options(
+        &self,
+        index_name: &str,
+    ) -> Result<Option<HashMap<String, serde_json::Value>>, StorageError> {
+        let key = [META_INDEX_OPTIONS_PREFIX, index_name.as_bytes()].concat();
+        let Some(value) = self.meta.get(key)? else {
+            return Ok(None);
+        };
+        Ok(Some(rmp_serde::from_slice(value.as_ref())?))
+    }
+
+    /// Delete index options for a named index.
+    pub fn delete_index_options(&self, index_name: &str) -> Result<(), StorageError> {
+        let key = [META_INDEX_OPTIONS_PREFIX, index_name.as_bytes()].concat();
+        self.meta.remove(key)?;
         Ok(())
     }
 

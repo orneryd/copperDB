@@ -719,6 +719,16 @@ impl<'a> ParseContext<'a> {
             vec![prop]
         };
 
+        // Check for IN [...] (Domain constraint) vs IS ... (others)
+        if self.peek_is("IN") {
+            self.advance(); // IN
+            let values = self.parse_constraint_domain_values()?;
+            return Ok(ConstraintEntry {
+                properties,
+                kind: ConstraintKind::Domain(values),
+            });
+        }
+
         self.expect("IS")?;
 
         let kind = match self.peek() {
@@ -740,6 +750,15 @@ impl<'a> ParseContext<'a> {
                 self.advance();
                 self.expect("KEY")?;
                 ConstraintKind::RelationshipKey
+            }
+            Some(t) if t.eq_ignore_ascii_case("TEMPORAL") => {
+                self.advance();
+                // Optionally consume NO OVERLAP
+                if self.peek_is("NO") {
+                    self.advance();
+                    self.expect("OVERLAP")?;
+                }
+                ConstraintKind::Temporal
             }
             Some(t) if t == "::" => {
                 self.advance();
@@ -763,6 +782,70 @@ impl<'a> ParseContext<'a> {
             properties,
             kind,
         })
+    }
+
+    /// Parse a domain constraint value list: `['active', 'inactive']` or `[1, 2, 3]`
+    fn parse_constraint_domain_values(&mut self) -> Result<Vec<Value>, CypherError> {
+        self.expect("[")?;
+        let mut values = Vec::new();
+        loop {
+            if self.peek() == Some("]") {
+                self.advance();
+                break;
+            }
+            let val = match self.peek() {
+                Some(t) if t.starts_with('\'') || t.starts_with('"') => {
+                    let s = self.advance_identifier()?;
+                    // Strip surrounding quotes from string tokens
+                    let unquoted = if s.len() >= 2
+                        && ((s.starts_with('\'') && s.ends_with('\''))
+                            || (s.starts_with('"') && s.ends_with('"')))
+                    {
+                        s[1..s.len() - 1].to_string()
+                    } else {
+                        s
+                    };
+                    Value::String(unquoted)
+                }
+                Some(t) => {
+                    // Try to parse as number
+                    if let Ok(i) = t.parse::<i64>() {
+                        self.advance();
+                        Value::from(i)
+                    } else if let Ok(f) = t.parse::<f64>() {
+                        self.advance();
+                        Value::from(f)
+                    } else if t.eq_ignore_ascii_case("true") {
+                        self.advance();
+                        Value::Bool(true)
+                    } else if t.eq_ignore_ascii_case("false") {
+                        self.advance();
+                        Value::Bool(false)
+                    } else {
+                        let s = self.advance_identifier()?;
+                        Value::String(s)
+                    }
+                }
+                None => {
+                    return Err(CypherError::ParseError(
+                        "unexpected end of input in domain value list".into(),
+                    ));
+                }
+            };
+            values.push(val);
+            if self.peek() == Some(",") {
+                self.advance();
+            } else if self.peek() == Some("]") {
+                self.advance();
+                break;
+            } else {
+                return Err(CypherError::ParseError(format!(
+                    "expected ',' or ']' in domain value list, got {:?}",
+                    self.peek()
+                )));
+            }
+        }
+        Ok(values)
     }
 
     fn parse_drop_constraint(&mut self) -> Result<DropConstraintClause, CypherError> {

@@ -8,6 +8,29 @@ applyTo: '**'
 - Keep automatic indexing or search work disabled by default; schema-declared indexes remain authoritative per database.
 - Plan local embedding work against NornicDB's llama.cpp path, not `mistral.rs`: preserve multi-model loading and env passthrough for context, pooling, attention, and flash-attn settings, and keep the llama.cpp pin aligned with NornicDB.
 
+# Constraint Enforcement Architecture
+- Storage `Constraint` has `type_name: Option<String>` with `#[serde(default)]` for Type constraints.
+- `check_node_constraints` handles: Unique, Exists, NodeKey, Type (via `value_matches_type`).
+- `check_relationship_constraints` handles: Unique, Exists, RelationshipKey (= ConstraintType::Relationship in storage), Type.
+- Types validated: INTEGER, FLOAT, NUMBER, STRING, BOOLEAN, NULL, LIST, MAP, DATE, DATETIME, POINT.
+- Relationship constraint checks run BEFORE edge persistence in CREATE path.
+- MERGE relationship path creates edges with empty props, then applies ON CREATE SET afterwards — constraint checking at creation time uses empty properties.
+- NornicDB reference: `pkg/storage/badger_constraint_validation.go` — validateNodeConstraintsInTxn.
+
+# Vector Index Options
+- Vector index options (`vector.dimensions`, `vector.similarity_function`) are stored separately from `IndexDefinition` via `persist_index_options`/`load_index_options` in storage.
+- The `IndexDefinition` struct was NOT modified — adding a field would require updating 100+ construction sites.
+- Options are persisted at `CREATE VECTOR INDEX ... OPTIONS {indexConfig: {...}}` time and cleaned up at `DROP INDEX`.
+- Query-time consumption of options (in vector search procedures) remains future work.
+
+# Temporal & Domain Constraints
+- `ConstraintKind::Temporal` and `ConstraintKind::Domain(Vec<Value>)` added to cypher AST.
+- `ConstraintType::Temporal` and `ConstraintType::Domain` added to storage.
+- `Constraint.allowed_values: Vec<Value>` field for domain constraints.
+- Cypher syntax: `REQUIRE (n.key, n.from, n.to) IS TEMPORAL [NO OVERLAP]` and `REQUIRE n.prop IN ['a', 'b', 'c']`.
+- Enforcement: temporal overlap detection (non-null key, overlapping ranges fail), domain value membership check (null allowed).
+- NornicDB reference: `pkg/storage/badger_constraint_validation.go` cases `ConstraintTemporal` and `ConstraintDomain`.
+
 # Project Architecture
 - Remove anything considered legacy. it is vestigial since this is a new project that is not released yet. Any plan changes to architecture are considered refactor to clean architecture that are not backwards compatible until a 1.0 release
 - copperDB is a Rust Cargo workspace mirroring NornicDB ../NornicDB package structure under `crates/`.
