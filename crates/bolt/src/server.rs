@@ -17,6 +17,87 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::accept_async;
 use tracing::{debug, info, warn};
 
+/// Result of executing a Cypher query through Bolt.
+#[derive(Debug, Clone)]
+pub struct BoltQueryResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<serde_json::Value>>,
+}
+
+/// Trait for components that can execute Cypher queries.
+/// Mirrors NornicDB's `QueryExecutor` interface.
+pub trait QueryExecutor: Send + Sync {
+    fn execute(
+        &self,
+        query: &str,
+        params: &HashMap<String, serde_json::Value>,
+    ) -> Result<BoltQueryResult, String>;
+}
+
+/// A no-op query executor that returns empty results for all queries.
+/// Used as a placeholder when no real executor is wired.
+pub struct NoopExecutor;
+
+impl QueryExecutor for NoopExecutor {
+    fn execute(&self, query: &str, _params: &HashMap<String, serde_json::Value>) -> Result<BoltQueryResult, String> {
+        let upper = query.trim().to_ascii_uppercase();
+        // Handle common system queries with proper column names so the
+        // Neo4j browser doesn't hang waiting for results.
+        if upper.starts_with("SHOW DATABASES") || upper.starts_with("SHOW DBS") {
+            return Ok(BoltQueryResult {
+                columns: vec![
+                    "name".into(), "type".into(), "aliases".into(), "access".into(),
+                    "address".into(), "role".into(), "writer".into(),
+                    "requestedStatus".into(), "currentStatus".into(),
+                    "statusMessage".into(), "default".into(), "home".into(),
+                    "constituents".into(),
+                ],
+                rows: vec![vec![
+                    serde_json::json!("copperdb"),
+                    serde_json::json!("standard"),
+                    serde_json::json!([]),
+                    serde_json::json!("read-write"),
+                    serde_json::json!("localhost:7687"),
+                    serde_json::json!("standalone"),
+                    serde_json::json!(true),
+                    serde_json::json!("online"),
+                    serde_json::json!("online"),
+                    serde_json::json!(""),
+                    serde_json::json!(true),
+                    serde_json::json!(true),
+                    serde_json::json!([]),
+                ]],
+            });
+        }
+        if upper.starts_with("CALL DBMS.CLUSTER.OVERVIEW") {
+            return Ok(BoltQueryResult {
+                columns: vec![
+                    "id".into(), "addresses".into(), "role".into(),
+                    "database".into(), "routing".into(),
+                ],
+                rows: vec![vec![
+                    serde_json::json!("00000000-0000-0000-0000-000000000000"),
+                    serde_json::json!(["localhost:7687"]),
+                    serde_json::json!("standalone"),
+                    serde_json::json!("copperdb"),
+                    serde_json::json!(null),
+                ]],
+            });
+        }
+        // For MATCH ... RETURN queries, return empty rows with proper column names
+        if upper.starts_with("MATCH ") || upper.starts_with("RETURN ") || upper.starts_with("CALL ") {
+            return Ok(BoltQueryResult {
+                columns: vec!["n".into()],
+                rows: vec![],
+            });
+        }
+        Ok(BoltQueryResult {
+            columns: vec![],
+            rows: vec![],
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BoltServerConfig {
     pub listen_addr: String,
@@ -32,16 +113,26 @@ impl Default for BoltServerConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for BoltServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoltServer")
+            .field("listen_addr", &self.listen_addr)
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct BoltServer {
     pub listen_addr: String,
     config: BoltServerConfig,
     telemetry: Arc<Telemetry>,
     active_connections: Arc<AtomicU64>,
+    executor: Arc<dyn QueryExecutor>,
 }
 
 impl BoltServer {
-    pub fn new(listen_addr: impl Into<String>, telemetry: Arc<Telemetry>) -> Self {
+    pub fn new(listen_addr: impl Into<String>, telemetry: Arc<Telemetry>, executor: Arc<dyn QueryExecutor>) -> Self {
         let addr = listen_addr.into();
         Self {
             listen_addr: addr.clone(),
@@ -51,6 +142,7 @@ impl BoltServer {
             },
             telemetry,
             active_connections: Arc::new(AtomicU64::new(0)),
+            executor,
         }
     }
 
@@ -86,6 +178,7 @@ impl BoltServer {
         let started = std::time::Instant::now();
         let telemetry = Arc::clone(&self.telemetry);
         let active_connections = Arc::clone(&self.active_connections);
+        let executor = Arc::clone(&self.executor);
         let _ = telemetry.record_counter(
             "nornicdb_bolt_connections_total",
             &[("result", "success"), ("transport", "ws")],
@@ -96,7 +189,7 @@ impl BoltServer {
         tokio::spawn(async move {
             match accept_async(stream).await {
                 Ok(mut ws_stream) => {
-                    let result = handle_ws_session(&mut ws_stream, &telemetry).await;
+                    let result = handle_ws_session(&mut ws_stream, &telemetry, &*executor).await;
                     if let Err(ref e) = result {
                         warn!(%peer_addr, %e, "bolt ws connection failed");
                         let _ = telemetry.record_counter("nornicdb_bolt_connections_total", &[("result", "error"), ("transport", "ws")]);
@@ -116,13 +209,14 @@ impl BoltServer {
         let started = std::time::Instant::now();
         let telemetry = Arc::clone(&self.telemetry);
         let active_connections = Arc::clone(&self.active_connections);
+        let executor = Arc::clone(&self.executor);
         let _ = telemetry.record_counter("nornicdb_bolt_connections_total", &[("result", "success"), ("transport", "tcp")]);
         let active = active_connections.fetch_add(1, Ordering::SeqCst) + 1;
         let _ = telemetry.set_gauge("nornicdb_bolt_connections_active", &[("transport", "tcp")], active as f64);
         debug!(%peer_addr, "accepted bolt tcp");
 
         tokio::spawn(async move {
-            let result = handle_tcp_session(&mut stream, &telemetry).await;
+            let result = handle_tcp_session(&mut stream, &telemetry, &*executor).await;
             if let Err(ref e) = result {
                 let _ = telemetry.record_counter("nornicdb_bolt_connections_total", &[("result", "error"), ("transport", "tcp")]);
                 warn!(%peer_addr, %e, "bolt tcp failed");
@@ -132,10 +226,10 @@ impl BoltServer {
             let _ = telemetry.observe_histogram("nornicdb_bolt_session_duration_seconds", &[("transport", "tcp")], started.elapsed().as_secs_f64());
         });
     }
-}
+} // end impl BoltServer
 
 /// Handle a Bolt session over raw TCP.
-async fn handle_tcp_session(stream: &mut TcpStream, telemetry: &Telemetry) -> Result<(), BoltError> {
+async fn handle_tcp_session(stream: &mut TcpStream, telemetry: &Telemetry, executor: &dyn QueryExecutor) -> Result<(), BoltError> {
     let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
     info!(%peer, "bolt tcp session started");
     let mut preamble = [0u8; 20];
@@ -146,67 +240,75 @@ async fn handle_tcp_session(stream: &mut TcpStream, telemetry: &Telemetry) -> Re
     stream.write_all(&[0x00, 0x00, 0x04, 0x04]).await?;
     info!(%peer, "bolt tcp version 4.4 sent, entering message loop");
 
+    let mut session = BoltSession::new();
     let mut read_buf = Vec::with_capacity(4096);
     let mut temp_buf = [0u8; 4096];
-    let mut authenticated = false;
-    let mut current_query: Option<String> = None;
 
     loop {
         let bytes_read = stream.read(&mut temp_buf).await?;
         if bytes_read == 0 { break; }
         read_buf.extend_from_slice(&temp_buf[..bytes_read]);
-        process_buffer(&mut read_buf, stream, &mut authenticated, &mut current_query, telemetry).await?;
+        process_buffer(&mut read_buf, stream, &mut session, telemetry, executor).await?;
     }
     Ok(())
 }
 
 /// Handle a Bolt session over WebSocket.
-async fn handle_ws_session<S>(ws: &mut tokio_tungstenite::WebSocketStream<S>, _telemetry: &Telemetry) -> Result<(), BoltError>
+async fn handle_ws_session<S>(ws: &mut tokio_tungstenite::WebSocketStream<S>, _telemetry: &Telemetry, executor: &dyn QueryExecutor) -> Result<(), BoltError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     // The first WS binary message after upgrade is the Bolt preamble
     // (magic 0x60 0x60 0xB0 0x17 + four 4-byte version proposals = 20 bytes).
-    // We must read and respond before entering the PackStream message loop.
-    let preamble = match wsconn::read_ws_message(ws).await {
-        Some(Ok(data)) => data,
-        Some(Err(e)) => return Err(BoltError::ProtocolViolation(format!("WS preamble read error: {e}"))),
-        None => return Ok(()),
+    // This is sent as a raw WS binary frame — NOT chunk-encoded.
+    // We must read it directly before entering chunk-encoded message loop.
+    let preamble = {
+        use futures::StreamExt;
+        match ws.next().await {
+            Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(data))) => data.to_vec(),
+            Some(Ok(other)) => return Err(BoltError::ProtocolViolation(format!("expected Binary preamble, got {other:?}"))),
+            Some(Err(e)) => return Err(BoltError::ProtocolViolation(format!("WS preamble read error: {e}"))),
+            None => return Ok(()),
+        }
     };
     if preamble.len() < 4 || preamble[..4] != [0x60, 0x60, 0xB0, 0x17] {
         return Err(BoltError::ProtocolViolation("invalid bolt magic preamble on WS".into()));
     }
-    // Respond with Bolt 4.4
+    // Respond with Bolt 4.4 (raw — handshake, not chunked)
     info!("bolt WS preamble OK, sending version 4.4");
-    wsconn::write_ws_message(ws, &[0x00, 0x00, 0x04, 0x04]).await
+    wsconn::write_ws_raw(ws, &[0x00, 0x00, 0x04, 0x04]).await
         .map_err(|e| BoltError::ProtocolViolation(format!("WS version response error: {e}")))?;
     info!("bolt WS version response sent, entering message loop");
 
-    let mut authenticated = false;
-    let mut current_query: Option<String> = None;
+    let mut session = BoltSession::new();
 
     loop {
-        let frame = match wsconn::read_ws_message(ws).await {
-            Some(Ok(data)) => {
-                info!(len = data.len(), "bolt WS frame received");
-                data
+        let frames = match wsconn::read_ws_message(ws).await {
+            Some(Ok(messages)) => {
+                info!(count = messages.len(), "bolt WS messages received");
+                messages
             }
             Some(Err(e)) => return Err(BoltError::ProtocolViolation(format!("WS read error: {e}"))),
             None => { info!("bolt WS connection closed"); break; }
         };
 
-        let mut read_buf = frame;
-        loop {
-            match crate::packstream::decode(&read_buf) {
-                Ok((value, consumed)) => {
-                    read_buf.drain(..consumed);
-                    match process_message(&value, &mut authenticated, &mut current_query) {
-                        Ok(Some(response_bytes)) => {
-                            info!(len = response_bytes.len(), "bolt WS sending response");
-                            wsconn::write_ws_message(ws, &response_bytes).await.map_err(|e| BoltError::ProtocolViolation(e.to_string()))?;
-                            info!("bolt WS response sent");
-                        }
-                        Ok(None) => {}
+        for frame in frames {
+            let mut read_buf = frame;
+            loop {
+                match crate::packstream::decode(&read_buf) {
+                    Ok((value, consumed)) => {
+                        read_buf.drain(..consumed);
+                        match process_message(&value, &mut session, executor) {
+                            Ok(responses) => {
+                                let has_responses = !responses.is_empty();
+                                for response_bytes in &responses {
+                                    info!(len = response_bytes.len(), "bolt WS sending response");
+                                    wsconn::write_ws_message(ws, response_bytes).await.map_err(|e| BoltError::ProtocolViolation(e.to_string()))?;
+                                }
+                                if has_responses {
+                                    info!("bolt WS responses sent");
+                                }
+                            }
                         Err(e) => {
                             let failure = BoltMessage::Failure {
                                 metadata: HashMap::from([
@@ -219,7 +321,12 @@ where
                         }
                     }
                 }
-                Err(BoltError::PackStream(ref msg)) if msg.contains("unexpected end") || msg.contains("truncated") => break,
+                Err(BoltError::PackStream(ref msg)) if msg.contains("unexpected end") || msg.contains("truncated") => {
+                    if !read_buf.is_empty() {
+                        info!(remaining = read_buf.len(), "bolt WS incomplete message, waiting for more data");
+                    }
+                    break;
+                }
                 Err(e) => return Err(e),
             }
             if read_buf.is_empty() { break; }
@@ -232,21 +339,26 @@ where
 async fn process_buffer(
     read_buf: &mut Vec<u8>,
     stream: &mut TcpStream,
-    authenticated: &mut bool,
-    current_query: &mut Option<String>,
+    session: &mut BoltSession,
     telemetry: &Telemetry,
+    executor: &dyn QueryExecutor,
 ) -> Result<(), BoltError> {
     loop {
         match crate::packstream::decode(read_buf) {
             Ok((value, consumed)) => {
                 read_buf.drain(..consumed);
-                let (op, result) = match process_message(&value, authenticated, current_query) {
-                    Ok(Some(response_bytes)) => {
-                        info!(len = response_bytes.len(), "bolt sending response");
-                        stream.write_all(&response_bytes).await?;
+                let (op, result) = match process_message(&value, session, executor) {
+                    Ok(responses) => {
+                        let len = responses.len();
+                        for response_bytes in responses.iter() {
+                            info!(len = response_bytes.len(), "bolt sending response");
+                            stream.write_all(response_bytes).await?;
+                        }
+                        if len > 0 {
+                            info!("bolt TCP responses sent");
+                        }
                         ("run", "success")
                     }
-                    Ok(None) => ("run", "success"),
                     Err(e) => {
                         let failure = BoltMessage::Failure {
                             metadata: HashMap::from([
@@ -269,11 +381,30 @@ async fn process_buffer(
     Ok(())
 }
 
+/// Per-connection Bolt session state. Mirrors NornicDB's Session struct.
+struct BoltSession {
+    authenticated: bool,
+    current_query: Option<String>,
+    last_result: Option<BoltQueryResult>,
+    result_index: usize,
+}
+
+impl BoltSession {
+    fn new() -> Self {
+        Self {
+            authenticated: false,
+            current_query: None,
+            last_result: None,
+            result_index: 0,
+        }
+    }
+}
+
 fn process_message(
     value: &Value,
-    authenticated: &mut bool,
-    current_query: &mut Option<String>,
-) -> Result<Option<Vec<u8>>, BoltError> {
+    session: &mut BoltSession,
+    executor: &dyn QueryExecutor,
+) -> Result<Vec<Vec<u8>>, BoltError> {
     let (sig, fields) = match value {
         Value::Struct { signature, fields } => (*signature, fields.as_slice()),
         _ => return Err(BoltError::ProtocolViolation("expected struct message".into())),
@@ -282,47 +413,92 @@ fn process_message(
     info!(signature = format!("0x{sig:02X}"), "bolt message received");
     match msg {
         BoltMessage::Hello { extra: _ } => {
-            *authenticated = false;
+            session.authenticated = false;
             let meta = HashMap::from([
                 ("server".into(), serde_json::json!("copperdb/1.0")),
                 ("connection_id".into(), serde_json::json!("copperdb-1")),
-                ("hints".into(), serde_json::json!({})),
+                ("hints".into(), serde_json::json!({"connection.recv_timeout_seconds": 120})),
                 ("patch_bolt".into(), serde_json::json!(["utc"])),
             ]);
             info!("bolt HELLO → SUCCESS");
-            Ok(Some(dispatch::encode_message(&BoltMessage::Success {
+            Ok(vec![dispatch::encode_message(&BoltMessage::Success {
                 metadata: meta,
-            })))
+            })])
         }
         BoltMessage::Logon { auth: _ } => {
-            *authenticated = true;
-            Ok(Some(dispatch::encode_message(&BoltMessage::Success {
+            session.authenticated = true;
+            Ok(vec![dispatch::encode_message(&BoltMessage::Success {
                 metadata: HashMap::from([("server".into(), serde_json::json!("copperdb/1.0"))]),
-            })))
+            })])
         }
         BoltMessage::Logoff => {
-            *authenticated = false;
-            Ok(Some(dispatch::encode_message(&BoltMessage::Success { metadata: HashMap::new() })))
+            session.authenticated = false;
+            Ok(vec![dispatch::encode_message(&BoltMessage::Success { metadata: HashMap::new() })])
         }
-        BoltMessage::Run { query, parameters: _, extra: _ } => {
-            *current_query = Some(query.clone());
-            Ok(Some(dispatch::encode_message(&BoltMessage::Success {
-                metadata: HashMap::from([("fields".into(), serde_json::json!([] as [serde_json::Value; 0])), ("t_first".into(), serde_json::json!(0))]),
-            })))
+        BoltMessage::Run { query, parameters, extra: _ } => {
+            session.current_query = Some(query.clone());
+            match executor.execute(&query, &parameters) {
+                Ok(result) => {
+                    let columns = result.columns.clone();
+                    session.last_result = Some(result);
+                    session.result_index = 0;
+                    let fields_json: Vec<serde_json::Value> = columns
+                        .iter()
+                        .map(|c| serde_json::Value::String(c.clone()))
+                        .collect();
+                    info!(%query, fields = ?columns, "bolt RUN executed");
+                    Ok(vec![dispatch::encode_message(&BoltMessage::Success {
+                        metadata: HashMap::from([
+                            ("fields".into(), serde_json::json!(fields_json)),
+                            ("t_first".into(), serde_json::json!(0)),
+                            ("result_available_after".into(), serde_json::json!(0)),
+                        ]),
+                    })])
+                }
+                Err(e) => {
+                    warn!(%query, %e, "bolt RUN failed");
+                    Ok(vec![dispatch::encode_message(&BoltMessage::Failure {
+                        metadata: HashMap::from([
+                            ("code".into(), serde_json::json!("Neo.ClientError.Statement.ExecutionFailed")),
+                            ("message".into(), serde_json::json!(e)),
+                        ]),
+                    })])
+                }
+            }
         }
         BoltMessage::Pull { .. } | BoltMessage::Discard { .. } => {
-            Ok(Some(dispatch::encode_message(&BoltMessage::Success {
-                metadata: HashMap::from([("type".into(), serde_json::json!("r")), ("has_more".into(), serde_json::json!(false))]),
-            })))
+            let mut responses: Vec<Vec<u8>> = Vec::new();
+            if let Some(ref result) = session.last_result {
+                info!(rows = result.rows.len(), "bolt PULL → streaming records");
+                // Send one RECORD message per row (rows are position-based Vecs)
+                for row in &result.rows {
+                    responses.push(dispatch::encode_message(&BoltMessage::Record {
+                        data: row.clone(),
+                    }));
+                }
+            } else {
+                info!("bolt PULL → no prior result");
+            }
+            // Always send summary SUCCESS (matching NornicDB format:
+            // no has_more when false, includes db and bookmark).
+            responses.push(dispatch::encode_message(&BoltMessage::Success {
+                metadata: HashMap::from([
+                    ("type".into(), serde_json::json!("r")),
+                    ("t_last".into(), serde_json::json!(0)),
+                    ("bookmark".into(), serde_json::json!("")),
+                    ("db".into(), serde_json::json!("copperdb")),
+                ]),
+            }));
+            Ok(responses)
         }
-        BoltMessage::Begin { extra: _ } => Ok(Some(dispatch::encode_message(&BoltMessage::Success { metadata: HashMap::new() }))),
-        BoltMessage::Commit => Ok(Some(dispatch::encode_message(&BoltMessage::Success {
+        BoltMessage::Begin { extra: _ } => Ok(vec![dispatch::encode_message(&BoltMessage::Success { metadata: HashMap::new() })]),
+        BoltMessage::Commit => Ok(vec![dispatch::encode_message(&BoltMessage::Success {
             metadata: HashMap::from([("bookmark".into(), serde_json::json!(""))]),
-        }))),
-        BoltMessage::Rollback => Ok(Some(dispatch::encode_message(&BoltMessage::Success { metadata: HashMap::new() }))),
-        BoltMessage::Reset => { *current_query = None; Ok(Some(dispatch::encode_message(&BoltMessage::Success { metadata: HashMap::new() }))) }
-        BoltMessage::Route { .. } => Ok(Some(dispatch::encode_message(&BoltMessage::Success { metadata: HashMap::new() }))),
-        _ => Ok(None),
+        })]),
+        BoltMessage::Rollback => Ok(vec![dispatch::encode_message(&BoltMessage::Success { metadata: HashMap::new() })]),
+        BoltMessage::Reset => { session.current_query = None; Ok(vec![dispatch::encode_message(&BoltMessage::Success { metadata: HashMap::new() })]) }
+        BoltMessage::Route { .. } => Ok(vec![dispatch::encode_message(&BoltMessage::Success { metadata: HashMap::new() })]),
+        _ => Ok(vec![]),
     }
 }
 
@@ -385,7 +561,8 @@ mod tests {
         let server_telemetry = Arc::clone(&telemetry);
         tokio::spawn(async move {
             let (mut stream, _peer) = listener.accept().await.unwrap();
-            let result = handle_tcp_session(&mut stream, &server_telemetry).await;
+            let exec = NoopExecutor;
+            let result = handle_tcp_session(&mut stream, &server_telemetry, &exec).await;
             if let Err(ref e) = result {
                 eprintln!("server error: {e}");
             }
@@ -489,7 +666,8 @@ mod tests {
 
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let result = handle_tcp_session(&mut stream, &st).await;
+            let exec = NoopExecutor;
+            let result = handle_tcp_session(&mut stream, &st, &exec).await;
             assert!(result.is_err());
         });
 
@@ -514,7 +692,8 @@ mod tests {
 
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let result = handle_tcp_session(&mut stream, &st).await;
+            let exec = NoopExecutor;
+            let result = handle_tcp_session(&mut stream, &st, &exec).await;
             // EOF after preamble should be Ok (clean disconnect)
             assert!(result.is_ok());
         });
@@ -537,6 +716,16 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
+    /// Wrap raw PackStream bytes in Bolt chunk encoding.
+    fn chunk_encode(data: &[u8]) -> Vec<u8> {
+        crate::wsconn::encode_bolt_chunks(data)
+    }
+
+    /// Decode Bolt chunk encoding to raw PackStream bytes (first message only).
+    fn chunk_decode(data: &[u8]) -> Vec<u8> {
+        crate::wsconn::decode_bolt_chunks(data).into_iter().next().unwrap_or_default()
+    }
+
     #[tokio::test]
     async fn test_ws_full_handshake_hello_run_pull_flow() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -544,7 +733,7 @@ mod tests {
 
         let telemetry = Arc::new(Telemetry::new());
         telemetry.seed_zero_catalog_metrics();
-        let server = BoltServer::new(addr.to_string(), Arc::clone(&telemetry));
+        let server = BoltServer::new(addr.to_string(), Arc::clone(&telemetry), Arc::new(NoopExecutor));
 
         // Spawn server that accepts one connection
         tokio::spawn(async move {
@@ -571,7 +760,7 @@ mod tests {
 
         let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
 
-        // Step 1: Send Bolt preamble
+        // Step 1: Send Bolt preamble (unchunked)
         let preamble: Vec<u8> = vec![
             0x60, 0x60, 0xB0, 0x17,
             0x00, 0x00, 0x04, 0x04,
@@ -590,56 +779,59 @@ mod tests {
         };
         assert_eq!(vr.as_ref(), &[0x00, 0x00, 0x04, 0x04]);
 
-        // Step 2: Send HELLO
+        // Step 2: Send HELLO (chunk-encoded per Bolt spec)
         let hello_bytes = encode_bolt_struct(0x01, &[Value::Map(vec![
             ("user_agent".to_string(), Value::String("neo4j-test/1.0".to_string())),
             ("scheme".to_string(), Value::String("none".to_string())),
         ])]);
-        ws.send(tokio_tungstenite::tungstenite::Message::Binary(hello_bytes.into())).await.unwrap();
+        ws.send(tokio_tungstenite::tungstenite::Message::Binary(chunk_encode(&hello_bytes).into())).await.unwrap();
 
-        // Read SUCCESS for HELLO
+        // Read SUCCESS for HELLO (chunked response → decode chunks first)
         let resp = match ws.next().await.unwrap().unwrap() {
             tokio_tungstenite::tungstenite::Message::Binary(data) => data,
             other => panic!("expected Binary SUCCESS, got {other:?}"),
         };
-        let (value, _) = crate::packstream::decode(&resp).unwrap();
+        let decoded = chunk_decode(&resp);
+        let (value, _) = crate::packstream::decode(&decoded).unwrap();
         match value {
             Value::Struct { signature: 0x70, .. } => {}
             other => panic!("expected SUCCESS (0x70), got {other:?}"),
         }
 
-        // Step 3: Send RUN
+        // Step 3: Send RUN (chunk-encoded)
         let run_bytes = encode_bolt_struct(0x10, &[
             Value::String("RETURN 1 AS n".to_string()),
             Value::Map(vec![]),
             Value::Map(vec![]),
         ]);
-        ws.send(tokio_tungstenite::tungstenite::Message::Binary(run_bytes.into())).await.unwrap();
+        ws.send(tokio_tungstenite::tungstenite::Message::Binary(chunk_encode(&run_bytes).into())).await.unwrap();
 
         // Read SUCCESS for RUN
         let resp = match ws.next().await.unwrap().unwrap() {
             tokio_tungstenite::tungstenite::Message::Binary(data) => data,
             other => panic!("expected Binary SUCCESS for RUN, got {other:?}"),
         };
-        let (value, _) = crate::packstream::decode(&resp).unwrap();
+        let decoded = chunk_decode(&resp);
+        let (value, _) = crate::packstream::decode(&decoded).unwrap();
         match value {
             Value::Struct { signature: 0x70, .. } => {}
             other => panic!("expected SUCCESS for RUN, got {other:?}"),
         }
 
-        // Step 4: Send PULL
+        // Step 4: Send PULL (chunk-encoded)
         let pull_bytes = encode_bolt_struct(0x3F, &[
             Value::Integer(-1),
             Value::Integer(-1),
         ]);
-        ws.send(tokio_tungstenite::tungstenite::Message::Binary(pull_bytes.into())).await.unwrap();
+        ws.send(tokio_tungstenite::tungstenite::Message::Binary(chunk_encode(&pull_bytes).into())).await.unwrap();
 
         // Read SUCCESS for PULL
         let resp = match ws.next().await.unwrap().unwrap() {
             tokio_tungstenite::tungstenite::Message::Binary(data) => data,
             other => panic!("expected Binary SUCCESS for PULL, got {other:?}"),
         };
-        let (value, _) = crate::packstream::decode(&resp).unwrap();
+        let decoded = chunk_decode(&resp);
+        let (value, _) = crate::packstream::decode(&decoded).unwrap();
         match value {
             Value::Struct { signature: 0x70, .. } => {}
             other => panic!("expected SUCCESS for PULL, got {other:?}"),

@@ -142,9 +142,16 @@ impl Component for HttpComponent {
     }
 }
 
-#[derive(Debug)]
 struct BoltComponent {
     server: BoltServer,
+}
+
+impl std::fmt::Debug for BoltComponent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoltComponent")
+            .field("listen_addr", &self.server.listen_addr)
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -260,8 +267,8 @@ impl Component for GrpcComponent {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("copperdb=info,info"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("copperdb=info,info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -294,8 +301,11 @@ async fn main() -> Result<()> {
     }
 
     if startup.bolt_enabled {
+        use copperdb_bolt::server::NoopExecutor;
+        // Bolt query execution will be wired once EvalEngine is Sync-safe.
+        let executor = Arc::new(NoopExecutor);
         supervisor.register(BoltComponent {
-            server: BoltServer::new(startup.bolt_address.clone(), telemetry),
+            server: BoltServer::new(startup.bolt_address.clone(), telemetry, executor),
         });
     }
 

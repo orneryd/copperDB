@@ -42,11 +42,7 @@ impl From<NodeRecord> for GraphNode {
         Self {
             id: node.id,
             labels: node.labels,
-            properties: serde_json::Value::Object(
-                node.properties
-                    .into_iter()
-                    .collect(),
-            ),
+            properties: serde_json::Value::Object(node.properties.into_iter().collect()),
         }
     }
 }
@@ -96,9 +92,7 @@ impl MutationRoot {
         let engine = gql_ctx.engine.lock();
         let node_id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let props = match properties {
-            serde_json::Value::Object(map) => {
-                map.into_iter().collect()
-            }
+            serde_json::Value::Object(map) => map.into_iter().collect(),
             _ => std::collections::BTreeMap::new(),
         };
         let created_at = std::time::SystemTime::now()
@@ -122,7 +116,9 @@ impl MutationRoot {
 
 /// Wrapper type that exposes the async-graphql Schema publicly.
 #[derive(Clone)]
-pub struct GraphQlSchema(pub async_graphql::Schema<QueryRoot, MutationRoot, async_graphql::EmptySubscription>);
+pub struct GraphQlSchema(
+    pub async_graphql::Schema<QueryRoot, MutationRoot, async_graphql::EmptySubscription>,
+);
 
 impl GraphQlSchema {
     /// Execute a GraphQL request against the schema.
@@ -132,9 +128,7 @@ impl GraphQlSchema {
 }
 
 /// Build the copperdb GraphQL schema backed by the given storage engine.
-pub fn build_schema(
-    engine: Arc<Mutex<StorageEngine>>,
-) -> GraphQlSchema {
+pub fn build_schema(engine: Arc<Mutex<StorageEngine>>) -> GraphQlSchema {
     GraphQlSchema(
         async_graphql::Schema::build(QueryRoot, MutationRoot, async_graphql::EmptySubscription)
             .data(GraphQlContext { engine })

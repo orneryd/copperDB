@@ -481,9 +481,7 @@ fn profile_expression(expression: &Expression) -> QueryShapeStats {
                 stats.merge(profile_expression(&entry.value));
             }
         }
-        Expression::Not(inner)
-        | Expression::IsNull(inner)
-        | Expression::IsNotNull(inner) => {
+        Expression::Not(inner) | Expression::IsNull(inner) | Expression::IsNotNull(inner) => {
             stats.boxed_expression_edges += 1;
             stats.merge(profile_expression(inner));
         }

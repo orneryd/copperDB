@@ -1071,9 +1071,10 @@ fn test_execute_large_variable_length_chain_traversal_consistency() {
             .put_node_record(&copperdb_storage::NodeRecord {
                 id: format!("Node:{index}"),
                 labels: vec!["Node".to_string()],
-                properties: BTreeMap::from([
-                    ("name".to_string(), Value::String(format!("n{index:02}"))),
-                ])
+                properties: BTreeMap::from([(
+                    "name".to_string(),
+                    Value::String(format!("n{index:02}")),
+                )])
                 .into_iter()
                 .collect(),
                 named_embeddings: BTreeMap::new(),

@@ -636,11 +636,10 @@ impl<'a> ParseContext<'a> {
                     return Ok(());
                 }
                 let saved = self.pos;
-                if self.advance().is_some()
-                    && self.peek_is("IN") {
-                        self.pos = saved;
-                        return self.validate_list_comprehension();
-                    }
+                if self.advance().is_some() && self.peek_is("IN") {
+                    self.pos = saved;
+                    return self.validate_list_comprehension();
+                }
                 self.pos = saved;
                 self.validate_list_literal()
             }

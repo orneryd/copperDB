@@ -20,6 +20,7 @@ tonic.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 rustls.workspace = true
+serde_json.workspace = true
 copperdb-kms = { workspace = true }
 copperdb-bolt = { workspace = true }
 copperdb-buildinfo = { workspace = true }

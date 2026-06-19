@@ -412,7 +412,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            address: "0.0.0.0".into(),
+            address: "127.0.0.1".into(),
             http_address: None,
             bolt_address: None,
             grpc_address: None,
@@ -1337,9 +1337,9 @@ mod tests {
     #[test]
     fn test_default_config() {
         let cfg = Config::default();
-        assert_eq!(cfg.server.address, "0.0.0.0");
+        assert_eq!(cfg.server.address, "127.0.0.1");
         assert_eq!(cfg.server.http_port, 7474);
-        assert_eq!(cfg.bolt.listen_addr, "0.0.0.0:7687");
+        assert_eq!(cfg.bolt.listen_addr, "127.0.0.1:7687");
         assert_eq!(cfg.storage.path, "./data");
         assert!(!cfg.embedding.enabled);
         assert!(!cfg.search.bm25_enabled);
@@ -1498,9 +1498,9 @@ mod tests {
     fn listener_config_derives_addresses_from_base_address_and_ports() {
         let cfg = Config::default();
         let listeners = cfg.listener_config();
-        assert_eq!(listeners.http_address, "0.0.0.0:7474");
-        assert_eq!(listeners.bolt_address, "0.0.0.0:7687");
-        assert_eq!(listeners.grpc_address, "0.0.0.0:50051");
+        assert_eq!(listeners.http_address, "127.0.0.1:7474");
+        assert_eq!(listeners.bolt_address, "127.0.0.1:7687");
+        assert_eq!(listeners.grpc_address, "127.0.0.1:50051");
         assert!(listeners.http_enabled);
         assert!(listeners.bolt_enabled);
         assert!(!listeners.grpc_enabled);
@@ -1649,7 +1649,11 @@ server:
         // even without copperdb_AUTH__JWT_SECRET in the environment.
         if std::env::var("copperdb_AUTH__JWT_SECRET").is_err() {
             let cfg = load_from_env();
-            assert!(cfg.is_ok(), "load_from_env should succeed with default JWT: {:?}", cfg.err());
+            assert!(
+                cfg.is_ok(),
+                "load_from_env should succeed with default JWT: {:?}",
+                cfg.err()
+            );
         }
     }
 }

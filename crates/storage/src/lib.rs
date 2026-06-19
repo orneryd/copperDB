@@ -470,10 +470,7 @@ impl WAL {
     }
 
     /// Truncate WAL entries at or before the snapshot point.
-    pub fn truncate_to_snapshot(
-        &self,
-        snapshot: &WALSnapshot,
-    ) -> Result<usize, StorageError> {
+    pub fn truncate_to_snapshot(&self, snapshot: &WALSnapshot) -> Result<usize, StorageError> {
         self.compact_up_to(snapshot.compacted_through)
     }
 
@@ -549,7 +546,10 @@ pub struct WALSnapshot {
 }
 
 /// Save a WAL snapshot to a file.
-pub fn save_wal_snapshot(snapshot: &WALSnapshot, path: &std::path::Path) -> Result<(), StorageError> {
+pub fn save_wal_snapshot(
+    snapshot: &WALSnapshot,
+    path: &std::path::Path,
+) -> Result<(), StorageError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -814,7 +814,10 @@ impl SchemaManager {
                         }
                     }
                 }
-                ConstraintType::Type | ConstraintType::Relationship | ConstraintType::Temporal | ConstraintType::Domain => {}
+                ConstraintType::Type
+                | ConstraintType::Relationship
+                | ConstraintType::Temporal
+                | ConstraintType::Domain => {}
             }
         }
         Ok(())
@@ -1702,8 +1705,8 @@ impl StorageEngine {
             let mut ids = Vec::new();
             for entry in self.meta.scan_prefix(META_PENDING_DEINDEX_PREFIX) {
                 let (key, _) = entry?;
-                let key_str = std::str::from_utf8(key.as_ref())
-                    .map_err(|_| StorageError::InvalidUtf8)?;
+                let key_str =
+                    std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
                 if let Some(id) = key_str.strip_prefix(
                     std::str::from_utf8(META_PENDING_DEINDEX_PREFIX)
                         .map_err(|_| StorageError::InvalidUtf8)?,
@@ -1768,7 +1771,9 @@ impl StorageEngine {
 
     /// Check whether a tombstone exists for the given index key.
     pub fn has_index_tombstone(&self, index_key: &str) -> bool {
-        self.meta.contains_key(tombstone_key(index_key)).unwrap_or(false)
+        self.meta
+            .contains_key(tombstone_key(index_key))
+            .unwrap_or(false)
     }
 
     /// Delete all tombstones for a given entity by scanning the tombstone prefix
@@ -1780,8 +1785,8 @@ impl StorageEngine {
         let mut removed = 0usize;
         for entry in self.meta.scan_prefix(META_INDEX_TOMBSTONE_PREFIX) {
             let (key, _) = entry?;
-            let key_str = std::str::from_utf8(key.as_ref())
-                .map_err(|_| StorageError::InvalidUtf8)?;
+            let key_str =
+                std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
             if key_str.contains(entity_id) {
                 self.meta.remove(key.as_ref())?;
                 removed += 1;
@@ -2463,8 +2468,7 @@ impl StorageEngine {
         options: &HashMap<String, serde_json::Value>,
     ) -> Result<(), StorageError> {
         let key = [META_INDEX_OPTIONS_PREFIX, index_name.as_bytes()].concat();
-        self.meta
-            .insert(key, rmp_serde::to_vec(options)?)?;
+        self.meta.insert(key, rmp_serde::to_vec(options)?)?;
         Ok(())
     }
 
@@ -2494,9 +2498,7 @@ impl StorageEngine {
     /// re-indexes all matching records.
     ///
     /// Returns counts of indexes rebuilt per category.
-    pub fn rebuild_all_indexes(
-        &self,
-    ) -> Result<(usize, usize, usize), StorageError> {
+    pub fn rebuild_all_indexes(&self) -> Result<(usize, usize, usize), StorageError> {
         let definitions = self.load_index_definitions()?;
         let mut node_prop = 0usize;
         let mut node_fulltext = 0usize;
@@ -3947,7 +3949,10 @@ fn promotion_policy_target_key(policy: &PromotionPolicySchema) -> String {
     format!("node:{}", sorted.join("\0"))
 }
 
-fn compat_node_record_from_bytes(_id: &str, raw: &[u8]) -> Result<Option<NodeRecord>, StorageError> {
+fn compat_node_record_from_bytes(
+    _id: &str,
+    raw: &[u8],
+) -> Result<Option<NodeRecord>, StorageError> {
     // Single format: NodeRecord only (greenfield — no legacy).
     Ok(rmp_serde::from_slice::<NodeRecord>(raw).ok())
 }

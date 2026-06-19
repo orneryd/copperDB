@@ -233,7 +233,11 @@ impl DatabaseManager {
         Ok(())
     }
 
-    fn persist_database_with(&self, storage: &StorageEngine, database: &Database) -> Result<(), MultiDbError> {
+    fn persist_database_with(
+        &self,
+        storage: &StorageEngine,
+        database: &Database,
+    ) -> Result<(), MultiDbError> {
         storage
             .for_namespace("multidb")
             .put_node_record(&database_to_node(database)?)?;

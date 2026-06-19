@@ -1,6 +1,6 @@
 use crate::{
-    parse_context::ParseContext, BinaryExpression, CypherError, EdgePattern,
-    Expression, LiteralValue, NodePattern, Pattern, PatternComprehension, PropertyEntry,
+    parse_context::ParseContext, BinaryExpression, CypherError, EdgePattern, Expression,
+    LiteralValue, NodePattern, Pattern, PatternComprehension, PropertyEntry,
 };
 
 impl<'a> ParseContext<'a> {
@@ -257,11 +257,10 @@ impl<'a> ParseContext<'a> {
                     self.pos = saved;
                     return self.parse_pattern_comprehension();
                 }
-                if self.advance().is_some()
-                    && self.peek_is("IN") {
-                        self.pos = saved;
-                        return self.parse_list_comprehension();
-                    }
+                if self.advance().is_some() && self.peek_is("IN") {
+                    self.pos = saved;
+                    return self.parse_list_comprehension();
+                }
                 self.pos = saved;
                 self.parse_list_literal()
             }
@@ -353,10 +352,7 @@ impl<'a> ParseContext<'a> {
                     if let Some(last_dot) = full_name.rfind('.') {
                         let variable = full_name[..last_dot].to_string();
                         let property = full_name[last_dot + 1..].to_string();
-                        return Ok(Expression::PropertyAccess {
-                            variable,
-                            property,
-                        });
+                        return Ok(Expression::PropertyAccess { variable, property });
                     }
                     return Ok(Expression::Variable(full_name));
                 }
@@ -475,8 +471,8 @@ impl<'a> ParseContext<'a> {
     }
 
     fn parse_case_expression(&mut self) -> Result<Expression, CypherError> {
-        use crate::CaseExpression;
         use crate::CaseAlternative;
+        use crate::CaseExpression;
 
         self.expect("CASE")?;
 
@@ -557,7 +553,6 @@ impl<'a> ParseContext<'a> {
     }
 
     fn parse_pattern_comprehension(&mut self) -> Result<Expression, CypherError> {
-
         self.expect("[")?;
 
         // Parse start node: (var:Label) or ()
@@ -601,7 +596,11 @@ impl<'a> ParseContext<'a> {
         self.expect("(")?;
         if self.peek() == Some(")") {
             self.advance();
-            return Ok(NodePattern { variable: None, labels: Vec::new(), properties: Vec::new() });
+            return Ok(NodePattern {
+                variable: None,
+                labels: Vec::new(),
+                properties: Vec::new(),
+            });
         }
         let variable = if self.peek().is_some_and(|t| !t.starts_with(':') && t != "{") {
             Some(self.advance_identifier()?)
@@ -614,11 +613,15 @@ impl<'a> ParseContext<'a> {
             labels.push(self.advance_identifier()?);
         }
         self.expect(")")?;
-        Ok(NodePattern { variable, labels, properties: Vec::new() })
+        Ok(NodePattern {
+            variable,
+            labels,
+            properties: Vec::new(),
+        })
     }
 
     fn parse_pc_edge(&mut self) -> Result<EdgePattern, CypherError> {
-        use crate::{EdgePattern, EdgeDirection};
+        use crate::{EdgeDirection, EdgePattern};
         // Determine direction: <--, -->, or --
         let direction = if self.peek() == Some("<") {
             self.advance();
@@ -631,7 +634,10 @@ impl<'a> ParseContext<'a> {
         let (rel_type, min_hops, max_hops) = if self.peek() == Some("[") {
             self.advance();
             // Skip optional variable
-            if self.peek().is_some_and(|t| t != ":" && t != "*" && t != "]") {
+            if self
+                .peek()
+                .is_some_and(|t| t != ":" && t != "*" && t != "]")
+            {
                 let id = self.advance_identifier()?;
                 if self.peek() == Some(":") {
                     self.advance();
@@ -656,9 +662,12 @@ impl<'a> ParseContext<'a> {
             // Simple --> (no brackets)
             self.advance();
             return Ok(EdgePattern {
-                variable: None, rel_type: None,
+                variable: None,
+                rel_type: None,
                 direction: EdgeDirection::Outgoing,
-                min_hops: None, max_hops: None, properties: Vec::new(),
+                min_hops: None,
+                max_hops: None,
+                properties: Vec::new(),
             });
         } else {
             (None, None, None)
@@ -675,8 +684,12 @@ impl<'a> ParseContext<'a> {
         }
 
         Ok(EdgePattern {
-            variable: None, rel_type, direction,
-            min_hops, max_hops, properties: Vec::new(),
+            variable: None,
+            rel_type,
+            direction,
+            min_hops,
+            max_hops,
+            properties: Vec::new(),
         })
     }
 

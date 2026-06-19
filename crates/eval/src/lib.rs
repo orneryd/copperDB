@@ -5,10 +5,9 @@
 use copperdb_cypher::{
     hot_path_trace::{HotPathTrace, HotPathTraceState},
     Clause, ConstraintEntityType as CypherConstraintEntityType, ConstraintKind, EdgeDirection,
-    EdgePattern, Expression, LiteralValue, NodePattern, Pattern, PatternComprehension,
-    PatternInfo, PipelineClause, PipelineClauseKind, PropertyEntry, Query, QueryPattern,
-    RemoveItem, ReturnItem, SetItem, ShapeKind, ShapeMatch, ShapeValue, SubqueryClause,
-    WithClause,
+    EdgePattern, Expression, LiteralValue, NodePattern, Pattern, PatternComprehension, PatternInfo,
+    PipelineClause, PipelineClauseKind, PropertyEntry, Query, QueryPattern, RemoveItem, ReturnItem,
+    SetItem, ShapeKind, ShapeMatch, ShapeValue, SubqueryClause, WithClause,
 };
 use copperdb_filter::{eval_expression, eval_predicate};
 use copperdb_indexing::{CatalogRangeIndexComparison, IndexCatalog, IndexError};
@@ -470,10 +469,7 @@ fn collect_expression_variables(expression: &Expression, variables: &mut HashSet
         | Expression::Parameter(_)
         | Expression::ParameterPropertyAccess { .. }
         | Expression::PatternExists { .. } => {}
-        Expression::BracketAccess {
-            expression,
-            key,
-        } => {
+        Expression::BracketAccess { expression, key } => {
             collect_expression_variables(expression, variables);
             collect_expression_variables(key, variables);
         }
@@ -917,9 +913,7 @@ fn resolve_order_expression(
     alias_map: &HashMap<String, Expression>,
 ) -> Expression {
     match expr {
-        Expression::Variable(name) => {
-            alias_map.get(name).cloned().unwrap_or_else(|| expr.clone())
-        }
+        Expression::Variable(name) => alias_map.get(name).cloned().unwrap_or_else(|| expr.clone()),
         _ => expr.clone(),
     }
 }
@@ -973,7 +967,11 @@ fn sort_rows_by_with_order(rows: &mut [Row], with_clause: &WithClause) {
     });
 }
 
-fn apply_with_window(rows: &mut Vec<Row>, with_clause: &WithClause, params: &HashMap<String, Value>) {
+fn apply_with_window(
+    rows: &mut Vec<Row>,
+    with_clause: &WithClause,
+    params: &HashMap<String, Value>,
+) {
     if let Some(skip) = resolve_limit(&with_clause.skip, params) {
         *rows = rows.drain(..).skip(skip.max(0) as usize).collect();
     }

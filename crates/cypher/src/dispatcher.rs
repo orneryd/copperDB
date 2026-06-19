@@ -45,9 +45,8 @@ impl<'a> ParseContext<'a> {
                                     t if t.eq_ignore_ascii_case("OPTIONAL") => {
                                         self.advance();
                                         self.expect("MATCH")?;
-                                        sub_clauses.push(Clause::OptionalMatch(
-                                            self.parse_match(true)?,
-                                        ));
+                                        sub_clauses
+                                            .push(Clause::OptionalMatch(self.parse_match(true)?));
                                     }
                                     t if t.eq_ignore_ascii_case("CREATE") => {
                                         self.advance();
@@ -71,8 +70,7 @@ impl<'a> ParseContext<'a> {
                                     }
                                     t if t.eq_ignore_ascii_case("DELETE") => {
                                         self.advance();
-                                        sub_clauses
-                                            .push(Clause::Delete(self.parse_delete(false)?));
+                                        sub_clauses.push(Clause::Delete(self.parse_delete(false)?));
                                     }
                                     t if t.eq_ignore_ascii_case("WHERE") => {
                                         self.advance();
@@ -121,10 +119,18 @@ impl<'a> ParseContext<'a> {
                             loop {
                                 if self.peek_is("SKIP") {
                                     self.advance();
-                                    skip = Some(self.parse_expression_item(&["LIMIT", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE"])?);
+                                    skip = Some(self.parse_expression_item(&[
+                                        "LIMIT", "RETURN", "WITH", "MATCH", "CREATE", "MERGE",
+                                        "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND",
+                                        "ORDER", "WHERE",
+                                    ])?);
                                 } else if self.peek_is("LIMIT") {
                                     self.advance();
-                                    limit = Some(self.parse_expression_item(&["SKIP", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE"])?);
+                                    limit = Some(self.parse_expression_item(&[
+                                        "SKIP", "RETURN", "WITH", "MATCH", "CREATE", "MERGE",
+                                        "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND",
+                                        "ORDER", "WHERE",
+                                    ])?);
                                 } else {
                                     break;
                                 }
@@ -459,9 +465,7 @@ impl<'a> ParseContext<'a> {
                 break;
             }
             if self.pos >= self.tokens.len() {
-                return Err(CypherError::ParseError(
-                    "unterminated subquery body".into(),
-                ));
+                return Err(CypherError::ParseError("unterminated subquery body".into()));
             }
             let token = match self.peek() {
                 Some(t) => t,

@@ -67,8 +67,12 @@ impl EvalEngine {
         params: &HashMap<String, Value>,
     ) -> Result<Value, EvalError> {
         // Match the pattern against the graph
-        let matched_rows =
-            self.match_relationship_pattern(std::slice::from_ref(row), &comp.pattern, params, None)?;
+        let matched_rows = self.match_relationship_pattern(
+            std::slice::from_ref(row),
+            &comp.pattern,
+            params,
+            None,
+        )?;
 
         let mut results = Vec::new();
         for matched_row in &matched_rows {
@@ -237,18 +241,27 @@ impl EvalEngine {
     ) -> Result<bool, EvalError> {
         match expr {
             Expression::Not(inner) => {
-                if let Expression::PatternExists { variable, rel_type, target_variable } = inner.as_ref() {
-                    let exists = self.check_edge_exists(row, variable, rel_type, target_variable)?;
+                if let Expression::PatternExists {
+                    variable,
+                    rel_type,
+                    target_variable,
+                } = inner.as_ref()
+                {
+                    let exists =
+                        self.check_edge_exists(row, variable, rel_type, target_variable)?;
                     return Ok(!exists);
                 }
                 let inner_result = self.eval_where_predicate(inner, row, params)?;
                 Ok(!inner_result)
             }
-            Expression::PatternExists { variable, rel_type, target_variable } => {
-                self.check_edge_exists(row, variable, rel_type, target_variable)
+            Expression::PatternExists {
+                variable,
+                rel_type,
+                target_variable,
+            } => self.check_edge_exists(row, variable, rel_type, target_variable),
+            _ => {
+                eval_predicate(expr, row, params).map_err(|e| EvalError::FilterError(e.to_string()))
             }
-            _ => eval_predicate(expr, row, params)
-                .map_err(|e| EvalError::FilterError(e.to_string())),
         }
     }
 
@@ -354,18 +367,14 @@ impl EvalEngine {
                     // Apply YIELD projection — restrict columns to those requested.
                     // YIELD * (Variable("*")) means passthrough all columns.
                     if !call.yield_items.is_empty() {
-                        let is_wildcard = call.yield_items.iter().any(|item| {
-                            matches!(&item.expression, Expression::Variable(v) if v == "*")
-                        });
+                        let is_wildcard = call.yield_items.iter().any(
+                            |item| matches!(&item.expression, Expression::Variable(v) if v == "*"),
+                        );
                         if !is_wildcard {
                             let yield_columns: Vec<String> = call
                                 .yield_items
                                 .iter()
-                                .map(|item| {
-                                    item.alias
-                                        .clone()
-                                        .unwrap_or_else(|| column_name(item))
-                                })
+                                .map(|item| item.alias.clone().unwrap_or_else(|| column_name(item)))
                                 .collect();
                             call_result.rows = call_result
                                 .rows
@@ -408,18 +417,24 @@ impl EvalEngine {
                             ConstraintKind::Unique => (ConstraintType::Unique, None, Vec::new()),
                             ConstraintKind::Exists => (ConstraintType::Exists, None, Vec::new()),
                             ConstraintKind::NodeKey => (ConstraintType::NodeKey, None, Vec::new()),
-                            ConstraintKind::RelationshipKey => (ConstraintType::Relationship, None, Vec::new()),
-                            ConstraintKind::Type(name) => (ConstraintType::Type, Some(name.clone()), Vec::new()),
-                            ConstraintKind::Temporal => (ConstraintType::Temporal, None, Vec::new()),
-                            ConstraintKind::Domain(values) => (ConstraintType::Domain, None, values.clone()),
+                            ConstraintKind::RelationshipKey => {
+                                (ConstraintType::Relationship, None, Vec::new())
+                            }
+                            ConstraintKind::Type(name) => {
+                                (ConstraintType::Type, Some(name.clone()), Vec::new())
+                            }
+                            ConstraintKind::Temporal => {
+                                (ConstraintType::Temporal, None, Vec::new())
+                            }
+                            ConstraintKind::Domain(values) => {
+                                (ConstraintType::Domain, None, values.clone())
+                            }
                         };
                         self.storage.persist_constraint(&Constraint {
                             name: create.name.clone(),
                             constraint_type,
                             entity_type: match create.entity_type {
-                                CypherConstraintEntityType::Node => {
-                                    ConstraintEntityType::Node
-                                }
+                                CypherConstraintEntityType::Node => ConstraintEntityType::Node,
                                 CypherConstraintEntityType::Relationship => {
                                     ConstraintEntityType::Relationship
                                 }
@@ -960,9 +975,9 @@ impl EvalEngine {
 
                 Clause::Return(ret) => {
                     // Expand * wildcard to all current columns
-                    let has_wildcard = ret.items.iter().any(|item| {
-                        matches!(&item.expression, Expression::Variable(v) if v == "*")
-                    });
+                    let has_wildcard = ret.items.iter().any(
+                        |item| matches!(&item.expression, Expression::Variable(v) if v == "*"),
+                    );
                     if has_wildcard {
                         columns = current_rows
                             .first()
@@ -2012,7 +2027,11 @@ impl EvalEngine {
         for row in rows {
             for item in items {
                 match item {
-                    SetItem::Property { variable, property, value } => {
+                    SetItem::Property {
+                        variable,
+                        property,
+                        value,
+                    } => {
                         let new_val = self.evaluate_expression(value, row, params)?;
                         if let Some(Value::Object(props)) = row.get_mut(variable) {
                             props.insert(property.clone(), new_val);
@@ -2371,22 +2390,21 @@ impl EvalEngine {
             "NULL" => value.is_null(),
             "LIST" | "ARRAY" => value.is_array(),
             "MAP" | "OBJECT" => value.is_object(),
-            "DATE" => {
-                value.as_str()
-                    .map(|s| s.len() >= 10 && s.chars().filter(|&c| c == '-').count() == 2)
-                    .unwrap_or(false)
-            }
+            "DATE" => value
+                .as_str()
+                .map(|s| s.len() >= 10 && s.chars().filter(|&c| c == '-').count() == 2)
+                .unwrap_or(false),
             "DATETIME" | "TIMESTAMP" => {
-                value.as_str()
+                value
+                    .as_str()
                     .map(|s| s.len() >= 19 && s.contains('T'))
                     .unwrap_or(false)
                     || value.is_number()
             }
-            "POINT" | "GEOMETRY" => {
-                value.as_object()
-                    .map(|o| o.contains_key("x") || o.contains_key("latitude"))
-                    .unwrap_or(false)
-            }
+            "POINT" | "GEOMETRY" => value
+                .as_object()
+                .map(|o| o.contains_key("x") || o.contains_key("latitude"))
+                .unwrap_or(false),
             _ => true, // Unknown types pass through
         }
     }
@@ -2449,7 +2467,9 @@ impl EvalEngine {
             }
             match c.constraint_type {
                 ConstraintType::Unique => {
-                    let Some(prop) = c.properties.first() else { continue };
+                    let Some(prop) = c.properties.first() else {
+                        continue;
+                    };
                     let val = match props.get(prop) {
                         None | Some(Value::Null) => continue,
                         Some(v) => v,
@@ -2496,15 +2516,16 @@ impl EvalEngine {
                     // Scan for existing node with all matching key properties
                     if let Ok(nodes) = self.storage.get_nodes_by_label(&c.label) {
                         for node in &nodes {
-                            let all_match = c.properties.iter().all(|prop| {
-                                node.properties.get(prop)
-                                    == props.get(prop)
-                            });
+                            let all_match = c
+                                .properties
+                                .iter()
+                                .all(|prop| node.properties.get(prop) == props.get(prop));
                             if all_match {
                                 return Err(EvalError::ExecutionError(format!(
                                     "Node already exists with label `{}` and key {:?}",
                                     c.label,
-                                    c.properties.iter()
+                                    c.properties
+                                        .iter()
                                         .map(|p| format!("{}={:?}", p, props.get(p)))
                                         .collect::<Vec<_>>()
                                         .join(", ")
@@ -2514,7 +2535,9 @@ impl EvalEngine {
                     }
                 }
                 ConstraintType::Type => {
-                    let Some(type_name) = &c.type_name else { continue };
+                    let Some(type_name) = &c.type_name else {
+                        continue;
+                    };
                     for prop in &c.properties {
                         if let Some(val) = props.get(prop) {
                             if !Self::value_matches_type(val, type_name) {
@@ -2543,10 +2566,8 @@ impl EvalEngine {
                         _ => {}
                     }
                     if let Ok(nodes) = self.storage.get_nodes_by_label(&c.label) {
-                        let new_from =
-                            Self::parse_temporal_value(props.get(from_prop));
-                        let new_to =
-                            Self::parse_temporal_value(props.get(to_prop));
+                        let new_from = Self::parse_temporal_value(props.get(from_prop));
+                        let new_to = Self::parse_temporal_value(props.get(to_prop));
                         for node in &nodes {
                             if node.properties.get(key_prop) != props.get(key_prop) {
                                 continue;
@@ -2556,12 +2577,16 @@ impl EvalEngine {
                             let existing_to =
                                 Self::parse_temporal_value(node.properties.get(to_prop));
                             if Self::temporal_ranges_overlap(
-                                new_from, new_to, existing_from, existing_to,
+                                new_from,
+                                new_to,
+                                existing_from,
+                                existing_to,
                             ) {
                                 return Err(EvalError::ExecutionError(format!(
                                     "TEMPORAL overlap on node with label `{}` and key `{}`",
                                     c.label,
-                                    props.get(key_prop)
+                                    props
+                                        .get(key_prop)
                                         .map(|v| format!("{:?}", v))
                                         .unwrap_or_default()
                                 )));
@@ -2578,8 +2603,7 @@ impl EvalEngine {
                             if matches!(val, Value::Null) {
                                 continue;
                             }
-                            if !c.allowed_values.iter().any(|a| Self::values_equal(a, val))
-                            {
+                            if !c.allowed_values.iter().any(|a| Self::values_equal(a, val)) {
                                 return Err(EvalError::ExecutionError(format!(
                                     "Property `{}` value {:?} is not in allowed domain for label `{}`",
                                     prop, val, c.label
@@ -2612,7 +2636,9 @@ impl EvalEngine {
             }
             match c.constraint_type {
                 ConstraintType::Unique => {
-                    let Some(prop) = c.properties.first() else { continue };
+                    let Some(prop) = c.properties.first() else {
+                        continue;
+                    };
                     let val = match props.get(prop) {
                         None | Some(Value::Null) => continue,
                         Some(v) => v,
@@ -2662,15 +2688,15 @@ impl EvalEngine {
                         for edge in &edges {
                             if edge.start_node == start_id
                                 && edge.end_node == end_id
-                                && c.properties.iter().all(|prop| {
-                                    edge.properties.get(prop)
-                                        == props.get(prop)
-                                })
+                                && c.properties
+                                    .iter()
+                                    .all(|prop| edge.properties.get(prop) == props.get(prop))
                             {
                                 return Err(EvalError::ExecutionError(format!(
                                     "Relationship already exists with type `{}` and key {:?}",
                                     rel_type,
-                                    c.properties.iter()
+                                    c.properties
+                                        .iter()
                                         .map(|p| format!("{}={:?}", p, props.get(p)))
                                         .collect::<Vec<_>>()
                                         .join(", ")
@@ -2680,7 +2706,9 @@ impl EvalEngine {
                     }
                 }
                 ConstraintType::Type => {
-                    let Some(type_name) = &c.type_name else { continue };
+                    let Some(type_name) = &c.type_name else {
+                        continue;
+                    };
                     for prop in &c.properties {
                         if let Some(val) = props.get(prop) {
                             if !Self::value_matches_type(val, type_name) {
@@ -2720,12 +2748,16 @@ impl EvalEngine {
                             let existing_to =
                                 Self::parse_temporal_value(edge.properties.get(to_prop));
                             if Self::temporal_ranges_overlap(
-                                new_from, new_to, existing_from, existing_to,
+                                new_from,
+                                new_to,
+                                existing_from,
+                                existing_to,
                             ) {
                                 return Err(EvalError::ExecutionError(format!(
                                     "TEMPORAL overlap on relationship `{}` with key `{}`",
                                     rel_type,
-                                    props.get(key_prop)
+                                    props
+                                        .get(key_prop)
                                         .map(|v| format!("{:?}", v))
                                         .unwrap_or_default()
                                 )));
@@ -2742,8 +2774,7 @@ impl EvalEngine {
                             if matches!(val, Value::Null) {
                                 continue;
                             }
-                            if !c.allowed_values.iter().any(|a| Self::values_equal(a, val))
-                            {
+                            if !c.allowed_values.iter().any(|a| Self::values_equal(a, val)) {
                                 return Err(EvalError::ExecutionError(format!(
                                     "Property `{}` value {:?} is not in allowed domain for relationship `{}`",
                                     prop, val, rel_type
@@ -2837,12 +2868,7 @@ impl EvalEngine {
                 evaluate_pattern_properties(&edge_pat.properties, row, params)?
                     .into_iter()
                     .collect();
-            self.check_relationship_constraints(
-                &rel_type,
-                &edge_props,
-                start_node,
-                end_node,
-            )?;
+            self.check_relationship_constraints(&rel_type, &edge_props, start_node, end_node)?;
             let edge = self.persist_edge_record(EdgeRecord {
                 id: id.clone(),
                 start_node: start_node.clone(),
@@ -2904,8 +2930,11 @@ impl EvalEngine {
     ) -> Result<Vec<Row>, EvalError> {
         let mut result = Vec::new();
         for row in rows {
-            let sub_results =
-                self.execute_subquery_block(std::slice::from_ref(row), &sub.blocks[0].clauses, params)?;
+            let sub_results = self.execute_subquery_block(
+                std::slice::from_ref(row),
+                &sub.blocks[0].clauses,
+                params,
+            )?;
             if !sub_results.is_empty() {
                 result.push(row.clone());
             }
@@ -3017,10 +3046,7 @@ impl EvalEngine {
                             let mut r = row.clone();
                             let mut stats = QueryStats::default();
                             self.execute_pattern_create_segment(
-                                &mut r,
-                                &c.pattern,
-                                &mut stats,
-                                params,
+                                &mut r, &c.pattern, &mut stats, params,
                             )?;
                             new_rows.push(r);
                         }
@@ -3238,9 +3264,9 @@ impl EvalEngine {
                 let end_id_for_check = end_id.clone();
 
                 let existing_edges = self.storage.get_edges_by_type(&edge_type)?;
-                let found = existing_edges.iter().find(|e| {
-                    e.start_node == start_id && e.end_node == end_id
-                });
+                let found = existing_edges
+                    .iter()
+                    .find(|e| e.start_node == start_id && e.end_node == end_id);
                 let (edge_val, is_new) = if let Some(edge) = found {
                     let mut props: HashMap<String, Value> =
                         edge.properties.clone().into_iter().collect();
@@ -3248,9 +3274,11 @@ impl EvalEngine {
                     props.insert("_type".to_string(), Value::String(edge.edge_type.clone()));
                     props.insert("_start".to_string(), Value::String(edge.start_node.clone()));
                     props.insert("_end".to_string(), Value::String(edge.end_node.clone()));
-                    (serde_json::to_value(&props)
-                        .map_err(|e| EvalError::SerializationError(e.to_string()))?,
-                     false)
+                    (
+                        serde_json::to_value(&props)
+                            .map_err(|e| EvalError::SerializationError(e.to_string()))?,
+                        false,
+                    )
                 } else {
                     let id = format!("edge:{}", Uuid::new_v4());
                     let edge_record = EdgeRecord {
@@ -3269,9 +3297,11 @@ impl EvalEngine {
                     props.insert("_type".to_string(), Value::String(edge_type));
                     props.insert("_start".to_string(), Value::String(start_id));
                     props.insert("_end".to_string(), Value::String(end_id));
-                    (serde_json::to_value(&props)
-                        .map_err(|e| EvalError::SerializationError(e.to_string()))?,
-                     true)
+                    (
+                        serde_json::to_value(&props)
+                            .map_err(|e| EvalError::SerializationError(e.to_string()))?,
+                        true,
+                    )
                 };
 
                 let mut row = base_row.clone();
@@ -3367,15 +3397,9 @@ impl EvalEngine {
                 var
             )));
         };
-        let id = props
-            .get("_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                EvalError::ExecutionError(format!(
-                    "node variable '{}' is missing _id",
-                    var
-                ))
-            })?;
+        let id = props.get("_id").and_then(Value::as_str).ok_or_else(|| {
+            EvalError::ExecutionError(format!("node variable '{}' is missing _id", var))
+        })?;
         Ok(id.to_string())
     }
 
@@ -4155,7 +4179,10 @@ fn apply_aggregation_to_rows(
     for row in rows {
         let key: Vec<Value> = non_agg_items
             .iter()
-            .map(|item| copperdb_filter::eval_expression(&item.expression, row, params).unwrap_or(Value::Null))
+            .map(|item| {
+                copperdb_filter::eval_expression(&item.expression, row, params)
+                    .unwrap_or(Value::Null)
+            })
             .collect();
         groups.entry(key).or_default().push(row);
     }
@@ -4210,36 +4237,47 @@ fn compute_agg(
             }
         }
         "sum" => {
-            let arg = arg.ok_or_else(|| {
-                EvalError::ExecutionError("sum() requires an argument".into())
-            })?;
+            let arg =
+                arg.ok_or_else(|| EvalError::ExecutionError("sum() requires an argument".into()))?;
             let total: f64 = rows
                 .iter()
-                .filter_map(|row| copperdb_filter::eval_expression(arg, row, params).ok()?.as_f64())
+                .filter_map(|row| {
+                    copperdb_filter::eval_expression(arg, row, params)
+                        .ok()?
+                        .as_f64()
+                })
                 .sum();
             Ok(Value::from(total))
         }
         "avg" => {
-            let arg = arg.ok_or_else(|| {
-                EvalError::ExecutionError("avg() requires an argument".into())
-            })?;
+            let arg =
+                arg.ok_or_else(|| EvalError::ExecutionError("avg() requires an argument".into()))?;
             let values: Vec<f64> = rows
                 .iter()
-                .filter_map(|row| copperdb_filter::eval_expression(arg, row, params).ok()?.as_f64())
+                .filter_map(|row| {
+                    copperdb_filter::eval_expression(arg, row, params)
+                        .ok()?
+                        .as_f64()
+                })
                 .collect();
             if values.is_empty() {
                 Ok(Value::Null)
             } else {
-                Ok(Value::from(values.iter().sum::<f64>() / values.len() as f64))
+                Ok(Value::from(
+                    values.iter().sum::<f64>() / values.len() as f64,
+                ))
             }
         }
         "min" => {
-            let arg = arg.ok_or_else(|| {
-                EvalError::ExecutionError("min() requires an argument".into())
-            })?;
+            let arg =
+                arg.ok_or_else(|| EvalError::ExecutionError("min() requires an argument".into()))?;
             let min_val = rows
                 .iter()
-                .filter_map(|row| copperdb_filter::eval_expression(arg, row, params).ok()?.as_f64())
+                .filter_map(|row| {
+                    copperdb_filter::eval_expression(arg, row, params)
+                        .ok()?
+                        .as_f64()
+                })
                 .fold(f64::NAN, |a, b| if a.is_nan() { b } else { a.min(b) });
             if min_val.is_nan() {
                 Ok(Value::Null)
@@ -4248,12 +4286,15 @@ fn compute_agg(
             }
         }
         "max" => {
-            let arg = arg.ok_or_else(|| {
-                EvalError::ExecutionError("max() requires an argument".into())
-            })?;
+            let arg =
+                arg.ok_or_else(|| EvalError::ExecutionError("max() requires an argument".into()))?;
             let max_val = rows
                 .iter()
-                .filter_map(|row| copperdb_filter::eval_expression(arg, row, params).ok()?.as_f64())
+                .filter_map(|row| {
+                    copperdb_filter::eval_expression(arg, row, params)
+                        .ok()?
+                        .as_f64()
+                })
                 .fold(f64::NAN, |a, b| if a.is_nan() { b } else { a.max(b) });
             if max_val.is_nan() {
                 Ok(Value::Null)

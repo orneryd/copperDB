@@ -486,8 +486,10 @@ fn collect_expression_properties(expression: &Expression, properties: &mut Vec<S
         Expression::Not(inner) | Expression::IsNull(inner) | Expression::IsNotNull(inner) => {
             collect_expression_properties(inner, properties);
         }
-        Expression::Add(operands) | Expression::Subtract(operands)
-        | Expression::Multiply(operands) | Expression::Divide(operands)
+        Expression::Add(operands)
+        | Expression::Subtract(operands)
+        | Expression::Multiply(operands)
+        | Expression::Divide(operands)
         | Expression::Modulo(operands) => {
             collect_expression_properties(&operands.left, properties);
             collect_expression_properties(&operands.right, properties);

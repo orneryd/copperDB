@@ -4,6 +4,7 @@
 //! Provides a management REST API and serves the GraphQL endpoint.
 //! Uses `axum` (Rust equivalent of Go's `net/http` + `gorilla/mux`).
 
+use async_graphql_axum::GraphQLRequest;
 use axum::{
     body::Body,
     extract::{Path, Query, State},
@@ -18,11 +19,10 @@ use copperdb_auth::{
 };
 use copperdb_buildinfo::{display_version, server_announcement, version};
 use copperdb_config::Config as RuntimeConfig;
-use copperdb_graphql::GraphQlSchema;
-use async_graphql_axum::GraphQLRequest;
 use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig};
 use copperdb_envutil::{get as env_get, get_bool_loose};
 use copperdb_fabric::{FabricReadRequest, FabricReadScope};
+use copperdb_graphql::GraphQlSchema;
 use copperdb_multidb::{DatabaseManager, DatabaseStatus, MultiDbError};
 use copperdb_nornicgrpc::{
     GrpcAuthValidator, GrpcError, NornicGrpcHydrationTransport, NornicGrpcRankedSearchTransport,
@@ -751,6 +751,15 @@ fn static_root(state: &AppState) -> Option<PathBuf> {
     state.static_dir.as_ref().map(PathBuf::from)
 }
 
+/// Returns true when the UI can actually be served (index.html exists).
+/// Mirrors NornicDB's `uiHandler != nil` guard — when the UI handler
+/// failed to initialize, discovery is served to all requesters.
+fn ui_available(state: &AppState) -> bool {
+    static_root(state)
+        .map(|root| root.join("index.html").exists())
+        .unwrap_or(false)
+}
+
 fn read_static_file(state: &AppState, relative_path: &str) -> Option<Vec<u8>> {
     let root = static_root(state)?;
     let path = root.join(relative_path.trim_start_matches('/'));
@@ -806,7 +815,9 @@ fn serve_ui_index(state: &AppState) -> Response {
 }
 
 async fn root_handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if is_ui_request(&headers) && !state.headless {
+    // Only serve UI for browser requests when a UI dist is actually available
+    // (matching NornicDB: uiHandler != nil check — skip UI when init failed).
+    if is_ui_request(&headers) && !state.headless && ui_available(&state) {
         return serve_ui_index(&state);
     }
 

@@ -7,40 +7,19 @@ impl EvalEngine {
         params: &HashMap<String, Value>,
         rows: &[Row],
     ) -> Result<EvalResult, EvalError> {
-        let result = if call
-            .procedure
-            .eq_ignore_ascii_case("db.labels")
-        {
+        let result = if call.procedure.eq_ignore_ascii_case("db.labels") {
             self.execute_db_labels_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("db.relationshipTypes")
-        {
+        } else if call.procedure.eq_ignore_ascii_case("db.relationshipTypes") {
             self.execute_db_relationship_types_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("db.propertyKeys")
-        {
+        } else if call.procedure.eq_ignore_ascii_case("db.propertyKeys") {
             self.execute_db_property_keys_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("db.constraints")
-        {
+        } else if call.procedure.eq_ignore_ascii_case("db.constraints") {
             self.execute_db_constraints_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("db.indexes")
-        {
+        } else if call.procedure.eq_ignore_ascii_case("db.indexes") {
             self.execute_db_indexes_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("db.ping")
-        {
+        } else if call.procedure.eq_ignore_ascii_case("db.ping") {
             self.execute_db_ping_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("db.info")
-        {
+        } else if call.procedure.eq_ignore_ascii_case("db.info") {
             self.execute_db_info_call(call)
         } else if call
             .procedure
@@ -57,60 +36,30 @@ impl EvalEngine {
             .eq_ignore_ascii_case("db.schema.visualization")
         {
             self.execute_db_schema_visualization_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("nornicdb.version")
-        {
+        } else if call.procedure.eq_ignore_ascii_case("nornicdb.version") {
             self.execute_nornicdb_version_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("nornicdb.stats")
-        {
+        } else if call.procedure.eq_ignore_ascii_case("nornicdb.stats") {
             self.execute_nornicdb_stats_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("nornicdb.decay.info")
-        {
+        } else if call.procedure.eq_ignore_ascii_case("nornicdb.decay.info") {
             self.execute_nornicdb_decay_info_call(call)
         } else if call
             .procedure
             .eq_ignore_ascii_case("nornicdb.knowledgepolicy.info")
         {
             self.execute_nornicdb_knowledgepolicy_info_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("dbms.procedures")
-        {
+        } else if call.procedure.eq_ignore_ascii_case("dbms.procedures") {
             self.execute_dbms_procedures_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("dbms.functions")
-        {
+        } else if call.procedure.eq_ignore_ascii_case("dbms.functions") {
             self.execute_dbms_functions_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("dbms.components")
-        {
+        } else if call.procedure.eq_ignore_ascii_case("dbms.components") {
             self.execute_dbms_components_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("dbms.info")
-        {
+        } else if call.procedure.eq_ignore_ascii_case("dbms.info") {
             self.execute_dbms_info_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("dbms.listConfig")
-        {
+        } else if call.procedure.eq_ignore_ascii_case("dbms.listConfig") {
             self.execute_dbms_list_config_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("dbms.clientConfig")
-        {
+        } else if call.procedure.eq_ignore_ascii_case("dbms.clientConfig") {
             self.execute_dbms_client_config_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("dbms.listConnections")
-        {
+        } else if call.procedure.eq_ignore_ascii_case("dbms.listConnections") {
             self.execute_dbms_list_connections_call(call)
         } else if call
             .procedure
@@ -292,13 +241,29 @@ impl EvalEngine {
         call: &copperdb_cypher::CallClause,
     ) -> Result<EvalResult, EvalError> {
         if !call.args.is_empty() {
-            return Err(EvalError::ExecutionError("dbms.components expects no arguments".to_string()));
+            return Err(EvalError::ExecutionError(
+                "dbms.components expects no arguments".to_string(),
+            ));
         }
         let mut row = Row::new();
         row.insert("name".to_string(), Value::String("CopperDB".to_string()));
-        row.insert("versions".to_string(), Value::Array(vec![Value::String("0.1.0".to_string())]));
-        row.insert("edition".to_string(), Value::String("community".to_string()));
-        Ok(EvalResult { columns: vec!["name".to_string(), "versions".to_string(), "edition".to_string()], rows: vec![row], stats: QueryStats::default() })
+        row.insert(
+            "versions".to_string(),
+            Value::Array(vec![Value::String("0.1.0".to_string())]),
+        );
+        row.insert(
+            "edition".to_string(),
+            Value::String("community".to_string()),
+        );
+        Ok(EvalResult {
+            columns: vec![
+                "name".to_string(),
+                "versions".to_string(),
+                "edition".to_string(),
+            ],
+            rows: vec![row],
+            stats: QueryStats::default(),
+        })
     }
 
     fn execute_dbms_info_call(
@@ -306,13 +271,29 @@ impl EvalEngine {
         call: &copperdb_cypher::CallClause,
     ) -> Result<EvalResult, EvalError> {
         if !call.args.is_empty() {
-            return Err(EvalError::ExecutionError("dbms.info expects no arguments".to_string()));
+            return Err(EvalError::ExecutionError(
+                "dbms.info expects no arguments".to_string(),
+            ));
         }
         let mut row = Row::new();
-        row.insert("id".to_string(), Value::String("copperdb-instance".to_string()));
+        row.insert(
+            "id".to_string(),
+            Value::String("copperdb-instance".to_string()),
+        );
         row.insert("name".to_string(), Value::String("CopperDB".to_string()));
-        row.insert("creationDate".to_string(), Value::String("2024-01-01T00:00:00Z".to_string()));
-        Ok(EvalResult { columns: vec!["id".to_string(), "name".to_string(), "creationDate".to_string()], rows: vec![row], stats: QueryStats::default() })
+        row.insert(
+            "creationDate".to_string(),
+            Value::String("2024-01-01T00:00:00Z".to_string()),
+        );
+        Ok(EvalResult {
+            columns: vec![
+                "id".to_string(),
+                "name".to_string(),
+                "creationDate".to_string(),
+            ],
+            rows: vec![row],
+            stats: QueryStats::default(),
+        })
     }
 
     fn execute_dbms_list_config_call(
@@ -320,22 +301,51 @@ impl EvalEngine {
         call: &copperdb_cypher::CallClause,
     ) -> Result<EvalResult, EvalError> {
         if !call.args.is_empty() {
-            return Err(EvalError::ExecutionError("dbms.listConfig expects no arguments".to_string()));
+            return Err(EvalError::ExecutionError(
+                "dbms.listConfig expects no arguments".to_string(),
+            ));
         }
         let configs: Vec<(&str, &str, Value, bool)> = vec![
-            ("nornicdb.version", "NornicDB version", Value::String("0.1.0".to_string()), false),
-            ("nornicdb.bolt.enabled", "Bolt protocol enabled", Value::Bool(true), false),
-            ("nornicdb.http.enabled", "HTTP API enabled", Value::Bool(true), false),
+            (
+                "nornicdb.version",
+                "NornicDB version",
+                Value::String("0.1.0".to_string()),
+                false,
+            ),
+            (
+                "nornicdb.bolt.enabled",
+                "Bolt protocol enabled",
+                Value::Bool(true),
+                false,
+            ),
+            (
+                "nornicdb.http.enabled",
+                "HTTP API enabled",
+                Value::Bool(true),
+                false,
+            ),
         ];
-        let rows: Vec<Row> = configs.into_iter().map(|(name, desc, val, dynamic)| {
-            let mut row = Row::new();
-            row.insert("name".to_string(), Value::String(name.to_string()));
-            row.insert("description".to_string(), Value::String(desc.to_string()));
-            row.insert("value".to_string(), val.clone());
-            row.insert("dynamic".to_string(), Value::Bool(dynamic));
-            row
-        }).collect();
-        Ok(EvalResult { columns: vec!["name".to_string(), "description".to_string(), "value".to_string(), "dynamic".to_string()], rows, stats: QueryStats::default() })
+        let rows: Vec<Row> = configs
+            .into_iter()
+            .map(|(name, desc, val, dynamic)| {
+                let mut row = Row::new();
+                row.insert("name".to_string(), Value::String(name.to_string()));
+                row.insert("description".to_string(), Value::String(desc.to_string()));
+                row.insert("value".to_string(), val.clone());
+                row.insert("dynamic".to_string(), Value::Bool(dynamic));
+                row
+            })
+            .collect();
+        Ok(EvalResult {
+            columns: vec![
+                "name".to_string(),
+                "description".to_string(),
+                "value".to_string(),
+                "dynamic".to_string(),
+            ],
+            rows,
+            stats: QueryStats::default(),
+        })
     }
 
     fn execute_dbms_client_config_call(
@@ -343,16 +353,28 @@ impl EvalEngine {
         call: &copperdb_cypher::CallClause,
     ) -> Result<EvalResult, EvalError> {
         if !call.args.is_empty() {
-            return Err(EvalError::ExecutionError("dbms.clientConfig expects no arguments".to_string()));
+            return Err(EvalError::ExecutionError(
+                "dbms.clientConfig expects no arguments".to_string(),
+            ));
         }
-        let configs = vec![("server.bolt.advertised_address", "localhost:7687"), ("server.http.advertised_address", "localhost:7474")];
-        let rows: Vec<Row> = configs.into_iter().map(|(name, val)| {
-            let mut row = Row::new();
-            row.insert("name".to_string(), Value::String(name.to_string()));
-            row.insert("value".to_string(), Value::String(val.to_string()));
-            row
-        }).collect();
-        Ok(EvalResult { columns: vec!["name".to_string(), "value".to_string()], rows, stats: QueryStats::default() })
+        let configs = vec![
+            ("server.bolt.advertised_address", "localhost:7687"),
+            ("server.http.advertised_address", "localhost:7474"),
+        ];
+        let rows: Vec<Row> = configs
+            .into_iter()
+            .map(|(name, val)| {
+                let mut row = Row::new();
+                row.insert("name".to_string(), Value::String(name.to_string()));
+                row.insert("value".to_string(), Value::String(val.to_string()));
+                row
+            })
+            .collect();
+        Ok(EvalResult {
+            columns: vec!["name".to_string(), "value".to_string()],
+            rows,
+            stats: QueryStats::default(),
+        })
     }
 
     fn execute_dbms_list_connections_call(
@@ -360,9 +382,22 @@ impl EvalEngine {
         call: &copperdb_cypher::CallClause,
     ) -> Result<EvalResult, EvalError> {
         if !call.args.is_empty() {
-            return Err(EvalError::ExecutionError("dbms.listConnections expects no arguments".to_string()));
+            return Err(EvalError::ExecutionError(
+                "dbms.listConnections expects no arguments".to_string(),
+            ));
         }
-        Ok(EvalResult { columns: vec!["connectionId".to_string(), "connectTime".to_string(), "connector".to_string(), "username".to_string(), "userAgent".to_string(), "clientAddress".to_string()], rows: vec![], stats: QueryStats::default() })
+        Ok(EvalResult {
+            columns: vec![
+                "connectionId".to_string(),
+                "connectTime".to_string(),
+                "connector".to_string(),
+                "username".to_string(),
+                "userAgent".to_string(),
+                "clientAddress".to_string(),
+            ],
+            rows: vec![],
+            stats: QueryStats::default(),
+        })
     }
 
     fn execute_fulltext_list_analyzers_call(
@@ -370,22 +405,37 @@ impl EvalEngine {
         call: &copperdb_cypher::CallClause,
     ) -> Result<EvalResult, EvalError> {
         if !call.args.is_empty() {
-            return Err(EvalError::ExecutionError("db.index.fulltext.listAvailableAnalyzers expects no arguments".to_string()));
+            return Err(EvalError::ExecutionError(
+                "db.index.fulltext.listAvailableAnalyzers expects no arguments".to_string(),
+            ));
         }
         let analyzers = vec![
-            ("standard-no-stop-words", "Standard analyzer without stop words"),
+            (
+                "standard-no-stop-words",
+                "Standard analyzer without stop words",
+            ),
             ("simple", "Simple analyzer with lowercase tokenizer"),
             ("whitespace", "Whitespace analyzer"),
-            ("keyword", "Keyword analyzer - entire string as single token"),
+            (
+                "keyword",
+                "Keyword analyzer - entire string as single token",
+            ),
             ("url-or-email", "URL or email analyzer"),
         ];
-        let rows: Vec<Row> = analyzers.into_iter().map(|(analyzer, desc)| {
-            let mut row = Row::new();
-            row.insert("analyzer".to_string(), Value::String(analyzer.to_string()));
-            row.insert("description".to_string(), Value::String(desc.to_string()));
-            row
-        }).collect();
-        Ok(EvalResult { columns: vec!["analyzer".to_string(), "description".to_string()], rows, stats: QueryStats::default() })
+        let rows: Vec<Row> = analyzers
+            .into_iter()
+            .map(|(analyzer, desc)| {
+                let mut row = Row::new();
+                row.insert("analyzer".to_string(), Value::String(analyzer.to_string()));
+                row.insert("description".to_string(), Value::String(desc.to_string()));
+                row
+            })
+            .collect();
+        Ok(EvalResult {
+            columns: vec!["analyzer".to_string(), "description".to_string()],
+            rows,
+            stats: QueryStats::default(),
+        })
     }
 
     fn execute_db_property_keys_call(
@@ -437,10 +487,7 @@ impl EvalEngine {
             .into_iter()
             .map(|constraint| {
                 let mut row = Row::new();
-                row.insert(
-                    "name".to_string(),
-                    Value::String(constraint.name),
-                );
+                row.insert("name".to_string(), Value::String(constraint.name));
                 let constraint_type = match constraint.constraint_type {
                     ConstraintType::Unique => "UNIQUENESS",
                     ConstraintType::Exists => "NODE_PROPERTY_EXISTENCE",
@@ -468,10 +515,7 @@ impl EvalEngine {
                             .collect(),
                     ),
                 );
-                row.insert(
-                    "propertyType".to_string(),
-                    Value::Null,
-                );
+                row.insert("propertyType".to_string(), Value::Null);
                 row
             })
             .collect();
@@ -584,10 +628,7 @@ impl EvalEngine {
             Value::String("2025-01-01T00:00:00Z".to_string()),
         );
         row.insert("nodeCount".to_string(), Value::from(node_count));
-        row.insert(
-            "relationshipCount".to_string(),
-            Value::from(edge_count),
-        );
+        row.insert("relationshipCount".to_string(), Value::from(edge_count));
 
         Ok(EvalResult {
             columns: vec![
@@ -615,7 +656,10 @@ impl EvalEngine {
         let mut row = Row::new();
         row.insert("version".to_string(), Value::String("0.1.0".to_string()));
         row.insert("build".to_string(), Value::String("dev".to_string()));
-        row.insert("edition".to_string(), Value::String("community".to_string()));
+        row.insert(
+            "edition".to_string(),
+            Value::String("community".to_string()),
+        );
 
         Ok(EvalResult {
             columns: vec![
@@ -686,7 +730,10 @@ impl EvalEngine {
             ));
         }
 
-        let decay_profiles = self.storage.load_decay_profile_schemas().unwrap_or_default();
+        let decay_profiles = self
+            .storage
+            .load_decay_profile_schemas()
+            .unwrap_or_default();
         let decay_bindings = self
             .storage
             .load_decay_profile_binding_schemas()
@@ -697,9 +744,7 @@ impl EvalEngine {
         row.insert("enabled".to_string(), Value::Bool(enabled));
         row.insert(
             "system".to_string(),
-            Value::String(
-                "knowledge-layer scoring (decay profile bundles + bindings)".to_string(),
-            ),
+            Value::String("knowledge-layer scoring (decay profile bundles + bindings)".to_string()),
         );
         row.insert(
             "configuredVia".to_string(),
@@ -730,7 +775,10 @@ impl EvalEngine {
             ));
         }
 
-        let decay_profiles = self.storage.load_decay_profile_schemas().unwrap_or_default();
+        let decay_profiles = self
+            .storage
+            .load_decay_profile_schemas()
+            .unwrap_or_default();
         let decay_bindings = self
             .storage
             .load_decay_profile_binding_schemas()
@@ -799,25 +847,78 @@ impl EvalEngine {
         call: &copperdb_cypher::CallClause,
     ) -> Result<EvalResult, EvalError> {
         if !call.args.is_empty() {
-            return Err(EvalError::ExecutionError("nornicdb.knowledgepolicy.profiles expects no arguments".to_string()));
+            return Err(EvalError::ExecutionError(
+                "nornicdb.knowledgepolicy.profiles expects no arguments".to_string(),
+            ));
         }
-        let bundles = self.storage.load_decay_profile_schemas().unwrap_or_default();
-        let bindings = self.storage.load_decay_profile_binding_schemas().unwrap_or_default();
-        let bundle_by_name: HashMap<String, &DecayProfileSchema> = bundles.iter().map(|b| (b.name.clone(), b)).collect();
-        let columns = vec!["kind","Name","HalfLifeSeconds","VisibilityThreshold","ScoreFloor","Function","Scope","DecayEnabled","ScoreFrom","ScoreFromProperty","Enabled","TargetLabels","TargetEdgeType","IsWildcard","IsEdge","ProfileRef","NoDecay","Order"].into_iter().map(String::from).collect();
+        let bundles = self
+            .storage
+            .load_decay_profile_schemas()
+            .unwrap_or_default();
+        let bindings = self
+            .storage
+            .load_decay_profile_binding_schemas()
+            .unwrap_or_default();
+        let bundle_by_name: HashMap<String, &DecayProfileSchema> =
+            bundles.iter().map(|b| (b.name.clone(), b)).collect();
+        let columns = vec![
+            "kind",
+            "Name",
+            "HalfLifeSeconds",
+            "VisibilityThreshold",
+            "ScoreFloor",
+            "Function",
+            "Scope",
+            "DecayEnabled",
+            "ScoreFrom",
+            "ScoreFromProperty",
+            "Enabled",
+            "TargetLabels",
+            "TargetEdgeType",
+            "IsWildcard",
+            "IsEdge",
+            "ProfileRef",
+            "NoDecay",
+            "Order",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let mut rows: Vec<Row> = Vec::new();
         for bundle in &bundles {
             let mut row = Row::new();
             row.insert("kind".to_string(), Value::String("bundle".to_string()));
             row.insert("Name".to_string(), Value::String(bundle.name.clone()));
-            row.insert("HalfLifeSeconds".to_string(), Value::from(bundle.half_life_seconds));
-            row.insert("VisibilityThreshold".to_string(), Value::from(bundle.visibility_threshold));
+            row.insert(
+                "HalfLifeSeconds".to_string(),
+                Value::from(bundle.half_life_seconds),
+            );
+            row.insert(
+                "VisibilityThreshold".to_string(),
+                Value::from(bundle.visibility_threshold),
+            );
             row.insert("ScoreFloor".to_string(), Value::from(bundle.score_floor));
-            row.insert("Function".to_string(), Value::String(bundle.function.clone()));
+            row.insert(
+                "Function".to_string(),
+                Value::String(bundle.function.clone()),
+            );
             row.insert("Scope".to_string(), Value::String(bundle.scope.clone()));
-            row.insert("DecayEnabled".to_string(), Value::Bool(bundle.decay_enabled));
-            row.insert("ScoreFrom".to_string(), Value::String(bundle.score_from.clone()));
-            row.insert("ScoreFromProperty".to_string(), bundle.score_from_property.as_ref().map(|p| Value::String(p.clone())).unwrap_or(Value::Null));
+            row.insert(
+                "DecayEnabled".to_string(),
+                Value::Bool(bundle.decay_enabled),
+            );
+            row.insert(
+                "ScoreFrom".to_string(),
+                Value::String(bundle.score_from.clone()),
+            );
+            row.insert(
+                "ScoreFromProperty".to_string(),
+                bundle
+                    .score_from_property
+                    .as_ref()
+                    .map(|p| Value::String(p.clone()))
+                    .unwrap_or(Value::Null),
+            );
             row.insert("Enabled".to_string(), Value::Bool(bundle.enabled));
             row.insert("TargetLabels".to_string(), Value::Null);
             row.insert("TargetEdgeType".to_string(), Value::String(String::new()));
@@ -829,31 +930,77 @@ impl EvalEngine {
             rows.push(row);
         }
         for binding in &bindings {
-            let half_life = binding.profile_ref.as_ref().and_then(|r| bundle_by_name.get(r)).map(|b| b.half_life_seconds).unwrap_or(0);
-            let score_floor = binding.profile_ref.as_ref().and_then(|r| bundle_by_name.get(r)).map(|b| b.score_floor).unwrap_or(0.0);
+            let half_life = binding
+                .profile_ref
+                .as_ref()
+                .and_then(|r| bundle_by_name.get(r))
+                .map(|b| b.half_life_seconds)
+                .unwrap_or(0);
+            let score_floor = binding
+                .profile_ref
+                .as_ref()
+                .and_then(|r| bundle_by_name.get(r))
+                .map(|b| b.score_floor)
+                .unwrap_or(0.0);
             let scope = if binding.is_edge { "EDGE" } else { "NODE" };
             let mut row = Row::new();
             row.insert("kind".to_string(), Value::String("binding".to_string()));
             row.insert("Name".to_string(), Value::String(binding.name.clone()));
             row.insert("HalfLifeSeconds".to_string(), Value::from(half_life));
-            row.insert("VisibilityThreshold".to_string(), binding.visibility_threshold.map(Value::from).unwrap_or(Value::Null));
+            row.insert(
+                "VisibilityThreshold".to_string(),
+                binding
+                    .visibility_threshold
+                    .map(Value::from)
+                    .unwrap_or(Value::Null),
+            );
             row.insert("ScoreFloor".to_string(), Value::from(score_floor));
             row.insert("Function".to_string(), Value::String(String::new()));
             row.insert("Scope".to_string(), Value::String(scope.to_string()));
             row.insert("DecayEnabled".to_string(), Value::Bool(!binding.no_decay));
             row.insert("ScoreFrom".to_string(), Value::String(String::new()));
-            row.insert("ScoreFromProperty".to_string(), Value::String(String::new()));
+            row.insert(
+                "ScoreFromProperty".to_string(),
+                Value::String(String::new()),
+            );
             row.insert("Enabled".to_string(), Value::Bool(true));
-            row.insert("TargetLabels".to_string(), Value::Array(binding.target_labels.iter().map(|l| Value::String(l.clone())).collect()));
-            row.insert("TargetEdgeType".to_string(), binding.target_edge_type.as_ref().map(|t| Value::String(t.clone())).unwrap_or(Value::String(String::new())));
+            row.insert(
+                "TargetLabels".to_string(),
+                Value::Array(
+                    binding
+                        .target_labels
+                        .iter()
+                        .map(|l| Value::String(l.clone()))
+                        .collect(),
+                ),
+            );
+            row.insert(
+                "TargetEdgeType".to_string(),
+                binding
+                    .target_edge_type
+                    .as_ref()
+                    .map(|t| Value::String(t.clone()))
+                    .unwrap_or(Value::String(String::new())),
+            );
             row.insert("IsWildcard".to_string(), Value::Bool(binding.is_wildcard));
             row.insert("IsEdge".to_string(), Value::Bool(binding.is_edge));
-            row.insert("ProfileRef".to_string(), binding.profile_ref.as_ref().map(|r| Value::String(r.clone())).unwrap_or(Value::String(String::new())));
+            row.insert(
+                "ProfileRef".to_string(),
+                binding
+                    .profile_ref
+                    .as_ref()
+                    .map(|r| Value::String(r.clone()))
+                    .unwrap_or(Value::String(String::new())),
+            );
             row.insert("NoDecay".to_string(), Value::Bool(binding.no_decay));
             row.insert("Order".to_string(), Value::from(binding.order));
             rows.push(row);
         }
-        Ok(EvalResult { columns, rows, stats: QueryStats::default() })
+        Ok(EvalResult {
+            columns,
+            rows,
+            stats: QueryStats::default(),
+        })
     }
 
     fn execute_nornicdb_knowledgepolicy_policies_call(
@@ -861,11 +1008,34 @@ impl EvalEngine {
         call: &copperdb_cypher::CallClause,
     ) -> Result<EvalResult, EvalError> {
         if !call.args.is_empty() {
-            return Err(EvalError::ExecutionError("nornicdb.knowledgepolicy.policies expects no arguments".to_string()));
+            return Err(EvalError::ExecutionError(
+                "nornicdb.knowledgepolicy.policies expects no arguments".to_string(),
+            ));
         }
-        let profiles = self.storage.load_promotion_profile_schemas().unwrap_or_default();
-        let policies = self.storage.load_promotion_policy_schemas().unwrap_or_default();
-        let columns = vec!["kind","Name","Scope","Multiplier","ScoreFloor","ScoreCap","Enabled","TargetLabels","TargetEdgeType","IsWildcard","IsEdge"].into_iter().map(String::from).collect();
+        let profiles = self
+            .storage
+            .load_promotion_profile_schemas()
+            .unwrap_or_default();
+        let policies = self
+            .storage
+            .load_promotion_policy_schemas()
+            .unwrap_or_default();
+        let columns = vec![
+            "kind",
+            "Name",
+            "Scope",
+            "Multiplier",
+            "ScoreFloor",
+            "ScoreCap",
+            "Enabled",
+            "TargetLabels",
+            "TargetEdgeType",
+            "IsWildcard",
+            "IsEdge",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let mut rows: Vec<Row> = Vec::new();
         for profile in &profiles {
             let mut row = Row::new();
@@ -892,13 +1062,33 @@ impl EvalEngine {
             row.insert("ScoreFloor".to_string(), Value::Null);
             row.insert("ScoreCap".to_string(), Value::Null);
             row.insert("Enabled".to_string(), Value::Bool(policy.enabled));
-            row.insert("TargetLabels".to_string(), Value::Array(policy.target_labels.iter().map(|l| Value::String(l.clone())).collect()));
-            row.insert("TargetEdgeType".to_string(), policy.target_edge_type.as_ref().map(|t| Value::String(t.clone())).unwrap_or(Value::String(String::new())));
+            row.insert(
+                "TargetLabels".to_string(),
+                Value::Array(
+                    policy
+                        .target_labels
+                        .iter()
+                        .map(|l| Value::String(l.clone()))
+                        .collect(),
+                ),
+            );
+            row.insert(
+                "TargetEdgeType".to_string(),
+                policy
+                    .target_edge_type
+                    .as_ref()
+                    .map(|t| Value::String(t.clone()))
+                    .unwrap_or(Value::String(String::new())),
+            );
             row.insert("IsWildcard".to_string(), Value::Bool(policy.is_wildcard));
             row.insert("IsEdge".to_string(), Value::Bool(policy.is_edge));
             rows.push(row);
         }
-        Ok(EvalResult { columns, rows, stats: QueryStats::default() })
+        Ok(EvalResult {
+            columns,
+            rows,
+            stats: QueryStats::default(),
+        })
     }
 
     fn execute_db_schema_node_properties_call(
@@ -1189,9 +1379,10 @@ impl EvalEngine {
         })?;
 
         // Load persisted index options (vector.dimensions, vector.similarity_function, etc.)
-        let index_options = self.storage.load_index_options(&index_name).map_err(|e| {
-            EvalError::ExecutionError(format!("failed to load index options: {e}"))
-        })?;
+        let index_options = self
+            .storage
+            .load_index_options(&index_name)
+            .map_err(|e| EvalError::ExecutionError(format!("failed to load index options: {e}")))?;
 
         // Validate query vector dimensions if specified in options
         if let Some(expected_dims) = resolve_vector_dimensions(&index_options) {
@@ -1304,12 +1495,14 @@ impl EvalEngine {
         }
 
         let mut ranked: Vec<(NodeRecord, usize, usize)> = merged.into_values().collect();
-        ranked.sort_by(|(left_node, left_score, left_ordinal), (right_node, right_score, right_ordinal)| {
-            right_score
-                .cmp(left_score)
-                .then(left_ordinal.cmp(right_ordinal))
-                .then(left_node.id.cmp(&right_node.id))
-        });
+        ranked.sort_by(
+            |(left_node, left_score, left_ordinal), (right_node, right_score, right_ordinal)| {
+                right_score
+                    .cmp(left_score)
+                    .then(left_ordinal.cmp(right_ordinal))
+                    .then(left_node.id.cmp(&right_node.id))
+            },
+        );
 
         if options.skip > 0 {
             ranked = ranked.into_iter().skip(options.skip).collect();
@@ -1367,9 +1560,11 @@ impl EvalEngine {
         let all_indexes = catalog.list()?;
         let rel_indexes: Vec<_> = all_indexes
             .into_iter()
-            .filter(|idx| idx.entity_type == copperdb_indexing::CatalogIndexEntityType::Relationship
-                && idx.kind == copperdb_indexing::CatalogIndexKind::FullText
-                && idx.name == index_name)
+            .filter(|idx| {
+                idx.entity_type == copperdb_indexing::CatalogIndexEntityType::Relationship
+                    && idx.kind == copperdb_indexing::CatalogIndexKind::FullText
+                    && idx.name == index_name
+            })
             .collect();
 
         if rel_indexes.is_empty() {
@@ -1410,9 +1605,7 @@ impl EvalEngine {
             }
         }
 
-        results.sort_by(|(a, a_score), (b, b_score)| {
-            b_score.cmp(a_score).then(a.id.cmp(&b.id))
-        });
+        results.sort_by(|(a, a_score), (b, b_score)| b_score.cmp(a_score).then(a.id.cmp(&b.id)));
 
         if options.skip > 0 {
             results = results.into_iter().skip(options.skip).collect();
@@ -1425,10 +1618,14 @@ impl EvalEngine {
             .into_iter()
             .map(|(edge, score)| {
                 let mut row = Row::new();
-                let mut props: HashMap<String, Value> = edge.properties.clone().into_iter().collect();
+                let mut props: HashMap<String, Value> =
+                    edge.properties.clone().into_iter().collect();
                 props.insert("_id".to_string(), Value::String(edge.id.clone()));
                 props.insert("_type".to_string(), Value::String(edge.edge_type.clone()));
-                row.insert("relationship".to_string(), Value::Object(props.into_iter().collect()));
+                row.insert(
+                    "relationship".to_string(),
+                    Value::Object(props.into_iter().collect()),
+                );
                 row.insert("score".to_string(), Value::from(score as f64));
                 row
             })
@@ -1484,9 +1681,10 @@ impl EvalEngine {
         })?;
 
         // Load persisted index options
-        let index_options = self.storage.load_index_options(&index_name).map_err(|e| {
-            EvalError::ExecutionError(format!("failed to load index options: {e}"))
-        })?;
+        let index_options = self
+            .storage
+            .load_index_options(&index_name)
+            .map_err(|e| EvalError::ExecutionError(format!("failed to load index options: {e}")))?;
 
         // Validate query vector dimensions if specified
         if let Some(expected_dims) = resolve_vector_dimensions(&index_options) {
@@ -1927,7 +2125,8 @@ impl EvalEngine {
     ) -> Result<EvalResult, EvalError> {
         if call.args.len() < 3 {
             return Err(EvalError::ExecutionError(
-                "db.create.setNodeVectorProperty requires 3 arguments: node, propertyName, vector".into(),
+                "db.create.setNodeVectorProperty requires 3 arguments: node, propertyName, vector"
+                    .into(),
             ));
         }
         for row in rows {
@@ -1937,8 +2136,7 @@ impl EvalEngine {
             )?;
             let vector_val = eval_expression(&call.args[2], row, params)?;
             if let Value::Object(props) = eval_expression(&call.args[0], row, params)? {
-                let mut persisted: HashMap<String, Value> =
-                    props.clone().into_iter().collect();
+                let mut persisted: HashMap<String, Value> = props.clone().into_iter().collect();
                 persisted.insert(prop_name, vector_val);
                 self.persist_node_props(&persisted)?;
             }
@@ -1968,8 +2166,7 @@ impl EvalEngine {
             )?;
             let vector_val = eval_expression(&call.args[2], row, params)?;
             if let Value::Object(props) = eval_expression(&call.args[0], row, params)? {
-                let mut persisted: HashMap<String, Value> =
-                    props.clone().into_iter().collect();
+                let mut persisted: HashMap<String, Value> = props.clone().into_iter().collect();
                 persisted.insert(prop_name, vector_val);
                 self.persist_edge_props(&persisted)?;
             }
@@ -2221,55 +2418,300 @@ fn builtin_procedure_rows() -> Vec<Row> {
 
 fn builtin_function_rows() -> Vec<Row> {
     let mut functions = vec![
-        ("abs", "abs(input :: NUMBER) :: NUMBER", "Returns the absolute value of a number", "Numeric"),
-        ("avg", "avg(input :: NUMBER) :: NUMBER", "Returns the average of numeric values", "Aggregating"),
-        ("ceil", "ceil(input :: NUMBER) :: NUMBER", "Returns the smallest integer greater than or equal to the input", "Numeric"),
-        ("coalesce", "coalesce(input :: ANY...) :: ANY", "Returns the first non-null value in the list", "Scalar"),
-        ("collect", "collect(input :: ANY) :: LIST<ANY>", "Collects values into a list", "Aggregating"),
-        ("contains", "contains(input :: STRING, substring :: STRING) :: BOOLEAN", "Returns whether the string contains the substring", "String"),
-        ("count", "count(input :: ANY) :: INTEGER", "Returns the number of values or rows", "Aggregating"),
-        ("date", "date() :: STRING", "Returns the current date", "Temporal"),
-        ("datetime", "datetime() :: STRING", "Returns the current datetime", "Temporal"),
-        ("duration", "duration() :: STRING", "Returns the current duration since epoch", "Temporal"),
-        ("elementId", "elementId(input :: NODE|RELATIONSHIP) :: STRING", "Returns the element id of a node or relationship", "Scalar"),
-        ("endsWith", "endsWith(input :: STRING, substring :: STRING) :: BOOLEAN", "Returns whether the string ends with the substring", "String"),
-        ("exists", "exists(input :: ANY) :: BOOLEAN", "Returns whether the value is not null", "Scalar"),
-        ("floor", "floor(input :: NUMBER) :: NUMBER", "Returns the largest integer less than or equal to the input", "Numeric"),
-        ("head", "head(input :: LIST<ANY>) :: ANY", "Returns the first element of a list", "List"),
-        ("id", "id(input :: NODE|RELATIONSHIP) :: STRING", "Returns the internal id of a node or relationship", "Scalar"),
-        ("keys", "keys(input :: NODE|RELATIONSHIP|MAP) :: LIST<STRING>", "Returns the property keys of a node, relationship, or map", "Scalar"),
-        ("labels", "labels(input :: NODE) :: LIST<STRING>", "Returns the labels of a node", "Scalar"),
-        ("last", "last(input :: LIST<ANY>) :: ANY", "Returns the last element of a list", "List"),
-        ("left", "left(input :: STRING, length :: INTEGER) :: STRING", "Returns the leftmost characters of a string", "String"),
-        ("length", "length(input :: PATH) :: INTEGER", "Returns the length of a path", "Scalar"),
-        ("ltrim", "ltrim(input :: STRING) :: STRING", "Returns the string with leading whitespace removed", "String"),
-        ("max", "max(input :: NUMBER) :: NUMBER", "Returns the maximum of numeric values", "Aggregating"),
-        ("min", "min(input :: NUMBER) :: NUMBER", "Returns the minimum of numeric values", "Aggregating"),
-        ("nodes", "nodes(input :: PATH) :: LIST<NODE>", "Returns the nodes in a path", "Scalar"),
-        ("now", "now() :: INTEGER", "Returns the current timestamp in milliseconds", "Temporal"),
-        ("properties", "properties(input :: NODE|RELATIONSHIP|MAP) :: MAP", "Returns the properties of a node, relationship, or map", "Scalar"),
-        ("range", "range(start :: INTEGER, end :: INTEGER [, step :: INTEGER]) :: LIST<INTEGER>", "Creates a list of integers in the given range", "List"),
-        ("relationships", "relationships(input :: PATH) :: LIST<RELATIONSHIP>", "Returns the relationships in a path", "Scalar"),
-        ("replace", "replace(input :: STRING, from :: STRING, to :: STRING) :: STRING", "Replaces all occurrences of a substring", "String"),
-        ("reverse", "reverse(input :: LIST<ANY>) :: LIST<ANY>", "Returns the list in reverse order", "List"),
-        ("right", "right(input :: STRING, length :: INTEGER) :: STRING", "Returns the rightmost characters of a string", "String"),
-        ("round", "round(input :: NUMBER) :: NUMBER", "Returns the nearest integer to the input", "Numeric"),
-        ("rtrim", "rtrim(input :: STRING) :: STRING", "Returns the string with trailing whitespace removed", "String"),
-        ("size", "size(input :: LIST<ANY>|STRING) :: INTEGER", "Returns the size of a list or string", "List"),
-        ("split", "split(input :: STRING, delimiter :: STRING) :: LIST<STRING>", "Splits a string by the delimiter", "String"),
-        ("startsWith", "startsWith(input :: STRING, substring :: STRING) :: BOOLEAN", "Returns whether the string starts with the substring", "String"),
-        ("substring", "substring(input :: STRING, start :: INTEGER [, length :: INTEGER]) :: STRING", "Returns a substring of the input", "String"),
-        ("sum", "sum(input :: NUMBER) :: NUMBER", "Returns the sum of numeric values", "Aggregating"),
-        ("tail", "tail(input :: LIST<ANY>) :: LIST<ANY>", "Returns the list without the first element", "List"),
-        ("timestamp", "timestamp() :: INTEGER", "Returns the current timestamp in milliseconds", "Temporal"),
-        ("toBoolean", "toBoolean(input :: ANY) :: BOOLEAN", "Converts a value to boolean", "Scalar"),
-        ("toFloat", "toFloat(input :: ANY) :: FLOAT", "Converts a value to float", "Scalar"),
-        ("toInteger", "toInteger(input :: ANY) :: INTEGER", "Converts a value to integer", "Scalar"),
-        ("toLower", "toLower(input :: STRING) :: STRING", "Returns the string in lowercase", "String"),
-        ("toString", "toString(input :: ANY) :: STRING", "Converts a value to string", "Scalar"),
-        ("toUpper", "toUpper(input :: STRING) :: STRING", "Returns the string in uppercase", "String"),
-        ("trim", "trim(input :: STRING) :: STRING", "Returns the string with leading and trailing whitespace removed", "String"),
-        ("type", "type(input :: RELATIONSHIP) :: STRING", "Returns the type of a relationship", "Scalar"),
+        (
+            "abs",
+            "abs(input :: NUMBER) :: NUMBER",
+            "Returns the absolute value of a number",
+            "Numeric",
+        ),
+        (
+            "avg",
+            "avg(input :: NUMBER) :: NUMBER",
+            "Returns the average of numeric values",
+            "Aggregating",
+        ),
+        (
+            "ceil",
+            "ceil(input :: NUMBER) :: NUMBER",
+            "Returns the smallest integer greater than or equal to the input",
+            "Numeric",
+        ),
+        (
+            "coalesce",
+            "coalesce(input :: ANY...) :: ANY",
+            "Returns the first non-null value in the list",
+            "Scalar",
+        ),
+        (
+            "collect",
+            "collect(input :: ANY) :: LIST<ANY>",
+            "Collects values into a list",
+            "Aggregating",
+        ),
+        (
+            "contains",
+            "contains(input :: STRING, substring :: STRING) :: BOOLEAN",
+            "Returns whether the string contains the substring",
+            "String",
+        ),
+        (
+            "count",
+            "count(input :: ANY) :: INTEGER",
+            "Returns the number of values or rows",
+            "Aggregating",
+        ),
+        (
+            "date",
+            "date() :: STRING",
+            "Returns the current date",
+            "Temporal",
+        ),
+        (
+            "datetime",
+            "datetime() :: STRING",
+            "Returns the current datetime",
+            "Temporal",
+        ),
+        (
+            "duration",
+            "duration() :: STRING",
+            "Returns the current duration since epoch",
+            "Temporal",
+        ),
+        (
+            "elementId",
+            "elementId(input :: NODE|RELATIONSHIP) :: STRING",
+            "Returns the element id of a node or relationship",
+            "Scalar",
+        ),
+        (
+            "endsWith",
+            "endsWith(input :: STRING, substring :: STRING) :: BOOLEAN",
+            "Returns whether the string ends with the substring",
+            "String",
+        ),
+        (
+            "exists",
+            "exists(input :: ANY) :: BOOLEAN",
+            "Returns whether the value is not null",
+            "Scalar",
+        ),
+        (
+            "floor",
+            "floor(input :: NUMBER) :: NUMBER",
+            "Returns the largest integer less than or equal to the input",
+            "Numeric",
+        ),
+        (
+            "head",
+            "head(input :: LIST<ANY>) :: ANY",
+            "Returns the first element of a list",
+            "List",
+        ),
+        (
+            "id",
+            "id(input :: NODE|RELATIONSHIP) :: STRING",
+            "Returns the internal id of a node or relationship",
+            "Scalar",
+        ),
+        (
+            "keys",
+            "keys(input :: NODE|RELATIONSHIP|MAP) :: LIST<STRING>",
+            "Returns the property keys of a node, relationship, or map",
+            "Scalar",
+        ),
+        (
+            "labels",
+            "labels(input :: NODE) :: LIST<STRING>",
+            "Returns the labels of a node",
+            "Scalar",
+        ),
+        (
+            "last",
+            "last(input :: LIST<ANY>) :: ANY",
+            "Returns the last element of a list",
+            "List",
+        ),
+        (
+            "left",
+            "left(input :: STRING, length :: INTEGER) :: STRING",
+            "Returns the leftmost characters of a string",
+            "String",
+        ),
+        (
+            "length",
+            "length(input :: PATH) :: INTEGER",
+            "Returns the length of a path",
+            "Scalar",
+        ),
+        (
+            "ltrim",
+            "ltrim(input :: STRING) :: STRING",
+            "Returns the string with leading whitespace removed",
+            "String",
+        ),
+        (
+            "max",
+            "max(input :: NUMBER) :: NUMBER",
+            "Returns the maximum of numeric values",
+            "Aggregating",
+        ),
+        (
+            "min",
+            "min(input :: NUMBER) :: NUMBER",
+            "Returns the minimum of numeric values",
+            "Aggregating",
+        ),
+        (
+            "nodes",
+            "nodes(input :: PATH) :: LIST<NODE>",
+            "Returns the nodes in a path",
+            "Scalar",
+        ),
+        (
+            "now",
+            "now() :: INTEGER",
+            "Returns the current timestamp in milliseconds",
+            "Temporal",
+        ),
+        (
+            "properties",
+            "properties(input :: NODE|RELATIONSHIP|MAP) :: MAP",
+            "Returns the properties of a node, relationship, or map",
+            "Scalar",
+        ),
+        (
+            "range",
+            "range(start :: INTEGER, end :: INTEGER [, step :: INTEGER]) :: LIST<INTEGER>",
+            "Creates a list of integers in the given range",
+            "List",
+        ),
+        (
+            "relationships",
+            "relationships(input :: PATH) :: LIST<RELATIONSHIP>",
+            "Returns the relationships in a path",
+            "Scalar",
+        ),
+        (
+            "replace",
+            "replace(input :: STRING, from :: STRING, to :: STRING) :: STRING",
+            "Replaces all occurrences of a substring",
+            "String",
+        ),
+        (
+            "reverse",
+            "reverse(input :: LIST<ANY>) :: LIST<ANY>",
+            "Returns the list in reverse order",
+            "List",
+        ),
+        (
+            "right",
+            "right(input :: STRING, length :: INTEGER) :: STRING",
+            "Returns the rightmost characters of a string",
+            "String",
+        ),
+        (
+            "round",
+            "round(input :: NUMBER) :: NUMBER",
+            "Returns the nearest integer to the input",
+            "Numeric",
+        ),
+        (
+            "rtrim",
+            "rtrim(input :: STRING) :: STRING",
+            "Returns the string with trailing whitespace removed",
+            "String",
+        ),
+        (
+            "size",
+            "size(input :: LIST<ANY>|STRING) :: INTEGER",
+            "Returns the size of a list or string",
+            "List",
+        ),
+        (
+            "split",
+            "split(input :: STRING, delimiter :: STRING) :: LIST<STRING>",
+            "Splits a string by the delimiter",
+            "String",
+        ),
+        (
+            "startsWith",
+            "startsWith(input :: STRING, substring :: STRING) :: BOOLEAN",
+            "Returns whether the string starts with the substring",
+            "String",
+        ),
+        (
+            "substring",
+            "substring(input :: STRING, start :: INTEGER [, length :: INTEGER]) :: STRING",
+            "Returns a substring of the input",
+            "String",
+        ),
+        (
+            "sum",
+            "sum(input :: NUMBER) :: NUMBER",
+            "Returns the sum of numeric values",
+            "Aggregating",
+        ),
+        (
+            "tail",
+            "tail(input :: LIST<ANY>) :: LIST<ANY>",
+            "Returns the list without the first element",
+            "List",
+        ),
+        (
+            "timestamp",
+            "timestamp() :: INTEGER",
+            "Returns the current timestamp in milliseconds",
+            "Temporal",
+        ),
+        (
+            "toBoolean",
+            "toBoolean(input :: ANY) :: BOOLEAN",
+            "Converts a value to boolean",
+            "Scalar",
+        ),
+        (
+            "toFloat",
+            "toFloat(input :: ANY) :: FLOAT",
+            "Converts a value to float",
+            "Scalar",
+        ),
+        (
+            "toInteger",
+            "toInteger(input :: ANY) :: INTEGER",
+            "Converts a value to integer",
+            "Scalar",
+        ),
+        (
+            "toLower",
+            "toLower(input :: STRING) :: STRING",
+            "Returns the string in lowercase",
+            "String",
+        ),
+        (
+            "toString",
+            "toString(input :: ANY) :: STRING",
+            "Converts a value to string",
+            "Scalar",
+        ),
+        (
+            "toUpper",
+            "toUpper(input :: STRING) :: STRING",
+            "Returns the string in uppercase",
+            "String",
+        ),
+        (
+            "trim",
+            "trim(input :: STRING) :: STRING",
+            "Returns the string with leading and trailing whitespace removed",
+            "String",
+        ),
+        (
+            "type",
+            "type(input :: RELATIONSHIP) :: STRING",
+            "Returns the type of a relationship",
+            "Scalar",
+        ),
     ];
     functions.sort_by(|left, right| left.0.cmp(right.0));
 
@@ -2278,8 +2720,14 @@ fn builtin_function_rows() -> Vec<Row> {
         .map(|(name, signature, description, category)| {
             let mut row = Row::new();
             row.insert("name".to_string(), Value::String(name.to_string()));
-            row.insert("signature".to_string(), Value::String(signature.to_string()));
-            row.insert("description".to_string(), Value::String(description.to_string()));
+            row.insert(
+                "signature".to_string(),
+                Value::String(signature.to_string()),
+            );
+            row.insert(
+                "description".to_string(),
+                Value::String(description.to_string()),
+            );
             row.insert("category".to_string(), Value::String(category.to_string()));
             row
         })
@@ -2305,7 +2753,8 @@ fn resolve_fulltext_node_indexes(
         return Ok(vec![index]);
     }
 
-    if index_name.eq_ignore_ascii_case("default") || index_name.eq_ignore_ascii_case("node_search") {
+    if index_name.eq_ignore_ascii_case("default") || index_name.eq_ignore_ascii_case("node_search")
+    {
         let indexes = catalog
             .list()?
             .into_iter()
@@ -2438,9 +2887,7 @@ fn resolve_similarity_function(
 }
 
 /// Resolve the expected vector dimensions from index options.
-fn resolve_vector_dimensions(
-    options: &Option<HashMap<String, serde_json::Value>>,
-) -> Option<u64> {
+fn resolve_vector_dimensions(options: &Option<HashMap<String, serde_json::Value>>) -> Option<u64> {
     options.as_ref().and_then(|opts| {
         opts.get("indexConfig")
             .and_then(|cfg| cfg.as_object())

@@ -509,10 +509,14 @@ pub fn strip_index_hints(query: &str) -> (Vec<String>, String) {
             // Scan forward to find the end of the hint (before WHERE/RETURN/WITH or end)
             let hint_start = pos;
             while pos < bytes.len() {
-                if bytes[pos] == b'\n' || (pos + 5 < bytes.len() &&
-                    (&upper[pos..pos+5] == "WHERE" || &upper[pos..pos+6] == "RETURN"
-                    || &upper[pos..pos+4] == "WITH" || &upper[pos..pos+5] == "MATCH"
-                    || &upper[pos..pos+6] == "CREATE" || &upper[pos..pos+5] == "MERGE"))
+                if bytes[pos] == b'\n'
+                    || (pos + 5 < bytes.len()
+                        && (&upper[pos..pos + 5] == "WHERE"
+                            || &upper[pos..pos + 6] == "RETURN"
+                            || &upper[pos..pos + 4] == "WITH"
+                            || &upper[pos..pos + 5] == "MATCH"
+                            || &upper[pos..pos + 6] == "CREATE"
+                            || &upper[pos..pos + 5] == "MERGE"))
                 {
                     break;
                 }

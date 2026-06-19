@@ -114,7 +114,6 @@ pub struct ToolRegistry {
     engine: Option<Arc<ParkingMutex<GraphEngine>>>,
 }
 
-
 impl ToolRegistry {
     pub fn new() -> Self {
         let mut registry = Self::default();
@@ -208,10 +207,7 @@ impl ToolRegistry {
                     .and_then(|args| args.get("query"))
                     .and_then(|v| v.as_str())
                     .ok_or("missing 'query' parameter")?;
-                let engine = self
-                    .engine
-                    .as_ref()
-                    .ok_or("no graph engine configured")?;
+                let engine = self.engine.as_ref().ok_or("no graph engine configured")?;
                 let engine = engine.lock();
                 match engine.execute(query, HashMap::new()) {
                     Ok(result) => {
@@ -241,10 +237,7 @@ impl ToolRegistry {
                     .and_then(|args| args.get("k"))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(10) as usize;
-                let engine = self
-                    .engine
-                    .as_ref()
-                    .ok_or("no graph engine configured")?;
+                let engine = self.engine.as_ref().ok_or("no graph engine configured")?;
                 let engine = engine.lock();
                 // Use the engine's fulltext search if available
                 match engine.search_fulltext_nodes("", &[], text, k) {
@@ -353,7 +346,11 @@ mod tests {
             ),
         );
         let resp = registry.dispatch(&req);
-        assert!(resp.error.is_none(), "expected success, got: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "expected success, got: {:?}",
+            resp.error
+        );
     }
 
     #[test]

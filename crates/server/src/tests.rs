@@ -3059,3 +3059,129 @@ fn unique_auth_path() -> String {
         .to_string_lossy()
         .into_owned()
 }
+
+// ─── Discovery endpoint parity tests (NornicDB matching) ──────────
+
+/// Matches NornicDB's TestHandleDiscovery — the root endpoint returns
+/// Neo4j-compatible discovery JSON with all required fields.
+#[tokio::test]
+async fn test_discovery_returns_neo4j_required_fields() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let state = Arc::new(AppState::default());
+    let app = build_router(state);
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let discovery: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // Required Neo4j discovery fields per NornicDB test
+    for field in &[
+        "bolt_direct",
+        "bolt_routing",
+        "transaction",
+        "neo4j_version",
+        "neo4j_edition",
+        "server",
+    ] {
+        assert!(
+            discovery.get(field).is_some(),
+            "discovery response missing required field: {field}"
+        );
+    }
+}
+
+/// Browser requests (Accept: text/html) get discovery JSON when no UI dist is
+/// available. Matches NornicDB: when uiHandler == nil, discovery is served to
+/// all requesters regardless of Accept header.
+#[tokio::test]
+async fn test_discovery_served_to_browser_when_no_ui_available() {
+    use axum::body::Body;
+    use axum::http::{header, Request};
+    use tower::ServiceExt;
+
+    // Use a temp static_dir that has no index.html to simulate "no UI available"
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = AppState::default();
+    state.static_dir = Some(temp.path().to_string_lossy().into_owned());
+    state.headless = false;
+    let app = build_router(Arc::new(state));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::ACCEPT, "text/html,application/xhtml+xml")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // No index.html means ui_available() returns false, so discovery is served.
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let discovery: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(discovery.get("bolt_direct").is_some());
+}
+
+/// Headless mode always serves discovery JSON, even to browser requests.
+#[tokio::test]
+async fn test_headless_mode_always_serves_discovery() {
+    use axum::body::Body;
+    use axum::http::{header, Request};
+    use tower::ServiceExt;
+
+    let mut state = AppState::default();
+    state.headless = true;
+    let app = build_router(Arc::new(state));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::ACCEPT, "text/html,application/xhtml+xml")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let discovery: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(discovery.get("bolt_direct").is_some());
+}
+
+/// API clients (no text/html Accept) always get discovery JSON.
+#[tokio::test]
+async fn test_discovery_served_to_api_clients_by_default() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let state = Arc::new(AppState::default());
+    let app = build_router(state);
+
+    // Default AppState has no static_dir, so discovery is always served
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let discovery: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(discovery["neo4j_edition"], "community");
+    assert_eq!(discovery["neo4j_version"], "5.0.0");
+}

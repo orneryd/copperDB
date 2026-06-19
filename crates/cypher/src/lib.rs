@@ -182,15 +182,18 @@ impl<'a> ParseContext<'a> {
             }
         }
 
-        Ok(MergeClause { pattern, on_create, on_match })
+        Ok(MergeClause {
+            pattern,
+            on_create,
+            on_match,
+        })
     }
 
     /// Parse SET items until a clause boundary (next clause keyword or end).
     fn parse_set_items_until_clause_boundary(&mut self) -> Result<Vec<SetItem>, CypherError> {
         let clause_keywords = [
-            "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "DELETE", "DETACH",
-            "REMOVE", "SET", "CALL", "UNWIND", "FOREACH", "WHERE", "ORDER",
-            "SKIP", "LIMIT", "ON",
+            "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "DELETE", "DETACH", "REMOVE", "SET",
+            "CALL", "UNWIND", "FOREACH", "WHERE", "ORDER", "SKIP", "LIMIT", "ON",
         ];
         let mut items = Vec::new();
         items.push(self.parse_set_item_with_terminators(&clause_keywords)?);
@@ -288,10 +291,16 @@ impl<'a> ParseContext<'a> {
         loop {
             if self.peek_is("SKIP") {
                 self.advance();
-                skip = Some(self.parse_expression_item(&["LIMIT", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE"])?);
+                skip = Some(self.parse_expression_item(&[
+                    "LIMIT", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE",
+                    "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE",
+                ])?);
             } else if self.peek_is("LIMIT") {
                 self.advance();
-                limit = Some(self.parse_expression_item(&["SKIP", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE"])?);
+                limit = Some(self.parse_expression_item(&[
+                    "SKIP", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE",
+                    "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE",
+                ])?);
             } else {
                 break;
             }
@@ -399,8 +408,11 @@ impl<'a> ParseContext<'a> {
         if self.peek() == Some(":") {
             self.advance();
             if self.peek() == Some("$") {
-                let next_is_paren =
-                    self.tokens.get(self.pos + 1).map(|t| *t == "(").unwrap_or(false);
+                let next_is_paren = self
+                    .tokens
+                    .get(self.pos + 1)
+                    .map(|t| *t == "(")
+                    .unwrap_or(false);
                 if next_is_paren {
                     self.advance();
                     self.advance();
@@ -511,10 +523,16 @@ impl<'a> ParseContext<'a> {
         loop {
             if self.peek_is("SKIP") {
                 self.advance();
-                skip = Some(self.parse_expression_item(&["LIMIT", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE"])?);
+                skip = Some(self.parse_expression_item(&[
+                    "LIMIT", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE",
+                    "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE",
+                ])?);
             } else if self.peek_is("LIMIT") {
                 self.advance();
-                limit = Some(self.parse_expression_item(&["SKIP", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE"])?);
+                limit = Some(self.parse_expression_item(&[
+                    "SKIP", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE",
+                    "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE",
+                ])?);
             } else {
                 break;
             }
@@ -646,11 +664,12 @@ impl<'a> ParseContext<'a> {
         self.expect("FOR")?;
 
         // Determine entity type: (n:Label) or ()-[r:TYPE]-()
-        let (entity_type, label) =
-            if self.tokens.get(self.pos) == Some(&"(") && self.tokens.get(self.pos + 1) == Some(&")") {
-                // Relationship constraint: FOR ()-[r:TYPE]-()
-                self.advance(); // (
-                self.advance(); // )
+        let (entity_type, label) = if self.tokens.get(self.pos) == Some(&"(")
+            && self.tokens.get(self.pos + 1) == Some(&")")
+        {
+            // Relationship constraint: FOR ()-[r:TYPE]-()
+            self.advance(); // (
+            self.advance(); // )
             self.expect("-")?;
             self.expect("[")?;
             let _variable = self.advance_identifier()?;
@@ -790,10 +809,7 @@ impl<'a> ParseContext<'a> {
             }
         };
 
-        Ok(ConstraintEntry {
-            properties,
-            kind,
-        })
+        Ok(ConstraintEntry { properties, kind })
     }
 
     /// Parse a domain constraint value list: `['active', 'inactive']` or `[1, 2, 3]`
@@ -1759,9 +1775,7 @@ mod tests {
     fn test_parse_call_with_yield_wildcard() {
         let p = Parser::new();
         let q = p
-            .parse(
-                "CALL db.index.vector.queryNodes('title_idx', 5, [1,0,0]) YIELD * RETURN score",
-            )
+            .parse("CALL db.index.vector.queryNodes('title_idx', 5, [1,0,0]) YIELD * RETURN score")
             .unwrap();
 
         let Some(Clause::Call(call)) = q.clauses.first() else {
@@ -1797,8 +1811,14 @@ mod tests {
         assert!(with_clause.where_clause.is_some());
         assert_eq!(with_clause.order_by.len(), 1);
         assert!(with_clause.order_by[0].descending);
-        assert_eq!(with_clause.skip, Some(Expression::Literal(LiteralValue::Integer(2))));
-        assert_eq!(with_clause.limit, Some(Expression::Literal(LiteralValue::Integer(5))));
+        assert_eq!(
+            with_clause.skip,
+            Some(Expression::Literal(LiteralValue::Integer(2)))
+        );
+        assert_eq!(
+            with_clause.limit,
+            Some(Expression::Literal(LiteralValue::Integer(5)))
+        );
     }
 
     #[test]
@@ -2068,9 +2088,7 @@ mod tests {
     fn test_parse_create_relationship_constraint() {
         let p = Parser::new();
         let q = p
-            .parse(
-                "CREATE CONSTRAINT rel_unique FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE",
-            )
+            .parse("CREATE CONSTRAINT rel_unique FOR ()-[r:KNOWS]-() REQUIRE r.since IS UNIQUE")
             .unwrap();
         if let Clause::CreateConstraint(c) = q.clauses.first().expect("clause missing") {
             assert!(matches!(c.entity_type, ConstraintEntityType::Relationship));
@@ -2086,9 +2104,7 @@ mod tests {
     fn test_parse_create_type_constraint() {
         let p = Parser::new();
         let q = p
-            .parse(
-                "CREATE CONSTRAINT age_type FOR (n:Person) REQUIRE n.age IS :: INTEGER",
-            )
+            .parse("CREATE CONSTRAINT age_type FOR (n:Person) REQUIRE n.age IS :: INTEGER")
             .unwrap();
         if let Clause::CreateConstraint(c) = q.clauses.first().expect("clause missing") {
             assert_eq!(c.entries.len(), 1);

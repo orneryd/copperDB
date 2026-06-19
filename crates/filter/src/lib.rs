@@ -47,14 +47,9 @@ pub fn eval_expression(
             let param_val = params
                 .get(parameter.as_str())
                 .cloned()
-                .ok_or_else(|| {
-                    FilterError::UnknownVariable(format!("parameter ${parameter}"))
-                })?;
+                .ok_or_else(|| FilterError::UnknownVariable(format!("parameter ${parameter}")))?;
             if let Value::Object(map) = param_val {
-                Ok(map
-                    .get(property.as_str())
-                    .cloned()
-                    .unwrap_or(Value::Null))
+                Ok(map.get(property.as_str()).cloned().unwrap_or(Value::Null))
             } else {
                 Ok(Value::Null)
             }
@@ -67,13 +62,10 @@ pub fn eval_expression(
                 (Value::Object(map), Value::String(k)) => {
                     Ok(map.get(k.as_str()).cloned().unwrap_or(Value::Null))
                 }
-                (Value::Array(arr), Value::Number(idx)) => {
-                    idx.as_u64()
-                        .and_then(|i| arr.get(i as usize).cloned())
-                        .ok_or_else(|| {
-                            FilterError::TypeError(format!("index out of bounds: {idx}"))
-                        })
-                }
+                (Value::Array(arr), Value::Number(idx)) => idx
+                    .as_u64()
+                    .and_then(|i| arr.get(i as usize).cloned())
+                    .ok_or_else(|| FilterError::TypeError(format!("index out of bounds: {idx}"))),
                 _ => Ok(Value::Null),
             }
         }
@@ -168,12 +160,15 @@ pub fn eval_expression(
                 let af = a.as_f64().unwrap_or(0.0);
                 let bf = b.as_f64().unwrap_or(0.0);
                 return Ok(Value::Number(
-                    serde_json::Number::from_f64(af + bf)
-                        .unwrap_or(serde_json::Number::from(0)),
+                    serde_json::Number::from_f64(af + bf).unwrap_or(serde_json::Number::from(0)),
                 ));
             }
             // String concatenation otherwise
-            Ok(Value::String(format!("{}{}", coerce_string(&lv)?, coerce_string(&rv)?)))
+            Ok(Value::String(format!(
+                "{}{}",
+                coerce_string(&lv)?,
+                coerce_string(&rv)?
+            )))
         }
 
         Expression::Subtract(operands) => {
@@ -524,7 +519,9 @@ fn eval_function(
             }
             // count(expr): per-row, return 1 if non-null, 0 if null
             let v = eval_arg(0)?;
-            Ok(Value::Number(if matches!(v, Value::Null) { 0 } else { 1 }.into()))
+            Ok(Value::Number(
+                if matches!(v, Value::Null) { 0 } else { 1 }.into(),
+            ))
         }
         "avg" | "sum" | "min" | "max" => {
             // Aggregation functions: return the argument value per-row.
@@ -906,7 +903,13 @@ fn eval_function(
             let v = eval_arg(0)?;
             if let Value::Number(n) = &v {
                 if let Some(f) = n.as_f64() {
-                    let s = if f > 0.0 { 1 } else if f < 0.0 { -1 } else { 0 };
+                    let s = if f > 0.0 {
+                        1
+                    } else if f < 0.0 {
+                        -1
+                    } else {
+                        0
+                    };
                     return Ok(Value::Number(s.into()));
                 }
             }
@@ -924,7 +927,9 @@ fn eval_function(
                     }
                 }
             }
-            Err(FilterError::TypeError("sqrt() requires a non-negative number".into()))
+            Err(FilterError::TypeError(
+                "sqrt() requires a non-negative number".into(),
+            ))
         }
         "rand" => {
             let v = eval_arg(0)?;
@@ -949,7 +954,10 @@ fn eval_function(
                 .and_then(|v| v.as_i64())
                 .unwrap_or(1);
             let list: Vec<Value> = if step > 0 {
-                (start..=end).step_by(step as usize).map(|i| Value::Number(i.into())).collect()
+                (start..=end)
+                    .step_by(step as usize)
+                    .map(|i| Value::Number(i.into()))
+                    .collect()
             } else {
                 Vec::new()
             };
@@ -1040,8 +1048,7 @@ fn eval_function(
             }
         }
         // ── Trig functions ──
-        "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2"
-        | "degrees" | "radians" => {
+        "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" | "degrees" | "radians" => {
             let v = eval_arg(0)?;
             if let Some(f) = v.as_f64() {
                 let result = match name_lower.as_str() {
@@ -1063,15 +1070,16 @@ fn eval_function(
                     serde_json::Number::from_f64(result).unwrap_or(serde_json::Number::from(0)),
                 ));
             }
-            Err(FilterError::TypeError(format!("{name}() requires a number")))
+            Err(FilterError::TypeError(format!(
+                "{name}() requires a number"
+            )))
         }
         // ── Power / log functions ──
         "pow" | "power" => {
             let base = eval_arg(0)?.as_f64().unwrap_or(0.0);
             let exp = eval_arg(1)?.as_f64().unwrap_or(0.0);
             Ok(Value::Number(
-                serde_json::Number::from_f64(base.powf(exp))
-                    .unwrap_or(serde_json::Number::from(0)),
+                serde_json::Number::from_f64(base.powf(exp)).unwrap_or(serde_json::Number::from(0)),
             ))
         }
         "exp" => {
@@ -1138,7 +1146,9 @@ fn eval_function(
                     serde_json::Number::from_f64(result).unwrap_or(serde_json::Number::from(0)),
                 ));
             }
-            Err(FilterError::TypeError(format!("{name}() requires a number")))
+            Err(FilterError::TypeError(format!(
+                "{name}() requires a number"
+            )))
         }
         // ── Math constants ──
         "e" => Ok(Value::Number(
@@ -1161,7 +1171,11 @@ fn eval_function(
                 Value::Null => "NULL",
                 Value::Bool(_) => "BOOLEAN",
                 Value::Number(n) => {
-                    if n.is_f64() { "FLOAT" } else { "INTEGER" }
+                    if n.is_f64() {
+                        "FLOAT"
+                    } else {
+                        "INTEGER"
+                    }
                 }
                 Value::String(_) => "STRING",
                 Value::Array(_) => "LIST",
@@ -1176,7 +1190,8 @@ fn eval_function(
         "tointegerornull" => {
             let v = eval_arg(0)?;
             match &v {
-                Value::String(s) => Ok(s.parse::<i64>()
+                Value::String(s) => Ok(s
+                    .parse::<i64>()
                     .ok()
                     .map(|i| Value::Number(i.into()))
                     .unwrap_or(Value::Null)),
@@ -1188,7 +1203,8 @@ fn eval_function(
         "tofloatornull" => {
             let v = eval_arg(0)?;
             match &v {
-                Value::String(s) => Ok(s.parse::<f64>()
+                Value::String(s) => Ok(s
+                    .parse::<f64>()
                     .ok()
                     .and_then(serde_json::Number::from_f64)
                     .map(Value::Number)
@@ -1206,9 +1222,13 @@ fn eval_function(
             match &v {
                 Value::Bool(b) => Ok(Value::Bool(*b)),
                 Value::String(s) => {
-                    if s == "true" { Ok(Value::Bool(true)) }
-                    else if s == "false" { Ok(Value::Bool(false)) }
-                    else { Ok(Value::Null) }
+                    if s == "true" {
+                        Ok(Value::Bool(true))
+                    } else if s == "false" {
+                        Ok(Value::Bool(false))
+                    } else {
+                        Ok(Value::Null)
+                    }
                 }
                 Value::Null => Ok(Value::Null),
                 _ => Ok(Value::Null),
@@ -1218,7 +1238,8 @@ fn eval_function(
             let v = eval_arg(0)?;
             if let Value::Array(arr) = &v {
                 let from = eval_arg(1)?.as_i64().unwrap_or(0).max(0) as usize;
-                let to = args.get(2)
+                let to = args
+                    .get(2)
                     .map(|e| eval_expression(e, row, params))
                     .transpose()?
                     .and_then(|v| v.as_i64())
@@ -1337,7 +1358,8 @@ fn epoch_days_to_date(days: i64) -> (i64, i64, i64) {
         (days - 146096) / 146097
     };
     let day_of_era = days - era_cycles * 146097;
-    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36524 - day_of_era / 146096) / 365;
     let year = year_of_era + era_cycles * 400 + 1;
     let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
     let mp = (5 * day_of_year + 2) / 153;
@@ -1436,51 +1458,45 @@ fn extract_time_str(v: &Value) -> Option<(i64, i64, i64)> {
 // ── Date component accessors ──
 
 fn temporal_date_component(v: Value, index: usize) -> Result<Value, FilterError> {
-    let (y, m, d) = extract_date_str(&v).ok_or_else(|| {
-        FilterError::TypeError("date.* functions require a date string".into())
-    })?;
+    let (y, m, d) = extract_date_str(&v)
+        .ok_or_else(|| FilterError::TypeError("date.* functions require a date string".into()))?;
     Ok(Value::from([y, m, d][index]))
 }
 
 fn temporal_date_week(v: Value) -> Result<Value, FilterError> {
-    let (y, m, d) = extract_date_str(&v).ok_or_else(|| {
-        FilterError::TypeError("date.week requires a date string".into())
-    })?;
+    let (y, m, d) = extract_date_str(&v)
+        .ok_or_else(|| FilterError::TypeError("date.week requires a date string".into()))?;
     let day_of_year = days_since_epoch(y, m, d) - days_since_epoch(y, 1, 1) + 1;
     let week = (day_of_year + 6) / 7;
     Ok(Value::from(week))
 }
 
 fn temporal_date_quarter(v: Value) -> Result<Value, FilterError> {
-    let (_, m, _) = extract_date_str(&v).ok_or_else(|| {
-        FilterError::TypeError("date.quarter requires a date string".into())
-    })?;
+    let (_, m, _) = extract_date_str(&v)
+        .ok_or_else(|| FilterError::TypeError("date.quarter requires a date string".into()))?;
     Ok(Value::from((m + 2) / 3))
 }
 
 fn temporal_date_day_of_week(v: Value) -> Result<Value, FilterError> {
     // 1970-01-01 was a Thursday. Compute days since then → weekday (1=Mon, 7=Sun).
-    let (y, m, d) = extract_date_str(&v).ok_or_else(|| {
-        FilterError::TypeError("date.dayOfWeek requires a date string".into())
-    })?;
+    let (y, m, d) = extract_date_str(&v)
+        .ok_or_else(|| FilterError::TypeError("date.dayOfWeek requires a date string".into()))?;
     let days = days_since_epoch(y, m, d);
     let dow = ((days + 3) % 7) + 1; // 1970-01-01 was Thursday (dow=4, +3 offset)
     Ok(Value::from(dow))
 }
 
 fn temporal_date_day_of_year(v: Value) -> Result<Value, FilterError> {
-    let (y, m, d) = extract_date_str(&v).ok_or_else(|| {
-        FilterError::TypeError("date.dayOfYear requires a date string".into())
-    })?;
+    let (y, m, d) = extract_date_str(&v)
+        .ok_or_else(|| FilterError::TypeError("date.dayOfYear requires a date string".into()))?;
     let doy = days_since_epoch(y, m, d) - days_since_epoch(y, 1, 1) + 1;
     Ok(Value::from(doy))
 }
 
 fn temporal_date_truncate(unit: Value, date: Value) -> Result<Value, FilterError> {
     let unit = unit.as_str().unwrap_or("day");
-    let (y, m, d) = extract_date_str(&date).ok_or_else(|| {
-        FilterError::TypeError("date.truncate requires (unit, date)".into())
-    })?;
+    let (y, m, d) = extract_date_str(&date)
+        .ok_or_else(|| FilterError::TypeError("date.truncate requires (unit, date)".into()))?;
     match unit.to_lowercase().as_str() {
         "year" | "years" => Ok(Value::String(format!("{y:04}-01-01"))),
         "month" | "months" => Ok(Value::String(format!("{y:04}-{m:02}-01"))),
@@ -1506,10 +1522,12 @@ fn temporal_datetime_truncate(unit: Value, dt: Value) -> Result<Value, FilterErr
         "year" | "years" => Ok(Value::String(format!("{y:04}-01-01T00:00:00Z"))),
         "month" | "months" => Ok(Value::String(format!("{y:04}-{mo:02}-01T00:00:00Z"))),
         "day" | "days" => Ok(Value::String(format!("{y:04}-{mo:02}-{d:02}T00:00:00Z"))),
-        "hour" | "hours" => Ok(Value::String(format!("{y:04}-{mo:02}-{d:02}T{h:02}:00:00Z"))),
-        "minute" | "minutes" | "min" => {
-            Ok(Value::String(format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:00Z")))
-        }
+        "hour" | "hours" => Ok(Value::String(format!(
+            "{y:04}-{mo:02}-{d:02}T{h:02}:00:00Z"
+        ))),
+        "minute" | "minutes" | "min" => Ok(Value::String(format!(
+            "{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:00Z"
+        ))),
         _ => Ok(Value::String(format!(
             "{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z"
         ))),
@@ -1519,17 +1537,15 @@ fn temporal_datetime_truncate(unit: Value, dt: Value) -> Result<Value, FilterErr
 // ── Time component accessors ──
 
 fn temporal_time_component(v: Value, index: usize) -> Result<Value, FilterError> {
-    let (h, mi, s) = extract_time_str(&v).ok_or_else(|| {
-        FilterError::TypeError("time.* functions require a time string".into())
-    })?;
+    let (h, mi, s) = extract_time_str(&v)
+        .ok_or_else(|| FilterError::TypeError("time.* functions require a time string".into()))?;
     Ok(Value::from([h, mi, s][index]))
 }
 
 fn temporal_time_truncate(unit: Value, t: Value) -> Result<Value, FilterError> {
     let unit = unit.as_str().unwrap_or("second");
-    let (h, mi, s) = extract_time_str(&t).ok_or_else(|| {
-        FilterError::TypeError("time.truncate requires (unit, time)".into())
-    })?;
+    let (h, mi, s) = extract_time_str(&t)
+        .ok_or_else(|| FilterError::TypeError("time.truncate requires (unit, time)".into()))?;
     match unit.to_lowercase().as_str() {
         "hour" | "hours" => Ok(Value::String(format!("{h:02}:00:00Z"))),
         "minute" | "minutes" | "min" => Ok(Value::String(format!("{h:02}:{mi:02}:00Z"))),
@@ -1541,11 +1557,7 @@ fn temporal_time_truncate(unit: Value, t: Value) -> Result<Value, FilterError> {
 /// as epoch_days_to_date so the two functions are exact inverses.
 fn days_since_epoch(y: i64, m: i64, d: i64) -> i64 {
     // Convert to March-based year (March = month 0, Jan/Feb = month 10/11 of prev year).
-    let (y_adj, m_adj) = if m <= 2 {
-        (y - 1, m + 12)
-    } else {
-        (y, m)
-    };
+    let (y_adj, m_adj) = if m <= 2 { (y - 1, m + 12) } else { (y, m) };
     // Days from year 0-03-01 to (y_adj, m_adj, d).
     let era = if y_adj >= 0 {
         y_adj / 400

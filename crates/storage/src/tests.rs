@@ -392,7 +392,7 @@ fn namespace_scoped_schema_is_isolated_from_global_catalog() {
         label: "Person".to_string(),
         properties: vec!["email".to_string()],
         type_name: None,
-            allowed_values: Vec::new(),
+        allowed_values: Vec::new(),
     };
     let alpha_constraint = Constraint {
         name: "alpha_person_name_exists".to_string(),
@@ -401,7 +401,7 @@ fn namespace_scoped_schema_is_isolated_from_global_catalog() {
         label: "Person".to_string(),
         properties: vec!["name".to_string()],
         type_name: None,
-            allowed_values: Vec::new(),
+        allowed_values: Vec::new(),
     };
     let alpha_index = IndexDefinition {
         name: "alpha_person_name_idx".to_string(),
@@ -467,7 +467,7 @@ fn delete_by_prefix_removes_namespace_records_indexes_stats_and_schema() {
         label: "Person".to_string(),
         properties: vec!["name".to_string()],
         type_name: None,
-            allowed_values: Vec::new(),
+        allowed_values: Vec::new(),
     };
     let alpha_index = IndexDefinition {
         name: "alpha_person_name_idx".to_string(),
@@ -871,7 +871,7 @@ fn namespaced_storage_engine_streams_schema_and_deletes_within_namespace() {
         label: "Person".to_string(),
         properties: vec!["name".to_string()],
         type_name: None,
-            allowed_values: Vec::new(),
+        allowed_values: Vec::new(),
     };
     let tenant_a_index = IndexDefinition {
         name: "tenant_a_person_name_idx".to_string(),
@@ -5396,7 +5396,9 @@ fn async_engine_drains_deindex_on_flush_tick() {
     }
 
     // Node still exists after deindex
-    let node = async_engine.get_node_record_latest_effective("n-deidx").unwrap();
+    let node = async_engine
+        .get_node_record_latest_effective("n-deidx")
+        .unwrap();
     assert!(node.is_some());
 
     async_engine.close().unwrap();
