@@ -1188,6 +1188,28 @@ impl EvalEngine {
             ))
         })?;
 
+        // Load persisted index options (vector.dimensions, vector.similarity_function, etc.)
+        let index_options = self.storage.load_index_options(&index_name).map_err(|e| {
+            EvalError::ExecutionError(format!("failed to load index options: {e}"))
+        })?;
+
+        // Validate query vector dimensions if specified in options
+        if let Some(expected_dims) = resolve_vector_dimensions(&index_options) {
+            if query_vector.len() as u64 != expected_dims {
+                return Err(EvalError::ExecutionError(format!(
+                    "vector index {index_name} expects {expected_dims} dimensions, got {}",
+                    query_vector.len()
+                )));
+            }
+        }
+
+        // Choose similarity function based on index options
+        let similarity_fn: fn(&[f32], &[f32]) -> Option<f32> =
+            match resolve_similarity_function(&index_options) {
+                Some("euclidean") => euclidean_similarity,
+                _ => cosine_similarity,
+            };
+
         let mut ranked = if index.label.is_empty() {
             self.storage.all_node_records()?
         } else {
@@ -1196,7 +1218,7 @@ impl EvalEngine {
         .into_iter()
         .filter_map(|node| {
             let vector = node_vector_for_property(&node, property)?;
-            let score = cosine_similarity(&query_vector, &vector)?;
+            let score = similarity_fn(&query_vector, &vector)?;
             Some((node, score))
         })
         .collect::<Vec<_>>();
@@ -1461,6 +1483,28 @@ impl EvalEngine {
             ))
         })?;
 
+        // Load persisted index options
+        let index_options = self.storage.load_index_options(&index_name).map_err(|e| {
+            EvalError::ExecutionError(format!("failed to load index options: {e}"))
+        })?;
+
+        // Validate query vector dimensions if specified
+        if let Some(expected_dims) = resolve_vector_dimensions(&index_options) {
+            if query_vector.len() as u64 != expected_dims {
+                return Err(EvalError::ExecutionError(format!(
+                    "vector index {index_name} expects {expected_dims} dimensions, got {}",
+                    query_vector.len()
+                )));
+            }
+        }
+
+        // Choose similarity function based on index options
+        let similarity_fn: fn(&[f32], &[f32]) -> Option<f32> =
+            match resolve_similarity_function(&index_options) {
+                Some("euclidean") => euclidean_similarity,
+                _ => cosine_similarity,
+            };
+
         let edges = if index.label.is_empty() {
             self.storage.all_edges()?
         } else {
@@ -1470,7 +1514,7 @@ impl EvalEngine {
         let mut ranked: Vec<(EdgeRecord, f32)> = Vec::new();
         for edge in edges {
             if let Some(vector) = edge_vector_for_property(&edge, property) {
-                if let Some(score) = cosine_similarity(&query_vector, &vector) {
+                if let Some(score) = similarity_fn(&query_vector, &vector) {
                     ranked.push((edge, score));
                 }
             }
@@ -2363,4 +2407,44 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
     }
 
     Some(dot / (left_norm.sqrt() * right_norm.sqrt()))
+}
+
+fn euclidean_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
+    if left.len() != right.len() || left.is_empty() {
+        return None;
+    }
+
+    let mut sum_sq = 0.0f32;
+    for (l, r) in left.iter().zip(right.iter()) {
+        let diff = l - r;
+        sum_sq += diff * diff;
+    }
+
+    // Map to [0, 1] where 1 = identical (inverse of distance)
+    Some(1.0 / (1.0 + sum_sq.sqrt()))
+}
+
+/// Resolve the similarity function name from index options.
+/// Returns the function to use for scoring (cosine or euclidean).
+fn resolve_similarity_function(
+    options: &Option<HashMap<String, serde_json::Value>>,
+) -> Option<&str> {
+    options.as_ref().and_then(|opts| {
+        opts.get("indexConfig")
+            .and_then(|cfg| cfg.as_object())
+            .and_then(|cfg| cfg.get("vector.similarity_function"))
+            .and_then(|v| v.as_str())
+    })
+}
+
+/// Resolve the expected vector dimensions from index options.
+fn resolve_vector_dimensions(
+    options: &Option<HashMap<String, serde_json::Value>>,
+) -> Option<u64> {
+    options.as_ref().and_then(|opts| {
+        opts.get("indexConfig")
+            .and_then(|cfg| cfg.as_object())
+            .and_then(|cfg| cfg.get("vector.dimensions"))
+            .and_then(|v| v.as_u64())
+    })
 }

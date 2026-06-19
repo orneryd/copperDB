@@ -306,10 +306,8 @@ pub fn eval_expression(
             };
             let mut results = Vec::new();
             for item in &items {
-                // Bind variable to current item
                 let mut ext_row = row.clone();
                 ext_row.insert(comp.variable.clone(), item.clone());
-                // Evaluate predicate if present
                 if let Some(ref pred) = comp.predicate {
                     if !eval_predicate(pred, &ext_row, params)? {
                         continue;
@@ -319,6 +317,12 @@ pub fn eval_expression(
                 results.push(result);
             }
             Ok(Value::Array(results))
+        }
+
+        Expression::PatternComprehension(_comp) => {
+            // Pattern comprehensions require storage access;
+            // evaluated by EvalEngine, not by the stateless filter.
+            Ok(Value::Array(vec![]))
         }
 
         Expression::Reduce(reduce) => {

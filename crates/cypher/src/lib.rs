@@ -101,12 +101,24 @@ impl<'a> ParseContext<'a> {
             self.expect(")")?;
             pattern.shortest_path = true;
             pattern
+        } else if allow_shortest_path && self.peek_is("ALLSHORTESTPATHS") {
+            self.advance();
+            self.expect("(")?;
+            let mut pattern = self.parse_pattern()?;
+            self.expect(")")?;
+            pattern.all_shortest_paths = true;
+            pattern
         } else {
             self.parse_pattern()?
         };
         if pattern.shortest_path && pattern.segment_edge_counts.len() != 1 {
             return Err(CypherError::ParseError(
                 "shortestPath requires a single connected pattern".to_string(),
+            ));
+        }
+        if pattern.all_shortest_paths && pattern.segment_edge_counts.len() != 1 {
+            return Err(CypherError::ParseError(
+                "allShortestPaths requires a single connected pattern".to_string(),
             ));
         }
         if path_variable.is_some() && pattern.segment_edge_counts.len() != 1 {

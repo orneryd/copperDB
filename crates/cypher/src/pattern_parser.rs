@@ -42,6 +42,7 @@ impl<'a> ParseContext<'a> {
         Ok(Pattern {
             path_variable: None,
             shortest_path: false,
+            all_shortest_paths: false,
             nodes,
             edges,
             segment_edge_counts,

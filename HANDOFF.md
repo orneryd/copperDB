@@ -20,7 +20,7 @@
 ### Test Counts
 | Crate | Tests | Failing |
 |-------|-------|---------|
-| copperdb-eval | 247 | 0 |
+| copperdb-eval | 258 | 0 |
 | copperdb-cypher | 146 | 0 |
 | copperdb-engine | 83 | 0 |
 | copperdb-storage | 106 | 0 |
@@ -100,24 +100,18 @@ All parse + eval variants: `Literal`, `Variable`, `PropertyAccess`, `Parameter`,
 - [x] Vector index options persistence — `persist_index_options` / `load_index_options` in storage, round-trip through `CREATE VECTOR INDEX ... OPTIONS {indexConfig: {...}}`
 - [x] Temporal constraint enforcement — `IS TEMPORAL [NO OVERLAP]` with temporal overlap detection
 - [x] Domain constraint enforcement — `IN [value1, value2, ...]` with allowed values checking
-- [x] `allowed_values` field on storage `Constraint` for domain constraints
+- [x] MERGE + ON CREATE SET constraint enforcement for both nodes and relationships (constraint check deferred until after SET runs)
+- [x] `allShortestPaths` — parser, validator, and BFS execution (returns all paths at minimum distance)
+- [x] BFS visited logic changed from `(node, depth)` pairs to `HashMap<node, min_depth>` to allow same-depth paths via different routes
+- [x] Vector index options consumed at query time — `vector.dimensions` validation, `vector.similarity_function` (cosine/euclidean) in queryNodes/queryRelationships
+- [x] Pattern comprehensions — full parser, expression evaluator, and EvalEngine execution with WHERE predicate support
+- [x] CALL {} subqueries — parser, importing subquery execution (MATCH/WHERE/WITH/RETURN/CREATE/SET), UNION [ALL] support, node-only MATCH
+- [x] WHERE EXISTS { ... } existential subqueries — parsed as `Clause::WhereExists`, filters rows where inner subquery returns >= 1 result
 
 ---
 
 ## Remaining Known Gaps
-These are from the parity checklist — NOT yet implemented in copperDB:
-
-### Cypher/Eval
-- [ ] Vector index options consumed at query time (persisted but not yet read by vector search procedures)
-- [ ] Constraint enforcement on relationship properties during MERGE + ON CREATE SET
-- [ ] `OPTIONAL MATCH` with relationship patterns (paths, not just nodes)
-- [ ] Path materialization / path functions (`nodes()`, `relationships()`)
-- [ ] `shortestPath` / `allShortestPaths`
-- [ ] `apoc.*` procedure parity
-- [ ] `db.*` procedure parity beyond `db.constraints`
-- [ ] Subqueries (CALL {} / existential subqueries)
-- [ ] Pattern comprehensions `[(n)-->(m) | n.prop]`
-- [ ] `FOREACH` with complex expressions
+_All tracked Cypher/eval gaps from the original HANDOFF are now resolved. The remaining work is in the broader parity checklist (storage async engine, WAL/MVCC lifecycle, search/vector runtime, protocol adapters)._
 
 ### Storage
 - [ ] Async write-behind

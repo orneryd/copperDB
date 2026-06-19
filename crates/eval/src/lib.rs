@@ -5,9 +5,10 @@
 use copperdb_cypher::{
     hot_path_trace::{HotPathTrace, HotPathTraceState},
     Clause, ConstraintEntityType as CypherConstraintEntityType, ConstraintKind, EdgeDirection,
-    EdgePattern, Expression, LiteralValue, NodePattern, Pattern, PatternInfo, PipelineClause,
-    PipelineClauseKind, PropertyEntry, Query, QueryPattern, RemoveItem, ReturnItem, SetItem,
-    ShapeKind, ShapeMatch, ShapeValue, WithClause,
+    EdgePattern, Expression, LiteralValue, NodePattern, Pattern, PatternComprehension,
+    PatternInfo, PipelineClause, PipelineClauseKind, PropertyEntry, Query, QueryPattern,
+    RemoveItem, ReturnItem, SetItem, ShapeKind, ShapeMatch, ShapeValue, SubqueryClause,
+    WithClause,
 };
 use copperdb_filter::{eval_expression, eval_predicate};
 use copperdb_indexing::{CatalogRangeIndexComparison, IndexCatalog, IndexError};
@@ -432,6 +433,12 @@ fn collect_expression_variables(expression: &Expression, variables: &mut HashSet
         }
         Expression::ListComprehension(comp) => {
             collect_expression_variables(&comp.list, variables);
+            if let Some(ref pred) = comp.predicate {
+                collect_expression_variables(pred, variables);
+            }
+            collect_expression_variables(&comp.expression, variables);
+        }
+        Expression::PatternComprehension(comp) => {
             if let Some(ref pred) = comp.predicate {
                 collect_expression_variables(pred, variables);
             }

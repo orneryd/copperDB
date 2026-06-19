@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::{
     parse_context::ParseContext, parser_support::dominant_query_type, Clause, CypherError,
-    Expression, Query, ReturnClause, ReturnItem,
+    Expression, Query, ReturnClause, ReturnItem, SubqueryBlock, SubqueryClause,
 };
 
 impl<'a> ParseContext<'a> {
@@ -18,37 +18,129 @@ impl<'a> ParseContext<'a> {
             match token {
                 token if token.eq_ignore_ascii_case("CALL") => {
                     self.advance();
-                    let clause = self.parse_call()?;
-                    let has_yield = !clause.yield_items.is_empty();
-                    clauses.push(Clause::Call(clause));
-
-                    // Neo4j-compatible: CALL ... YIELD x SKIP n / LIMIT n
-                    // generates an implicit RETURN * with those modifiers
-                    if has_yield && self.peek_is_one_of(&["SKIP", "LIMIT"]) {
-                        let mut skip: Option<Expression> = None;
-                        let mut limit: Option<Expression> = None;
+                    // CALL { ... } subquery vs CALL procedureName(...)
+                    if self.peek() == Some("{") {
+                        self.advance(); // consume {
+                        let mut blocks: Vec<SubqueryBlock> = Vec::new();
                         loop {
-                            if self.peek_is("SKIP") {
+                            let mut sub_clauses = Vec::new();
+                            loop {
+                                if self.peek() == Some("}") || self.peek() == Some("UNION") {
+                                    break;
+                                }
+                                if self.pos >= self.tokens.len() {
+                                    return Err(CypherError::ParseError(
+                                        "unterminated CALL {} subquery".into(),
+                                    ));
+                                }
+                                let inner_token = match self.peek() {
+                                    Some(t) => t,
+                                    None => break,
+                                };
+                                match inner_token {
+                                    t if t.eq_ignore_ascii_case("MATCH") => {
+                                        self.advance();
+                                        sub_clauses.push(Clause::Match(self.parse_match(false)?));
+                                    }
+                                    t if t.eq_ignore_ascii_case("OPTIONAL") => {
+                                        self.advance();
+                                        self.expect("MATCH")?;
+                                        sub_clauses.push(Clause::OptionalMatch(
+                                            self.parse_match(true)?,
+                                        ));
+                                    }
+                                    t if t.eq_ignore_ascii_case("CREATE") => {
+                                        self.advance();
+                                        sub_clauses.push(Clause::Create(self.parse_create()?));
+                                    }
+                                    t if t.eq_ignore_ascii_case("MERGE") => {
+                                        self.advance();
+                                        sub_clauses.push(Clause::Merge(self.parse_merge()?));
+                                    }
+                                    t if t.eq_ignore_ascii_case("WITH") => {
+                                        self.advance();
+                                        sub_clauses.push(Clause::With(self.parse_with()?));
+                                    }
+                                    t if t.eq_ignore_ascii_case("RETURN") => {
+                                        self.advance();
+                                        sub_clauses.push(Clause::Return(self.parse_return()?));
+                                    }
+                                    t if t.eq_ignore_ascii_case("SET") => {
+                                        self.advance();
+                                        sub_clauses.push(Clause::Set(self.parse_set()?));
+                                    }
+                                    t if t.eq_ignore_ascii_case("DELETE") => {
+                                        self.advance();
+                                        sub_clauses
+                                            .push(Clause::Delete(self.parse_delete(false)?));
+                                    }
+                                    t if t.eq_ignore_ascii_case("WHERE") => {
+                                        self.advance();
+                                        sub_clauses.push(Clause::Where(self.parse_where()?));
+                                    }
+                                    t if t.eq_ignore_ascii_case("UNWIND") => {
+                                        self.advance();
+                                        sub_clauses.push(Clause::Unwind(self.parse_unwind()?));
+                                    }
+                                    other => {
+                                        return Err(CypherError::ParseError(format!(
+                                            "unsupported clause in CALL {{}}: {}",
+                                            other
+                                        )));
+                                    }
+                                }
+                            }
+                            let union_all = self.peek_is("UNION");
+                            blocks.push(SubqueryBlock {
+                                clauses: sub_clauses,
+                                union_all,
+                            });
+                            if union_all {
+                                self.advance(); // UNION
+                                if self.peek_is("ALL") {
+                                    self.advance();
+                                    // set union_all on the already-pushed block
+                                    blocks.last_mut().unwrap().union_all = true;
+                                }
+                            } else if self.peek() == Some("}") {
                                 self.advance();
-                                skip = Some(self.parse_expression_item(&["LIMIT", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE"])?);
-                            } else if self.peek_is("LIMIT") {
-                                self.advance();
-                                limit = Some(self.parse_expression_item(&["SKIP", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE"])?);
-                            } else {
                                 break;
                             }
                         }
-                        let wildcard = ReturnItem {
-                            expression: Expression::Variable("*".to_string()),
-                            alias: None,
-                        };
-                        clauses.push(Clause::Return(ReturnClause {
-                            items: vec![wildcard],
-                            order_by: vec![],
-                            skip,
-                            limit,
-                            distinct: false,
-                        }));
+                        clauses.push(Clause::Subquery(SubqueryClause { blocks }));
+                    } else {
+                        let clause = self.parse_call()?;
+                        let has_yield = !clause.yield_items.is_empty();
+                        clauses.push(Clause::Call(clause));
+
+                        // Neo4j-compatible: CALL ... YIELD x SKIP n / LIMIT n
+                        // generates an implicit RETURN * with those modifiers
+                        if has_yield && self.peek_is_one_of(&["SKIP", "LIMIT"]) {
+                            let mut skip: Option<Expression> = None;
+                            let mut limit: Option<Expression> = None;
+                            loop {
+                                if self.peek_is("SKIP") {
+                                    self.advance();
+                                    skip = Some(self.parse_expression_item(&["LIMIT", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE"])?);
+                                } else if self.peek_is("LIMIT") {
+                                    self.advance();
+                                    limit = Some(self.parse_expression_item(&["SKIP", "RETURN", "WITH", "MATCH", "CREATE", "MERGE", "SET", "DELETE", "DETACH", "REMOVE", "CALL", "UNWIND", "ORDER", "WHERE"])?);
+                                } else {
+                                    break;
+                                }
+                            }
+                            let wildcard = ReturnItem {
+                                expression: Expression::Variable("*".to_string()),
+                                alias: None,
+                            };
+                            clauses.push(Clause::Return(ReturnClause {
+                                items: vec![wildcard],
+                                order_by: vec![],
+                                skip,
+                                limit,
+                                distinct: false,
+                            }));
+                        }
                     }
                 }
                 token if token.eq_ignore_ascii_case("MATCH") => {
@@ -140,8 +232,14 @@ impl<'a> ParseContext<'a> {
                 }
                 token if token.eq_ignore_ascii_case("WHERE") => {
                     self.advance();
-                    let clause = self.parse_where()?;
-                    clauses.push(Clause::Where(clause));
+                    if self.peek_is("EXISTS") && self.tokens.get(self.pos + 1) == Some(&"{") {
+                        self.advance(); // EXISTS
+                        let subquery = self.parse_subquery_body()?;
+                        clauses.push(Clause::WhereExists(subquery));
+                    } else {
+                        let clause = self.parse_where()?;
+                        clauses.push(Clause::Where(clause));
+                    }
                 }
                 token if token.eq_ignore_ascii_case("SET") => {
                     self.advance();
@@ -348,6 +446,66 @@ impl<'a> ParseContext<'a> {
             query_type,
             clauses,
             parameters: HashMap::new(),
+        })
+    }
+
+    /// Parse `{ MATCH ... [WHERE ...] }` body for EXISTS / CALL {} subqueries.
+    fn parse_subquery_body(&mut self) -> Result<SubqueryClause, CypherError> {
+        self.expect("{")?;
+        let mut sub_clauses = Vec::new();
+        loop {
+            if self.peek() == Some("}") {
+                self.advance();
+                break;
+            }
+            if self.pos >= self.tokens.len() {
+                return Err(CypherError::ParseError(
+                    "unterminated subquery body".into(),
+                ));
+            }
+            let token = match self.peek() {
+                Some(t) => t,
+                None => break,
+            };
+            match token {
+                t if t.eq_ignore_ascii_case("MATCH") => {
+                    self.advance();
+                    sub_clauses.push(Clause::Match(self.parse_match(false)?));
+                }
+                t if t.eq_ignore_ascii_case("OPTIONAL") => {
+                    self.advance();
+                    self.expect("MATCH")?;
+                    sub_clauses.push(Clause::OptionalMatch(self.parse_match(true)?));
+                }
+                t if t.eq_ignore_ascii_case("WHERE") => {
+                    self.advance();
+                    sub_clauses.push(Clause::Where(self.parse_where()?));
+                }
+                t if t.eq_ignore_ascii_case("WITH") => {
+                    self.advance();
+                    sub_clauses.push(Clause::With(self.parse_with()?));
+                }
+                t if t.eq_ignore_ascii_case("RETURN") => {
+                    self.advance();
+                    sub_clauses.push(Clause::Return(self.parse_return()?));
+                }
+                t if t.eq_ignore_ascii_case("CREATE") => {
+                    self.advance();
+                    sub_clauses.push(Clause::Create(self.parse_create()?));
+                }
+                other => {
+                    return Err(CypherError::ParseError(format!(
+                        "unsupported clause in subquery body: {}",
+                        other
+                    )));
+                }
+            }
+        }
+        Ok(SubqueryClause {
+            blocks: vec![SubqueryBlock {
+                clauses: sub_clauses,
+                union_all: false,
+            }],
         })
     }
 }

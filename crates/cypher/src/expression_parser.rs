@@ -1,6 +1,6 @@
 use crate::{
-    parse_context::ParseContext, BinaryExpression, CypherError, Expression, LiteralValue,
-    PropertyEntry,
+    parse_context::ParseContext, BinaryExpression, CypherError, EdgeDirection, EdgePattern,
+    Expression, LiteralValue, NodePattern, Pattern, PatternComprehension, PropertyEntry,
 };
 
 impl<'a> ParseContext<'a> {
@@ -245,11 +245,17 @@ impl<'a> ParseContext<'a> {
             }
             Some("[") => {
                 // Try list comprehension: [var IN list [WHERE pred] | expr]
+                // Try pattern comprehension: [(pattern) [WHERE pred] | expr]
                 let saved = self.pos;
                 self.advance(); // consume [
                 if self.peek() == Some("]") {
                     self.advance();
                     return Ok(Expression::ListLiteral(Vec::new()));
+                }
+                // Check for pattern comprehension: starts with (
+                if self.peek() == Some("(") {
+                    self.pos = saved;
+                    return self.parse_pattern_comprehension();
                 }
                 if let Some(_) = self.advance() {
                     if self.peek_is("IN") {
@@ -549,6 +555,130 @@ impl<'a> ParseContext<'a> {
             predicate,
             expression: Box::new(expression),
         }))
+    }
+
+    fn parse_pattern_comprehension(&mut self) -> Result<Expression, CypherError> {
+
+        self.expect("[")?;
+
+        // Parse start node: (var:Label) or ()
+        let start_node = self.parse_pc_node()?;
+
+        // Parse relationship: -[:TYPE*..]-> or -->
+        let edge = self.parse_pc_edge()?;
+
+        // Parse end node: (var:Label) or ()
+        let end_node = self.parse_pc_node()?;
+
+        let pattern = Pattern {
+            path_variable: None,
+            shortest_path: false,
+            all_shortest_paths: false,
+            nodes: vec![start_node, end_node],
+            edges: vec![edge],
+            segment_edge_counts: vec![1],
+        };
+
+        // Optional WHERE clause
+        let predicate = if self.peek_is("WHERE") {
+            self.advance();
+            Some(Box::new(self.parse_expression_item(&["|", "]"])?))
+        } else {
+            None
+        };
+
+        self.expect("|")?;
+        let expression = self.parse_expression_item(&["]"])?;
+        self.expect("]")?;
+
+        Ok(Expression::PatternComprehension(PatternComprehension {
+            pattern,
+            predicate,
+            expression: Box::new(expression),
+        }))
+    }
+
+    fn parse_pc_node(&mut self) -> Result<NodePattern, CypherError> {
+        self.expect("(")?;
+        if self.peek() == Some(")") {
+            self.advance();
+            return Ok(NodePattern { variable: None, labels: Vec::new(), properties: Vec::new() });
+        }
+        let variable = if self.peek().map_or(false, |t| !t.starts_with(':') && t != "{") {
+            Some(self.advance_identifier()?)
+        } else {
+            None
+        };
+        let mut labels = Vec::new();
+        while self.peek() == Some(":") {
+            self.advance();
+            labels.push(self.advance_identifier()?);
+        }
+        self.expect(")")?;
+        Ok(NodePattern { variable, labels, properties: Vec::new() })
+    }
+
+    fn parse_pc_edge(&mut self) -> Result<EdgePattern, CypherError> {
+        use crate::{EdgePattern, EdgeDirection};
+        // Determine direction: <--, -->, or --
+        let direction = if self.peek() == Some("<") {
+            self.advance();
+            self.expect("-")?;
+            EdgeDirection::Incoming
+        } else {
+            self.expect("-")?;
+            EdgeDirection::Outgoing
+        };
+        let (rel_type, min_hops, max_hops) = if self.peek() == Some("[") {
+            self.advance();
+            // Skip optional variable
+            if self.peek().map_or(false, |t| t != ":" && t != "*" && t != "]") {
+                let id = self.advance_identifier()?;
+                if self.peek() == Some(":") {
+                    self.advance();
+                    let rt = self.advance_identifier()?;
+                    self.expect("]")?;
+                    (Some(rt), None, None)
+                } else {
+                    // Just a variable, no type
+                    self.expect("]")?;
+                    (Some(id), None, None)
+                }
+            } else if self.peek() == Some(":") {
+                self.advance();
+                let rt = self.advance_identifier()?;
+                self.expect("]")?;
+                (Some(rt), None, None)
+            } else {
+                self.expect("]")?;
+                (None, None, None)
+            }
+        } else if self.peek() == Some(">") {
+            // Simple --> (no brackets)
+            self.advance();
+            return Ok(EdgePattern {
+                variable: None, rel_type: None,
+                direction: EdgeDirection::Outgoing,
+                min_hops: None, max_hops: None, properties: Vec::new(),
+            });
+        } else {
+            (None, None, None)
+        };
+
+        // After bracket, consume optional - and > for directed edges
+        if self.peek() == Some("-") {
+            self.advance();
+            if self.peek() == Some(">") {
+                self.advance();
+            }
+        } else if self.peek() == Some(">") {
+            self.advance();
+        }
+
+        Ok(EdgePattern {
+            variable: None, rel_type, direction,
+            min_hops, max_hops, properties: Vec::new(),
+        })
     }
 
     fn parse_reduce_expression(&mut self) -> Result<Expression, CypherError> {

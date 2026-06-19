@@ -19,6 +19,72 @@ impl EvalEngine {
         self.hot_path_trace.snapshot()
     }
 
+    /// Project a row to only the returned columns, with pattern comprehension support.
+    pub fn project_row(
+        &self,
+        row: &Row,
+        items: &[ReturnItem],
+        params: &HashMap<String, Value>,
+    ) -> Result<Row, EvalError> {
+        let mut result = HashMap::new();
+        for item in items {
+            if matches!(&item.expression, Expression::Variable(v) if v == "*") {
+                for (key, val) in row.iter() {
+                    result.insert(key.clone(), val.clone());
+                }
+                continue;
+            }
+            let col = column_name(item);
+            let val = self.evaluate_expression(&item.expression, row, params)?;
+            result.insert(col, val);
+        }
+        Ok(result)
+    }
+
+    /// Evaluate an expression with storage-backed pattern comprehension support.
+    /// Wraps the filter's `eval_expression` to handle PatternComprehension nodes.
+    pub fn evaluate_expression(
+        &self,
+        expr: &Expression,
+        row: &Row,
+        params: &HashMap<String, Value>,
+    ) -> Result<Value, EvalError> {
+        // Check if the expression tree contains a PatternComprehension at the top level
+        match expr {
+            Expression::PatternComprehension(comp) => {
+                self.evaluate_pattern_comprehension(comp, row, params)
+            }
+            _ => copperdb_filter::eval_expression(expr, row, params)
+                .map_err(|e| EvalError::FilterError(e.to_string())),
+        }
+    }
+
+    /// Execute a pattern comprehension: match the pattern, filter, and project.
+    fn evaluate_pattern_comprehension(
+        &self,
+        comp: &PatternComprehension,
+        row: &Row,
+        params: &HashMap<String, Value>,
+    ) -> Result<Value, EvalError> {
+        // Match the pattern against the graph
+        let matched_rows =
+            self.match_relationship_pattern(&[row.clone()], &comp.pattern, params, None)?;
+
+        let mut results = Vec::new();
+        for matched_row in &matched_rows {
+            // Evaluate predicate if present
+            if let Some(ref pred) = comp.predicate {
+                if !eval_predicate(pred, matched_row, params)? {
+                    continue;
+                }
+            }
+            // Evaluate projection expression
+            let value = self.evaluate_expression(&comp.expression, matched_row, params)?;
+            results.push(value);
+        }
+        Ok(Value::Array(results))
+    }
+
     fn with_access_buffer<T, F>(&self, operation: F) -> Result<T, EvalError>
     where
         F: FnOnce() -> Result<T, EvalError>,
@@ -937,14 +1003,14 @@ impl EvalEngine {
                     } else {
                         current_rows
                             .iter()
-                            .map(|row| project_row(row, &ret.items, params))
+                            .map(|row| self.project_row(row, &ret.items, params))
                             .collect::<Result<Vec<_>, _>>()?
                     };
                     // If aggregation produced empty result but we had rows, fall back
                     if non_count_agg && rows.is_empty() && !current_rows.is_empty() {
                         rows = current_rows
                             .iter()
-                            .map(|row| project_row(row, &ret.items, params))
+                            .map(|row| self.project_row(row, &ret.items, params))
                             .collect::<Result<Vec<_>, _>>()?;
                     }
 
@@ -980,7 +1046,7 @@ impl EvalEngine {
                     } else {
                         current_rows
                             .iter()
-                            .map(|row| project_row(row, &with.items, params))
+                            .map(|row| self.project_row(row, &with.items, params))
                             .collect::<Result<Vec<_>, _>>()?
                     };
 
@@ -1007,7 +1073,7 @@ impl EvalEngine {
                 Clause::Unwind(unwind) => {
                     let mut new_rows = pooled_binding_rows();
                     for row in &current_rows {
-                        let list_val = eval_expression(&unwind.expression, row, params)?;
+                        let list_val = self.evaluate_expression(&unwind.expression, row, params)?;
                         if let Value::Array(items) = list_val {
                             for item in items {
                                 let mut new_row = row.clone();
@@ -1021,7 +1087,7 @@ impl EvalEngine {
 
                 Clause::Foreach(foreach) => {
                     for row in &mut *current_rows {
-                        let list_val = eval_expression(&foreach.list, row, params)?;
+                        let list_val = self.evaluate_expression(&foreach.list, row, params)?;
                         if let Value::Array(items) = list_val {
                             for item in items {
                                 // Bind loop variable directly on the row
@@ -1045,6 +1111,14 @@ impl EvalEngine {
                 Clause::Merge(merge) => {
                     current_rows =
                         self.execute_merge_clause(&current_rows, merge, params, &mut stats)?;
+                }
+
+                Clause::Subquery(sub) => {
+                    current_rows = self.execute_subquery(&current_rows, sub, params)?;
+                }
+
+                Clause::WhereExists(sub) => {
+                    current_rows = self.execute_where_exists(&current_rows, sub, params)?;
                 }
             }
             clause_index += 1;
@@ -1256,7 +1330,7 @@ impl EvalEngine {
                 variable.clone(),
                 Value::Object(node_record_to_props(&node).into_iter().collect()),
             );
-            rows.push(project_row(&binding_row, &ret.items, params)?);
+            rows.push(self.project_row(&binding_row, &ret.items, params)?);
 
             if rows.len() == limit {
                 break;
@@ -1315,7 +1389,7 @@ impl EvalEngine {
                 pattern_info.end_var.clone(),
                 Value::Object(end_props.clone().into_iter().collect()),
             );
-            rows.push(project_row(&binding_row, &ret.items, &HashMap::new())?);
+            rows.push(self.project_row(&binding_row, &ret.items, &HashMap::new())?);
         }
 
         if !ret.order_by.is_empty() {
@@ -1815,7 +1889,7 @@ impl EvalEngine {
                 Clause::With(with) => {
                     let mut projected: Vec<Row> = current_rows
                         .iter()
-                        .map(|row| project_row(row, &with.items, params))
+                        .map(|row| self.project_row(row, &with.items, params))
                         .collect::<Result<Vec<_>, _>>()?;
 
                     if let Some(where_clause) = &with.where_clause {
@@ -1840,7 +1914,7 @@ impl EvalEngine {
                 Clause::Unwind(unwind) => {
                     let mut new_rows = pooled_binding_rows();
                     for row in &current_rows {
-                        let list_val = eval_expression(&unwind.expression, row, params)?;
+                        let list_val = self.evaluate_expression(&unwind.expression, row, params)?;
                         if let Value::Array(items) = list_val {
                             for item in items {
                                 let mut new_row = row.clone();
@@ -1878,7 +1952,7 @@ impl EvalEngine {
 
                     let mut rows: Vec<Row> = current_rows
                         .iter()
-                        .map(|row| project_row(row, &ret.items, params))
+                        .map(|row| self.project_row(row, &ret.items, params))
                         .collect::<Result<Vec<_>, _>>()?;
 
                     if ret.distinct {
@@ -1939,7 +2013,7 @@ impl EvalEngine {
             for item in items {
                 match item {
                     SetItem::Property { variable, property, value } => {
-                        let new_val = eval_expression(value, row, params)?;
+                        let new_val = self.evaluate_expression(value, row, params)?;
                         if let Some(Value::Object(props)) = row.get_mut(variable) {
                             props.insert(property.clone(), new_val);
                             stats.properties_set += 1;
@@ -1949,7 +2023,7 @@ impl EvalEngine {
                         }
                     }
                     SetItem::MapAssignment { variable, value } => {
-                        let new_val = eval_expression(value, row, params)?;
+                        let new_val = self.evaluate_expression(value, row, params)?;
                         if let Value::Object(map) = &new_val {
                             if let Some(Value::Object(props)) = row.get_mut(variable) {
                                 for (k, v) in map {
@@ -1963,7 +2037,7 @@ impl EvalEngine {
                         }
                     }
                     SetItem::MapMerge { variable, value } => {
-                        let new_val = eval_expression(value, row, params)?;
+                        let new_val = self.evaluate_expression(value, row, params)?;
                         if let Value::Object(map) = &new_val {
                             if let Some(Value::Object(props)) = row.get_mut(variable) {
                                 let mut merged = 0usize;
@@ -2005,7 +2079,7 @@ impl EvalEngine {
                         variable,
                         expression,
                     } => {
-                        let val = eval_expression(expression, row, params)?;
+                        let val = self.evaluate_expression(expression, row, params)?;
                         let Some(Value::Object(props)) = row.get_mut(variable) else {
                             continue;
                         };
@@ -2821,6 +2895,157 @@ impl EvalEngine {
         Ok(output_rows)
     }
 
+    /// Execute WHERE EXISTS { ... }: filter rows where subquery returns >= 1 result.
+    fn execute_where_exists(
+        &self,
+        rows: &[Row],
+        sub: &SubqueryClause,
+        params: &HashMap<String, Value>,
+    ) -> Result<Vec<Row>, EvalError> {
+        let mut result = Vec::new();
+        for row in rows {
+            let sub_results =
+                self.execute_subquery_block(std::slice::from_ref(row), &sub.blocks[0].clauses, params)?;
+            if !sub_results.is_empty() {
+                result.push(row.clone());
+            }
+        }
+        Ok(result)
+    }
+
+    /// Execute a CALL {} subquery: iterate outer rows, execute inner clauses, merge results.
+    fn execute_subquery(
+        &self,
+        outer_rows: &[Row],
+        sub: &SubqueryClause,
+        params: &HashMap<String, Value>,
+    ) -> Result<Vec<Row>, EvalError> {
+        let mut result = Vec::new();
+        for block in &sub.blocks {
+            let block_rows = self.execute_subquery_block(outer_rows, &block.clauses, params)?;
+            result.extend(block_rows);
+        }
+        // UNION (without ALL): deduplicate
+        if sub.blocks.len() > 1 && !sub.blocks.iter().any(|b| b.union_all) {
+            let mut seen = std::collections::HashSet::new();
+            result.retain(|r| seen.insert(row_key(r)));
+        }
+        Ok(result)
+    }
+
+    fn execute_subquery_block(
+        &self,
+        outer_rows: &[Row],
+        clauses: &[Clause],
+        params: &HashMap<String, Value>,
+    ) -> Result<Vec<Row>, EvalError> {
+        let mut result = Vec::new();
+        for outer_row in outer_rows {
+            let mut current: Vec<Row> = vec![outer_row.clone()];
+            for clause in clauses {
+                match clause {
+                    Clause::Match(m) => {
+                        let mut new_rows = Vec::new();
+                        for row in &current {
+                            if m.pattern.edges.is_empty() {
+                                // Node-only match — use matching_node_props
+                                let mut rows = self.execute_node_match_clause(
+                                    &[row.clone()],
+                                    &m.pattern,
+                                    params,
+                                    None,
+                                )?;
+                                new_rows.append(&mut rows);
+                            } else {
+                                let matched = self.match_relationship_pattern(
+                                    &[row.clone()],
+                                    &m.pattern,
+                                    params,
+                                    None,
+                                )?;
+                                new_rows.extend(matched);
+                            }
+                        }
+                        current = new_rows;
+                    }
+                    Clause::OptionalMatch(m) => {
+                        let mut new_rows = Vec::new();
+                        for row in &current {
+                            let matched = self.match_relationship_pattern(
+                                &[row.clone()],
+                                &m.pattern,
+                                params,
+                                None,
+                            )?;
+                            if matched.is_empty() {
+                                let mut null_row = row.clone();
+                                bind_optional_pattern_nulls(&mut null_row, &m.pattern);
+                                new_rows.push(null_row);
+                            } else {
+                                new_rows.extend(matched);
+                            }
+                        }
+                        current = new_rows;
+                    }
+                    Clause::Where(w) => {
+                        current.retain(|row| {
+                            eval_predicate(&w.expression, row, params).unwrap_or(false)
+                        });
+                    }
+                    Clause::With(w) => {
+                        let mut new_rows = Vec::new();
+                        for row in &current {
+                            new_rows.push(self.project_row(row, &w.items, params)?);
+                        }
+                        current = new_rows;
+                    }
+                    Clause::Return(r) => {
+                        let mut rows: Vec<Row> = current
+                            .iter()
+                            .map(|row| self.project_row(row, &r.items, params))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        if r.distinct {
+                            let mut seen = std::collections::HashSet::new();
+                            rows.retain(|r| seen.insert(row_key(r)));
+                        }
+                        result.extend(rows);
+                        current.clear();
+                    }
+                    Clause::Create(c) => {
+                        let mut new_rows = Vec::new();
+                        for row in &current {
+                            let mut r = row.clone();
+                            let mut stats = QueryStats::default();
+                            self.execute_pattern_create_segment(
+                                &mut r,
+                                &c.pattern,
+                                &mut stats,
+                                params,
+                            )?;
+                            new_rows.push(r);
+                        }
+                        current = new_rows;
+                    }
+                    Clause::Set(s) => {
+                        self.execute_set_clause(
+                            &mut current,
+                            &s.items,
+                            params,
+                            &mut QueryStats::default(),
+                        )?;
+                    }
+                    _ => {
+                        return Err(EvalError::ExecutionError(
+                            "unsupported clause in CALL {} subquery".into(),
+                        ));
+                    }
+                }
+            }
+            result.extend(current);
+        }
+        Ok(result)
+    }
+
     fn execute_merge_clause(
         &self,
         base_rows: &[Row],
@@ -2938,15 +3163,16 @@ impl EvalEngine {
                                     .collect(),
                             ),
                         );
-                        self.check_node_constraints(labels, &props)?;
-                        self.persist_node_props(&props)?;
-                        stats.nodes_created += 1;
-                        stats.properties_set += node_pat.properties.len();
-                        let mut created = serde_json::to_value(&props)
-                            .map_err(|e| EvalError::SerializationError(e.to_string()))?;
 
-                        // ON CREATE SET items
+                        // ON CREATE SET items — defer constraint check and persistence
+                        // until after SET has run, since SET may add required properties.
                         if !merge.on_create.is_empty() {
+                            self.persist_node_props(&props)?;
+                            stats.nodes_created += 1;
+                            stats.properties_set += node_pat.properties.len();
+                            let mut created = serde_json::to_value(&props)
+                                .map_err(|e| EvalError::SerializationError(e.to_string()))?;
+
                             let mut create_row = base_row.clone();
                             if let Some(var) = &node_pat.variable {
                                 create_row.insert(var.clone(), created.clone());
@@ -2961,13 +3187,24 @@ impl EvalEngine {
                                 if let Some(Value::Object(updated_props)) = create_row.get(var) {
                                     let persisted: HashMap<String, Value> =
                                         updated_props.clone().into_iter().collect();
+                                    // Validate constraints after ON CREATE SET
+                                    self.check_node_constraints(labels, &persisted)?;
                                     self.persist_node_props(&persisted)?;
                                     created = Value::Object(updated_props.clone());
                                 }
                             }
+                            self.cache_merge_node(labels, &merge_props, &created);
+                            created
+                        } else {
+                            self.check_node_constraints(labels, &props)?;
+                            self.persist_node_props(&props)?;
+                            stats.nodes_created += 1;
+                            stats.properties_set += node_pat.properties.len();
+                            let mut created = serde_json::to_value(&props)
+                                .map_err(|e| EvalError::SerializationError(e.to_string()))?;
+                            self.cache_merge_node(labels, &merge_props, &created);
+                            created
                         }
-                        self.cache_merge_node(labels, &merge_props, &created);
-                        created
                     }
                 };
 
@@ -2994,6 +3231,11 @@ impl EvalEngine {
 
                 let start_id = self.resolve_bound_node_id(base_row, start_node)?;
                 let end_id = self.resolve_bound_node_id(base_row, end_node)?;
+
+                // Clone for later constraint checking (before they move into edge_val)
+                let edge_type_for_check = edge_type.clone();
+                let start_id_for_check = start_id.clone();
+                let end_id_for_check = end_id.clone();
 
                 let existing_edges = self.storage.get_edges_by_type(&edge_type)?;
                 let found = existing_edges.iter().find(|e| {
@@ -3045,6 +3287,19 @@ impl EvalEngine {
                         params,
                         stats,
                     )?;
+                    // After ON CREATE SET, validate constraints on the updated properties
+                    if let Some(var) = &edge_pat.variable {
+                        if let Some(Value::Object(props)) = row.get(var) {
+                            let updated_props: HashMap<String, Value> =
+                                props.clone().into_iter().collect();
+                            self.check_relationship_constraints(
+                                &edge_type_for_check,
+                                &updated_props,
+                                &start_id_for_check,
+                                &end_id_for_check,
+                            )?;
+                        }
+                    }
                 } else if !is_new && !merge.on_match.is_empty() {
                     self.execute_set_clause(
                         std::slice::from_mut(&mut row),
@@ -3195,6 +3450,17 @@ impl EvalEngine {
                     if let Some(best) = matched_rows.into_iter().min_by_key(|matched| matched.hops)
                     {
                         rows.push(best.row);
+                    }
+                } else if pattern.all_shortest_paths {
+                    // Find min hops, return all paths at that minimum distance
+                    let min_hops = matched_rows.iter().map(|m| m.hops).min();
+                    if let Some(min) = min_hops {
+                        rows.extend(
+                            matched_rows
+                                .into_iter()
+                                .filter(|m| m.hops == min)
+                                .map(|m| m.row),
+                        );
                     }
                 } else {
                     rows.extend(matched_rows.into_iter().map(|matched| matched.row));
@@ -3384,7 +3650,7 @@ impl EvalEngine {
         let expected_edge_props =
             evaluate_pattern_properties(&edge_pattern.properties, row, params)?;
         let mut frontier = VecDeque::new();
-        let mut visited = HashSet::new();
+        let mut visited: HashMap<String, u32> = HashMap::new();
         let mut matches = Vec::new();
 
         frontier.push_back((
@@ -3393,7 +3659,7 @@ impl EvalEngine {
             vec![start_id.clone()],
             Vec::<EdgeRecord>::new(),
         ));
-        visited.insert((start_id.clone(), 0_u32));
+        visited.insert(start_id.clone(), 0_u32);
 
         while let Some((current_id, depth, path_node_ids, path_edges)) = frontier.pop_front() {
             Self::check_current_request_context()?;
@@ -3469,10 +3735,13 @@ impl EvalEngine {
                     continue;
                 };
                 let next_depth = depth + 1;
-                let visit_key = (next_id.clone(), next_depth);
-                if !visited.insert(visit_key) {
-                    continue;
+                let visit_key = next_id.clone();
+                if let Some(&prev_depth) = visited.get(&visit_key) {
+                    if prev_depth < next_depth {
+                        continue;
+                    }
                 }
+                visited.insert(visit_key, next_depth);
                 let mut next_node_ids = path_node_ids.clone();
                 next_node_ids.push(next_id.clone());
                 let mut next_edges = path_edges.clone();
@@ -3735,7 +4004,7 @@ fn extract_node_range_predicate(
             } = &operands.left
             {
                 if left_variable == variable {
-                    let value = eval_expression(&operands.right, row, params)?;
+                    let value = copperdb_filter::eval_expression(&operands.right, row, params)?;
                     return Ok(
                         is_range_comparable_value(&value).then(|| NodeRangePredicate {
                             property: property.clone(),
@@ -3752,7 +4021,7 @@ fn extract_node_range_predicate(
             } = &operands.right
             {
                 if right_variable == variable {
-                    let value = eval_expression(&operands.left, row, params)?;
+                    let value = copperdb_filter::eval_expression(&operands.left, row, params)?;
                     return Ok(
                         is_range_comparable_value(&value).then(|| NodeRangePredicate {
                             property: property.clone(),
@@ -3886,7 +4155,7 @@ fn apply_aggregation_to_rows(
     for row in rows {
         let key: Vec<Value> = non_agg_items
             .iter()
-            .map(|item| eval_expression(&item.expression, row, params).unwrap_or(Value::Null))
+            .map(|item| copperdb_filter::eval_expression(&item.expression, row, params).unwrap_or(Value::Null))
             .collect();
         groups.entry(key).or_default().push(row);
     }
@@ -3930,7 +4199,7 @@ fn compute_agg(
                 Ok(Value::from(
                     rows.iter()
                         .filter(|row| {
-                            eval_expression(arg_expr, row, params)
+                            copperdb_filter::eval_expression(arg_expr, row, params)
                                 .map(|v| v != Value::Null)
                                 .unwrap_or(false)
                         })
@@ -3946,7 +4215,7 @@ fn compute_agg(
             })?;
             let total: f64 = rows
                 .iter()
-                .filter_map(|row| eval_expression(arg, row, params).ok()?.as_f64())
+                .filter_map(|row| copperdb_filter::eval_expression(arg, row, params).ok()?.as_f64())
                 .sum();
             Ok(Value::from(total))
         }
@@ -3956,7 +4225,7 @@ fn compute_agg(
             })?;
             let values: Vec<f64> = rows
                 .iter()
-                .filter_map(|row| eval_expression(arg, row, params).ok()?.as_f64())
+                .filter_map(|row| copperdb_filter::eval_expression(arg, row, params).ok()?.as_f64())
                 .collect();
             if values.is_empty() {
                 Ok(Value::Null)
@@ -3970,7 +4239,7 @@ fn compute_agg(
             })?;
             let min_val = rows
                 .iter()
-                .filter_map(|row| eval_expression(arg, row, params).ok()?.as_f64())
+                .filter_map(|row| copperdb_filter::eval_expression(arg, row, params).ok()?.as_f64())
                 .fold(f64::NAN, |a, b| if a.is_nan() { b } else { a.min(b) });
             if min_val.is_nan() {
                 Ok(Value::Null)
@@ -3984,7 +4253,7 @@ fn compute_agg(
             })?;
             let max_val = rows
                 .iter()
-                .filter_map(|row| eval_expression(arg, row, params).ok()?.as_f64())
+                .filter_map(|row| copperdb_filter::eval_expression(arg, row, params).ok()?.as_f64())
                 .fold(f64::NAN, |a, b| if a.is_nan() { b } else { a.max(b) });
             if max_val.is_nan() {
                 Ok(Value::Null)

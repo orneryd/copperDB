@@ -31,6 +31,14 @@ applyTo: '**'
 - Enforcement: temporal overlap detection (non-null key, overlapping ranges fail), domain value membership check (null allowed).
 - NornicDB reference: `pkg/storage/badger_constraint_validation.go` cases `ConstraintTemporal` and `ConstraintDomain`.
 
+# shortestPath / allShortestPaths
+- Both already implemented at parser and eval levels.
+- `Pattern.shortest_path: bool` and `Pattern.all_shortest_paths: bool`.
+- Parser: `shortestPath(...)` and `allShortestPaths(...)` function syntax.
+- BFS execution: `variable_relationship_step_matches` uses BFS with `HashMap<node_id, min_depth>` visited tracking.
+- `allShortestPaths` returns all paths at the minimum distance (not just one).
+- Visited check: skip only if node was visited at strictly lower depth, allowing same-depth alternative paths.
+
 # Project Architecture
 - Remove anything considered legacy. it is vestigial since this is a new project that is not released yet. Any plan changes to architecture are considered refactor to clean architecture that are not backwards compatible until a 1.0 release
 - copperDB is a Rust Cargo workspace mirroring NornicDB ../NornicDB package structure under `crates/`.

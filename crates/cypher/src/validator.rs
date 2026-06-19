@@ -308,6 +308,17 @@ impl<'a> ParseContext<'a> {
                 ));
             }
             segment_count
+        } else if allow_shortest_path && self.peek_is("ALLSHORTESTPATHS") {
+            self.advance();
+            self.expect("(")?;
+            let segment_count = self.validate_pattern()?;
+            self.expect(")")?;
+            if segment_count != 1 {
+                return Err(CypherError::ParseError(
+                    "allShortestPaths requires a single connected pattern".to_string(),
+                ));
+            }
+            segment_count
         } else {
             self.validate_pattern()?
         };

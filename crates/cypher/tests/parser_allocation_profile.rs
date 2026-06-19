@@ -339,7 +339,9 @@ fn profile_query_shape(query: &Query) -> QueryShapeStats {
             | Clause::AlterPromotionPolicy(_)
             | Clause::DropPromotionPolicy(_)
             | Clause::ShowPromotionPolicies(_)
-            | Clause::Foreach(_) => {}
+            | Clause::Foreach(_)
+            | Clause::Subquery(_)
+            | Clause::WhereExists(_) => {}
         }
     }
 
@@ -464,6 +466,9 @@ fn profile_expression(expression: &Expression) -> QueryShapeStats {
             if let Some(pred) = &lc.predicate {
                 stats.merge(profile_expression(pred));
             }
+        }
+        Expression::PatternComprehension(_) => {
+            stats.list_literals += 1;
         }
         Expression::Reduce(re) => {
             stats.merge(profile_expression(&re.initial));

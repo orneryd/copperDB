@@ -55,6 +55,8 @@ pub enum Clause {
     AlterPromotionPolicy(AlterPromotionPolicyClause),
     DropPromotionPolicy(DropPromotionPolicyClause),
     ShowPromotionPolicies(ShowPromotionPoliciesClause),
+    Subquery(SubqueryClause),
+    WhereExists(SubqueryClause),
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +82,19 @@ pub struct CallClause {
     pub procedure: String,
     pub args: Vec<Expression>,
     pub yield_items: Vec<ReturnItem>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubqueryClause {
+    /// Each block is a set of clauses (MATCH, WHERE, RETURN, etc.).
+    /// Multiple blocks represent UNION [ALL] branches.
+    pub blocks: Vec<SubqueryBlock>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubqueryBlock {
+    pub clauses: Vec<Clause>,
+    pub union_all: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -304,10 +319,11 @@ pub struct DropPromotionPolicyClause {
 #[derive(Debug, Clone)]
 pub struct ShowPromotionPoliciesClause;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Pattern {
     pub path_variable: Option<String>,
     pub shortest_path: bool,
+    pub all_shortest_paths: bool,
     pub nodes: Vec<NodePattern>,
     pub edges: Vec<EdgePattern>,
     pub segment_edge_counts: Vec<usize>,
@@ -363,6 +379,7 @@ impl Pattern {
                     .then(|| self.path_variable.clone())
                     .flatten(),
                 shortest_path: self.shortest_path,
+                all_shortest_paths: self.all_shortest_paths,
                 nodes: self.nodes[segment.node_start..segment.node_start + segment.node_len]
                     .to_vec(),
                 edges: self.edges[segment.edge_start..segment.edge_start + segment.edge_len]
@@ -379,14 +396,14 @@ pub struct PropertyEntry {
     pub value: Expression,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct NodePattern {
     pub variable: Option<String>,
     pub labels: Vec<String>,
     pub properties: Vec<PropertyEntry>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EdgePattern {
     pub variable: Option<String>,
     pub rel_type: Option<String>,
@@ -454,6 +471,7 @@ pub enum Expression {
     },
     ListLiteral(Vec<Expression>),
     ListComprehension(ListComprehension),
+    PatternComprehension(PatternComprehension),
     Reduce(ReduceExpression),
     MapLiteral(Vec<PropertyEntry>),
     Variable(String),
@@ -496,6 +514,13 @@ pub struct CaseAlternative {
 pub struct ListComprehension {
     pub variable: String,
     pub list: Box<Expression>,
+    pub predicate: Option<Box<Expression>>,
+    pub expression: Box<Expression>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PatternComprehension {
+    pub pattern: Pattern,
     pub predicate: Option<Box<Expression>>,
     pub expression: Box<Expression>,
 }

@@ -3258,3 +3258,499 @@
         let msg = err.to_string();
         assert!(msg.contains("TEMPORAL") || msg.contains("overlap"), "got: {msg}");
     }
+
+    /// Tests allShortestPaths returns all paths at the minimum distance.
+    #[test]
+    fn test_all_shortest_paths_returns_all_minimum_distance_paths() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // Create a diamond graph: a -> b -> d and a -> c -> d (both length 2)
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (a:Node {name: 'a'}), (b:Node {name: 'b'}), (c:Node {name: 'c'}), (d:Node {name: 'd'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {name: 'a'}), (b:Node {name: 'b'}) CREATE (a)-[:LINK]->(b)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (b:Node {name: 'b'}), (d:Node {name: 'd'}) CREATE (b)-[:LINK]->(d)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {name: 'a'}), (c:Node {name: 'c'}) CREATE (a)-[:LINK]->(c)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (c:Node {name: 'c'}), (d:Node {name: 'd'}) CREATE (c)-[:LINK]->(d)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // allShortestPaths should return both paths of length 2
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH p = allShortestPaths((a:Node {name: 'a'})-[:LINK*]->(d:Node {name: 'd'})) RETURN length(p) AS hops, nodes(p) AS nodes")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 2, "should return 2 shortest paths");
+        for row in &result.rows {
+            let hops = row.get("hops").and_then(|v| v.as_i64()).unwrap_or(0);
+            assert_eq!(hops, 2, "all paths should have minimum length 2");
+        }
+    }
+
+    /// Tests allShortestPaths with a longer alternative path — only shortest paths returned.
+    #[test]
+    fn test_all_shortest_paths_excludes_longer_paths() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // Create: a -> b -> c (length 2) and a -> d -> e -> c (length 3)
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (a:Node {name: 'a'}), (b:Node {name: 'b'}), (c:Node {name: 'c'}), (d:Node {name: 'd'}), (e:Node {name: 'e'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        for (from, to) in [("a", "b"), ("b", "c"), ("a", "d"), ("d", "e"), ("e", "c")] {
+            engine
+                .execute(
+                    &parser
+                        .parse(&format!(
+                            "MATCH (a:Node {{name: '{from}'}}), (b:Node {{name: '{to}'}}) CREATE (a)-[:LINK]->(b)"
+                        ))
+                        .unwrap(),
+                    &HashMap::new(),
+                )
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH p = allShortestPaths((a:Node {name: 'a'})-[:LINK*]->(c:Node {name: 'c'})) RETURN length(p) AS hops")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // Should return only the path of length 2, not length 3
+        assert_eq!(result.rows.len(), 1, "should return only paths at minimum distance");
+        for row in &result.rows {
+            let hops = row.get("hops").and_then(|v| v.as_i64()).unwrap_or(0);
+            assert_eq!(hops, 2, "minimum path length should be 2");
+        }
+    }
+
+    /// Tests that MERGE ... ON CREATE SET enforces constraints after SET is applied.
+    #[test]
+    fn test_merge_on_create_set_enforces_constraints_on_updated_properties() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // Create a NOT NULL constraint on Person.name
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE CONSTRAINT person_name_required FOR (n:Person) REQUIRE n.name IS NOT NULL")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // MERGE creates a node with no name, then ON CREATE SET adds name — should succeed
+        engine
+            .execute(
+                &parser
+                    .parse("MERGE (n:Person {id: 1}) ON CREATE SET n.name = 'Alice', n.age = 30")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // MERGE creates a node with no name, ON CREATE SET does NOT set name — should fail
+        let err = engine
+            .execute(
+                &parser
+                    .parse("MERGE (n:Person {id: 2}) ON CREATE SET n.age = 25")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing") || msg.contains("required") || msg.contains("null"), "got: {msg}");
+    }
+
+    /// Tests that MERGE ... ON CREATE SET enforces constraints on relationship properties.
+    #[test]
+    fn test_merge_on_create_set_enforces_relationship_constraints() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // Create an EXISTS constraint on relationship property
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE CONSTRAINT knows_since_exists FOR ()-[r:KNOWS]-() REQUIRE r.since IS NOT NULL")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        engine
+            .execute(
+                &parser.parse("CREATE (a:Node {name: 'A'}), (b:Node {name: 'B'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // MERGE with ON CREATE SET that sets the required property — should succeed
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {name: 'A'}), (b:Node {name: 'B'}) MERGE (a)-[r:KNOWS]->(b) ON CREATE SET r.since = 2024")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // MERGE with ON CREATE SET that does NOT set the required property — should fail
+        engine
+            .execute(
+                &parser.parse("CREATE (c:Node {name: 'C'}), (d:Node {name: 'D'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let err = engine
+            .execute(
+                &parser
+                    .parse("MATCH (c:Node {name: 'C'}), (d:Node {name: 'D'}) MERGE (c)-[r:KNOWS]->(d) ON CREATE SET r.weight = 1.0")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("missing") || msg.contains("required") || msg.contains("null"), "got: {msg}");
+    }
+
+    /// Tests that vector index options (dimensions, similarity) are consumed at query time.
+    #[test]
+    fn test_vector_index_options_consumed_at_query_time() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (n:Doc {name: 'doc1', embedding: [1.0, 0.0, 0.0]})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE VECTOR INDEX idx_doc_vec FOR (n:Doc) ON (n.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'euclidean'}}")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // Query with correct dimensions succeeds
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.vector.queryNodes('idx_doc_vec', 5, [1.0, 0.0, 0.0])")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert!(!result.rows.is_empty(), "should return results");
+
+        // Query with wrong dimensions fails
+        let err = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.vector.queryNodes('idx_doc_vec', 5, [1.0, 0.0])")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("dimensions") || msg.contains("expects"), "got: {msg}");
+    }
+
+    /// Tests pattern comprehension evaluation: [(n)-->(m) | expr] in RETURN context.
+    #[test]
+    fn test_pattern_comprehension_in_return() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (a:Node {name: 'a'}), (b:Node {name: 'b'}), (c:Node {name: 'c'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {name: 'a'}), (b:Node {name: 'b'}) CREATE (a)-[:LINK]->(b)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {name: 'a'}), (c:Node {name: 'c'}) CREATE (a)-[:LINK]->(c)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // First, verify direct MATCH works
+        let direct = engine
+            .execute(
+                &parser.parse("MATCH (a:Node {name: 'a'})-[r:LINK]->(m:Node) RETURN m.name AS name").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(direct.rows.len(), 2, "direct MATCH should find 2 nodes");
+
+        // Pattern comprehension
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {name: 'a'}) RETURN [(a)-[:LINK]->(m:Node) | m.name] AS names")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1, "should have 1 result row");
+        let names = result.rows[0].get("names").and_then(|v| v.as_array());
+        assert!(names.is_some(), "should return a list, got: {:?}", result.rows[0]);
+        let names = names.unwrap();
+        assert_eq!(names.len(), 2, "should have 2 reachable nodes, got names: {:?}", names);
+    }
+
+    /// Tests pattern comprehension with WHERE predicate.
+    #[test]
+    fn test_pattern_comprehension_with_where() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (a:Node {name: 'a'}), (b:Node {name: 'b'}), (c:Node {name: 'c'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {name: 'a'}), (b:Node {name: 'b'}) CREATE (a)-[:LINK]->(b)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {name: 'a'}), (c:Node {name: 'c'}) CREATE (a)-[:LINK]->(c)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // Filter with WHERE — only nodes where name != 'b'
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {name: 'a'}) RETURN [(a)-[:LINK]->(m:Node) WHERE m.name = 'b' | m.name] AS names")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        let names = result.rows[0].get("names").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(names.len(), 1, "WHERE should filter to only 'b'");
+        assert_eq!(names[0].as_str().unwrap(), "b");
+    }
+
+    /// Tests CALL {} subquery basic importing behavior.
+    #[test]
+    fn test_call_subquery_importing() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (a:Node {name: 'a'}), (b:Node {name: 'b'}), (c:Node {name: 'c'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {name: 'a'}), (b:Node {name: 'b'}) CREATE (a)-[:LINK]->(b)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {name: 'a'}), (c:Node {name: 'c'}) CREATE (a)-[:LINK]->(c)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // CALL {} subquery that imports outer bindings and returns filtered results
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {name: 'a'}) CALL { MATCH (a)-[:LINK]->(m:Node) RETURN m.name AS name } RETURN name")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 2, "should find 2 reachable nodes via subquery");
+    }
+
+    /// Tests CALL {} subquery with UNION.
+    #[test]
+    fn test_call_subquery_union() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (a:Node {name: 'a'}), (b:Node {name: 'b'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {name: 'a'}), (b:Node {name: 'b'}) CREATE (a)-[:LINK]->(b)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // UNION combines results from two subquery branches
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL { MATCH (n:Node {name: 'a'}) RETURN n.name AS name UNION MATCH (n:Node {name: 'b'}) RETURN n.name AS name } RETURN name ORDER BY name")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 2, "UNION should combine 2 results");
+    }
+
+    /// Tests WHERE EXISTS { ... } existential subquery.
+    #[test]
+    fn test_where_exists_subquery() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (a:Node {name: 'a'}), (b:Node {name: 'b'}), (c:Node {name: 'c'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {name: 'a'}), (b:Node {name: 'b'}) CREATE (a)-[:LINK]->(b)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // WHERE EXISTS should filter to only nodes with outgoing LINK edges
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Node) WHERE EXISTS { MATCH (n)-[:LINK]->() } RETURN n.name AS name")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        // a has outgoing edges, b and c don't
+        assert_eq!(result.rows.len(), 1, "only 'a' should have outgoing edges");
+        assert_eq!(
+            result.rows[0].get("name").and_then(|v| v.as_str()),
+            Some("a")
+        );
+    }
+
+    /// Tests WHERE EXISTS returns no rows when subquery empty.
+    #[test]
+    fn test_where_exists_subquery_empty() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser.parse("CREATE (a:Node {name: 'a'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // a has no outgoing LINK edges, so WHERE EXISTS returns nothing
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Node) WHERE EXISTS { MATCH (n)-[:LINK]->() } RETURN n.name AS name")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 0, "no node has outgoing LINK edges");
+    }

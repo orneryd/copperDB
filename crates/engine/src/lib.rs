@@ -466,6 +466,13 @@ fn collect_expression_properties(expression: &Expression, properties: &mut Vec<S
             }
             collect_expression_properties(&comp.expression, properties);
         }
+        Expression::PatternComprehension(comp) => {
+            // Recurse into the projection expression
+            collect_expression_properties(&comp.expression, properties);
+            if let Some(ref pred) = comp.predicate {
+                collect_expression_properties(pred, properties);
+            }
+        }
         Expression::Reduce(reduce) => {
             collect_expression_properties(&reduce.initial, properties);
             collect_expression_properties(&reduce.list, properties);
