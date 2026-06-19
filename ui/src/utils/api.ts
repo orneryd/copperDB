@@ -1,5 +1,20 @@
 // NornicDB API Client
 
+// neo4j-driver ships a `browser` field in its package.json that swaps
+// the package's node-internal channel for the browser channel at bundle
+// time (Rolldown under Vite 8 needs an explicit plugin — see
+// vite.config.ts). The driver's URL parser still only accepts the
+// canonical Bolt schemes (bolt / bolt+s / neo4j / neo4j+s); the
+// browser channel is what turns those into WebSocket frames on the
+// wire, so this single import is enough as long as the channel swap
+// is wired in vite.config.ts.
+import neo4j, {
+  isInt,
+  type AuthToken,
+  type Driver,
+  type Integer,
+  type Session,
+} from "neo4j-driver";
 import { BASE_PATH, joinBasePath } from "./basePath";
 
 export interface AuthConfig {
@@ -279,6 +294,94 @@ export interface RetentionStatus {
   timestamp?: string;
 }
 
+export interface DecayProfileBundle {
+  Name: string;
+  HalfLifeSeconds: number;
+  VisibilityThreshold: number;
+  ScoreFloor: number;
+  Function: string;
+  Scope: string;
+  DecayEnabled: boolean;
+  ScoreFrom: string;
+  ScoreFromProperty?: string;
+  Enabled: boolean;
+}
+
+export interface DecayProfileBinding {
+  Name: string;
+  TargetLabels?: string[];
+  TargetEdgeType?: string;
+  IsWildcard: boolean;
+  IsEdge: boolean;
+  ProfileRef?: string;
+  NoDecay?: boolean;
+  VisibilityThreshold?: number;
+  Order: number;
+}
+
+export interface PromotionProfileDef {
+  Name: string;
+  Scope: string;
+  Multiplier: number;
+  ScoreFloor: number;
+  ScoreCap: number;
+  Enabled: boolean;
+}
+
+export interface PromotionPolicyDef {
+  Name: string;
+  TargetLabels?: string[];
+  TargetEdgeType?: string;
+  IsWildcard: boolean;
+  IsEdge: boolean;
+  Enabled: boolean;
+}
+
+export interface ScoringResolution {
+  TargetID: string;
+  TargetScope: string;
+  ResolvedDecayProfileID: string;
+  ResolvedScoreFrom: string;
+  ResolutionSourceChain: string[];
+  AppliedDecayProfileNames: string[];
+  AppliedPromotionPolicyName: string;
+  AppliedPromotionProfileName: string;
+  EffectiveRate: number;
+  EffectiveThreshold: number;
+  EffectiveMultiplier: number;
+  BaseScore: number;
+  FinalScore: number;
+  NoDecay: boolean;
+  SuppressionEligible: boolean;
+  Explanation: string;
+}
+
+export interface KPProfilesResponse {
+  bundles: DecayProfileBundle[];
+  bindings: DecayProfileBinding[];
+  decay_enabled: boolean;
+}
+
+export interface KPPoliciesResponse {
+  promotion_profiles: PromotionProfileDef[];
+  promotion_policies: PromotionPolicyDef[];
+}
+
+export interface DeindexWorkItem {
+  workItemId: string;
+  targetId: string;
+  targetScope: string;
+  enqueuedAt: number;
+  status: string;
+}
+
+export interface KPDeindexStatusResponse {
+  pending_count: number;
+  items: DeindexWorkItem[];
+  supported: boolean;
+  message?: string;
+}
+
 interface DiscoveryResponse {
   bolt_direct: string;
   bolt_routing: string;
@@ -288,33 +391,146 @@ interface DiscoveryResponse {
   default_database?: string; // NornicDB extension
 }
 
+function asString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+// neo4jValueToPlain unwraps Bolt-typed values into the same shape the
+// HTTP /tx/commit path produced. The neo4j-driver-lite ships its own
+// Integer / Node / Relationship / Path classes; the UI's existing
+// consumers (parseCypherRows, QueryResultsTable) expect plain JS
+// numbers, plain objects, etc. This walks the value tree and substitutes.
+function neo4jValueToPlain(v: unknown): unknown {
+  if (v === null || v === undefined) {
+    return v;
+  }
+  // neo4j Integer: detected via the driver's isInt() typeguard. Values
+  // within Number.MIN_SAFE_INTEGER..MAX_SAFE_INTEGER come back as JS
+  // Number; larger ones round-trip as String to avoid precision loss
+  // (matching the HTTP /tx/commit path's JSON serialization).
+  if (isInt(v)) {
+    const intValue = v as Integer;
+    if (intValue.inSafeRange()) {
+      return intValue.toNumber();
+    }
+    return intValue.toString();
+  }
+  // Node / Relationship / PathSegment: serialize properties + identity.
+  // Surface elementId at the top level so downstream consumers
+  // (extractNodeFromResult, the Browser select-button column) can find
+  // it without diving into driver-specific fields. Same shape the HTTP
+  // /tx/commit path produced.
+  if (
+    typeof v === "object" &&
+    v !== null &&
+    "properties" in (v as Record<string, unknown>) &&
+    "identity" in (v as Record<string, unknown>)
+  ) {
+    const node = v as {
+      identity: unknown;
+      elementId?: string;
+      labels?: string[];
+      type?: string;
+      properties: Record<string, unknown>;
+      start?: unknown;
+      end?: unknown;
+      startNodeElementId?: string;
+      endNodeElementId?: string;
+    };
+    const identity = neo4jValueToPlain(node.identity);
+    const out: Record<string, unknown> = {
+      identity,
+      properties: neo4jValueToPlain(node.properties),
+    };
+    // elementId is the canonical node id on driver v5+; fall back to
+    // identity (stringified) when the driver doesn't supply one.
+    if (typeof node.elementId === "string" && node.elementId !== "") {
+      out.elementId = node.elementId;
+    } else if (identity !== null && identity !== undefined) {
+      out.elementId = String(identity);
+    }
+    if (Array.isArray(node.labels)) {
+      out.labels = node.labels;
+    }
+    if (typeof node.type === "string") {
+      out.type = node.type;
+    }
+    if (node.start !== undefined) {
+      out.start = neo4jValueToPlain(node.start);
+    }
+    if (node.end !== undefined) {
+      out.end = neo4jValueToPlain(node.end);
+    }
+    if (typeof node.startNodeElementId === "string") {
+      out.startNodeElementId = node.startNodeElementId;
+    }
+    if (typeof node.endNodeElementId === "string") {
+      out.endNodeElementId = node.endNodeElementId;
+    }
+    return out;
+  }
+  if (Array.isArray(v)) {
+    return v.map(neo4jValueToPlain);
+  }
+  if (typeof v === "object") {
+    const obj = v as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(obj)) {
+      out[k] = neo4jValueToPlain(val);
+    }
+    return out;
+  }
+  return v;
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  const out = asString(value);
+  return out ? out : undefined;
+}
+
+function asNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function asOptionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function asBoolean(value: unknown): boolean {
+  return value === true;
+}
+
+function asStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const strings = value.filter(
+    (item): item is string => typeof item === "string",
+  );
+  return strings.length > 0 ? strings : undefined;
+}
+
+function escapeCypherStringLiteral(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
 class NornicDBClient {
   private defaultDatabase: string | null = null;
-  private static readonly TX_COMMIT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+  // Bolt-over-WebSocket driver state. The driver is constructed lazily
+  // on first executeCypher call (after discovery returns ws_direct).
+  // We use auth.none() because the WS upgrade itself carries the
+  // same-origin cookie (or an Authorization header from a third-party
+  // tab); the server reads either and promotes scheme=none HELLO to
+  // those claims. Browser drivers can't read HttpOnly cookies, so we
+  // never need to surface the JWT in JS — the UA does it for us.
+  private boltDriver: Driver | null = null;
+  private boltDriverPromise: Promise<Driver> | null = null;
 
-  private async fetchWithTimeout(
-    url: string,
-    init: RequestInit,
-    timeoutMs: number,
-  ): Promise<Response> {
-    const controller = new AbortController();
-    const timeoutHandle = window.setTimeout(
-      () => controller.abort(),
-      timeoutMs,
-    );
-    try {
-      return await fetch(url, { ...init, signal: controller.signal });
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") {
-        throw new Error(
-          `Request timed out after ${Math.floor(timeoutMs / 1000)} seconds`,
-        );
-      }
-      throw err;
-    } finally {
-      window.clearTimeout(timeoutHandle);
-    }
-  }
+  // Pre-decoded discovery payload, cached for the same lifetime as
+  // defaultDatabase. Used to pick ws_direct vs wss_direct.
+  private discovery: DiscoveryResponse | null = null;
 
   private async parseErrorMessage(
     res: Response,
@@ -332,35 +548,16 @@ class NornicDBClient {
     return fallback;
   }
 
-  private async parseCypherResponseOrThrow(
-    res: Response,
-    fallback: string,
-  ): Promise<CypherResponse> {
-    if (!res.ok) {
-      const message = await this.parseErrorMessage(
-        res,
-        `${fallback} (${res.status})`,
-      );
-      throw new Error(message);
-    }
-    const raw = await res.text().catch(() => "");
-    if (!raw) {
-      throw new Error(`${fallback}: empty response`);
-    }
-    try {
-      return JSON.parse(raw) as CypherResponse;
-    } catch {
-      throw new Error(`${fallback}: invalid JSON response`);
-    }
-  }
-
-  private async postCypherCommit(
+  // runCypherOverHttp drives a single Cypher statement through the
+  // HTTP /tx/commit endpoint. Faster than Bolt-over-WS for single
+  // fire-and-forget queries (1 HTTP round-trip vs multiple Bolt frames).
+  // Used by latency-sensitive paths like the traversal demo.
+  private async runCypherOverHttp(
     dbName: string,
     statement: string,
     parameters?: Record<string, unknown>,
-    timeoutMs: number = NornicDBClient.TX_COMMIT_TIMEOUT_MS,
   ): Promise<CypherResponse> {
-    const res = await this.fetchWithTimeout(
+    const res = await fetch(
       joinBasePath(BASE_PATH, `/db/${encodeURIComponent(dbName)}/tx/commit`),
       {
         method: "POST",
@@ -370,35 +567,199 @@ class NornicDBClient {
           statements: [{ statement, parameters }],
         }),
       },
-      timeoutMs,
     );
-    return this.parseCypherResponseOrThrow(res, "Cypher request failed");
+    if (!res.ok) {
+      const message = await this.parseErrorMessage(res, "Cypher request failed");
+      return { results: [], errors: [{ code: "Neo.ClientError.Request.Invalid", message }] };
+    }
+    const json = await res.json();
+    return json as CypherResponse;
   }
 
-  // Get default database name from discovery endpoint
+  // executeCypherOverHttp provides a public HTTP-based Cypher path for
+  // latency-sensitive pages (e.g. the traversal demo) where the single
+  // HTTP round-trip is measurably faster than Bolt session lifecycle.
+  async executeCypherOverHttp(
+    dbName: string,
+    statement: string,
+    parameters?: Record<string, unknown>,
+  ): Promise<CypherResponse> {
+    return this.runCypherOverHttp(dbName, statement, parameters);
+  }
+
+  // runCypherOverBolt drives a single Cypher statement through the
+  // Bolt-over-WS driver and reshapes the result into the same
+  // CypherResponse format the UI's parseCypherRows / display layer
+  // already consumes. This replaces the HTTP /tx/commit path.
+  //
+  // Auth: the WS upgrade carries the same-origin nornicdb_token cookie
+  // (browsers attach automatically) or an Authorization: Bearer header
+  // if a third-party caller set one; the server promotes the HELLO
+  // scheme=none to those claims. See docs/user-guides/connecting-bolt.md.
+  //
+  // Timeouts: long-running queries are bounded server-side; the driver's
+  // connection-acquisition timeout handles connect failures.
+  private async runCypherOverBolt(
+    dbName: string,
+    statement: string,
+    parameters?: Record<string, unknown>,
+  ): Promise<CypherResponse> {
+    const driver = await this.getBoltDriver();
+    let session: Session | null = null;
+    try {
+      session = driver.session({ database: dbName });
+      const result = await session.run(
+        statement,
+        (parameters ?? {}) as Record<string, unknown>,
+      );
+      // Driver: QueryResult is { records, summary }. keys live on each
+      // Record; pull them from the first record (or empty for 0-row results).
+      const columns: string[] =
+        result.records.length > 0
+          ? (result.records[0].keys as string[]).slice()
+          : [];
+      const data = result.records.map((rec) => {
+        const row = columns.map((k) => neo4jValueToPlain(rec.get(k)));
+        return { row, meta: [] };
+      });
+      return {
+        results: [{ columns, data }],
+      };
+    } catch (err) {
+      // Surface driver errors in the same shape the UI's
+      // assertCypherSuccess / display layer expects.
+      const message = err instanceof Error ? err.message : String(err);
+      const code =
+        err &&
+        typeof err === "object" &&
+        "code" in err &&
+        typeof (err as { code?: unknown }).code === "string"
+          ? (err as { code: string }).code
+          : "Neo.ClientError.Statement.SyntaxError";
+      return {
+        results: [],
+        errors: [{ code, message }],
+      };
+    } finally {
+      if (session) {
+        try {
+          await session.close();
+        } catch {
+          // best-effort
+        }
+      }
+    }
+  }
+
+  // Get default database name from discovery endpoint. As a side effect
+  // this also caches the full DiscoveryResponse so getBoltDriver can
+  // read bolt_direct (and pick its scheme based on the page protocol).
   private async getDefaultDatabase(): Promise<string> {
-    // Return cached value if available
     if (this.defaultDatabase) {
       return this.defaultDatabase;
     }
+    await this.fetchDiscovery();
+    return this.defaultDatabase ?? "nornic";
+  }
 
+  private async fetchDiscovery(): Promise<DiscoveryResponse | null> {
+    if (this.discovery) {
+      return this.discovery;
+    }
     try {
       const res = await fetch(joinBasePath(BASE_PATH, "/"), {
         credentials: "include",
       });
       if (res.ok) {
         const discovery: DiscoveryResponse = await res.json();
-        // Cache the default database name
+        this.discovery = discovery;
         this.defaultDatabase = discovery.default_database || "nornic";
-        return this.defaultDatabase;
+        return discovery;
       }
     } catch {
-      // Fallback to default if discovery fails
+      // Fall through to defaults
     }
-
-    // Fallback to NornicDB's default
     this.defaultDatabase = "nornic";
-    return this.defaultDatabase;
+    return null;
+  }
+
+  // resolveBoltURL picks the URL the UI hands to neo4j.driver(). The
+  // scheme is bolt:// (or bolt+s:// when the page is served over HTTPS
+  // so browsers don't refuse a mixed-content upgrade), NOT ws:// / wss://.
+  //
+  // The full neo4j-driver package validates schemes upfront and only
+  // accepts bolt / bolt+s / bolt+ssc / neo4j / neo4j+s / neo4j+ssc;
+  // ws:// / wss:// fail with "Unknown scheme: ws". WebSocket transport
+  // is selected automatically at runtime when the bundle resolves the
+  // browser channel (vite.config.ts wires that), so passing bolt://
+  // from the browser still produces a WS upgrade on the wire.
+  //
+  // Discovery's bolt_direct already carries the correct host:port for
+  // this server (port-aware as of the BoltPort config wiring); fall
+  // back to window.location.hostname:7687 when discovery is unreachable.
+  private resolveBoltURL(): string {
+    const usingTLS = window.location.protocol === "https:";
+    const discoveryURL = this.discovery?.bolt_direct;
+    if (discoveryURL) {
+      // Upgrade plain bolt:// to bolt+s:// when the page itself uses
+      // HTTPS so the browser permits the connection (mixed content).
+      if (usingTLS && discoveryURL.startsWith("bolt://")) {
+        return "bolt+s://" + discoveryURL.slice("bolt://".length);
+      }
+      return discoveryURL;
+    }
+    const scheme = usingTLS ? "bolt+s" : "bolt";
+    return `${scheme}://${window.location.hostname}:7687`;
+  }
+
+  // getBoltDriver returns a process-wide singleton Bolt driver. The
+  // driver is built lazily so the UI doesn't pay the cost on pages that
+  // never run a Cypher query, and so we can defer construction until
+  // after discovery has populated this.discovery.
+  private async getBoltDriver(): Promise<Driver> {
+    if (this.boltDriver) {
+      return this.boltDriver;
+    }
+    if (this.boltDriverPromise) {
+      return this.boltDriverPromise;
+    }
+    this.boltDriverPromise = (async () => {
+      await this.fetchDiscovery();
+      const url = this.resolveBoltURL();
+      // Bolt scheme=none. The AuthToken type insists on a credentials
+      // field; the wire-protocol scheme=none is just {scheme:"none"}
+      // with no payload. Cast through. The actual auth credential
+      // travels in the WS upgrade headers (cookie or Authorization);
+      // the server reads either and promotes scheme=none HELLO to
+      // those claims.
+      const noneAuth = { scheme: "none" } as unknown as AuthToken;
+      const driver = neo4j.driver(url, noneAuth, {
+        userAgent: "nornicdb-ui/0.1",
+      });
+      this.boltDriver = driver;
+      return driver;
+    })();
+    try {
+      return await this.boltDriverPromise;
+    } finally {
+      this.boltDriverPromise = null;
+    }
+  }
+
+  // closeBoltDriver tears down the cached driver. Called on logout so
+  // a re-login can pick up a fresh cookie without leaking the old
+  // session's connections.
+  async closeBoltDriver(): Promise<void> {
+    const driver = this.boltDriver;
+    this.boltDriver = null;
+    this.discovery = null;
+    if (driver) {
+      try {
+        await driver.close();
+      } catch {
+        // best-effort: a network failure on close is not interesting
+      }
+    }
   }
 
   async getAuthConfig(): Promise<AuthConfig> {
@@ -468,6 +829,8 @@ class NornicDBClient {
       method: "POST",
       credentials: "include",
     });
+    // Tear down the Bolt driver so the next login uses a fresh cookie.
+    await this.closeBoltDriver();
   }
 
   async getHealth(): Promise<{ status: string; time: string }> {
@@ -548,7 +911,7 @@ class NornicDBClient {
       database != null && database !== ""
         ? database
         : await this.getDefaultDatabase();
-    return this.postCypherCommit(dbName, statement, parameters);
+    return this.runCypherOverBolt(dbName, statement, parameters);
   }
 
   async getResolvedDatabaseName(database?: string): Promise<string> {
@@ -599,7 +962,7 @@ class NornicDBClient {
     statement: string,
     parameters?: Record<string, unknown>,
   ): Promise<CypherResponse> {
-    return this.postCypherCommit(dbName, statement, parameters);
+    return this.runCypherOverBolt(dbName, statement, parameters);
   }
 
   async executeSystemCypher(
@@ -642,6 +1005,14 @@ class NornicDBClient {
       }
       return out as T;
     });
+  }
+
+  private assertCypherSuccess(resp: CypherResponse, fallback: string): void {
+    if (resp.errors && resp.errors.length > 0) {
+      throw new Error(
+        resp.errors.map((err) => err.message).join("; ") || fallback,
+      );
+    }
   }
 
   async listDatabases(): Promise<DatabaseInfo[]> {
@@ -730,7 +1101,7 @@ class NornicDBClient {
     try {
       // First, verify the nodes exist before deleting (safety check)
       const verifyStatement = `MATCH (n) WHERE id(n) IN $ids RETURN id(n) as nodeId, elementId(n) as elementId`;
-      const verifyResult = await this.postCypherCommit(
+      const verifyResult = await this.runCypherOverBolt(
         dbName,
         verifyStatement,
         { ids: nodeIds },
@@ -767,7 +1138,11 @@ class NornicDBClient {
       const statement = `MATCH (n) WHERE id(n) IN $ids DETACH DELETE n RETURN count(n) as deleted`;
       const parameters = { ids: nodeIds };
 
-      const result = await this.postCypherCommit(dbName, statement, parameters);
+      const result = await this.runCypherOverBolt(
+        dbName,
+        statement,
+        parameters,
+      );
 
       if (result.errors && result.errors.length > 0) {
         return {
@@ -848,7 +1223,11 @@ class NornicDBClient {
     const statement = `MATCH (n) WHERE id(n) = $nodeId OR n.id = $nodeId SET ${setParts.join(", ")} RETURN n`;
 
     try {
-      const result = await this.postCypherCommit(dbName, statement, parameters);
+      const result = await this.runCypherOverBolt(
+        dbName,
+        statement,
+        parameters,
+      );
 
       if (result.errors && result.errors.length > 0) {
         return {
@@ -1058,9 +1437,12 @@ class NornicDBClient {
   }
 
   async getRetentionStatus(): Promise<RetentionStatus> {
-    const res = await fetch(joinBasePath(BASE_PATH, "/admin/retention/status"), {
-      credentials: "include",
-    });
+    const res = await fetch(
+      joinBasePath(BASE_PATH, "/admin/retention/status"),
+      {
+        credentials: "include",
+      },
+    );
     if (!res.ok) {
       const message = await this.parseErrorMessage(
         res,
@@ -1134,7 +1516,9 @@ class NornicDBClient {
     return res.json();
   }
 
-  async deleteRetentionPolicy(id: string): Promise<{ status: string; id: string }> {
+  async deleteRetentionPolicy(
+    id: string,
+  ): Promise<{ status: string; id: string }> {
     const res = await fetch(
       joinBasePath(
         BASE_PATH,
@@ -1211,9 +1595,14 @@ class NornicDBClient {
     return res.json();
   }
 
-  async releaseRetentionHold(id: string): Promise<{ status: string; id: string }> {
+  async releaseRetentionHold(
+    id: string,
+  ): Promise<{ status: string; id: string }> {
     const res = await fetch(
-      joinBasePath(BASE_PATH, `/admin/retention/holds/${encodeURIComponent(id)}`),
+      joinBasePath(
+        BASE_PATH,
+        `/admin/retention/holds/${encodeURIComponent(id)}`,
+      ),
       {
         method: "DELETE",
         credentials: "include",
@@ -1267,9 +1656,7 @@ class NornicDBClient {
     return res.json();
   }
 
-  async processRetentionErasure(
-    id: string,
-  ): Promise<RetentionErasureRequest> {
+  async processRetentionErasure(id: string): Promise<RetentionErasureRequest> {
     const res = await fetch(
       joinBasePath(
         BASE_PATH,
@@ -1303,6 +1690,180 @@ class NornicDBClient {
       throw new Error(message);
     }
     return res.json();
+  }
+
+  async getKnowledgePolicyProfiles(
+    database?: string,
+  ): Promise<KPProfilesResponse> {
+    const dbName = await this.getResolvedDatabaseName(database);
+    const [profilesResp, infoResp] = await Promise.all([
+      this.executeCypherOnDatabase(
+        dbName,
+        "CALL nornicdb.knowledgepolicy.profiles()",
+      ),
+      this.executeCypherOnDatabase(
+        dbName,
+        "CALL nornicdb.knowledgepolicy.info()",
+      ),
+    ]);
+    this.assertCypherSuccess(
+      profilesResp,
+      "Failed to load knowledge policy profiles",
+    );
+    this.assertCypherSuccess(infoResp, "Failed to load knowledge policy info");
+
+    const rows = this.parseCypherRows<Record<string, unknown>>(profilesResp);
+    const infoRows = this.parseCypherRows<Record<string, unknown>>(infoResp);
+    const bundles: DecayProfileBundle[] = [];
+    const bindings: DecayProfileBinding[] = [];
+
+    for (const row of rows) {
+      const kind = asString(row.kind);
+      if (kind === "bundle") {
+        bundles.push({
+          Name: asString(row.Name),
+          HalfLifeSeconds: asNumber(row.HalfLifeSeconds),
+          VisibilityThreshold: asNumber(row.VisibilityThreshold),
+          ScoreFloor: asNumber(row.ScoreFloor),
+          Function: asString(row.Function),
+          Scope: asString(row.Scope),
+          DecayEnabled: asBoolean(row.DecayEnabled),
+          ScoreFrom: asString(row.ScoreFrom),
+          ScoreFromProperty: asOptionalString(row.ScoreFromProperty),
+          Enabled: asBoolean(row.Enabled),
+        });
+        continue;
+      }
+      if (kind === "binding") {
+        bindings.push({
+          Name: asString(row.Name),
+          TargetLabels: asStringArray(row.TargetLabels),
+          TargetEdgeType: asOptionalString(row.TargetEdgeType),
+          IsWildcard: asBoolean(row.IsWildcard),
+          IsEdge: asBoolean(row.IsEdge),
+          ProfileRef: asOptionalString(row.ProfileRef),
+          NoDecay: asBoolean(row.NoDecay),
+          VisibilityThreshold: asOptionalNumber(row.VisibilityThreshold),
+          Order: asNumber(row.Order),
+        });
+      }
+    }
+
+    return {
+      bundles,
+      bindings,
+      decay_enabled: asBoolean(infoRows[0]?.enabled),
+    };
+  }
+
+  async getKnowledgePolicyPolicies(
+    database?: string,
+  ): Promise<KPPoliciesResponse> {
+    const dbName = await this.getResolvedDatabaseName(database);
+    const resp = await this.executeCypherOnDatabase(
+      dbName,
+      "CALL nornicdb.knowledgepolicy.policies()",
+    );
+    this.assertCypherSuccess(resp, "Failed to load knowledge policy policies");
+
+    const rows = this.parseCypherRows<Record<string, unknown>>(resp);
+    const promotion_profiles: PromotionProfileDef[] = [];
+    const promotion_policies: PromotionPolicyDef[] = [];
+
+    for (const row of rows) {
+      const kind = asString(row.kind);
+      if (kind === "profile") {
+        promotion_profiles.push({
+          Name: asString(row.Name),
+          Scope: asString(row.Scope),
+          Multiplier: asNumber(row.Multiplier),
+          ScoreFloor: asNumber(row.ScoreFloor),
+          ScoreCap: asNumber(row.ScoreCap),
+          Enabled: asBoolean(row.Enabled),
+        });
+        continue;
+      }
+      if (kind === "policy") {
+        promotion_policies.push({
+          Name: asString(row.Name),
+          TargetLabels: asStringArray(row.TargetLabels),
+          TargetEdgeType: asOptionalString(row.TargetEdgeType),
+          IsWildcard: asBoolean(row.IsWildcard),
+          IsEdge: asBoolean(row.IsEdge),
+          Enabled: asBoolean(row.Enabled),
+        });
+      }
+    }
+
+    return {
+      promotion_profiles,
+      promotion_policies,
+    };
+  }
+
+  async resolveKnowledgePolicy(params: {
+    entityId?: string;
+    labels?: string[];
+    edgeType?: string;
+    database?: string;
+  }): Promise<ScoringResolution> {
+    const dbName = await this.getResolvedDatabaseName(params.database);
+    const statement = `CALL nornicdb.knowledgepolicy.resolve('${escapeCypherStringLiteral(
+      params.entityId ?? "",
+    )}', '${escapeCypherStringLiteral((params.labels ?? []).join(","))}', '${escapeCypherStringLiteral(
+      params.edgeType ?? "",
+    )}')`;
+    const resp = await this.executeCypherOnDatabase(dbName, statement);
+    this.assertCypherSuccess(resp, "Failed to resolve knowledge policy");
+
+    const row = this.parseCypherRows<Record<string, unknown>>(resp)[0] ?? {};
+    return {
+      TargetID: asString(row.TargetID),
+      TargetScope: asString(row.TargetScope),
+      ResolvedDecayProfileID: asString(row.ResolvedDecayProfileID),
+      ResolvedScoreFrom: asString(row.ResolvedScoreFrom),
+      ResolutionSourceChain: asStringArray(row.ResolutionSourceChain) ?? [],
+      AppliedDecayProfileNames:
+        asStringArray(row.AppliedDecayProfileNames) ?? [],
+      AppliedPromotionPolicyName: asString(row.AppliedPromotionPolicyName),
+      AppliedPromotionProfileName: asString(row.AppliedPromotionProfileName),
+      EffectiveRate: asNumber(row.EffectiveRate),
+      EffectiveThreshold: asNumber(row.EffectiveThreshold),
+      EffectiveMultiplier: asNumber(row.EffectiveMultiplier),
+      BaseScore: asNumber(row.BaseScore),
+      FinalScore: asNumber(row.FinalScore),
+      NoDecay: asBoolean(row.NoDecay),
+      SuppressionEligible: asBoolean(row.SuppressionEligible),
+      Explanation: asString(row.Explanation),
+    };
+  }
+
+  async getDeindexStatus(database?: string): Promise<KPDeindexStatusResponse> {
+    const dbName = await this.getResolvedDatabaseName(database);
+    const resp = await this.executeCypherOnDatabase(
+      dbName,
+      "CALL nornicdb.knowledgepolicy.deindexStatus()",
+    );
+    this.assertCypherSuccess(resp, "Failed to load deindex status");
+
+    const rows = this.parseCypherRows<Record<string, unknown>>(resp);
+    const first = rows[0] ?? {};
+    const items = rows
+      .filter((row) => asString(row.workItemId) !== "")
+      .map((row) => ({
+        workItemId: asString(row.workItemId),
+        targetId: asString(row.targetId),
+        targetScope: asString(row.targetScope),
+        enqueuedAt: asNumber(row.enqueuedAt),
+        status: asString(row.status),
+      }));
+
+    return {
+      pending_count: asNumber(first.pending_count),
+      items,
+      supported: first.supported !== false,
+      message: asOptionalString(first.message),
+    };
   }
 }
 

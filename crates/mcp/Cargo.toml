@@ -12,8 +12,11 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+parking_lot.workspace = true
 axum.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
 copperdb-auth = { workspace = true }
+copperdb-engine = { workspace = true }
+copperdb-storage = { workspace = true }
 copperdb-util = { workspace = true }

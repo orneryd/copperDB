@@ -3754,3 +3754,224 @@
             .unwrap();
         assert_eq!(result.rows.len(), 0, "no node has outgoing LINK edges");
     }
+
+    /// Tests that property index maintenance tracks node updates correctly.
+    #[test]
+    fn test_property_index_maintenance_on_update() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // Create an index on Person.name
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE INDEX person_name_idx FOR (n:Person) ON (n.name)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // Create a node
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (n:Person {name: 'Alice', age: 30})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // Update the node — change the indexed property
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Person {name: 'Alice'}) SET n.name = 'Alicia'")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // Query by old name should find nothing
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Person {name: 'Alice'}) RETURN n.name AS name")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 0, "old indexed value should not match");
+
+        // Query by new name should find the node
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Person {name: 'Alicia'}) RETURN n.name AS name")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1, "new indexed value should match");
+        assert_eq!(
+            result.rows[0].get("name").and_then(|v| v.as_str()),
+            Some("Alicia")
+        );
+    }
+
+    /// Tests that DELETE properly cleans up node property index entries.
+    #[test]
+    fn test_delete_cleans_up_property_index_entries() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        // Create index on Person.name
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE INDEX person_idx FOR (n:Person) ON (n.name)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // Create two nodes
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // Both should be findable
+        let result = engine
+            .execute(
+                &parser.parse("MATCH (n:Person) RETURN n.name AS name ORDER BY name").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 2);
+
+        // Delete Alice
+        engine
+            .execute(
+                &parser.parse("MATCH (n:Person {name: 'Alice'}) DELETE n").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // Alice should be gone, Bob remains
+        let result = engine
+            .execute(
+                &parser.parse("MATCH (n:Person {name: 'Alice'}) RETURN n").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 0, "deleted node should not be found via index");
+
+        let result = engine
+            .execute(
+                &parser.parse("MATCH (n:Person {name: 'Bob'}) RETURN n.name AS name").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1, "non-deleted node should still be found");
+        assert_eq!(
+            result.rows[0].get("name").and_then(|v| v.as_str()),
+            Some("Bob")
+        );
+
+        // Re-create Alice — should succeed without index conflicts
+        engine
+            .execute(
+                &parser.parse("CREATE (a:Person {name: 'Alice'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser.parse("MATCH (n:Person {name: 'Alice'}) RETURN n.name AS name").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1, "re-created node should be found via index");
+    }
+
+    /// Tests that DELETE on edges cleans up edge property indexes.
+    #[test]
+    fn test_delete_cleans_up_edge_property_index_entries() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE INDEX rel_idx FOR ()-[r:KNOWS]-() ON (r.since)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (a:Node {name: 'A'}), (b:Node {name: 'B'}), (c:Node {name: 'C'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {name: 'A'}), (b:Node {name: 'B'}) CREATE (a)-[:KNOWS {since: 2020}]->(b)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {name: 'A'}), (c:Node {name: 'C'}) CREATE (a)-[:KNOWS {since: 2021}]->(c)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // Delete one relationship
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Node {name: 'A'})-[r:KNOWS {since: 2020}]->() DELETE r")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        // Deleted edge should not be found via property query
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH ()-[r:KNOWS {since: 2020}]->() RETURN r.since AS since")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 0, "deleted edge should not be found via index");
+
+        // Non-deleted edge should still be found
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH ()-[r:KNOWS {since: 2021}]->() RETURN r.since AS since")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1, "non-deleted edge should still be found");
+        assert_eq!(
+            result.rows[0].get("since").and_then(|v| v.as_i64()),
+            Some(2021)
+        );
+    }

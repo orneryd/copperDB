@@ -357,8 +357,7 @@ export function Browser() {
                 executeCypher({ continueOnError })
               }
               onNodeSelect={handleSelectNodeData}
-              onToggleSelect={toggleNodeSelection}
-              onSelectAll={(nodeIds) => selectAllNodes(nodeIds)}
+              onSelectionChange={selectAllNodes}
               onClearSelection={clearNodeSelection}
               onDeleteClick={() => {
                 setDeleteError(null);

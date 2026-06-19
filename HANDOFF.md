@@ -20,12 +20,12 @@
 ### Test Counts
 | Crate | Tests | Failing |
 |-------|-------|---------|
-| copperdb-eval | 258 | 0 |
+| copperdb-eval | 261 | 0 |
 | copperdb-cypher | 146 | 0 |
 | copperdb-engine | 83 | 0 |
-| copperdb-storage | 106 | 0 |
+| copperdb-storage | 125 | 0 |
 | copperdb-server | 28 | 1 (pre-existing distributed timeout) |
-| **Workspace total** | **~610** | **1 (pre-existing)** |
+| **Workspace total** | **~639** | **1 (pre-existing)** |
 
 All core tests pass. One pre-existing server test (`neo4j_commit_can_opt_into_distributed_graph_read_routing`) has a timing issue in the deferred Layer 3 distributed path; it is not caused by this work.
 
@@ -107,6 +107,15 @@ All parse + eval variants: `Literal`, `Variable`, `PropertyAccess`, `Parameter`,
 - [x] Pattern comprehensions — full parser, expression evaluator, and EvalEngine execution with WHERE predicate support
 - [x] CALL {} subqueries — parser, importing subquery execution (MATCH/WHERE/WITH/RETURN/CREATE/SET), UNION [ALL] support, node-only MATCH
 - [x] WHERE EXISTS { ... } existential subqueries — parsed as `Clause::WhereExists`, filters rows where inner subquery returns >= 1 result
+- [x] WAL snapshot orchestration — `create_snapshot`, `save_wal_snapshot`, `load_wal_snapshot`, `prune_wal_snapshots`, `truncate_to_snapshot` for recovery acceleration and WAL size management
+- [x] WAL repair/corruption diagnostics — `scan_for_corruption`, `corrupted_entry_count`, `repair_truncate_at_first_corruption`
+- [x] Deindex cleanup queue — `enqueue_deindex_work`, `drain_deindex_work`, `pending_deindex_count` with `META_PENDING_DEINDEX_PREFIX`, unindexes labels/properties/edge-types while preserving entity records
+- [x] Index tombstones — `write_index_tombstones`, `delete_index_tombstones`, `has_index_tombstone`, `delete_index_tombstones_for_entity`; `drain_deindex_work` writes tombstones (hides entries, doesn't delete); all index scan paths check tombstones (`get_nodes_by_label`, `get_edges_by_type`, adjacency scans, property/range scans)
+- [x] Namespace batch writes — `batch_write` on `StorageEngine` and `NamespacedStorageEngine` with `BatchWriter` for atomic multi-operation writes within a namespace; error before commit rolls back all operations
+- [x] Storage event notifier — `StorageEventNotifier` trait implemented; callbacks for node/edge created/updated/deleted fired after successful CRUD; accessible via trait or direct `on_Xxx` methods on `StorageEngine`
+- [x] Index warming — `rebuild_all_indexes` rebuilds all property and fulltext indexes from stored node/edge records; idempotent, returns counts per index category
+- [x] Bolt message dispatch — `dispatch.rs` with full message decoder (HELLO, LOGON/LOGOFF, RUN, PULL, DISCARD, BEGIN/COMMIT/ROLLBACK, RESET, ROUTE), response encoder (SUCCESS/FAILURE/IGNORED/RECORD), PackStream↔JSON value conversion, and async TCP connection handler with message framing
+- [x] GraphQL endpoint — `copperdb-graphql` wired to storage with `node(id)`, `nodes`, and `createNode(id, labels, properties)` resolvers; mounted on HTTP router at `/graphql` (POST) with interactive playground at `GET /graphql`
 
 ---
 
@@ -114,20 +123,26 @@ All parse + eval variants: `Literal`, `Variable`, `PropertyAccess`, `Parameter`,
 _All tracked Cypher/eval gaps from the original HANDOFF are now resolved. The remaining work is in the broader parity checklist (storage async engine, WAL/MVCC lifecycle, search/vector runtime, protocol adapters)._
 
 ### Storage
-- [ ] Async write-behind
-- [ ] Reader registry
-- [ ] Pruning/rebuild controller
-- [ ] Full index maintenance lifecycle
-- [ ] Namespace transaction semantics
+- [x] Async write-behind baseline (`AsyncStorageEngine` with timer-driven auto-flush, cache-pressure thresholds, flush holds/results, pending-aware reads, bounded label/edge/adjacency indexes)
+- [x] Reader registry (MVCC `active_readers` with snapshot leases, `oldest_active_reader`, prune-floor anchoring)
+- [x] Pruning/rebuild controller (`MvccPruneOptions`, `prune_to_max_versions`, `trigger_prune_now`, `rebuild_mvcc_from_current_state`, lifecycle pause/resume/schedule/debt)
+- [x] WAL snapshot orchestration (`create_snapshot`, `truncate_to_snapshot`, `save_wal_snapshot`, `load_wal_snapshot`, `prune_wal_snapshots`)
+- [x] WAL repair/corruption diagnostics (`scan_for_corruption`, `corrupted_entry_count`, `repair_truncate_at_first_corruption`)
+- [x] Deindex cleanup queue (`enqueue_deindex_work`, `drain_deindex_work`, `pending_deindex_count`)
+- [x] Deindex worker integration (periodic drain wired into async engine worker loop via `maybe_auto_flush`)
+- [x] Index tombstones — `write_index_tombstones`, `delete_index_tombstones`, `has_index_tombstone`, `delete_index_tombstones_for_entity`; `drain_deindex_work` now writes tombstones instead of deleting index entries; tombstone checks wired into all index scan paths (`get_nodes_by_label`, `get_edges_by_type`, adjacency scans, node/edge property index scans, range scans)
+- [x] Namespace batch writes — `batch_write` on `StorageEngine` and `NamespacedStorageEngine` with `BatchWriter` for atomic multi-operation writes (nodes + edges committed together)
+- [x] Storage event notifier — `StorageEventNotifier` trait; node/edge created/updated/deleted callbacks fired after successful CRUD; `on_node_created`, `on_node_updated`, `on_node_deleted`, `on_edge_created`, `on_edge_updated`, `on_edge_deleted`
+- [x] Index warming on startup — `rebuild_all_indexes` rebuilds all property/fulltext indexes from stored records; idempotent; returns counts per category
 
-### Missing Crates
-- [ ] `knowledgepolicy` — decay/promotion policy resolution (no Rust crate exists)
-- [ ] `lifecycle` — supervisor/component coordination (no Rust crate exists)
-- [ ] `errors` — retryable Neo4j wire codes (no Rust crate exists)
+### Missing Crates (now implemented)
+- [x] `knowledgepolicy` — decay/promotion policy resolution, `ON ACCESS` flusher, `WHEN` predicate compilation, scoring
+- [x] `lifecycle` — supervisor/component coordination, first-error cancellation, reverse-order shutdown
+- [x] `errors` — Neo4j-compatible transient error codes, retry classification
 
-### Wiring
-- [ ] Bolt message dispatch (handshake exists, no query execution path)
-- [ ] GraphQL endpoint wired to HTTP router
+### Wiring (future work)
+- [x] Bolt message dispatch (handshake + full message decode/dispatch loop; HELLO/LOGON/RUN/PULL/BEGIN/COMMIT/ROLLBACK/RESET all handled; SUCCESS/FAILURE/IGNORED/RECORD responses encoded; query execution engine wiring is next step)
+- [x] GraphQL endpoint wired to HTTP router — `copperdb-graphql` with real storage-backed resolvers (node query, nodes list, createNode mutation); `GraphQlSchema` wrapper with `Mutex<StorageEngine>` context; mounted at `POST /graphql` with GraphiQL playground at `GET /graphql`
 - [ ] MCP server transport
 
 ---

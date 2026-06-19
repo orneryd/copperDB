@@ -18,6 +18,8 @@ use copperdb_auth::{
 };
 use copperdb_buildinfo::{display_version, server_announcement, version};
 use copperdb_config::Config as RuntimeConfig;
+use copperdb_graphql::{GraphQlSchema, MutationRoot, QueryRoot};
+use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
 use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig};
 use copperdb_envutil::{get as env_get, get_bool_loose};
 use copperdb_fabric::{FabricReadRequest, FabricReadScope};
@@ -192,6 +194,8 @@ pub struct AppState {
     pub security: SecurityMiddleware,
     /// Route supported Cypher requests through the distributed coordinator when enabled.
     pub distributed_cypher_enabled: bool,
+    /// GraphQL schema wired to storage.
+    pub graphql_schema: GraphQlSchema,
 }
 
 #[derive(Clone)]
@@ -546,6 +550,7 @@ impl Default for AppState {
                 allow_http: get_bool_loose("COPPERDB_ALLOW_HTTP", true),
             }),
             distributed_cypher_enabled: get_bool_loose("COPPERDB_DISTRIBUTED_CYPHER", false),
+            graphql_schema: copperdb_graphql::build_default_schema(),
         }
     }
 }
@@ -634,7 +639,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         // ── Sweep / status ───────────────────────────────────────────────────
         .route("/admin/retention/sweep", post(retention_sweep))
-        .route("/admin/retention/status", get(retention_status));
+        .route("/admin/retention/status", get(retention_status))
+        // ── GraphQL ──────────────────────────────────────────────────────
+        .route("/graphql", post(graphql_handler))
+        .route("/graphql", get(graphql_playground_handler))
+        // ── MCP (Model Context Protocol) ──────────────────────────────────
+        .route("/mcp", post(mcp_handler));
 
     let normalized = normalize_base_path(&state.base_path);
     let router = router.layer(middleware::from_fn_with_state(
@@ -2551,6 +2561,66 @@ async fn retention_status(State(state): State<Arc<AppState>>, headers: HeaderMap
         "pending_erasures": erasure_count,
     }))
     .into_response()
+}
+
+// ── GraphQL endpoint ──────────────────────────────────────────────────────
+
+async fn graphql_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    request: GraphQLRequest,
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, false) {
+        return status.into_response();
+    }
+    let gql_response = state.graphql_schema.execute(request.into_inner()).await;
+    let body = axum::body::Body::from(serde_json::to_vec(&gql_response).unwrap_or_default());
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(body)
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+async fn graphql_playground_handler() -> impl IntoResponse {
+    Html(include_str!("../playground.html"))
+}
+
+// ── MCP (Model Context Protocol) handler ───────────────────────────────────
+
+async fn mcp_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, false) {
+        return status.into_response();
+    }
+    let request: copperdb_mcp::McpRequest = match serde_json::from_value(body) {
+        Ok(req) => req,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "error": { "code": -32700, "message": e.to_string() }
+            }))
+            .into_response()
+        }
+    };
+    let engine = match open_engine(&state, &state.db_name) {
+        Ok(engine) => Arc::new(parking_lot::Mutex::new(engine)),
+        Err(e) => {
+            return Json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request.id,
+                "error": { "code": -32000, "message": e }
+            }))
+            .into_response()
+        }
+    };
+    let registry = copperdb_mcp::ToolRegistry::with_engine(engine);
+    let response = registry.dispatch(&request);
+    Json(response).into_response()
 }
 
 #[cfg(test)]

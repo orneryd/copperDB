@@ -8,8 +8,11 @@
 //! MCP is an open protocol for connecting LLMs to data sources.
 //! https://modelcontextprotocol.io/
 
+use copperdb_engine::CopperDb as GraphEngine;
+use parking_lot::Mutex as ParkingMutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -107,22 +110,31 @@ pub struct ToolCallParams {
 /// Registry of available MCP tools.
 pub struct ToolRegistry {
     tools: HashMap<String, Tool>,
+    engine: Option<Arc<ParkingMutex<GraphEngine>>>,
 }
 
 impl Default for ToolRegistry {
     fn default() -> Self {
-        Self::new()
+        Self {
+            tools: HashMap::new(),
+            engine: None,
+        }
     }
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        let mut registry = Self {
-            tools: HashMap::new(),
-        };
+        let mut registry = Self::default();
         for tool in copperdb_tools() {
             registry.register(tool);
         }
+        registry
+    }
+
+    /// Create a registry with a graph engine for real Cypher execution.
+    pub fn with_engine(engine: Arc<ParkingMutex<GraphEngine>>) -> Self {
+        let mut registry = Self::new();
+        registry.engine = Some(engine);
         registry
     }
 
@@ -173,10 +185,10 @@ impl ToolRegistry {
                         format!("tool not found: {}", call.name),
                     );
                 }
-                McpResponse::ok(
-                    request.id.clone(),
-                    serde_json::json!({ "content": [{ "type": "text", "text": "stub response" }] }),
-                )
+                match self.execute_tool(&call.name, &call.arguments) {
+                    Ok(result) => McpResponse::ok(request.id.clone(), result),
+                    Err(e) => McpResponse::error(request.id.clone(), -32000, e),
+                }
             }
             "initialize" => McpResponse::ok(
                 request.id.clone(),
@@ -187,6 +199,76 @@ impl ToolRegistry {
                 }),
             ),
             _ => McpResponse::error(request.id.clone(), -32601, "method not found"),
+        }
+    }
+
+    /// Execute a named tool with the given arguments.
+    fn execute_tool(
+        &self,
+        name: &str,
+        arguments: &Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
+        match name {
+            "run_cypher" => {
+                let query = arguments
+                    .as_ref()
+                    .and_then(|args| args.get("query"))
+                    .and_then(|v| v.as_str())
+                    .ok_or("missing 'query' parameter")?;
+                let engine = self
+                    .engine
+                    .as_ref()
+                    .ok_or("no graph engine configured")?;
+                let engine = engine.lock();
+                match engine.execute(query, HashMap::new()) {
+                    Ok(result) => {
+                        let text = format!(
+                            "Query executed successfully.\nRows: {}\nStats: {:?}",
+                            result.rows.len(),
+                            result.stats
+                        );
+                        Ok(serde_json::json!({
+                            "content": [{ "type": "text", "text": text }]
+                        }))
+                    }
+                    Err(e) => Ok(serde_json::json!({
+                        "content": [{ "type": "text", "text": format!("Error: {e}") }],
+                        "isError": true
+                    })),
+                }
+            }
+            "find_similar" => {
+                let text = arguments
+                    .as_ref()
+                    .and_then(|args| args.get("text"))
+                    .and_then(|v| v.as_str())
+                    .ok_or("missing 'text' parameter")?;
+                let k = arguments
+                    .as_ref()
+                    .and_then(|args| args.get("k"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(10) as usize;
+                let engine = self
+                    .engine
+                    .as_ref()
+                    .ok_or("no graph engine configured")?;
+                let engine = engine.lock();
+                // Use the engine's fulltext search if available
+                match engine.search_fulltext_nodes("", &[], text, k) {
+                    Ok(results) => {
+                        let json = serde_json::to_string_pretty(&results)
+                            .unwrap_or_else(|_| "[]".to_string());
+                        Ok(serde_json::json!({
+                            "content": [{ "type": "text", "text": json }]
+                        }))
+                    }
+                    Err(e) => Ok(serde_json::json!({
+                        "content": [{ "type": "text", "text": format!("Search error: {e}") }],
+                        "isError": true
+                    })),
+                }
+            }
+            _ => Err(format!("tool not found: {name}")),
         }
     }
 }
@@ -266,16 +348,19 @@ mod tests {
 
     #[test]
     fn test_dispatch_tool_call() {
-        let registry = ToolRegistry::new();
+        let engine = Arc::new(ParkingMutex::new(
+            copperdb_engine::CopperDb::open_temporary().unwrap(),
+        ));
+        let registry = ToolRegistry::with_engine(engine);
         let req = McpRequest::new(
             serde_json::json!(3),
             "tools/call",
             Some(
-                serde_json::json!({ "name": "run_cypher", "arguments": { "query": "MATCH (n) RETURN n" } }),
+                serde_json::json!({ "name": "run_cypher", "arguments": { "query": "RETURN 1 AS n" } }),
             ),
         );
         let resp = registry.dispatch(&req);
-        assert!(resp.error.is_none());
+        assert!(resp.error.is_none(), "expected success, got: {:?}", resp.error);
     }
 
     #[test]

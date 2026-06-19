@@ -520,6 +520,16 @@ enum WorkerRequest {
     Close {
         reply: Sender<Result<AsyncFlushResult, StorageError>>,
     },
+    EnqueueDeindex {
+        id: String,
+        reply: Sender<Result<(), StorageError>>,
+    },
+    DrainDeindex {
+        reply: Sender<Result<usize, StorageError>>,
+    },
+    PendingDeindexCount {
+        reply: Sender<Result<usize, StorageError>>,
+    },
 }
 
 pub struct AsyncStorageEngine {
@@ -767,6 +777,27 @@ impl AsyncStorageEngine {
 
     pub fn pending_embeddings_count(&self) -> usize {
         self.shared.pending_embeddings_count()
+    }
+
+    pub fn enqueue_deindex_work(&self, entity_id: &str) -> Result<(), StorageError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.send_request(WorkerRequest::EnqueueDeindex {
+            id: entity_id.to_string(),
+            reply: reply_tx,
+        })?;
+        self.recv_result(reply_rx)
+    }
+
+    pub fn drain_deindex_work(&self) -> Result<usize, StorageError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.send_request(WorkerRequest::DrainDeindex { reply: reply_tx })?;
+        self.recv_result(reply_rx)
+    }
+
+    pub fn pending_deindex_count(&self) -> Result<usize, StorageError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.send_request(WorkerRequest::PendingDeindexCount { reply: reply_tx })?;
+        self.recv_result(reply_rx)
     }
 
     pub fn stream_node_records<F>(&self, visit: F) -> Result<u64, StorageError>
@@ -1581,6 +1612,8 @@ fn maybe_auto_flush(
         }
     }
     let _ = shared.try_flush_pending(engine);
+    // Drain any pending deindex work after each flush tick
+    let _ = engine.drain_deindex_work();
 }
 
 fn handle_request(
@@ -1707,6 +1740,15 @@ fn handle_request(
         WorkerRequest::Close { reply } => {
             let _ = reply.send(shared.flush_pending(engine));
             return true;
+        }
+        WorkerRequest::EnqueueDeindex { id, reply } => {
+            let _ = reply.send(engine.enqueue_deindex_work(&id));
+        }
+        WorkerRequest::DrainDeindex { reply } => {
+            let _ = reply.send(engine.drain_deindex_work());
+        }
+        WorkerRequest::PendingDeindexCount { reply } => {
+            let _ = reply.send(engine.pending_deindex_count());
         }
     }
     false

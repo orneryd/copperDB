@@ -1,6 +1,37 @@
 @import "tailwindcss";
+@import "@ornery/ui-grid-react/styles";
 
 @config "../tailwind.config.js";
+
+.nornic-grid {
+  --ui-grid-surface: #141824;
+  --ui-grid-border-color: #2a3247;
+  --ui-grid-header-background: #1e2433;
+  --ui-grid-header-weight: 600;
+  --ui-grid-cell-color: #f3f4f6;
+  --ui-grid-muted-color: #9ca3af;
+  --ui-grid-row-odd: #141824;
+  --ui-grid-row-even: #1a1f2e;
+  --ui-grid-row-hover: rgba(16, 185, 129, 0.08);
+  --ui-grid-accent: #10b981;
+  --ui-grid-group-background: #1e2433;
+  --ui-grid-radius: 8px;
+  --ui-grid-shadow: none;
+  --ui-grid-control-background: #141824;
+  --ui-grid-control-border-color: #2a3247;
+  --ui-grid-control-color: #9ca3af;
+  --ui-grid-control-background-active: rgba(16, 185, 129, 0.14);
+  --ui-grid-control-border-color-active: rgba(16, 185, 129, 0.35);
+  --ui-grid-control-color-active: #10b981;
+  --ui-grid-filter-input-focus-outline: 2px solid rgba(16, 185, 129, 0.2);
+  --ui-grid-cell-focus-background: rgba(16, 185, 129, 0.08);
+  --ui-grid-cell-focus-ring: inset 0 0 0 1px rgba(16, 185, 129, 0.28);
+  --ui-grid-cell-editing-background: rgba(16, 185, 129, 0.06);
+  --ui-grid-cell-editor-border-color: rgba(16, 185, 129, 0.45);
+  --ui-grid-cell-editor-focus-outline: 2px solid rgba(16, 185, 129, 0.2);
+  --ui-grid-expandable-row-background: rgba(16, 185, 129, 0.04);
+  --ui-grid-empty-state-min-height: 10rem;
+}
 
 body {
   background-color: #0a0e1a;
@@ -92,8 +123,13 @@ body {
 
 /* Animations */
 @keyframes pulse-glow {
-  0%, 100% { box-shadow: 0 0 5px rgba(16, 185, 129, 0.3); }
-  50% { box-shadow: 0 0 20px rgba(16, 185, 129, 0.6); }
+  0%,
+  100% {
+    box-shadow: 0 0 5px rgba(16, 185, 129, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 20px rgba(16, 185, 129, 0.6);
+  }
 }
 
 .status-connected {

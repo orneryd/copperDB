@@ -1,5 +1,5 @@
 use crate::{
-    EdgeAdjacencyDirection, EdgeRecord, MvccLifecycleDebtKey, MvccLifecycleStatus,
+    BatchWriter, EdgeAdjacencyDirection, EdgeRecord, MvccLifecycleDebtKey, MvccLifecycleStatus,
     MvccPruneOptions, MvccSnapshot, MvccSnapshotLease, NamespaceSchema, NodeRecord, StorageEngine,
     StorageError,
 };
@@ -309,6 +309,25 @@ impl<'a> NamespacedStorageEngine<'a> {
 
     pub fn delete_all(&self) -> Result<(u64, u64), StorageError> {
         self.inner.delete_by_prefix(&self.prefix)
+    }
+
+    /// Execute a batch of namespace-scoped operations atomically.
+    ///
+    /// All node/edge puts and deletes within the closure are isolated to this
+    /// namespace and applied atomically. IDs are automatically prefixed with
+    /// the namespace.
+    pub fn batch_write<F, E>(&self, f: F) -> Result<(), E>
+    where
+        F: FnOnce(&mut BatchWriter<'_>) -> Result<(), E>,
+        E: From<StorageError>,
+    {
+        let mut writer = BatchWriter {
+            engine: self.inner,
+            ops: Vec::new(),
+        };
+        f(&mut writer)?;
+        writer.commit()?;
+        Ok(())
     }
 
     pub fn lifecycle_status(&self) -> MvccLifecycleStatus {

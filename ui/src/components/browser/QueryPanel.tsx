@@ -8,7 +8,6 @@ import { Play, History } from "lucide-react";
 import { QueryResultsTable } from "./QueryResultsTable";
 import { SelectionToolbar } from "../common/SelectionToolbar";
 import { QueryAutocomplete } from "./QueryAutocomplete";
-import { getAllNodeIdsFromQueryResults } from "../../utils/nodeUtils";
 
 interface QueryPanelProps {
   cypherQuery: string;
@@ -44,8 +43,7 @@ interface QueryPanelProps {
   deleteError: string | null;
   onExecute: (continueOnError: boolean) => void;
   onNodeSelect: (nodeData: { id: string; labels: string[]; properties: Record<string, unknown> }) => void;
-  onToggleSelect: (nodeId: string) => void; // eslint-disable-line @typescript-eslint/no-unused-vars
-  onSelectAll: (nodeIds: string[]) => void;
+  onSelectionChange: (nodeIds: string[]) => void;
   onClearSelection: () => void;
   onDeleteClick: () => void;
   deleting?: boolean;
@@ -63,8 +61,7 @@ export function QueryPanel({
   deleteError,
   onExecute,
   onNodeSelect,
-  onToggleSelect,
-  onSelectAll,
+  onSelectionChange,
   onClearSelection,
   onDeleteClick,
   deleting = false,
@@ -269,12 +266,7 @@ export function QueryPanel({
                       cypherResult={entryResult}
                       selectedNodeIds={selectedNodeIds}
                       onNodeSelect={onNodeSelect}
-                      onToggleSelect={onToggleSelect}
-                      onSelectAll={() => {
-                        const allIds = getAllNodeIdsFromQueryResults(entryResult);
-                        onSelectAll(allIds);
-                      }}
-                      onClearSelection={onClearSelection}
+                      onSelectionChange={onSelectionChange}
                     />
                     );
                   })()}
@@ -286,12 +278,7 @@ export function QueryPanel({
                   cypherResult={cypherResult}
                   selectedNodeIds={selectedNodeIds}
                   onNodeSelect={onNodeSelect}
-                  onToggleSelect={onToggleSelect}
-                  onSelectAll={() => {
-                    const allIds = getAllNodeIdsFromQueryResults(cypherResult);
-                    onSelectAll(allIds);
-                  }}
-                  onClearSelection={onClearSelection}
+                  onSelectionChange={onSelectionChange}
                 />
               )
             )}

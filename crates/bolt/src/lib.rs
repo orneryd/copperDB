@@ -22,6 +22,7 @@
 
 pub mod messages;
 pub mod packstream;
+pub mod dispatch;
 pub mod server;
 
 use thiserror::Error;

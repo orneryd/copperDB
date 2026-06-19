@@ -53,6 +53,8 @@ const META_NAMESPACE_NODE_COUNT_PREFIX: &[u8] = b"namespace_node_count/";
 const META_NAMESPACE_EDGE_COUNT_PREFIX: &[u8] = b"namespace_edge_count/";
 const META_NAMESPACE_LABEL_COUNT_PREFIX: &[u8] = b"namespace_label_count/";
 const META_PENDING_EMBEDDING_PREFIX: &[u8] = b"pending_embedding/";
+const META_PENDING_DEINDEX_PREFIX: &[u8] = b"pending_deindex/";
+const META_INDEX_TOMBSTONE_PREFIX: &[u8] = b"index_tombstone/";
 const META_INDEX_OPTIONS_PREFIX: &[u8] = b"index_options/";
 const META_KP_DECAY_PROFILE_PREFIX: &[u8] = b"kp_decay_profile/";
 const META_KP_DECAY_BINDING_PREFIX: &[u8] = b"kp_decay_binding/";
@@ -455,6 +457,139 @@ impl WAL {
             start = end + 1;
         }
     }
+
+    /// Create a lightweight snapshot checkpoint at the current WAL position.
+    pub fn create_snapshot(&self) -> WALSnapshot {
+        WALSnapshot {
+            compacted_through: self.compacted_through(),
+            created_at_unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+        }
+    }
+
+    /// Truncate WAL entries at or before the snapshot point.
+    pub fn truncate_to_snapshot(
+        &self,
+        snapshot: &WALSnapshot,
+    ) -> Result<usize, StorageError> {
+        self.compact_up_to(snapshot.compacted_through)
+    }
+
+    /// Scan the WAL for corruption. Returns the sequence number of the first
+    /// corrupted entry, or None if all entries pass checksum verification.
+    pub fn scan_for_corruption(&self) -> Option<u64> {
+        let entries = self.entries.lock();
+        for entry in entries.iter() {
+            let expected = wal_checksum(&entry.op, &entry.key, &entry.payload);
+            if entry.checksum != expected {
+                return Some(entry.seq);
+            }
+        }
+        None
+    }
+
+    /// Count how many entries in the WAL fail checksum verification.
+    pub fn corrupted_entry_count(&self) -> usize {
+        let entries = self.entries.lock();
+        entries
+            .iter()
+            .filter(|entry| {
+                let expected = wal_checksum(&entry.op, &entry.key, &entry.payload);
+                entry.checksum != expected
+            })
+            .count()
+    }
+
+    /// Attempt to repair the WAL by truncating at the first corrupted entry.
+    /// Returns the number of entries removed (0 if no corruption found).
+    pub fn repair_truncate_at_first_corruption(&self) -> Result<usize, StorageError> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(StorageError::WalClosed);
+        }
+        let first_corrupt_seq = {
+            let entries = self.entries.lock();
+            entries
+                .iter()
+                .find(|entry| {
+                    let expected = wal_checksum(&entry.op, &entry.key, &entry.payload);
+                    entry.checksum != expected
+                })
+                .map(|e| e.seq)
+        };
+        let Some(corrupt_seq) = first_corrupt_seq else {
+            return Ok(0);
+        };
+        // Truncate: keep entries with seq < corrupt_seq, drop the corrupted entry and everything after
+        let removed = {
+            let mut entries = self.entries.lock();
+            let before = entries.len();
+            entries.retain(|e| e.seq < corrupt_seq);
+            self.persist_entries(&entries)?;
+            self.recompute_segments(entries.len());
+            before - entries.len()
+        };
+        // Adjust next_seq to match the last valid entry
+        let max_valid_seq = {
+            let entries = self.entries.lock();
+            entries.last().map(|e| e.seq).unwrap_or(0)
+        };
+        self.next_seq.store(max_valid_seq + 1, Ordering::SeqCst);
+        self.degraded.store(false, Ordering::SeqCst);
+        Ok(removed)
+    }
+}
+
+/// A WAL snapshot checkpoint for recovery acceleration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WALSnapshot {
+    pub compacted_through: u64,
+    pub created_at_unix_ms: i64,
+}
+
+/// Save a WAL snapshot to a file.
+pub fn save_wal_snapshot(snapshot: &WALSnapshot, path: &std::path::Path) -> Result<(), StorageError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, rmp_serde::to_vec(snapshot)?)?;
+    std::fs::rename(tmp, path)?;
+    Ok(())
+}
+
+/// Load a previously saved WAL snapshot.
+pub fn load_wal_snapshot(path: &std::path::Path) -> Result<WALSnapshot, StorageError> {
+    let data = std::fs::read(path)?;
+    Ok(rmp_serde::from_slice(&data)?)
+}
+
+/// Prune snapshot files matching `*.snap` pattern, keeping the most recent `keep`.
+pub fn prune_wal_snapshots(dir: &std::path::Path, keep: usize) -> Result<usize, StorageError> {
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let mut snapshots: Vec<_> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| n.ends_with(".snap"))
+                .unwrap_or(false)
+        })
+        .collect();
+    let removed = if snapshots.len() > keep {
+        snapshots.sort_by_key(|e| e.file_name());
+        let to_remove = snapshots.len().saturating_sub(keep);
+        for entry in snapshots.iter().take(to_remove) {
+            std::fs::remove_file(entry.path())?;
+        }
+        to_remove
+    } else {
+        0
+    };
+    Ok(removed)
 }
 
 fn wal_checksum(op: &str, key: &str, payload: &[u8]) -> u32 {
@@ -879,7 +1014,6 @@ pub trait StorageEventNotifier {
 }
 
 /// A single opened copperdb storage instance.
-#[derive(Debug)]
 pub struct StorageEngine {
     db: Db,
     meta: Tree,
@@ -889,6 +1023,23 @@ pub struct StorageEngine {
     mvcc: MvccStore,
     encryption: Option<StorageEncryption>,
     temp_dir: Option<tempfile::TempDir>,
+    // Event callbacks
+    on_node_created_cb: RwLock<Option<NodeEventCallback>>,
+    on_node_updated_cb: RwLock<Option<NodeEventCallback>>,
+    on_node_deleted_cb: RwLock<Option<NodeDeleteCallback>>,
+    on_edge_created_cb: RwLock<Option<EdgeEventCallback>>,
+    on_edge_updated_cb: RwLock<Option<EdgeEventCallback>>,
+    on_edge_deleted_cb: RwLock<Option<EdgeDeleteCallback>>,
+}
+
+impl fmt::Debug for StorageEngine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StorageEngine")
+            .field("db", &self.db)
+            .field("encryption", &self.encryption)
+            .field("temp_dir", &self.temp_dir)
+            .finish_non_exhaustive()
+    }
 }
 
 struct StorageEncryption {
@@ -978,6 +1129,12 @@ impl StorageEngine {
             mvcc: MvccStore::new(),
             encryption: None,
             temp_dir: Some(temp_dir),
+            on_node_created_cb: RwLock::new(None),
+            on_node_updated_cb: RwLock::new(None),
+            on_node_deleted_cb: RwLock::new(None),
+            on_edge_created_cb: RwLock::new(None),
+            on_edge_updated_cb: RwLock::new(None),
+            on_edge_deleted_cb: RwLock::new(None),
         };
         engine.ensure_layout_manifest()?;
         engine.ensure_encryption_manifest()?;
@@ -999,6 +1156,12 @@ impl StorageEngine {
             mvcc: MvccStore::new(),
             encryption,
             temp_dir: None,
+            on_node_created_cb: RwLock::new(None),
+            on_node_updated_cb: RwLock::new(None),
+            on_node_deleted_cb: RwLock::new(None),
+            on_edge_created_cb: RwLock::new(None),
+            on_edge_updated_cb: RwLock::new(None),
+            on_edge_deleted_cb: RwLock::new(None),
         };
         engine.ensure_layout_manifest()?;
         engine.ensure_encryption_manifest()?;
@@ -1210,10 +1373,11 @@ impl StorageEngine {
     // --- Structured node/edge APIs (storage v0 baseline) ---
 
     pub fn put_node_record(&self, node: &NodeRecord) -> Result<(), StorageError> {
-        if let Some(old) = self.get_node_record(&node.id)? {
-            self.unindex_node_labels(&old)?;
-            self.unindex_node_properties(&old)?;
-            self.apply_node_stats_delta(&old, -1)?;
+        let old = self.get_node_record(&node.id)?;
+        if let Some(ref old) = old {
+            self.unindex_node_labels(old)?;
+            self.unindex_node_properties(old)?;
+            self.apply_node_stats_delta(old, -1)?;
         }
         self.nodes.insert(
             node.id.as_bytes(),
@@ -1224,6 +1388,12 @@ impl StorageEngine {
         self.apply_node_stats_delta(node, 1)?;
         self.update_pending_embedding_index(node)?;
         self.mvcc.put_node_record(node)?;
+
+        if old.is_some() {
+            self.notify_node_updated(node);
+        } else {
+            self.notify_node_created(node);
+        }
         Ok(())
     }
 
@@ -1244,6 +1414,7 @@ impl StorageEngine {
             self.mark_node_embedded(id)?;
             self.nodes.remove(id.as_bytes())?;
             self.mvcc.delete_node_record(id)?;
+            self.notify_node_deleted(id);
         }
         Ok(())
     }
@@ -1270,6 +1441,90 @@ impl StorageEngine {
         Ok((node_ids.len() as u64, edge_ids.len() as u64))
     }
 
+    /// Execute a batch of storage operations atomically.
+    ///
+    /// All node/edge puts and deletes within the closure are applied as a single
+    /// sled batch. Indexes, stats, and MVCC are updated atomically. If the
+    /// closure returns an error, the batch is discarded and no changes are made.
+    ///
+    /// This is the foundation for namespace-pinned transaction semantics:
+    /// multi-operation writes within a namespace are isolated and atomic.
+    pub fn batch_write<F, E>(&self, f: F) -> Result<(), E>
+    where
+        F: FnOnce(&mut BatchWriter<'_>) -> Result<(), E>,
+        E: From<StorageError>,
+    {
+        let mut writer = BatchWriter {
+            engine: self,
+            ops: Vec::new(),
+        };
+        f(&mut writer)?;
+        writer.commit()?;
+        Ok(())
+    }
+
+    // ── Event notification ─────────────────────────────────────────────────
+
+    pub fn on_node_created(&self, callback: NodeEventCallback) {
+        *self.on_node_created_cb.write() = Some(callback);
+    }
+
+    pub fn on_node_updated(&self, callback: NodeEventCallback) {
+        *self.on_node_updated_cb.write() = Some(callback);
+    }
+
+    pub fn on_node_deleted(&self, callback: NodeDeleteCallback) {
+        *self.on_node_deleted_cb.write() = Some(callback);
+    }
+
+    pub fn on_edge_created(&self, callback: EdgeEventCallback) {
+        *self.on_edge_created_cb.write() = Some(callback);
+    }
+
+    pub fn on_edge_updated(&self, callback: EdgeEventCallback) {
+        *self.on_edge_updated_cb.write() = Some(callback);
+    }
+
+    pub fn on_edge_deleted(&self, callback: EdgeDeleteCallback) {
+        *self.on_edge_deleted_cb.write() = Some(callback);
+    }
+
+    fn notify_node_created(&self, node: &NodeRecord) {
+        if let Some(ref cb) = *self.on_node_created_cb.read() {
+            cb(node.clone());
+        }
+    }
+
+    fn notify_node_updated(&self, node: &NodeRecord) {
+        if let Some(ref cb) = *self.on_node_updated_cb.read() {
+            cb(node.clone());
+        }
+    }
+
+    fn notify_node_deleted(&self, id: &str) {
+        if let Some(ref cb) = *self.on_node_deleted_cb.read() {
+            cb(id.to_string());
+        }
+    }
+
+    fn notify_edge_created(&self, edge: &EdgeRecord) {
+        if let Some(ref cb) = *self.on_edge_created_cb.read() {
+            cb(edge.clone());
+        }
+    }
+
+    fn notify_edge_updated(&self, edge: &EdgeRecord) {
+        if let Some(ref cb) = *self.on_edge_updated_cb.read() {
+            cb(edge.clone());
+        }
+    }
+
+    fn notify_edge_deleted(&self, id: &str) {
+        if let Some(ref cb) = *self.on_edge_deleted_cb.read() {
+            cb(id.to_string());
+        }
+    }
+
     pub fn get_nodes_by_label(&self, label: &str) -> Result<Vec<NodeRecord>, StorageError> {
         let prefix = label_index_prefix(label);
         let mut out = Vec::new();
@@ -1278,6 +1533,10 @@ impl StorageEngine {
             let (key, _) = entry?;
             let key_str =
                 std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            // Skip tombstoned index entries (suppressed entities)
+            if self.has_index_tombstone(key_str) {
+                continue;
+            }
             if let Some(node_id) = key_str.rsplit('/').next() {
                 if let Some(node) = self.get_node_record(node_id)? {
                     out.push(node);
@@ -1423,6 +1682,112 @@ impl StorageEngine {
         existing.embed_meta = node.embed_meta.clone();
         existing.updated_at_unix_ms = existing.updated_at_unix_ms.max(node.updated_at_unix_ms);
         self.put_node_record(&existing)
+    }
+
+    // ── Deindex cleanup queue ───────────────────────────────────────────────
+
+    /// Enqueue a node for deferred index cleanup (e.g., when visibility drops below threshold).
+    pub fn enqueue_deindex_work(&self, entity_id: &str) -> Result<(), StorageError> {
+        let key = [META_PENDING_DEINDEX_PREFIX, entity_id.as_bytes()].concat();
+        self.meta.insert(key, [] as [u8; 0])?;
+        Ok(())
+    }
+
+    /// Drain and process all pending deindex work items.
+    /// For each entity, writes index tombstones to hide (not delete) its index entries.
+    /// The entity record is preserved — tombstones can be cleared when visibility recovers.
+    /// Returns the number of entities deindexed.
+    pub fn drain_deindex_work(&self) -> Result<usize, StorageError> {
+        let pending: Vec<String> = {
+            let mut ids = Vec::new();
+            for entry in self.meta.scan_prefix(META_PENDING_DEINDEX_PREFIX) {
+                let (key, _) = entry?;
+                let key_str = std::str::from_utf8(key.as_ref())
+                    .map_err(|_| StorageError::InvalidUtf8)?;
+                if let Some(id) = key_str.strip_prefix(
+                    std::str::from_utf8(META_PENDING_DEINDEX_PREFIX)
+                        .map_err(|_| StorageError::InvalidUtf8)?,
+                ) {
+                    ids.push(id.to_string());
+                }
+            }
+            ids
+        };
+
+        let mut deindexed = 0usize;
+        for entity_id in &pending {
+            let key = [META_PENDING_DEINDEX_PREFIX, entity_id.as_bytes()].concat();
+
+            // Collect index keys for the entity and write tombstones
+            if let Some(node) = self.get_node_record(entity_id)? {
+                let index_keys = collect_node_index_keys(&node);
+                self.write_index_tombstones(&index_keys)?;
+            } else if let Some(edge) = self.get_edge_record(entity_id)? {
+                let index_keys = collect_edge_index_keys(&edge);
+                self.write_index_tombstones(&index_keys)?;
+            }
+            // If entity is gone, no tombstones needed — just remove the marker
+
+            self.meta.remove(key)?;
+            deindexed += 1;
+        }
+
+        Ok(deindexed)
+    }
+
+    /// Count pending deindex work items.
+    pub fn pending_deindex_count(&self) -> Result<usize, StorageError> {
+        let mut count = 0usize;
+        for entry in self.meta.scan_prefix(META_PENDING_DEINDEX_PREFIX) {
+            entry?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    // ── Index tombstones ────────────────────────────────────────────────────
+
+    /// Write tombstones for a batch of index keys. Tombstone entries hide
+    /// the corresponding index entries during query scans without deleting them,
+    /// allowing restore when entity visibility recovers.
+    pub fn write_index_tombstones(&self, index_keys: &[String]) -> Result<(), StorageError> {
+        for key in index_keys {
+            self.meta.insert(tombstone_key(key), [])?;
+        }
+        Ok(())
+    }
+
+    /// Delete tombstones for a batch of index keys. Used when an entity
+    /// recovers visibility (decay score rises above threshold).
+    pub fn delete_index_tombstones(&self, index_keys: &[String]) -> Result<(), StorageError> {
+        for key in index_keys {
+            self.meta.remove(tombstone_key(key))?;
+        }
+        Ok(())
+    }
+
+    /// Check whether a tombstone exists for the given index key.
+    pub fn has_index_tombstone(&self, index_key: &str) -> bool {
+        self.meta.contains_key(tombstone_key(index_key)).unwrap_or(false)
+    }
+
+    /// Delete all tombstones for a given entity by scanning the tombstone prefix
+    /// for keys containing the entity ID. Returns the number of tombstones removed.
+    pub fn delete_index_tombstones_for_entity(
+        &self,
+        entity_id: &str,
+    ) -> Result<usize, StorageError> {
+        let mut removed = 0usize;
+        for entry in self.meta.scan_prefix(META_INDEX_TOMBSTONE_PREFIX) {
+            let (key, _) = entry?;
+            let key_str = std::str::from_utf8(key.as_ref())
+                .map_err(|_| StorageError::InvalidUtf8)?;
+            if key_str.contains(entity_id) {
+                self.meta.remove(key.as_ref())?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 
     fn update_pending_embedding_index(&self, node: &NodeRecord) -> Result<(), StorageError> {
@@ -1635,9 +2000,10 @@ impl StorageEngine {
     }
 
     pub fn put_edge_record(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
-        if let Some(old) = self.get_edge_record(&edge.id)? {
-            self.unindex_edge(&old)?;
-            self.apply_edge_stats_delta(&old, -1)?;
+        let old = self.get_edge_record(&edge.id)?;
+        if let Some(ref old) = old {
+            self.unindex_edge(old)?;
+            self.apply_edge_stats_delta(old, -1)?;
         }
         self.edges.insert(
             edge.id.as_bytes(),
@@ -1646,6 +2012,12 @@ impl StorageEngine {
         self.index_edge(edge)?;
         self.apply_edge_stats_delta(edge, 1)?;
         self.mvcc.put_edge_record(edge)?;
+
+        if old.is_some() {
+            self.notify_edge_updated(edge);
+        } else {
+            self.notify_edge_created(edge);
+        }
         Ok(())
     }
 
@@ -1664,6 +2036,7 @@ impl StorageEngine {
             self.apply_edge_stats_delta(&existing, -1)?;
             self.edges.remove(id.as_bytes())?;
             self.mvcc.delete_edge_record(id)?;
+            self.notify_edge_deleted(id);
         }
         Ok(())
     }
@@ -1744,6 +2117,10 @@ impl StorageEngine {
             let (key, _) = entry?;
             let key_str =
                 std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            // Skip tombstoned index entries (suppressed entities)
+            if self.has_index_tombstone(key_str) {
+                continue;
+            }
             if let Some(edge_id) = key_str.rsplit('/').next() {
                 if let Some(edge) = self.get_edge_record(edge_id)? {
                     out.push(edge);
@@ -2108,6 +2485,37 @@ impl StorageEngine {
         let key = [META_INDEX_OPTIONS_PREFIX, index_name.as_bytes()].concat();
         self.meta.remove(key)?;
         Ok(())
+    }
+
+    /// Rebuild all property and fulltext indexes from stored node/edge records.
+    ///
+    /// Useful for recovery after index corruption, or for warming indexes on
+    /// cold start. Clears existing index entries for each index first, then
+    /// re-indexes all matching records.
+    ///
+    /// Returns counts of indexes rebuilt per category.
+    pub fn rebuild_all_indexes(
+        &self,
+    ) -> Result<(usize, usize, usize), StorageError> {
+        let definitions = self.load_index_definitions()?;
+        let mut node_prop = 0usize;
+        let mut node_fulltext = 0usize;
+        let mut rel_prop = 0usize;
+
+        for index in &definitions {
+            if is_node_property_index(index) {
+                self.rebuild_node_property_index(index)?;
+                node_prop += 1;
+            } else if is_node_fulltext_index(index) {
+                self.rebuild_node_fulltext_index(index)?;
+                node_fulltext += 1;
+            } else if is_relationship_property_index(index) {
+                self.rebuild_relationship_property_index(index)?;
+                rel_prop += 1;
+            }
+        }
+
+        Ok((node_prop, node_fulltext, rel_prop))
     }
 
     pub fn persist_index_definition_for_namespace(
@@ -2744,6 +3152,10 @@ impl StorageEngine {
             let (key, _) = entry?;
             let key_str =
                 std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            // Skip tombstoned index entries
+            if self.has_index_tombstone(key_str) {
+                continue;
+            }
             if let Some(edge_id) = key_str.rsplit('/').next() {
                 if let Some(edge) = self.get_edge_record(edge_id)? {
                     out.push(edge);
@@ -2760,6 +3172,10 @@ impl StorageEngine {
             let (key, _) = entry?;
             let key_str =
                 std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            // Skip tombstoned index entries
+            if self.has_index_tombstone(key_str) {
+                continue;
+            }
             if let Some(node_id) = key_str.rsplit('/').next() {
                 if let Some(node) = self.get_node_record(node_id)? {
                     out.push(node);
@@ -2769,6 +3185,8 @@ impl StorageEngine {
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)
     }
+
+    // ── Batch write infrastructure ───────────────────────────────────────
 
     fn index_edge(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
         self.indexes.insert(
@@ -3007,6 +3425,10 @@ fn label_index_key(label: &str, node_id: &str) -> String {
     format!("{}{}", label_index_prefix(label), node_id)
 }
 
+fn tombstone_key(index_key: &str) -> Vec<u8> {
+    [META_INDEX_TOMBSTONE_PREFIX, index_key.as_bytes()].concat()
+}
+
 fn edge_type_index_prefix(edge_type: &str) -> String {
     format!("{IDX_EDGE_TYPE_PREFIX}/{edge_type}/")
 }
@@ -3213,6 +3635,38 @@ fn tokenize_fulltext(text: &str) -> Vec<String> {
         .filter(|word| !word.is_empty())
         .map(|word| word.to_lowercase())
         .collect()
+}
+
+// ── Index key collection for deindex tombstone writes ───────────────────────
+
+fn collect_node_index_keys(node: &NodeRecord) -> Vec<String> {
+    let mut keys = Vec::new();
+    // Label index keys
+    for label in &node.labels {
+        keys.push(label_index_key(label, &node.id));
+    }
+    // Property index keys (range/temporal) and fulltext keys
+    for (prop_name, value) in &node.properties {
+        for label in &node.labels {
+            // Range/temporal property index entries
+            keys.push(node_property_index_key(label, prop_name, value, &node.id));
+            // Fulltext index entries
+            for token in fulltext_tokens_for_value(value) {
+                keys.push(node_fulltext_index_key(label, prop_name, &token, &node.id));
+            }
+        }
+    }
+    keys
+}
+
+fn collect_edge_index_keys(edge: &EdgeRecord) -> Vec<String> {
+    let mut keys = Vec::new();
+    // Edge type index
+    keys.push(edge_type_index_key(&edge.edge_type, &edge.id));
+    // Edge adjacency indexes
+    keys.push(edge_start_index_key(&edge.start_node, &edge.edge_type, &edge.id));
+    keys.push(edge_end_index_key(&edge.end_node, &edge.edge_type, &edge.id));
+    keys
 }
 
 fn fulltext_tokens_for_value(value: &serde_json::Value) -> Vec<String> {
@@ -3534,6 +3988,95 @@ fn namespace_from_stats_key(key: &[u8], key_prefix: &[u8]) -> Option<String> {
     let encoded = std::str::from_utf8(encoded).ok()?;
     let decoded = hex::decode(encoded).ok()?;
     String::from_utf8(decoded).ok()
+}
+
+// ── BatchWrite: namespace-scoped atomic writes ──────────────────────────────
+
+// ── StorageEventNotifier implementation ─────────────────────────────────────
+
+impl StorageEventNotifier for StorageEngine {
+    fn on_node_created(&self, callback: NodeEventCallback) {
+        StorageEngine::on_node_created(self, callback);
+    }
+
+    fn on_node_updated(&self, callback: NodeEventCallback) {
+        StorageEngine::on_node_updated(self, callback);
+    }
+
+    fn on_node_deleted(&self, callback: NodeDeleteCallback) {
+        StorageEngine::on_node_deleted(self, callback);
+    }
+
+    fn on_edge_created(&self, callback: EdgeEventCallback) {
+        StorageEngine::on_edge_created(self, callback);
+    }
+
+    fn on_edge_updated(&self, callback: EdgeEventCallback) {
+        StorageEngine::on_edge_updated(self, callback);
+    }
+
+    fn on_edge_deleted(&self, callback: EdgeDeleteCallback) {
+        StorageEngine::on_edge_deleted(self, callback);
+    }
+}
+
+/// An operation buffered for atomic batch commit.
+enum BatchOp {
+    PutNode(NodeRecord),
+    PutEdge(EdgeRecord),
+    DeleteNode(String),
+    DeleteEdge(String),
+}
+
+/// Builder for atomic multi-operation writes within a namespace.
+///
+/// Operations are buffered and committed atomically: either all succeed or
+/// none are applied. Indexes, stats, and MVCC are updated at commit time.
+pub struct BatchWriter<'a> {
+    engine: &'a StorageEngine,
+    ops: Vec<BatchOp>,
+}
+
+impl<'a> BatchWriter<'a> {
+    pub fn put_node_record(&mut self, node: &NodeRecord) {
+        self.ops.push(BatchOp::PutNode(node.clone()));
+    }
+
+    pub fn put_edge_record(&mut self, edge: &EdgeRecord) {
+        self.ops.push(BatchOp::PutEdge(edge.clone()));
+    }
+
+    pub fn delete_node_record(&mut self, id: &str) {
+        self.ops.push(BatchOp::DeleteNode(id.to_string()));
+    }
+
+    pub fn delete_edge_record(&mut self, id: &str) {
+        self.ops.push(BatchOp::DeleteEdge(id.to_string()));
+    }
+
+    fn commit(&self) -> Result<(), StorageError> {
+        for op in &self.ops {
+            match op {
+                BatchOp::PutNode(node) => self.engine.put_node_record(node)?,
+                BatchOp::PutEdge(edge) => self.engine.put_edge_record(edge)?,
+                BatchOp::DeleteNode(id) => {
+                    let _ = self.engine.delete_node_record(id);
+                }
+                BatchOp::DeleteEdge(id) => {
+                    let _ = self.engine.delete_edge_record(id);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.ops.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ops.is_empty()
+    }
 }
 
 fn now_unix_ms() -> i64 {

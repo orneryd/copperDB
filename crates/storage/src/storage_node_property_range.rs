@@ -37,6 +37,10 @@ impl StorageEngine {
             let (key, _) = entry?;
             let key_str =
                 std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            // Skip tombstoned index entries
+            if self.has_index_tombstone(key_str) {
+                continue;
+            }
             let Some(node_id) = key_str.rsplit('/').next() else {
                 continue;
             };
@@ -101,6 +105,10 @@ impl StorageEngine {
             let (key, _) = entry?;
             let key_str =
                 std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            // Skip tombstoned index entries
+            if self.has_index_tombstone(key_str) {
+                continue;
+            }
             let Some(node_id) = key_str.rsplit('/').next() else {
                 continue;
             };
