@@ -106,9 +106,10 @@ impl DatabaseManager {
             let (name, overrides) = database_config_from_node(&node)?;
             manager.config_overrides.insert(name, overrides);
         }
-        drop(storage);
         manager.seed_builtin_databases();
-        manager.persist_all()?;
+        // Persist using the already-open storage instead of opening a new one.
+        manager.persist_all_with(&storage)?;
+        drop(storage);
         Ok(manager)
     }
 
@@ -217,8 +218,17 @@ impl DatabaseManager {
     }
 
     fn persist_all(&self) -> Result<(), MultiDbError> {
+        let Some(path) = &self.catalog_path else {
+            return Ok(());
+        };
+        let storage = StorageEngine::open(path)?;
+        self.persist_all_with(&storage)?;
+        Ok(())
+    }
+
+    fn persist_all_with(&self, storage: &StorageEngine) -> Result<(), MultiDbError> {
         for database in self.list() {
-            self.persist_database(&database)?;
+            self.persist_database_with(storage, &database)?;
         }
         Ok(())
     }
@@ -228,6 +238,11 @@ impl DatabaseManager {
             return Ok(());
         };
         let storage = StorageEngine::open(path)?;
+        self.persist_database_with(&storage, database)?;
+        Ok(())
+    }
+
+    fn persist_database_with(&self, storage: &StorageEngine, database: &Database) -> Result<(), MultiDbError> {
         storage
             .for_namespace("multidb")
             .put_node_record(&database_to_node(database)?)?;
