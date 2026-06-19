@@ -8,7 +8,7 @@ use async_graphql_axum::GraphQLRequest;
 use axum::{
     body::Body,
     extract::{Path, Query, State},
-    http::{header, HeaderMap, Request, StatusCode},
+    http::{header, HeaderMap, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{delete, get, post, post_service},
@@ -644,7 +644,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/graphql", post(graphql_handler))
         .route("/graphql", get(graphql_playground_handler))
         // ── MCP (Model Context Protocol) ──────────────────────────────────
-        .route("/mcp", post(mcp_handler));
+        .route("/mcp", post(mcp_handler))
+        // ── SPA fallback: any unmatched route serves index.html when UI is available ──
+        .fallback(ui_fallback);
 
     let normalized = normalize_base_path(&state.base_path);
     let router = router.layer(middleware::from_fn_with_state(
@@ -838,6 +840,20 @@ async fn root_handler(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
 
 async fn ui_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     serve_ui_index(&state)
+}
+
+/// SPA fallback: any unmatched GET request serves index.html when the UI
+/// is available. Mimics NornicDB's uiHandler.ServeHTTP which serves
+/// index.html for all non-asset paths when uiHandler != nil.
+async fn ui_fallback(State(state): State<Arc<AppState>>, request: Request<Body>) -> impl IntoResponse {
+    if request.method() != Method::GET {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    if ui_available(&state) && !state.headless {
+        serve_ui_index(&state)
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
 }
 
 async fn asset_handler(

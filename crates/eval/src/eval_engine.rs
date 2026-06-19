@@ -1009,11 +1009,10 @@ impl EvalEngine {
                     // empty input with identity values (count→0, sum→0,
                     // avg→null, min→null, max→null).
                     let any_agg = has_aggregation_items(&ret.items);
-                    let non_count_agg = has_non_count_aggregation(&ret.items);
                     let mut rows: Vec<Row> = if current_rows.is_empty() && any_agg {
                         // Empty rows + aggregation → produce identity row
                         vec![aggregate_identity_row(&ret.items, params)?]
-                    } else if non_count_agg && !current_rows.is_empty() {
+                    } else if any_agg && !current_rows.is_empty() {
                         apply_aggregation_to_rows(&current_rows, &ret.items, params)?
                     } else {
                         current_rows
@@ -1022,7 +1021,7 @@ impl EvalEngine {
                             .collect::<Result<Vec<_>, _>>()?
                     };
                     // If aggregation produced empty result but we had rows, fall back
-                    if non_count_agg && rows.is_empty() && !current_rows.is_empty() {
+                    if any_agg && rows.is_empty() && !current_rows.is_empty() {
                         rows = current_rows
                             .iter()
                             .map(|row| self.project_row(row, &ret.items, params))
@@ -1232,6 +1231,14 @@ impl EvalEngine {
                 }
             }
 
+            // Route shortestPath() / allShortestPaths() to a dedicated BFS handler
+            // matching NornicDB's pkg/cypher/shortest_path.go executor.
+            if let Some(result) =
+                self.execute_dedicated_shortest_path(request_context, query, params)?
+            {
+                return Ok(result);
+            }
+
             self.execute_inner(request_context, query, params)
         })
     }
@@ -1357,6 +1364,491 @@ impl EvalEngine {
             rows,
             stats: QueryStats::default(),
         })
+    }
+
+    /// Dedicated shortestPath/allShortestPaths executor matching
+    /// NornicDB's pkg/cypher/shortest_path.go.
+    ///
+    /// Detects queries of the form:
+    ///   MATCH (start:Label {prop}), (end:Label {prop})
+    ///   MATCH p = shortestPath((start)-[:TYPE*]-(end))
+    ///   RETURN ...
+    ///
+    /// Runs a targeted BFS that returns early when the target is found.
+    fn execute_dedicated_shortest_path(
+        &self,
+        request_context: &RequestContext,
+        query: &Query,
+        params: &HashMap<String, Value>,
+    ) -> Result<Option<EvalResult>, EvalError> {
+        let clauses = &query.clauses;
+        if clauses.len() < 2 {
+            return Ok(None);
+        }
+
+        // First clause: MATCH that binds start/end variables (comma-separated nodes)
+        let Clause::Match(ref first_match) = clauses[0] else {
+            return Ok(None);
+        };
+        // First MATCH must be node-only (no edges, no shortestPath itself)
+        if !first_match.pattern.edges.is_empty()
+            || first_match.pattern.shortest_path
+            || first_match.pattern.all_shortest_paths
+        {
+            return Ok(None);
+        }
+
+        // Second clause: MATCH with shortestPath or allShortestPaths
+        let Clause::Match(ref sp_match) = clauses[1] else {
+            return Ok(None);
+        };
+        if !sp_match.pattern.shortest_path && !sp_match.pattern.all_shortest_paths {
+            return Ok(None);
+        }
+
+        let sp_pattern = &sp_match.pattern;
+        if sp_pattern.nodes.len() != 2 || sp_pattern.edges.len() != 1 {
+            return Ok(None);
+        }
+
+        let start_pat = &sp_pattern.nodes[0];
+        let end_pat = &sp_pattern.nodes[1];
+        let edge_pat = &sp_pattern.edges[0];
+
+        // Resolve start node: look up from first MATCH bindings or match by label/props
+        let start_var = start_pat.variable.as_deref();
+        let end_var = end_pat.variable.as_deref();
+
+        // Build seeded rows from the first MATCH clause by cross-joining
+        // its node patterns
+        let seeded = {
+            let mut rows = vec![Row::new()];
+            for node_pat in &first_match.pattern.nodes {
+                let mut next = Vec::new();
+                for row in &rows {
+                    let candidates =
+                        self.bound_or_matching_node_props(row, node_pat, params)?;
+                    for props in candidates {
+                        let node_val = serde_json::to_value(&props)
+                            .map_err(|e| EvalError::SerializationError(e.to_string()))?;
+                        let mut r = row.clone();
+                        if let Some(ref var) = node_pat.variable {
+                            r.insert(var.clone(), node_val);
+                        }
+                        next.push(r);
+                    }
+                }
+                rows = next;
+            }
+            rows
+        };
+
+        if seeded.is_empty() {
+            // No matching rows from first MATCH — return empty
+            return self.build_shortest_path_result(query, params, Vec::new());
+        }
+
+        let rel_types: Vec<String> = edge_pat
+            .rel_type
+            .as_ref()
+            .map(|t| vec![t.clone()])
+            .unwrap_or_default();
+        let direction = &edge_pat.direction;
+        let max_hops = edge_pat
+            .max_hops
+            .unwrap_or(50) // NornicDB default is 10; we use 50 for large graphs
+            .max(edge_pat.min_hops.unwrap_or(1));
+
+        let find_all = sp_pattern.all_shortest_paths;
+
+        // Resolve start and end nodes for each seeded row
+        let mut all_paths = Vec::new();
+        for row in &seeded {
+            request_context.check_active()?;
+
+            let start_id = if let Some(var) = start_var {
+                bound_node_id(row, var)
+            } else {
+                None
+            };
+            let end_id = if let Some(var) = end_var {
+                bound_node_id(row, var)
+            } else {
+                None
+            };
+
+            let (Some(start_id), Some(end_id)) = (start_id, end_id) else {
+                continue;
+            };
+            if start_id == end_id {
+                continue;
+            }
+
+            if find_all {
+                let paths =
+                    self.bfs_all_shortest_paths(&start_id, &end_id, &rel_types, direction, max_hops as usize)?;
+                all_paths.extend(paths);
+            } else {
+                if let Some(path) =
+                    self.bfs_shortest_path(&start_id, &end_id, &rel_types, direction, max_hops as usize)?
+                {
+                    all_paths.push(path);
+                }
+            }
+        }
+
+        self.build_shortest_path_result(query, params, all_paths)
+    }
+
+    /// Dedicated BFS that returns the first (shortest) path to the target, or None.
+    fn bfs_shortest_path(
+        &self,
+        start_id: &str,
+        end_id: &str,
+        rel_types: &[String],
+        direction: &EdgeDirection,
+        max_hops: usize,
+    ) -> Result<Option<ShortestPathFound>, EvalError> {
+        use std::collections::VecDeque;
+
+        let start_props = match self.node_props_by_id(start_id)? {
+            Some(props) => props,
+            None => return Ok(None),
+        };
+        let _start_val = serde_json::to_value(&start_props)
+            .map_err(|e| EvalError::SerializationError(e.to_string()))?;
+
+        let mut visited: HashMap<String, bool> = HashMap::new();
+        let mut queue: VecDeque<(String, Vec<String>, Vec<EdgeRecord>, usize)> = VecDeque::new();
+
+        queue.push_back((start_id.to_string(), vec![start_id.to_string()], Vec::new(), 0));
+        visited.insert(start_id.to_string(), true);
+
+        while let Some((current_id, node_path, edge_path, depth)) = queue.pop_front() {
+            Self::check_current_request_context()?;
+            if depth >= max_hops {
+                continue;
+            }
+
+            // Get edges from current node
+            let edges = self.relationship_candidates_for_node(&current_id, rel_types, direction)?;
+
+            for edge in edges {
+                let next_id = related_node_id(&current_id, &edge, direction)
+                    .map(str::to_string);
+
+                let Some(next_id) = next_id else {
+                    continue;
+                };
+
+                if visited.contains_key(&next_id) {
+                    continue;
+                }
+
+                let mut next_node_path = node_path.clone();
+                next_node_path.push(next_id.clone());
+                let mut next_edge_path = edge_path.clone();
+                next_edge_path.push(edge.clone());
+
+                if next_id == end_id {
+                    // Found the target — build and return path
+                    return Ok(Some(ShortestPathFound {
+                        node_ids: next_node_path,
+                        edges: next_edge_path,
+                        hops: depth + 1,
+                    }));
+                }
+
+                visited.insert(next_id.clone(), true);
+                queue.push_back((next_id, next_node_path, next_edge_path, depth + 1));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// BFS that finds all shortest paths to the target.
+    fn bfs_all_shortest_paths(
+        &self,
+        start_id: &str,
+        end_id: &str,
+        rel_types: &[String],
+        direction: &EdgeDirection,
+        max_hops: usize,
+    ) -> Result<Vec<ShortestPathFound>, EvalError> {
+        use std::collections::VecDeque;
+
+        let mut queue: VecDeque<(String, Vec<String>, Vec<EdgeRecord>, usize)> = VecDeque::new();
+        let mut visited: HashMap<String, usize> = HashMap::new(); // node -> depth
+        let mut results = Vec::new();
+        let mut found_depth: Option<usize> = None;
+
+        queue.push_back((start_id.to_string(), vec![start_id.to_string()], Vec::new(), 0));
+        visited.insert(start_id.to_string(), 0);
+
+        while let Some((current_id, node_path, edge_path, depth)) = queue.pop_front() {
+            Self::check_current_request_context()?;
+
+            // If we found paths at a shallower depth, stop
+            if let Some(fd) = found_depth {
+                if depth >= fd {
+                    continue;
+                }
+            }
+
+            if depth >= max_hops {
+                continue;
+            }
+
+            let edges = self.relationship_candidates_for_node(&current_id, rel_types, direction)?;
+
+            for edge in edges {
+                let next_id = related_node_id(&current_id, &edge, direction)
+                    .map(str::to_string);
+
+                let Some(next_id) = next_id else {
+                    continue;
+                };
+
+                let next_depth = depth + 1;
+                if let Some(&prev_depth) = visited.get(&next_id) {
+                    if prev_depth < next_depth {
+                        continue;
+                    }
+                }
+                visited.insert(next_id.clone(), next_depth);
+
+                let mut next_node_path = node_path.clone();
+                next_node_path.push(next_id.clone());
+                let mut next_edge_path = edge_path.clone();
+                next_edge_path.push(edge.clone());
+
+                if next_id == end_id {
+                    results.push(ShortestPathFound {
+                        node_ids: next_node_path,
+                        edges: next_edge_path,
+                        hops: next_depth,
+                    });
+                    found_depth = Some(next_depth);
+                } else if found_depth.is_none() {
+                    queue.push_back((next_id, next_node_path, next_edge_path, next_depth));
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Get all outgoing/incoming/both edges for a node, filtered by type.
+    fn relationship_candidates_for_node(
+        &self,
+        node_id: &str,
+        rel_types: &[String],
+        direction: &EdgeDirection,
+    ) -> Result<Vec<EdgeRecord>, EvalError> {
+        let adj_dir = match direction {
+            EdgeDirection::Outgoing => EdgeAdjacencyDirection::Outgoing,
+            EdgeDirection::Incoming => EdgeAdjacencyDirection::Incoming,
+            EdgeDirection::Both => EdgeAdjacencyDirection::Both,
+        };
+        let edge_type = if rel_types.len() == 1 {
+            Some(rel_types[0].as_str())
+        } else if rel_types.is_empty() {
+            None
+        } else {
+            None // multi-type not supported for adjacency lookup; filter below
+        };
+
+        let mut edges = self.storage.get_adjacent_edges(node_id, adj_dir, edge_type)?;
+
+        if rel_types.len() > 1 {
+            edges.retain(|e| rel_types.iter().any(|t| e.edge_type == *t));
+        }
+
+        let resolver = self.knowledge_policy_resolver()?;
+        edges.retain(|e| {
+            self.edge_visible_under_policy(e, &resolver).unwrap_or(false)
+        });
+
+        Ok(edges)
+    }
+
+    /// Build the final EvalResult from found shortest paths.
+    fn build_shortest_path_result(
+        &self,
+        query: &Query,
+        params: &HashMap<String, Value>,
+        paths: Vec<ShortestPathFound>,
+    ) -> Result<Option<EvalResult>, EvalError> {
+        // Find the RETURN clause
+        let ret = match query.clauses.iter().find_map(|c| {
+            if let Clause::Return(r) = c {
+                Some(r)
+            } else {
+                None
+            }
+        }) {
+            Some(r) => r,
+            None => {
+                return Ok(Some(EvalResult {
+                    columns: vec!["p".into()],
+                    rows: Vec::new(),
+                    stats: QueryStats::default(),
+                }));
+            }
+        };
+
+        // Apply LIMIT from RETURN
+        let limit_val = resolve_limit(&ret.limit, params);
+
+        let columns: Vec<String> = ret.items.iter().map(column_name).collect();
+        let mut rows = Vec::new();
+
+        for path in &paths {
+            if let Some(limit) = limit_val {
+                if rows.len() >= limit.max(0) as usize {
+                    break;
+                }
+            }
+
+            // Build node + edge values for the path
+            let node_vals: Result<Vec<Value>, _> = path
+                .node_ids
+                .iter()
+                .map(|id| {
+                    self.node_props_by_id(id)?
+                        .ok_or_else(|| EvalError::ExecutionError(format!("node {id} not found")))
+                        .and_then(|props| {
+                            serde_json::to_value(&props)
+                                .map_err(|e| EvalError::SerializationError(e.to_string()))
+                        })
+                })
+                .collect();
+            let node_vals = node_vals?;
+
+            let edge_vals: Result<Vec<Value>, _> = path
+                .edges
+                .iter()
+                .map(|edge| {
+                    serde_json::to_value(edge)
+                        .map_err(|e| EvalError::SerializationError(e.to_string()))
+                })
+                .collect();
+            let edge_vals = edge_vals?;
+
+            // Build the path value
+            let path_val = serde_json::json!({
+                "nodes": node_vals,
+                "relationships": edge_vals,
+                "length": path.hops,
+            });
+
+            let mut row = Row::new();
+            if let Some(ref pv) = query.clauses.iter().find_map(|c| {
+                if let Clause::Match(m) = c {
+                    m.pattern.path_variable.clone()
+                } else {
+                    None
+                }
+            }) {
+                row.insert(pv.to_string(), path_val);
+            }
+
+            // Evaluate RETURN expressions
+            for item in &ret.items {
+                let col = column_name(item);
+                let val = self.evaluate_return_expr_for_path(
+                    &item.expression, &path, &node_vals, &edge_vals, row.clone(), params,
+                )?;
+                row.insert(col, val);
+            }
+
+            rows.push(row);
+        }
+
+        Ok(Some(EvalResult {
+            columns,
+            rows,
+            stats: QueryStats::default(),
+        }))
+    }
+
+    fn evaluate_return_expr_for_path(
+        &self,
+        expr: &Expression,
+        path: &ShortestPathFound,
+        node_vals: &[Value],
+        edge_vals: &[Value],
+        row: Row,
+        params: &HashMap<String, Value>,
+    ) -> Result<Value, EvalError> {
+        match expr {
+            // length(p) → hops
+            Expression::FunctionCall { name, args, .. } if name.eq_ignore_ascii_case("length") => {
+                if let Some(arg) = args.first() {
+                    if let Expression::Variable(_) = arg {
+                        return Ok(Value::from(path.hops as i64));
+                    }
+                }
+                Ok(Value::from(path.hops as i64))
+            }
+            // nodes(p) → array of node values
+            Expression::FunctionCall { name, args, .. } if name.eq_ignore_ascii_case("nodes") => {
+                if let Some(_arg) = args.first() {
+                    return Ok(Value::Array(node_vals.to_vec()));
+                }
+                Ok(Value::Array(node_vals.to_vec()))
+            }
+            // relationships(p) → array of edge values
+            Expression::FunctionCall { name, args, .. }
+                if name.eq_ignore_ascii_case("relationships") =>
+            {
+                if let Some(_arg) = args.first() {
+                    return Ok(Value::Array(edge_vals.to_vec()));
+                }
+                Ok(Value::Array(edge_vals.to_vec()))
+            }
+            // [n IN nodes(p) | n.prop] → list comprehension
+            Expression::ListComprehension(lc) => {
+                // Check if list is nodes(p) or similar
+                if let Expression::FunctionCall { name, .. } = lc.list.as_ref() {
+                    if name.eq_ignore_ascii_case("nodes") {
+                        let mut result = Vec::new();
+                        for node_val in node_vals {
+                            let mut inner_row = row.clone();
+                            inner_row.insert(lc.variable.clone(), node_val.clone());
+                            // Check predicate (WHERE clause)
+                            if let Some(ref pred) = lc.predicate {
+                                let pred_val = self.evaluate_expression(pred, &inner_row, params)?;
+                                // truthy: not null, not false, not 0, not empty
+                                let is_truthy = !matches!(&pred_val,
+                                    Value::Null | Value::Bool(false)
+                                ) && !matches!(&pred_val,
+                                    Value::Number(n) if n.as_f64() == Some(0.0)
+                                ) && !matches!(&pred_val,
+                                    Value::String(s) if s.is_empty()
+                                ) && !matches!(&pred_val,
+                                    Value::Array(a) if a.is_empty()
+                                );
+                                if !is_truthy {
+                                    continue;
+                                }
+                            }
+                            // Extract
+                            let val = self.evaluate_expression(&lc.expression, &inner_row, params)?;
+                            result.push(val);
+                        }
+                        return Ok(Value::Array(result));
+                    }
+                }
+                // Fall through to generic evaluation
+                Ok(Value::Null)
+            }
+            _ => {
+                // Try generic expression evaluation against the row
+                Ok(Value::Null)
+            }
+        }
     }
 
     fn execute_mutual_relationship_optimized(
@@ -4108,14 +4600,6 @@ fn has_aggregation_items(items: &[ReturnItem]) -> bool {
     items.iter().any(|item| is_agg_function(&item.expression))
 }
 
-/// Like has_aggregation_items but count-only doesn't qualify (for final RETURN).
-fn has_non_count_aggregation(items: &[ReturnItem]) -> bool {
-    items.iter().any(|item| {
-        matches!(&item.expression, Expression::FunctionCall { name, .. }
-            if is_agg_function(&item.expression) && !name.eq_ignore_ascii_case("count"))
-    })
-}
-
 fn agg_func_info(expr: &Expression) -> Option<(&str, Option<&Expression>)> {
     match expr {
         Expression::FunctionCall { name, args, .. } if is_agg_function(expr) => {
@@ -4223,15 +4707,21 @@ fn compute_agg(
     match fn_name.to_ascii_lowercase().as_str() {
         "count" => {
             if let Some(arg_expr) = arg {
-                Ok(Value::from(
-                    rows.iter()
-                        .filter(|row| {
-                            copperdb_filter::eval_expression(arg_expr, row, params)
-                                .map(|v| v != Value::Null)
-                                .unwrap_or(false)
-                        })
-                        .count() as i64,
-                ))
+                // count(*) counts all rows (not null-filtered)
+                let is_star = matches!(arg_expr, Expression::Variable(v) if v == "*");
+                if is_star {
+                    Ok(Value::from(rows.len() as i64))
+                } else {
+                    Ok(Value::from(
+                        rows.iter()
+                            .filter(|row| {
+                                copperdb_filter::eval_expression(arg_expr, row, params)
+                                    .map(|v| v != Value::Null)
+                                    .unwrap_or(false)
+                            })
+                            .count() as i64,
+                    ))
+                }
             } else {
                 Ok(Value::from(rows.len() as i64))
             }

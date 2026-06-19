@@ -19,9 +19,9 @@ use copperdb_knowledgepolicy::{
 };
 use copperdb_storage::{
     Constraint, ConstraintEntityType, ConstraintType, DecayProfileBindingSchema,
-    DecayProfileSchema, EdgeRecord, KnowledgePolicyAccessMetadata, NodeRecord,
-    PromotionOnAccessMutationKindSchema, PromotionOnAccessMutationSchema, PromotionPolicySchema,
-    PromotionProfileSchema, PromotionWhenClauseSchema, StorageEngine,
+    DecayProfileSchema, EdgeAdjacencyDirection, EdgeRecord, KnowledgePolicyAccessMetadata,
+    NodeRecord, PromotionOnAccessMutationKindSchema, PromotionOnAccessMutationSchema,
+    PromotionPolicySchema, PromotionProfileSchema, PromotionWhenClauseSchema, StorageEngine,
 };
 use copperdb_util::{RequestCancelled, RequestContext};
 use serde_json::Value;
@@ -89,6 +89,13 @@ pub struct EvalResult {
 
 struct RelationshipMatchRow {
     row: Row,
+    hops: usize,
+}
+
+/// Result of a dedicated shortest-path BFS traversal.
+struct ShortestPathFound {
+    node_ids: Vec<String>,
+    edges: Vec<EdgeRecord>,
     hops: usize,
 }
 
@@ -551,6 +558,11 @@ fn pipeline_bound_node<'a>(
 
 fn bound_row_object_props(row: &Row, variable: &str) -> Option<HashMap<String, Value>> {
     pipeline_bound_node(row, variable).map(|props| props.clone().into_iter().collect())
+}
+
+/// Extract the node ID from a bound variable in a row.
+fn bound_node_id(row: &Row, variable: &str) -> Option<String> {
+    bound_row_object_props(row, variable).and_then(|props| node_id(&props).map(str::to_string))
 }
 
 fn bound_node_matches_row(

@@ -1342,7 +1342,7 @@ fn index_and_prefix_scan_apis_work() {
 
 #[test]
 fn flush_guard_and_size_api_are_stable() {
-    let engine = StorageEngine::open_temporary().unwrap();
+    let engine = Arc::new(StorageEngine::open_temporary().unwrap());
     {
         let _guard = engine.hold_flush();
         engine.put_node("n1", b"v1").unwrap();

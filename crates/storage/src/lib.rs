@@ -1099,7 +1099,15 @@ impl StorageEngine {
 
     /// Open (or create) a storage engine at the given path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
-        let db = sled::open(path)?;
+        let config = sled::Config::new()
+            .path(path)
+            // Disable periodic auto-flush — we call flush() explicitly at
+            // transaction boundaries via FlushGuard. This prevents sled from
+            // syncing to disk on every write, which is a major bottleneck on
+            // Windows (where NTFS fsync is slow). Matches NornicDB's BadgerDB
+            // batch-write semantics where durability is gated on explicit flush.
+            .flush_every_ms(None);
+        let db = config.open()?;
         Self::open_with_db(db, None)
     }
 
@@ -1110,7 +1118,10 @@ impl StorageEngine {
         provider: Arc<dyn KeyProvider>,
         key_uri: impl Into<String>,
     ) -> Result<Self, StorageError> {
-        let db = sled::open(path)?;
+        let config = sled::Config::new()
+            .path(path)
+            .flush_every_ms(None);
+        let db = config.open()?;
         let encryption = StorageEncryption::new(provider, key_uri.into())?;
         Self::open_with_db(db, Some(encryption))
     }
@@ -2955,9 +2966,11 @@ impl StorageEngine {
         Ok(())
     }
 
-    /// Acquire a flush guard for call-site parity with NornicDB's async engine.
-    pub fn hold_flush(&self) -> FlushGuard {
-        FlushGuard
+    /// Acquire a flush guard. When dropped, flushes all pending writes to disk.
+    pub fn hold_flush(self: &Arc<Self>) -> FlushGuard {
+        FlushGuard {
+            storage: Arc::clone(self),
+        }
     }
 
     /// Return the on-disk size in bytes.
@@ -3336,12 +3349,18 @@ impl StorageEngine {
     }
 }
 
-/// A RAII guard that signals "no flush should occur while I am alive".
-pub struct FlushGuard;
+/// A RAII guard that flushes pending writes to disk when dropped.
+pub struct FlushGuard {
+    storage: Arc<StorageEngine>,
+}
 
 impl Drop for FlushGuard {
     fn drop(&mut self) {
-        // No-op: sled handles durability internally.
+        // Flush sled to disk. Failures are logged but do not panic — a flush
+        // failure should not crash the server.
+        if let Err(e) = self.storage.db.flush() {
+            tracing::warn!(error = %e, "sled flush failed during FlushGuard drop");
+        }
     }
 }
 

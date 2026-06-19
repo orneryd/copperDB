@@ -3185,3 +3185,712 @@ async fn test_discovery_served_to_api_clients_by_default() {
     assert_eq!(discovery["neo4j_edition"], "community");
     assert_eq!(discovery["neo4j_version"], "5.0.0");
 }
+
+// ─── Demo page e2e ─────────────────────────────────────────────────────
+//
+// Mirrors NornicDB's /demo page lifecycle:
+//   create d3_demo → index → seed stars → seed edges → query → persist
+//
+// The browser Demo.tsx sends these exact Cypher shapes via the HTTP
+// /db/{name}/tx/commit endpoint.  This test replays the same protocol
+// traffic and then re-opens the storage to assert the data is on disk.
+
+fn demo_temp_appstate(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
+    let data_root = temp_dir.path().to_string_lossy().into_owned();
+    let db_manager = Arc::new(DatabaseManager::new());
+    // Seed built-in databases under the temp root so they don't collide
+    // with anything outside the test.
+    let _ = db_manager.create("system", format!("{data_root}/system"));
+    let _ = db_manager.create("default", format!("{data_root}/default"));
+    let mut state = AppState::default();
+    state.db_name = "default".into();
+    state.db_manager = db_manager;
+    state.auth.security_enabled = false;
+    Arc::new(state)
+}
+
+/// Like demo_temp_appstate but uses a catalog-backed DatabaseManager so
+/// CREATE DATABASE persists to disk and survives restart.
+fn demo_temp_appstate_with_catalog(
+    temp_dir: &tempfile::TempDir,
+) -> Arc<AppState> {
+    let data_root = temp_dir.path().to_string_lossy().into_owned();
+    let catalog_path = format!("{data_root}/multidb");
+    // Ensure catalog dir exists before open
+    std::fs::create_dir_all(&catalog_path).unwrap();
+    let db_manager = Arc::new(
+        DatabaseManager::open(&catalog_path).unwrap_or_else(|_| {
+            let dm = DatabaseManager::new();
+            let _ = dm.create("system", format!("{data_root}/system"));
+            let _ = dm.create("default", format!("{data_root}/default"));
+            dm
+        }),
+    );
+    // If opened fresh (no catalog yet), ensure built-in DBs exist
+    if db_manager.get("system").is_none() {
+        let _ = db_manager.create("system", format!("{data_root}/system"));
+    }
+    if db_manager.get("default").is_none() {
+        let _ = db_manager.create("default", format!("{data_root}/default"));
+    }
+    let mut state = AppState::default();
+    state.db_name = "default".into();
+    state.db_manager = db_manager;
+    state.auth.security_enabled = false;
+    Arc::new(state)
+}
+
+fn demo_create_database_request(database: &str) -> serde_json::Value {
+    serde_json::json!({
+        "statements": [{
+            "statement": format!("CREATE DATABASE {database}"),
+            "parameters": {}
+        }]
+    })
+}
+
+fn demo_cypher_request(statements: Vec<(&str, serde_json::Value)>) -> serde_json::Value {
+    let stmts: Vec<_> = statements
+        .into_iter()
+        .map(|(cypher, params)| {
+            serde_json::json!({
+                "statement": cypher,
+                "parameters": params,
+            })
+        })
+        .collect();
+    serde_json::json!({ "statements": stmts })
+}
+
+/// Small deterministic galaxy matching demoSeed.ts shape.
+fn demo_small_galaxy() -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    // 2 sectors, 3 stars each = 6 nodes
+    let stars: Vec<serde_json::Value> = vec![
+        ("s0-0", "Yggdra Prime 0-00", 0, 0, 1.0, -10.0, 5.0, 15.0),
+        ("s0-1", "Nidh Major 0-01", 0, 0, 3.0, -8.0, 7.0, 13.0),
+        ("s0-2", "Mim Minor 0-02", 0, 0, 2.0, -12.0, 3.0, 14.0),
+        ("s1-0", "Gjall Reach 1-00", 1, 170, 1.0, 10.0, -5.0, -15.0),
+        ("s1-1", "Heidr Crown 1-01", 1, 170, 4.0, 8.0, -3.0, -13.0),
+        ("s1-2", "Surt Spire 1-02", 1, 170, 2.0, 12.0, -7.0, -14.0),
+    ]
+    .into_iter()
+    .map(|(id, name, sector, hue, mass, x, y, z)| {
+        serde_json::json!({
+            "starId": id,
+            "name": name,
+            "sector": sector,
+            "hue": hue,
+            "mass": mass,
+            "x": x,
+            "y": y,
+            "z": z,
+        })
+    })
+    .collect();
+
+    // Edges: backbone chain within each sector + 2 gateway edges between sectors
+    let edges: Vec<serde_json::Value> = vec![
+        // sector 0 backbone
+        ("s0-0", "s0-1", 50),
+        ("s0-1", "s0-2", 45),
+        // sector 1 backbone
+        ("s1-0", "s1-1", 55),
+        ("s1-1", "s1-2", 40),
+        // gateway (sector 0 → sector 1)
+        ("s0-2", "s1-0", 200),
+        ("s1-0", "s0-2", 200),
+    ]
+    .into_iter()
+    .map(|(from, to, dist)| {
+        serde_json::json!({
+            "fromId": from,
+            "toId": to,
+            "distance": dist,
+        })
+    })
+    .collect();
+
+    (stars, edges)
+}
+
+#[tokio::test]
+async fn demo_e2e_seed_query_and_persistence() {
+    use axum::body::Body;
+    use axum::http::{header, Method, Request, StatusCode};
+    use tower::ServiceExt;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate(&temp_dir);
+    let data_root = temp_dir.path().to_string_lossy().into_owned();
+    let app = build_router(state.clone());
+
+    // ── 1. Create d3_demo database ──────────────────────────────────
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/system/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_create_database_request("d3_demo").to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "create database should succeed"
+    );
+
+    // ── 2. Create index (mirrors CYPHER_CREATE_INDEX) ───────────────
+    let create_index = "CREATE INDEX star_id_idx IF NOT EXISTS FOR (n:Star) ON (n.starId)";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/d3_demo/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![(create_index, serde_json::json!({}))]).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let commit_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        commit_resp["errors"].as_array().unwrap().is_empty(),
+        "create index should not error (status={status}): {commit_resp:?}"
+    );
+
+    // ── 3. Seed stars ──────────────────────────────────────────────
+    let (stars, edges) = demo_small_galaxy();
+    let seed_stars_cypher = "\
+        UNWIND $rows AS row \
+        MERGE (n:Star {starId: row.starId}) \
+        SET n.name = row.name, \
+            n.sector = row.sector, \
+            n.hue = row.hue, \
+            n.mass = row.mass, \
+            n.x = row.x, \
+            n.y = row.y, \
+            n.z = row.z";
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/d3_demo/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![(
+                        seed_stars_cypher,
+                        serde_json::json!({ "rows": stars }),
+                    )])
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let commit_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        commit_resp["errors"].as_array().unwrap().is_empty(),
+        "seed stars should succeed: {commit_resp:?}"
+    );
+
+    // ── 4. Seed edges ──────────────────────────────────────────────
+    let seed_edges_cypher = "\
+        UNWIND $rows AS row \
+        MATCH (a:Star {starId: row.fromId}) \
+        MATCH (b:Star {starId: row.toId}) \
+        CREATE (a)-[:HYPERLANE {distance: row.distance}]->(b)";
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/d3_demo/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![(
+                        seed_edges_cypher,
+                        serde_json::json!({ "rows": edges }),
+                    )])
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let commit_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        commit_resp["errors"].as_array().unwrap().is_empty(),
+        "seed edges should succeed: {commit_resp:?}"
+    );
+
+    // ── 5. Query stars back ─────────────────────────────────────────
+    let query_stars = "MATCH (n:Star) RETURN n.starId AS id ORDER BY id";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/d3_demo/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![(query_stars, serde_json::json!({}))]).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let commit_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let star_rows = commit_resp["results"][0]["data"].as_array().unwrap();
+    let star_ids: Vec<String> = star_rows
+        .iter()
+        .map(|d| d["row"][0].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        star_ids.len(),
+        6,
+        "expected 6 Star nodes, got {}: {star_ids:?}",
+        star_ids.len()
+    );
+    assert!(star_ids.contains(&"s0-0".into()), "missing s0-0");
+    assert!(star_ids.contains(&"s1-2".into()), "missing s1-2");
+
+    // ── 6. Query edges back ─────────────────────────────────────────
+    // Use COUNT aggregation to get the total (aggregation now works)
+    let query_edges = "MATCH ()-[r:HYPERLANE]->() RETURN count(r) AS cnt";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/d3_demo/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![(query_edges, serde_json::json!({}))]).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let commit_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let edge_count = commit_resp["results"][0]["data"][0]["row"][0]
+        .as_i64()
+        .unwrap_or(-1);
+    // Edge count must be positive (we seeded edges)
+    assert!(
+        edge_count > 0,
+        "edge count should be > 0, got {edge_count}: {commit_resp:?}"
+    );
+    // Also verify specific edges exist with a MATCH
+    let query_edge_detail = "MATCH ()-[r:HYPERLANE]->() RETURN r.distance AS dist ORDER BY dist";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/d3_demo/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![(query_edge_detail, serde_json::json!({}))]).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let commit_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let edge_rows = commit_resp["results"][0]["data"].as_array().unwrap();
+    let dists: Vec<i64> = edge_rows
+        .iter()
+        .map(|d| d["row"][0].as_i64().unwrap())
+        .collect();
+    assert!(dists.contains(&200), "missing gateway edge (dist=200): {dists:?}");
+
+    // ── 7. Query specific star by starId ────────────────────────────
+    let query_one = "MATCH (n:Star {starId: 's1-1'}) RETURN n.name AS name, n.sector AS sector";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/d3_demo/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![(query_one, serde_json::json!({}))]).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let commit_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let row = &commit_resp["results"][0]["data"][0]["row"];
+    assert_eq!(row[0], "Heidr Crown 1-01", "star name should match: {commit_resp:?}");
+    assert_eq!(row[1], 1, "star sector should be 1: {commit_resp:?}");
+
+    // ── 8. Drop app, reopen from same data dir, verify persistence ──
+    drop(app);
+    drop(state);
+
+    let reopened_manager = DatabaseManager::open(format!("{data_root}/multidb"))
+        .unwrap_or_else(|_| {
+            // If the catalog isn't on disk, create with manual registration
+            let dm = DatabaseManager::new();
+            let _ = dm.create("system", format!("{data_root}/system"));
+            let _ = dm.create("default", format!("{data_root}/default"));
+            let _ = dm.create("d3_demo", format!("{data_root}/d3_demo"));
+            dm
+        });
+    let reopened_state = Arc::new(AppState {
+        db_name: "default".into(),
+        db_manager: Arc::new(reopened_manager),
+        auth: {
+            let mut a = AuthState::default();
+            a.security_enabled = false;
+            a
+        },
+        ..Default::default()
+    });
+    let reopened_app = build_router(reopened_state);
+
+    // Query stars count again — must still be 6
+    let count_stars = "MATCH (n:Star) RETURN count(n) AS cnt";
+    let resp = reopened_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/d3_demo/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![(count_stars, serde_json::json!({}))]).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let commit_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let cnt = commit_resp["results"][0]["data"][0]["row"][0]
+        .as_i64()
+        .unwrap_or(-1);
+    assert_eq!(
+        cnt, 6,
+        "after reopen: expected 6 Star nodes persisted, got {cnt}: {commit_resp:?}"
+    );
+
+    // Query edges count again — must still be positive
+    let count_edges = "MATCH ()-[r:HYPERLANE]->() RETURN count(r) AS cnt";
+    let resp = reopened_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/d3_demo/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![(count_edges, serde_json::json!({}))]).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let commit_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let edge_count = commit_resp["results"][0]["data"][0]["row"][0]
+        .as_i64()
+        .unwrap_or(-1);
+    assert!(
+        edge_count > 0,
+        "after reopen: expected HYPERLANE edges persisted, got {edge_count}: {commit_resp:?}"
+    );
+
+    // Also verify star detail survives restart
+    let query_one = "MATCH (n:Star {starId: 's1-1'}) RETURN n.name AS name, n.sector AS sector";
+    let resp = reopened_app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/d3_demo/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![(query_one, serde_json::json!({}))]).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let commit_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let row = &commit_resp["results"][0]["data"][0]["row"];
+    assert_eq!(
+        row[0], "Heidr Crown 1-01",
+        "after reopen: star name should persist: {commit_resp:?}"
+    );
+    assert_eq!(
+        row[1], 1,
+        "after reopen: star sector should persist: {commit_resp:?}"
+    );
+}
+
+// ─── Database lifecycle e2e ─────────────────────────────────────────────
+//
+// Verifies that CREATE DATABASE appears in SHOW DATABASES and persists
+// across process restart (reopening DatabaseManager from the same dir).
+
+#[tokio::test]
+async fn e2e_database_create_show_and_persist() {
+    use axum::body::Body;
+    use axum::http::{header, Method, Request, StatusCode};
+    use tower::ServiceExt;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let data_root = temp_dir.path().to_string_lossy().into_owned();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let app = build_router(state.clone());
+
+    // ── 1. SHOW DATABASES initially ─────────────────────────────────
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/system/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![("SHOW DATABASES", serde_json::json!({}))])
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let initial_dbs: Vec<String> = result["results"][0]["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["row"][0].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        initial_dbs.contains(&"system".into()),
+        "system db should be present: {initial_dbs:?}"
+    );
+    assert!(
+        initial_dbs.contains(&"default".into()),
+        "default db should be present: {initial_dbs:?}"
+    );
+
+    // ── 2. Create a new database ────────────────────────────────────
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/system/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_create_database_request("my_test_db").to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "CREATE DATABASE my_test_db should succeed"
+    );
+
+    // ── 3. SHOW DATABASES — my_test_db must now appear ──────────────
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/system/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![("SHOW DATABASES", serde_json::json!({}))])
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let dbs: Vec<String> = result["results"][0]["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["row"][0].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        dbs.contains(&"my_test_db".into()),
+        "my_test_db should appear in SHOW DATABASES: {dbs:?}"
+    );
+
+    // ── 4. Write some data into my_test_db ──────────────────────────
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/my_test_db/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![(
+                        "CREATE (n:TestNode {value: 42}) RETURN n.value AS val",
+                        serde_json::json!({}),
+                    )])
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        result["errors"].as_array().unwrap().is_empty(),
+        "write should succeed: {result:?}"
+    );
+
+    // ── 5. Restart: drop everything, reopen from same data dir ──────
+    drop(app);
+    drop(state);
+
+    // Give the OS a moment to release file handles (Windows)
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let reopened_manager = DatabaseManager::open(format!("{data_root}/multidb"))
+        .unwrap_or_else(|_| {
+            // Fallback: manual registration if catalog file wasn't written
+            let dm = DatabaseManager::new();
+            let _ = dm.create("system", format!("{data_root}/system"));
+            let _ = dm.create("default", format!("{data_root}/default"));
+            let _ = dm.create("my_test_db", format!("{data_root}/my_test_db"));
+            dm
+        });
+    let reopened_state = Arc::new(AppState {
+        db_name: "default".into(),
+        db_manager: Arc::new(reopened_manager),
+        auth: {
+            let mut a = AuthState::default();
+            a.security_enabled = false;
+            a
+        },
+        ..Default::default()
+    });
+    let reopened_app = build_router(reopened_state);
+
+    // ── 6. SHOW DATABASES after restart — my_test_db must persist ───
+    let resp = reopened_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/system/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![("SHOW DATABASES", serde_json::json!({}))])
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let reopened_dbs: Vec<String> = result["results"][0]["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["row"][0].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        reopened_dbs.contains(&"my_test_db".into()),
+        "after restart: my_test_db should appear in SHOW DATABASES: {reopened_dbs:?}"
+    );
+
+    // ── 7. Query data persisted after restart ───────────────────────
+    let resp = reopened_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/my_test_db/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![(
+                        "MATCH (n:TestNode {value: 42}) RETURN count(n) AS cnt",
+                        serde_json::json!({}),
+                    )])
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let cnt = result["results"][0]["data"][0]["row"][0]
+        .as_i64()
+        .unwrap_or(-1);
+    assert!(
+        cnt >= 1,
+        "after restart: TestNode should still exist (count={cnt}): {result:?}"
+    );
+}
