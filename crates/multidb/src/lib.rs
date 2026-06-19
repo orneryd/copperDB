@@ -217,15 +217,6 @@ impl DatabaseManager {
             .map_err(|error| MultiDbError::InvalidConfig(error.to_string()))
     }
 
-    fn persist_all(&self) -> Result<(), MultiDbError> {
-        let Some(path) = &self.catalog_path else {
-            return Ok(());
-        };
-        let storage = StorageEngine::open(path)?;
-        self.persist_all_with(&storage)?;
-        Ok(())
-    }
-
     fn persist_all_with(&self, storage: &StorageEngine) -> Result<(), MultiDbError> {
         for database in self.list() {
             self.persist_database_with(storage, &database)?;
