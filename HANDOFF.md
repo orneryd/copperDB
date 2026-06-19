@@ -116,6 +116,7 @@ All parse + eval variants: `Literal`, `Variable`, `PropertyAccess`, `Parameter`,
 - [x] Index warming — `rebuild_all_indexes` rebuilds all property and fulltext indexes from stored node/edge records; idempotent, returns counts per index category
 - [x] Bolt message dispatch — `dispatch.rs` with full message decoder (HELLO, LOGON/LOGOFF, RUN, PULL, DISCARD, BEGIN/COMMIT/ROLLBACK, RESET, ROUTE), response encoder (SUCCESS/FAILURE/IGNORED/RECORD), PackStream↔JSON value conversion, and async TCP connection handler with message framing
 - [x] GraphQL endpoint — `copperdb-graphql` wired to storage with `node(id)`, `nodes`, and `createNode(id, labels, properties)` resolvers; mounted on HTTP router at `/graphql` (POST) with interactive playground at `GET /graphql`
+- [x] MCP server transport — `copperdb-mcp` wired to `CopperDb::execute()` for real Cypher tool execution; `run_cypher` and `find_similar` tools backed by engine; `POST /mcp` JSON-RPC endpoint with auth; `ToolRegistry::with_engine()` factory
 
 ---
 
@@ -143,7 +144,9 @@ _All tracked Cypher/eval gaps from the original HANDOFF are now resolved. The re
 ### Wiring (future work)
 - [x] Bolt message dispatch (handshake + full message decode/dispatch loop; HELLO/LOGON/RUN/PULL/BEGIN/COMMIT/ROLLBACK/RESET all handled; SUCCESS/FAILURE/IGNORED/RECORD responses encoded; query execution engine wiring is next step)
 - [x] GraphQL endpoint wired to HTTP router — `copperdb-graphql` with real storage-backed resolvers (node query, nodes list, createNode mutation); `GraphQlSchema` wrapper with `Mutex<StorageEngine>` context; mounted at `POST /graphql` with GraphiQL playground at `GET /graphql`
-- [ ] MCP server transport
+- [x] MCP server transport — `copperdb-mcp` with real `CopperDb::execute()` backing; `run_cypher` and `find_similar` tools; JSON-RPC endpoint at `POST /mcp`; auth-protected
+
+_All tracked wiring items are now complete._
 
 ---
 

@@ -712,7 +712,7 @@ impl<'a> ParseContext<'a> {
         // Parse property list: n.prop or (n.a, n.b)
         let properties = if self.peek() == Some("(") {
             self.advance();
-            let var1 = self.advance_identifier()?;
+            let _var1 = self.advance_identifier()?;
             self.expect(".")?;
             let prop1 = self.advance_identifier()?;
             let mut props = vec![prop1];
@@ -772,7 +772,7 @@ impl<'a> ParseContext<'a> {
                 }
                 ConstraintKind::Temporal
             }
-            Some(t) if t == "::" => {
+            Some("::") => {
                 self.advance();
                 let type_name = self.advance_identifier()?;
                 ConstraintKind::Type(type_name)

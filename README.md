@@ -375,3 +375,14 @@ backlog unless it can be added without reintroducing query-time strategy switchi
 
 See individual crate `src/lib.rs` files for inline TODO comments pointing to the
 equivalent NornicDB Go source file for reference implementation guidance.
+
+
+
+### Start copperDB (HTTP + Bolt + UI)
+```
+cargo run --package copperdb
+```
+### Or with specific ports:
+```
+cargo run --package copperdb -- --http-port 8080 --bolt-port 7687
+```

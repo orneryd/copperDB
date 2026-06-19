@@ -3660,13 +3660,11 @@ fn collect_node_index_keys(node: &NodeRecord) -> Vec<String> {
 }
 
 fn collect_edge_index_keys(edge: &EdgeRecord) -> Vec<String> {
-    let mut keys = Vec::new();
-    // Edge type index
-    keys.push(edge_type_index_key(&edge.edge_type, &edge.id));
-    // Edge adjacency indexes
-    keys.push(edge_start_index_key(&edge.start_node, &edge.edge_type, &edge.id));
-    keys.push(edge_end_index_key(&edge.end_node, &edge.edge_type, &edge.id));
-    keys
+    vec![
+        edge_type_index_key(&edge.edge_type, &edge.id),
+        edge_start_index_key(&edge.start_node, &edge.edge_type, &edge.id),
+        edge_end_index_key(&edge.end_node, &edge.edge_type, &edge.id),
+    ]
 }
 
 fn fulltext_tokens_for_value(value: &serde_json::Value) -> Vec<String> {

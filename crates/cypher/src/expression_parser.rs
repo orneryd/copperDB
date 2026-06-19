@@ -1,5 +1,5 @@
 use crate::{
-    parse_context::ParseContext, BinaryExpression, CypherError, EdgeDirection, EdgePattern,
+    parse_context::ParseContext, BinaryExpression, CypherError, EdgePattern,
     Expression, LiteralValue, NodePattern, Pattern, PatternComprehension, PropertyEntry,
 };
 
@@ -257,12 +257,11 @@ impl<'a> ParseContext<'a> {
                     self.pos = saved;
                     return self.parse_pattern_comprehension();
                 }
-                if let Some(_) = self.advance() {
-                    if self.peek_is("IN") {
+                if self.advance().is_some()
+                    && self.peek_is("IN") {
                         self.pos = saved;
                         return self.parse_list_comprehension();
                     }
-                }
                 self.pos = saved;
                 self.parse_list_literal()
             }
@@ -604,7 +603,7 @@ impl<'a> ParseContext<'a> {
             self.advance();
             return Ok(NodePattern { variable: None, labels: Vec::new(), properties: Vec::new() });
         }
-        let variable = if self.peek().map_or(false, |t| !t.starts_with(':') && t != "{") {
+        let variable = if self.peek().is_some_and(|t| !t.starts_with(':') && t != "{") {
             Some(self.advance_identifier()?)
         } else {
             None
@@ -632,7 +631,7 @@ impl<'a> ParseContext<'a> {
         let (rel_type, min_hops, max_hops) = if self.peek() == Some("[") {
             self.advance();
             // Skip optional variable
-            if self.peek().map_or(false, |t| t != ":" && t != "*" && t != "]") {
+            if self.peek().is_some_and(|t| t != ":" && t != "*" && t != "]") {
                 let id = self.advance_identifier()?;
                 if self.peek() == Some(":") {
                     self.advance();

@@ -54,12 +54,41 @@ fn decode_run(fields: &[Value]) -> Result<BoltMessage, BoltError> {
 }
 
 fn decode_pull(fields: &[Value]) -> Result<BoltMessage, BoltError> {
+    // Bolt 4.x: PULL has two struct fields (n: Integer, qid: Integer)
+    // Bolt 5.x: PULL has one struct field (extra: Map with "n" and "qid")
+    if fields.len() == 1 {
+        if let Value::Map(pairs) = &fields[0] {
+            let n = pairs.iter().find(|(k, _)| k == "n").map(|(_, v)| match v {
+                Value::Integer(n) => *n,
+                _ => -1,
+            }).unwrap_or(-1);
+            let qid = pairs.iter().find(|(k, _)| k == "qid").map(|(_, v)| match v {
+                Value::Integer(q) => *q,
+                _ => -1,
+            }).unwrap_or(-1);
+            return Ok(BoltMessage::Pull { n, qid });
+        }
+    }
     let n = extract_integer(fields.first(), "PULL.n")?;
     let qid = extract_integer(fields.get(1), "PULL.qid")?;
     Ok(BoltMessage::Pull { n, qid })
 }
 
 fn decode_discard(fields: &[Value]) -> Result<BoltMessage, BoltError> {
+    // Same dual-format as PULL
+    if fields.len() == 1 {
+        if let Value::Map(pairs) = &fields[0] {
+            let n = pairs.iter().find(|(k, _)| k == "n").map(|(_, v)| match v {
+                Value::Integer(n) => *n,
+                _ => -1,
+            }).unwrap_or(-1);
+            let qid = pairs.iter().find(|(k, _)| k == "qid").map(|(_, v)| match v {
+                Value::Integer(q) => *q,
+                _ => -1,
+            }).unwrap_or(-1);
+            return Ok(BoltMessage::Discard { n, qid });
+        }
+    }
     let n = extract_integer(fields.first(), "DISCARD.n")?;
     let qid = extract_integer(fields.get(1), "DISCARD.qid")?;
     Ok(BoltMessage::Discard { n, qid })
@@ -421,5 +450,198 @@ mod tests {
     fn decode_unknown_signature() {
         let result = decode_message(0xFF, &[]);
         assert!(result.is_err());
+    }
+
+    // ── Wire-format round-trip tests ────────────────────────────────────────
+
+    /// Encode a Bolt struct message as it appears on the wire.
+    fn encode_wire_struct(signature: u8, fields: &[Value]) -> Vec<u8> {
+        let mut buf = bytes::BytesMut::with_capacity(256);
+        crate::packstream::encode_struct_header(&mut buf, fields.len(), signature);
+        for field in fields {
+            encode_value(&mut buf, field);
+        }
+        buf.to_vec()
+    }
+
+    fn encode_value(buf: &mut bytes::BytesMut, value: &Value) {
+        match value {
+            Value::Null => crate::packstream::encode_null(buf),
+            Value::Bool(b) => crate::packstream::encode_bool(buf, *b),
+            Value::Integer(n) => crate::packstream::encode_int(buf, *n),
+            Value::Float(f) => crate::packstream::encode_float(buf, *f),
+            Value::String(s) => crate::packstream::encode_string(buf, s),
+            Value::Bytes(b) => crate::packstream::encode_bytes(buf, b),
+            Value::List(items) => {
+                crate::packstream::encode_list_header(buf, items.len());
+                for item in items {
+                    encode_value(buf, item);
+                }
+            }
+            Value::Map(pairs) => {
+                crate::packstream::encode_map_header(buf, pairs.len());
+                for (k, v) in pairs {
+                    crate::packstream::encode_string(buf, k);
+                    encode_value(buf, v);
+                }
+            }
+            Value::Struct { signature, fields } => {
+                crate::packstream::encode_struct_header(buf, fields.len(), *signature);
+                for f in fields {
+                    encode_value(buf, f);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn round_trip_hello_wire_format() {
+        // Encode HELLO { user_agent: "neo4j/4.4" }
+        let fields = vec![Value::Map(vec![(
+            "user_agent".to_string(),
+            Value::String("neo4j/4.4".to_string()),
+        )])];
+        let wire_bytes = encode_wire_struct(0x01, &fields);
+
+        // Decode from wire bytes
+        let (value, consumed) = crate::packstream::decode(&wire_bytes).unwrap();
+        assert_eq!(consumed, wire_bytes.len());
+
+        match &value {
+            Value::Struct { signature, fields } => {
+                assert_eq!(*signature, 0x01);
+                let msg = decode_message(0x01, fields).unwrap();
+                match msg {
+                    BoltMessage::Hello { extra } => {
+                        assert_eq!(
+                            extra.get("user_agent").unwrap(),
+                            &serde_json::json!("neo4j/4.4")
+                        );
+                    }
+                    _ => panic!("expected Hello"),
+                }
+            }
+            _ => panic!("expected Struct, got {:?}", value),
+        }
+    }
+
+    #[test]
+    fn round_trip_run_wire_format() {
+        // Encode RUN "RETURN 1" {} {}
+        let fields = vec![
+            Value::String("RETURN 1".to_string()),
+            Value::Map(vec![]),
+            Value::Map(vec![("db".to_string(), Value::String("neo4j".to_string()))]),
+        ];
+        let wire_bytes = encode_wire_struct(0x10, &fields);
+
+        let (value, consumed) = crate::packstream::decode(&wire_bytes).unwrap();
+        assert_eq!(consumed, wire_bytes.len());
+
+        let msg = match &value {
+            Value::Struct { signature: 0x10, fields } => decode_message(0x10, fields).unwrap(),
+            _ => panic!("expected RUN struct"),
+        };
+        match msg {
+            BoltMessage::Run { query, extra, .. } => {
+                assert_eq!(query, "RETURN 1");
+                assert_eq!(extra.get("db").unwrap(), &serde_json::json!("neo4j"));
+            }
+            _ => panic!("expected Run"),
+        }
+    }
+
+    #[test]
+    fn round_trip_pull_wire_format() {
+        // Encode PULL { n: 1000, qid: 0 }
+        let fields = vec![
+            Value::Map(vec![
+                ("n".to_string(), Value::Integer(1000)),
+                ("qid".to_string(), Value::Integer(0)),
+            ]),
+        ];
+        let wire_bytes = encode_wire_struct(0x3F, &fields);
+
+        let (value, consumed) = crate::packstream::decode(&wire_bytes).unwrap();
+        assert_eq!(consumed, wire_bytes.len());
+
+        let msg = match &value {
+            Value::Struct { signature: 0x3F, fields } => decode_message(0x3F, fields).unwrap(),
+            _ => panic!("expected PULL struct"),
+        };
+        match msg {
+            BoltMessage::Pull { n, qid } => {
+                assert_eq!(n, 1000);
+                assert_eq!(qid, 0);
+            }
+            _ => panic!("expected Pull"),
+        }
+    }
+
+    #[test]
+    fn round_trip_hello_response_is_valid_packstream() {
+        // Simulate what process_message returns for HELLO
+        let response_bytes = encode_message(&BoltMessage::Success {
+            metadata: HashMap::from([
+                ("server".to_string(), serde_json::json!("copperdb/1.0")),
+                ("connection_id".to_string(), serde_json::json!("bolt-0")),
+            ]),
+        });
+
+        // Response must be decodable as PackStream
+        let (value, consumed) = crate::packstream::decode(&response_bytes).unwrap();
+        assert_eq!(consumed, response_bytes.len());
+
+        // Must be a SUCCESS struct (0xB1 0x70 = struct with 1 field, signature 0x70)
+        match &value {
+            Value::Struct { signature, fields } => {
+                assert_eq!(*signature, 0x70, "expected SUCCESS signature 0x70");
+                assert_eq!(fields.len(), 1, "SUCCESS should have 1 field (metadata map)");
+            }
+            _ => panic!("expected Struct, got {:?}", value),
+        }
+    }
+
+    #[test]
+    fn full_hello_run_pull_message_flow() {
+        // Simulate the full client message flow:
+        // 1. HELLO → should produce SUCCESS
+        // 2. RUN → should produce SUCCESS
+        // 3. PULL → should produce SUCCESS (stream done)
+
+        // HELLO
+        let hello_bytes = encode_wire_struct(0x01, &[Value::Map(vec![
+            ("user_agent".to_string(), Value::String("neo4j-test/1.0".to_string())),
+        ])]);
+        let (hello_val, _) = crate::packstream::decode(&hello_bytes).unwrap();
+        let hello_msg = match &hello_val {
+            Value::Struct { signature: 0x01, fields } => decode_message(0x01, fields).unwrap(),
+            _ => panic!("expected HELLO"),
+        };
+        assert!(matches!(hello_msg, BoltMessage::Hello { .. }));
+
+        // RUN
+        let run_bytes = encode_wire_struct(0x10, &[
+            Value::String("RETURN 1 AS n".to_string()),
+            Value::Map(vec![]),
+            Value::Map(vec![]),
+        ]);
+        let (run_val, _) = crate::packstream::decode(&run_bytes).unwrap();
+        let run_msg = match &run_val {
+            Value::Struct { signature: 0x10, fields } => decode_message(0x10, fields).unwrap(),
+            _ => panic!("expected RUN"),
+        };
+        assert!(matches!(run_msg, BoltMessage::Run { .. }));
+
+        // PULL
+        let pull_bytes = encode_wire_struct(0x3F, &[Value::Map(vec![
+            ("n".to_string(), Value::Integer(-1)),
+        ])]);
+        let (pull_val, _) = crate::packstream::decode(&pull_bytes).unwrap();
+        let pull_msg = match &pull_val {
+            Value::Struct { signature: 0x3F, fields } => decode_message(0x3F, fields).unwrap(),
+            _ => panic!("expected PULL"),
+        };
+        assert!(matches!(pull_msg, BoltMessage::Pull { .. }));
     }
 }

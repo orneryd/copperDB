@@ -161,19 +161,16 @@ pub fn eval_expression(
             let lv = eval_expression(&operands.left, row, params)?;
             let rv = eval_expression(&operands.right, row, params)?;
             // Numeric addition when both sides are numbers
-            match (&lv, &rv) {
-                (Value::Number(a), Value::Number(b)) => {
-                    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
-                        return Ok(Value::Number((ai + bi).into()));
-                    }
-                    let af = a.as_f64().unwrap_or(0.0);
-                    let bf = b.as_f64().unwrap_or(0.0);
-                    return Ok(Value::Number(
-                        serde_json::Number::from_f64(af + bf)
-                            .unwrap_or(serde_json::Number::from(0)),
-                    ));
+            if let (Value::Number(a), Value::Number(b)) = (&lv, &rv) {
+                if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
+                    return Ok(Value::Number((ai + bi).into()));
                 }
-                _ => {}
+                let af = a.as_f64().unwrap_or(0.0);
+                let bf = b.as_f64().unwrap_or(0.0);
+                return Ok(Value::Number(
+                    serde_json::Number::from_f64(af + bf)
+                        .unwrap_or(serde_json::Number::from(0)),
+                ));
             }
             // String concatenation otherwise
             Ok(Value::String(format!("{}{}", coerce_string(&lv)?, coerce_string(&rv)?)))
@@ -1018,7 +1015,7 @@ fn eval_function(
         "any" => {
             let v = eval_arg(0)?;
             if let Value::Array(arr) = &v {
-                for _item in arr {
+                if let Some(_item) = arr.iter().next() {
                     return Ok(Value::Bool(true));
                 }
                 Ok(Value::Bool(false))
@@ -1193,7 +1190,7 @@ fn eval_function(
             match &v {
                 Value::String(s) => Ok(s.parse::<f64>()
                     .ok()
-                    .and_then(|f| serde_json::Number::from_f64(f))
+                    .and_then(serde_json::Number::from_f64)
                     .map(Value::Number)
                     .unwrap_or(Value::Null)),
                 Value::Number(n) => Ok(Value::Number(

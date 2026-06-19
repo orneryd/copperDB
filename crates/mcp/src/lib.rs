@@ -108,19 +108,12 @@ pub struct ToolCallParams {
 }
 
 /// Registry of available MCP tools.
+#[derive(Default)]
 pub struct ToolRegistry {
     tools: HashMap<String, Tool>,
     engine: Option<Arc<ParkingMutex<GraphEngine>>>,
 }
 
-impl Default for ToolRegistry {
-    fn default() -> Self {
-        Self {
-            tools: HashMap::new(),
-            engine: None,
-        }
-    }
-}
 
 impl ToolRegistry {
     pub fn new() -> Self {

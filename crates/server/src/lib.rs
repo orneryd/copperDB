@@ -18,8 +18,8 @@ use copperdb_auth::{
 };
 use copperdb_buildinfo::{display_version, server_announcement, version};
 use copperdb_config::Config as RuntimeConfig;
-use copperdb_graphql::{GraphQlSchema, MutationRoot, QueryRoot};
-use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
+use copperdb_graphql::GraphQlSchema;
+use async_graphql_axum::GraphQLRequest;
 use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig};
 use copperdb_envutil::{get as env_get, get_bool_loose};
 use copperdb_fabric::{FabricReadRequest, FabricReadScope};

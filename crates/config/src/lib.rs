@@ -498,11 +498,21 @@ pub struct AuthConfig {
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
-            jwt_secret: String::new(),
+            jwt_secret: default_jwt_secret(),
             token_expiry_secs: 3600,
             allow_anonymous: false,
         }
     }
+}
+
+/// Generate a default JWT secret. Mirrors NornicDB's `generateDefaultSecret()`:
+/// a clearly-unsafe placeholder so operators know to set a real secret.
+fn default_jwt_secret() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    format!("CHANGE_ME_IN_PRODUCTION_{nanos:x}")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1338,18 +1348,23 @@ mod tests {
     }
 
     #[test]
-    fn test_default_jwt_secret_is_empty() {
+    fn test_default_jwt_secret_is_not_empty() {
         let cfg = Config::default();
         assert!(
-            cfg.auth.jwt_secret.is_empty(),
-            "default JWT secret must be empty"
+            !cfg.auth.jwt_secret.is_empty(),
+            "default JWT secret must be non-empty (mirrors NornicDB generateDefaultSecret)"
+        );
+        assert!(
+            cfg.auth.jwt_secret.starts_with("CHANGE_ME_IN_PRODUCTION_"),
+            "default secret must use the clearly-insecure prefix"
         );
     }
 
     #[test]
-    fn test_validate_rejects_empty_jwt_secret() {
+    fn test_validate_passes_with_default_jwt_secret() {
         let cfg = Config::default();
-        assert!(cfg.validate().is_err());
+        // Now that JWT has a generated default, validation should succeed
+        assert!(cfg.validate().is_ok());
     }
 
     #[test]
@@ -1629,11 +1644,12 @@ server:
     }
 
     #[test]
-    fn test_load_from_env_requires_jwt_secret() {
-        // Without copperdb_AUTH__JWT_SECRET set, load_from_env must error.
-        // (Guard against the env variable already being set in CI.)
+    fn test_load_from_env_succeeds_with_default_secret() {
+        // With the generated default JWT secret, load_from_env should succeed
+        // even without copperdb_AUTH__JWT_SECRET in the environment.
         if std::env::var("copperdb_AUTH__JWT_SECRET").is_err() {
-            assert!(load_from_env().is_err());
+            let cfg = load_from_env();
+            assert!(cfg.is_ok(), "load_from_env should succeed with default JWT: {:?}", cfg.err());
         }
     }
 }

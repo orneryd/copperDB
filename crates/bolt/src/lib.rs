@@ -24,6 +24,7 @@ pub mod messages;
 pub mod packstream;
 pub mod dispatch;
 pub mod server;
+pub mod wsconn;
 
 use thiserror::Error;
 

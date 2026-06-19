@@ -68,7 +68,7 @@ impl EvalEngine {
     ) -> Result<Value, EvalError> {
         // Match the pattern against the graph
         let matched_rows =
-            self.match_relationship_pattern(&[row.clone()], &comp.pattern, params, None)?;
+            self.match_relationship_pattern(std::slice::from_ref(row), &comp.pattern, params, None)?;
 
         let mut results = Vec::new();
         for matched_row in &matched_rows {
@@ -977,8 +977,8 @@ impl EvalEngine {
                     }
 
                     // SKIP / LIMIT — resolve expressions to i64
-                    let skip_val = resolve_limit(&ret.skip, &params);
-                    let limit_val = resolve_limit(&ret.limit, &params);
+                    let skip_val = resolve_limit(&ret.skip, params);
+                    let limit_val = resolve_limit(&ret.limit, params);
                     if let Some(skip) = skip_val {
                         let skip = skip.max(0) as usize;
                         current_rows = current_rows.into_iter().skip(skip).collect();
@@ -2950,7 +2950,7 @@ impl EvalEngine {
                             if m.pattern.edges.is_empty() {
                                 // Node-only match — use matching_node_props
                                 let mut rows = self.execute_node_match_clause(
-                                    &[row.clone()],
+                                    std::slice::from_ref(row),
                                     &m.pattern,
                                     params,
                                     None,
@@ -2958,7 +2958,7 @@ impl EvalEngine {
                                 new_rows.append(&mut rows);
                             } else {
                                 let matched = self.match_relationship_pattern(
-                                    &[row.clone()],
+                                    std::slice::from_ref(row),
                                     &m.pattern,
                                     params,
                                     None,
@@ -2972,7 +2972,7 @@ impl EvalEngine {
                         let mut new_rows = Vec::new();
                         for row in &current {
                             let matched = self.match_relationship_pattern(
-                                &[row.clone()],
+                                std::slice::from_ref(row),
                                 &m.pattern,
                                 params,
                                 None,
@@ -3200,7 +3200,7 @@ impl EvalEngine {
                             self.persist_node_props(&props)?;
                             stats.nodes_created += 1;
                             stats.properties_set += node_pat.properties.len();
-                            let mut created = serde_json::to_value(&props)
+                            let created = serde_json::to_value(&props)
                                 .map_err(|e| EvalError::SerializationError(e.to_string()))?;
                             self.cache_merge_node(labels, &merge_props, &created);
                             created
@@ -4105,7 +4105,7 @@ fn agg_func_info(expr: &Expression) -> Option<(&str, Option<&Expression>)> {
 /// count→0, sum→0, avg→null, min→null, max→null
 fn aggregate_identity_row(
     items: &[ReturnItem],
-    params: &HashMap<String, Value>,
+    _params: &HashMap<String, Value>,
 ) -> Result<Row, EvalError> {
     let mut row = Row::new();
     for item in items {
@@ -4160,7 +4160,7 @@ fn apply_aggregation_to_rows(
         groups.entry(key).or_default().push(row);
     }
 
-    let sort_cols: Vec<String> = non_agg_items.iter().map(|item| column_name(item)).collect();
+    let _sort_cols: Vec<String> = non_agg_items.iter().map(|item| column_name(item)).collect();
     let mut result: Vec<(Vec<Value>, Row)> = Vec::new();
     for (key_vals, group_rows) in groups {
         let mut row = Row::new();

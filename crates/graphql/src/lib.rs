@@ -7,7 +7,7 @@
 //! Uses `async-graphql` (the most feature-complete Rust GraphQL library),
 //! which is directly equivalent to gqlgen in feature set.
 
-use async_graphql::{Context, Object, Schema, SimpleObject};
+use async_graphql::{Context, Object, SimpleObject};
 use copperdb_storage::{NodeRecord, StorageEngine};
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -30,8 +30,6 @@ impl From<async_graphql::Error> for GraphQlError {
 }
 
 /// GraphQL type for a graph Node.
-
-/// GraphQL type for a graph Node.
 #[derive(SimpleObject, Clone)]
 pub struct GraphNode {
     pub id: String,
@@ -47,7 +45,6 @@ impl From<NodeRecord> for GraphNode {
             properties: serde_json::Value::Object(
                 node.properties
                     .into_iter()
-                    .map(|(k, v)| (k, v))
                     .collect(),
             ),
         }
