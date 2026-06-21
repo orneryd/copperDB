@@ -11,7 +11,9 @@ use copperdb_buildinfo::display_version;
 use copperdb_config::{load_with_precedence, ConfigOverrides};
 use copperdb_lifecycle::{BoxError, Component, Supervisor};
 use copperdb_otel::Telemetry;
-use copperdb_server::{build_local_nornic_replica_service, build_router, AppState};
+use copperdb_server::{
+    build_local_nornic_replica_service, build_router, AppState, AppStateBoltExecutor,
+};
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
@@ -289,6 +291,13 @@ async fn main() -> Result<()> {
         telemetry: Arc::clone(&telemetry),
         ..Default::default()
     });
+    if state.db_manager.get(&startup.db_name).is_none() {
+        let storage_path = state.db_manager.default_storage_path(&startup.db_name);
+        state
+            .db_manager
+            .create(startup.db_name.clone(), storage_path)
+            .with_context(|| format!("failed to create home database {}", startup.db_name))?;
+    }
 
     let app = build_router(Arc::clone(&state));
     let mut supervisor = Supervisor::new();
@@ -301,9 +310,7 @@ async fn main() -> Result<()> {
     }
 
     if startup.bolt_enabled {
-        use copperdb_bolt::server::NoopExecutor;
-        // Bolt query execution will be wired once EvalEngine is Sync-safe.
-        let executor = Arc::new(NoopExecutor);
+        let executor = Arc::new(AppStateBoltExecutor::new(Arc::clone(&state)));
         supervisor.register(BoltComponent {
             server: BoltServer::new(startup.bolt_address.clone(), telemetry, executor),
         });

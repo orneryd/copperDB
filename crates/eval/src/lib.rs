@@ -6,8 +6,9 @@ use copperdb_cypher::{
     hot_path_trace::{HotPathTrace, HotPathTraceState},
     Clause, ConstraintEntityType as CypherConstraintEntityType, ConstraintKind, EdgeDirection,
     EdgePattern, Expression, LiteralValue, NodePattern, Pattern, PatternComprehension, PatternInfo,
-    PipelineClause, PipelineClauseKind, PropertyEntry, Query, QueryPattern, RemoveItem, ReturnItem,
-    SetItem, ShapeKind, ShapeMatch, ShapeValue, SubqueryClause, WithClause,
+    PipelineClause, PipelineClauseKind, PropertyEntry, Query, QueryPattern, RemoveItem,
+    ReturnClause, ReturnItem, SetItem, ShapeKind, ShapeMatch, ShapeValue, SubqueryClause,
+    WithClause,
 };
 use copperdb_filter::{eval_expression, eval_predicate};
 use copperdb_indexing::{CatalogRangeIndexComparison, IndexCatalog, IndexError};

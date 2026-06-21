@@ -84,7 +84,13 @@ SET n.name = row.name,
 const CYPHER_SEED_EDGES = `UNWIND $rows AS row
 MATCH (a:Star {starId: row.fromId})
 MATCH (b:Star {starId: row.toId})
-CREATE (a)-[:HYPERLANE {distance: row.distance}]->(b)`;
+MERGE (a)-[r:HYPERLANE]->(b)
+SET r.distance = row.distance`;
+
+const CYPHER_DEMO_COUNTS = `MATCH (n:Star)
+WITH count(n) AS stars
+MATCH ()-[r:HYPERLANE]->()
+RETURN stars, count(r) AS hyperlanes`;
 
 // Unbounded shortest-path traversal — dedicated executor in
 // pkg/cypher/shortest_path.go. Undirected to traverse across the seeded
@@ -96,6 +102,40 @@ LIMIT 1`;
 
 interface ParsedRow {
   [k: string]: unknown;
+}
+
+function assertCypherSuccess(resp: CypherResponse, fallback: string): void {
+  if (resp.errors && resp.errors.length > 0) {
+    throw new Error(resp.errors.map((err) => err.message).join("; ") || fallback);
+  }
+}
+
+function firstRowObject(resp: CypherResponse): ParsedRow | null {
+  const result = resp.results?.[0];
+  const columns = result?.columns || [];
+  const row = result?.data?.[0]?.row || [];
+  if (columns.length === 0 || row.length === 0) {
+    return null;
+  }
+  return columns.reduce<ParsedRow>((out, column, index) => {
+    out[column] = row[index];
+    return out;
+  }, {});
+}
+
+function asCount(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  if (typeof value === "object" && value !== null && "low" in value) {
+    const low = Number((value as { low?: unknown }).low);
+    return Number.isFinite(low) ? low : 0;
+  }
+  return 0;
 }
 
 function rowsFromCypher(resp: CypherResponse): ParsedRow[] {
@@ -196,63 +236,87 @@ export function Demo() {
       const dbList = await api.listDatabaseNames();
       if (cancelled) return;
 
+      const starRows = galaxy.stars.map((s) => ({
+        starId: s.id,
+        name: s.name,
+        sector: s.sector,
+        hue: s.hue,
+        mass: s.mass,
+        x: s.x,
+        y: s.y,
+        z: s.z,
+      }));
+      const edgeRows = galaxy.edges.map((e) => ({
+        fromId: e.source,
+        toId: e.target,
+        distance: e.distance,
+      }));
+
       if (!dbList.includes(DEMO_DB)) {
         setPhase("creating");
         setStatusLine(`Forging database '${DEMO_DB}'...`);
         await api.createDatabase(DEMO_DB);
         if (cancelled) return;
+      } else {
+        setStatusLine(`Database '${DEMO_DB}' detected; validating contents...`);
+      }
 
-        setPhase("indexing");
-        setStatusLine("Provisioning Star index...");
-        await api.executeCypherOnDatabase(DEMO_DB, CYPHER_CREATE_INDEX);
+      setPhase("indexing");
+      setStatusLine("Provisioning Star index...");
+      assertCypherSuccess(
+        await api.executeCypherOnDatabase(DEMO_DB, CYPHER_CREATE_INDEX),
+        "Failed to create Star index",
+      );
+      if (cancelled) return;
+
+      const countResp = await api.executeCypherOnDatabase(DEMO_DB, CYPHER_DEMO_COUNTS);
+      assertCypherSuccess(countResp, "Failed to validate demo seed contents");
+      const counts = firstRowObject(countResp);
+      const starCount = asCount(counts?.stars);
+      const edgeCount = asCount(counts?.hyperlanes);
+
+      if (starCount === starRows.length && edgeCount >= edgeRows.length) {
+        setStatusLine(`Database '${DEMO_DB}' detected; reusing.`);
+        return;
+      }
+
+      setPhase("seeding");
+      setStatusLine(
+        `Repairing demo seed (${starCount}/${starRows.length} stars, ${edgeCount}/${edgeRows.length} hyperlanes)...`,
+      );
+      const total = starRows.length + edgeRows.length;
+      setSeedTotal(total);
+      setSeededCount(0);
+
+      let written = 0;
+      for (const batch of chunk(starRows, SEED_BATCH)) {
         if (cancelled) return;
-
-        setPhase("seeding");
-        const starRows = galaxy.stars.map((s) => ({
-          starId: s.id,
-          name: s.name,
-          sector: s.sector,
-          hue: s.hue,
-          mass: s.mass,
-          x: s.x,
-          y: s.y,
-          z: s.z,
-        }));
-        const edgeRows = galaxy.edges.map((e) => ({
-          fromId: e.source,
-          toId: e.target,
-          distance: e.distance,
-        }));
-        const total = starRows.length + edgeRows.length;
-        setSeedTotal(total);
-        setSeededCount(0);
-
-        let written = 0;
-        for (const batch of chunk(starRows, SEED_BATCH)) {
-          if (cancelled) return;
-          setStatusLine(
-            `Seeding stars (${written}/${total})... UnwindSimpleMergeBatch`,
-          );
+        setStatusLine(
+          `Seeding stars (${written}/${total})... UnwindSimpleMergeBatch`,
+        );
+        assertCypherSuccess(
           await api.executeCypherOnDatabase(DEMO_DB, CYPHER_SEED_STARS, {
             rows: batch,
-          });
-          written += batch.length;
-          setSeededCount(written);
-        }
+          }),
+          "Failed to seed demo stars",
+        );
+        written += batch.length;
+        setSeededCount(written);
+      }
 
-        for (const batch of chunk(edgeRows, SEED_BATCH)) {
-          if (cancelled) return;
-          setStatusLine(
-            `Linking hyperlanes (${written}/${total})... UnwindMultiMatchCreateBatch`,
-          );
+      for (const batch of chunk(edgeRows, SEED_BATCH)) {
+        if (cancelled) return;
+        setStatusLine(
+          `Linking hyperlanes (${written}/${total})... UnwindMultiMatchCreateBatch`,
+        );
+        assertCypherSuccess(
           await api.executeCypherOnDatabase(DEMO_DB, CYPHER_SEED_EDGES, {
             rows: batch,
-          });
-          written += batch.length;
-          setSeededCount(written);
-        }
-      } else {
-        setStatusLine(`Database '${DEMO_DB}' detected; reusing.`);
+          }),
+          "Failed to seed demo hyperlanes",
+        );
+        written += batch.length;
+        setSeededCount(written);
       }
     };
 

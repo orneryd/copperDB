@@ -14,7 +14,7 @@ import { BASE_PATH, joinBasePath } from '../utils/basePath';
 
 const BUILTIN_ROLES = ['admin', 'editor', 'viewer'];
 const SYSTEM_DB = 'system';
-const DEFAULT_DB = 'nornic';
+const DEFAULT_DB = 'copperdb';
 
 interface PrivilegeEntry {
   role: string;
@@ -119,7 +119,7 @@ export function DatabaseAccess() {
       } else {
         setPrivilegesMatrix([]);
       }
-      setDbNames(names.length > 0 ? names : ['nornic', 'system']);
+      setDbNames(names.length > 0 ? names : ['copperdb', 'system']);
       setDirty(false);
 
       if (entitlementsRes?.ok) {

@@ -3186,6 +3186,28 @@ async fn test_discovery_served_to_api_clients_by_default() {
     assert_eq!(discovery["neo4j_version"], "5.0.0");
 }
 
+#[tokio::test]
+async fn database_info_allows_unauthenticated_access_when_security_disabled() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let mut state = AppState::default();
+    state.auth.security_enabled = false;
+    let app = build_router(Arc::new(state));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/db/copperdb")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
 // ─── Demo page e2e ─────────────────────────────────────────────────────
 //
 // Mirrors NornicDB's /demo page lifecycle:
@@ -3195,47 +3217,19 @@ async fn test_discovery_served_to_api_clients_by_default() {
 // /db/{name}/tx/commit endpoint.  This test replays the same protocol
 // traffic and then re-opens the storage to assert the data is on disk.
 
-fn demo_temp_appstate(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
-    let data_root = temp_dir.path().to_string_lossy().into_owned();
-    let db_manager = Arc::new(DatabaseManager::new());
-    // Seed built-in databases under the temp root so they don't collide
-    // with anything outside the test.
-    let _ = db_manager.create("system", format!("{data_root}/system"));
-    let _ = db_manager.create("default", format!("{data_root}/default"));
-    let mut state = AppState::default();
-    state.db_name = "default".into();
-    state.db_manager = db_manager;
-    state.auth.security_enabled = false;
-    Arc::new(state)
-}
-
 /// Like demo_temp_appstate but uses a catalog-backed DatabaseManager so
 /// CREATE DATABASE persists to disk and survives restart.
-fn demo_temp_appstate_with_catalog(
-    temp_dir: &tempfile::TempDir,
-) -> Arc<AppState> {
+fn demo_temp_appstate_with_catalog(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
     let data_root = temp_dir.path().to_string_lossy().into_owned();
     let catalog_path = format!("{data_root}/multidb");
-    // Ensure catalog dir exists before open
     std::fs::create_dir_all(&catalog_path).unwrap();
-    let db_manager = Arc::new(
-        DatabaseManager::open(&catalog_path).unwrap_or_else(|_| {
-            let dm = DatabaseManager::new();
-            let _ = dm.create("system", format!("{data_root}/system"));
-            let _ = dm.create("default", format!("{data_root}/default"));
-            dm
-        }),
-    );
-    // If opened fresh (no catalog yet), ensure built-in DBs exist
-    if db_manager.get("system").is_none() {
-        let _ = db_manager.create("system", format!("{data_root}/system"));
-    }
-    if db_manager.get("default").is_none() {
-        let _ = db_manager.create("default", format!("{data_root}/default"));
-    }
+    let db_manager = Arc::new(DatabaseManager::open(&catalog_path).unwrap());
     let mut state = AppState::default();
-    state.db_name = "default".into();
+    state.db_name = "copperdb".into();
     state.db_manager = db_manager;
+    let _ = state
+        .db_manager
+        .create("copperdb", format!("{data_root}/copperdb"));
     state.auth.security_enabled = false;
     Arc::new(state)
 }
@@ -3320,7 +3314,7 @@ async fn demo_e2e_seed_query_and_persistence() {
     use tower::ServiceExt;
 
     let temp_dir = tempfile::tempdir().unwrap();
-    let state = demo_temp_appstate(&temp_dir);
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
     let data_root = temp_dir.path().to_string_lossy().into_owned();
     let app = build_router(state.clone());
 
@@ -3343,6 +3337,54 @@ async fn demo_e2e_seed_query_and_persistence() {
         resp.status(),
         StatusCode::OK,
         "create database should succeed"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/system/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![("SHOW DATABASES", serde_json::json!({}))])
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let show_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let database_names: Vec<String> = show_resp["results"][0]["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["row"][0].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        database_names.contains(&"d3_demo".into()),
+        "d3_demo should appear in SHOW DATABASES after create: {show_resp:?}"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/db/d3_demo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "GET /db/d3_demo must succeed so the UI list does not drop it"
     );
 
     // ── 2. Create index (mirrors CYPHER_CREATE_INDEX) ───────────────
@@ -3518,7 +3560,8 @@ async fn demo_e2e_seed_query_and_persistence() {
                 .uri("/db/d3_demo/tx/commit")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
-                    demo_cypher_request(vec![(query_edge_detail, serde_json::json!({}))]).to_string(),
+                    demo_cypher_request(vec![(query_edge_detail, serde_json::json!({}))])
+                        .to_string(),
                 ))
                 .unwrap(),
         )
@@ -3533,7 +3576,47 @@ async fn demo_e2e_seed_query_and_persistence() {
         .iter()
         .map(|d| d["row"][0].as_i64().unwrap())
         .collect();
-    assert!(dists.contains(&200), "missing gateway edge (dist=200): {dists:?}");
+    assert!(
+        dists.contains(&200),
+        "missing gateway edge (dist=200): {dists:?}"
+    );
+
+    let demo_counts = "\
+        MATCH (n:Star) \
+        WITH count(n) AS stars \
+        MATCH ()-[r:HYPERLANE]->() \
+        RETURN stars, count(r) AS hyperlanes";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/d3_demo/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![(demo_counts, serde_json::json!({}))]).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let commit_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        commit_resp["errors"].as_array().unwrap().is_empty(),
+        "demo count validation query should not error: {commit_resp:?}"
+    );
+    let count_row = &commit_resp["results"][0]["data"][0]["row"];
+    assert_eq!(
+        count_row[0], 6,
+        "demo count query should see 6 stars: {commit_resp:?}"
+    );
+    assert!(
+        count_row[1].as_i64().unwrap_or(0) > 0,
+        "demo count query should see hyperlanes: {commit_resp:?}"
+    );
 
     // ── 7. Query specific star by starId ────────────────────────────
     let query_one = "MATCH (n:Star {starId: 's1-1'}) RETURN n.name AS name, n.sector AS sector";
@@ -3556,24 +3639,65 @@ async fn demo_e2e_seed_query_and_persistence() {
         .unwrap();
     let commit_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let row = &commit_resp["results"][0]["data"][0]["row"];
-    assert_eq!(row[0], "Heidr Crown 1-01", "star name should match: {commit_resp:?}");
+    assert_eq!(
+        row[0], "Heidr Crown 1-01",
+        "star name should match: {commit_resp:?}"
+    );
     assert_eq!(row[1], 1, "star sector should be 1: {commit_resp:?}");
+
+    let shortest_path = "\
+        MATCH (start:Star {starId: $startId}), (end:Star {starId: $endId}) \
+        MATCH p = shortestPath((start)-[:HYPERLANE*]-(end)) \
+        RETURN [n IN nodes(p) | n.starId] AS pathIds, length(p) AS hops \
+        LIMIT 1";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/d3_demo/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![(
+                        shortest_path,
+                        serde_json::json!({ "startId": "s0-0", "endId": "s1-2" }),
+                    )])
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let commit_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        commit_resp["errors"].as_array().unwrap().is_empty(),
+        "shortest path query should not error: {commit_resp:?}"
+    );
+    let path_rows = commit_resp["results"][0]["data"].as_array().unwrap();
+    assert_eq!(
+        path_rows.len(),
+        1,
+        "shortest path should return one row: {commit_resp:?}"
+    );
+    let path_ids = path_rows[0]["row"][0].as_array().unwrap();
+    assert_eq!(path_ids.first().unwrap(), "s0-0");
+    assert_eq!(path_ids.last().unwrap(), "s1-2");
+    let hops = path_rows[0]["row"][1].as_i64().unwrap_or(0);
+    assert!(
+        hops > 0,
+        "shortest path hops should be positive: {commit_resp:?}"
+    );
 
     // ── 8. Drop app, reopen from same data dir, verify persistence ──
     drop(app);
     drop(state);
 
-    let reopened_manager = DatabaseManager::open(format!("{data_root}/multidb"))
-        .unwrap_or_else(|_| {
-            // If the catalog isn't on disk, create with manual registration
-            let dm = DatabaseManager::new();
-            let _ = dm.create("system", format!("{data_root}/system"));
-            let _ = dm.create("default", format!("{data_root}/default"));
-            let _ = dm.create("d3_demo", format!("{data_root}/d3_demo"));
-            dm
-        });
+    let reopened_manager = DatabaseManager::open(format!("{data_root}/multidb")).unwrap();
     let reopened_state = Arc::new(AppState {
-        db_name: "default".into(),
+        db_name: "copperdb".into(),
         db_manager: Arc::new(reopened_manager),
         auth: {
             let mut a = AuthState::default();
@@ -3583,6 +3707,54 @@ async fn demo_e2e_seed_query_and_persistence() {
         ..Default::default()
     });
     let reopened_app = build_router(reopened_state);
+
+    let resp = reopened_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/system/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![("SHOW DATABASES", serde_json::json!({}))])
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let show_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let database_names: Vec<String> = show_resp["results"][0]["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["row"][0].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        database_names.contains(&"d3_demo".into()),
+        "after reopen: d3_demo should appear in SHOW DATABASES: {show_resp:?}"
+    );
+
+    let resp = reopened_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/db/d3_demo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "after reopen: GET /db/d3_demo must succeed"
+    );
 
     // Query stars count again — must still be 6
     let count_stars = "MATCH (n:Star) RETURN count(n) AS cnt";
@@ -3638,6 +3810,43 @@ async fn demo_e2e_seed_query_and_persistence() {
     assert!(
         edge_count > 0,
         "after reopen: expected HYPERLANE edges persisted, got {edge_count}: {commit_resp:?}"
+    );
+
+    let resp = reopened_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/d3_demo/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![(
+                        shortest_path,
+                        serde_json::json!({ "startId": "s0-0", "endId": "s1-2" }),
+                    )])
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let commit_resp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let path_rows = commit_resp["results"][0]["data"].as_array().unwrap();
+    assert_eq!(
+        path_rows.len(),
+        1,
+        "after reopen: shortest path should return one row: {commit_resp:?}"
+    );
+    let path_ids = path_rows[0]["row"][0].as_array().unwrap();
+    assert_eq!(path_ids.first().unwrap(), "s0-0");
+    assert_eq!(path_ids.last().unwrap(), "s1-2");
+    let hops = path_rows[0]["row"][1].as_i64().unwrap_or(0);
+    assert!(
+        hops > 0,
+        "after reopen: shortest path hops should be positive: {commit_resp:?}"
     );
 
     // Also verify star detail survives restart
@@ -3718,8 +3927,76 @@ async fn e2e_database_create_show_and_persist() {
         "system db should be present: {initial_dbs:?}"
     );
     assert!(
-        initial_dbs.contains(&"default".into()),
-        "default db should be present: {initial_dbs:?}"
+        initial_dbs.contains(&"copperdb".into()),
+        "copperdb db should be present: {initial_dbs:?}"
+    );
+    assert!(
+        !initial_dbs.contains(&"default".into()),
+        "legacy default db should not be present: {initial_dbs:?}"
+    );
+
+    // Posting to a missing database must not implicitly create it. Neo4j and
+    // NornicDB require explicit CREATE DATABASE through the system database.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/implicit_missing/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![(
+                        "CREATE (n:ShouldNotExist {value: 1}) RETURN n.value AS val",
+                        serde_json::json!({}),
+                    )])
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        result["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error["message"].as_str() == Some("database not found: implicit_missing")),
+        "missing database write should fail without auto-create: {result:?}"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/db/system/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    demo_cypher_request(vec![("SHOW DATABASES", serde_json::json!({}))])
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let dbs_after_missing_write: Vec<String> = result["results"][0]["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["row"][0].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        !dbs_after_missing_write.contains(&"implicit_missing".into()),
+        "missing database write must not register a catalog entry: {dbs_after_missing_write:?}"
     );
 
     // ── 2. Create a new database ────────────────────────────────────
@@ -3810,17 +4087,9 @@ async fn e2e_database_create_show_and_persist() {
     // Give the OS a moment to release file handles (Windows)
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let reopened_manager = DatabaseManager::open(format!("{data_root}/multidb"))
-        .unwrap_or_else(|_| {
-            // Fallback: manual registration if catalog file wasn't written
-            let dm = DatabaseManager::new();
-            let _ = dm.create("system", format!("{data_root}/system"));
-            let _ = dm.create("default", format!("{data_root}/default"));
-            let _ = dm.create("my_test_db", format!("{data_root}/my_test_db"));
-            dm
-        });
+    let reopened_manager = DatabaseManager::open(format!("{data_root}/multidb")).unwrap();
     let reopened_state = Arc::new(AppState {
-        db_name: "default".into(),
+        db_name: "copperdb".into(),
         db_manager: Arc::new(reopened_manager),
         auth: {
             let mut a = AuthState::default();
@@ -3892,5 +4161,172 @@ async fn e2e_database_create_show_and_persist() {
     assert!(
         cnt >= 1,
         "after restart: TestNode should still exist (count={cnt}): {result:?}"
+    );
+}
+
+#[test]
+fn appstate_bolt_executor_routes_system_and_named_database_queries() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+
+    executor
+        .execute_on_database(Some("system"), "CREATE DATABASE d3_demo", &empty)
+        .expect("Bolt executor should create databases through system");
+
+    let show = executor
+        .execute_on_database(Some("system"), "SHOW DATABASES", &empty)
+        .expect("Bolt executor should query system database");
+    assert!(
+        show.rows
+            .iter()
+            .any(|row| row.first() == Some(&serde_json::json!("d3_demo"))),
+        "d3_demo should appear in SHOW DATABASES over Bolt executor: {show:?}"
+    );
+
+    let write = executor
+        .execute_on_database(
+            Some("d3_demo"),
+            "CREATE (n:Star {starId: 's0-16'}) RETURN n.starId AS id",
+            &empty,
+        )
+        .expect("Bolt executor should write to selected database");
+    assert_eq!(write.columns, vec!["id"]);
+    assert_eq!(write.rows[0][0], serde_json::json!("s0-16"));
+
+    let count = executor
+        .execute_on_database(
+            Some("d3_demo"),
+            "MATCH (n:Star {starId: 's0-16'}) RETURN count(n) AS cnt",
+            &empty,
+        )
+        .expect("Bolt executor should read from selected database");
+    assert_eq!(count.columns, vec!["cnt"]);
+    assert_eq!(count.rows[0][0], serde_json::json!(1));
+
+    let missing = executor
+        .execute_on_database(Some("missing_db"), "RETURN 1 AS n", &empty)
+        .expect_err("Bolt executor must not auto-create missing databases");
+    assert_eq!(missing, "database not found: missing_db");
+}
+
+#[test]
+fn appstate_bolt_executor_seeds_demo_sized_star_batch() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+
+    executor
+        .execute_on_database(Some("system"), "CREATE DATABASE d3_demo", &empty)
+        .expect("Bolt executor should create the demo database");
+    executor
+        .execute_on_database(
+            Some("d3_demo"),
+            "CREATE INDEX star_id_idx IF NOT EXISTS FOR (n:Star) ON (n.starId)",
+            &empty,
+        )
+        .expect("Bolt executor should create the demo index");
+
+    let rows: Vec<serde_json::Value> = (0..400)
+        .map(|idx| {
+            serde_json::json!({
+                "starId": format!("s0-{idx}"),
+                "name": format!("Star {idx}"),
+                "sector": 0,
+                "hue": idx % 360,
+                "mass": 1 + (idx % 18),
+                "x": idx,
+                "y": idx * 2,
+                "z": idx * 3,
+            })
+        })
+        .collect();
+    let mut params = HashMap::new();
+    params.insert("rows".into(), serde_json::json!(rows));
+
+    executor
+        .execute_on_database(
+            Some("d3_demo"),
+            "UNWIND $rows AS row MERGE (n:Star {starId: row.starId}) SET n.name = row.name, n.sector = row.sector, n.hue = row.hue, n.mass = row.mass, n.x = row.x, n.y = row.y, n.z = row.z",
+            &params,
+        )
+        .expect("Bolt executor should seed a demo-sized star batch");
+
+    let count = executor
+        .execute_on_database(
+            Some("d3_demo"),
+            "MATCH (n:Star) RETURN count(n) AS stars",
+            &empty,
+        )
+        .expect("Bolt executor should query seeded demo stars");
+    assert_eq!(count.columns, vec!["stars"]);
+    assert_eq!(count.rows[0][0], serde_json::json!(400));
+}
+
+#[test]
+fn appstate_bolt_executor_links_demo_sized_hyperlane_batch() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+
+    executor
+        .execute_on_database(Some("system"), "CREATE DATABASE d3_demo", &empty)
+        .expect("Bolt executor should create the demo database");
+
+    let rows: Vec<serde_json::Value> = (0..=400)
+        .map(|idx| {
+            serde_json::json!({
+                "starId": format!("s0-{idx}"),
+                "name": format!("Star {idx}"),
+            })
+        })
+        .collect();
+    let mut params = HashMap::new();
+    params.insert("rows".into(), serde_json::json!(rows));
+
+    executor
+        .execute_on_database(
+            Some("d3_demo"),
+            "UNWIND $rows AS row MERGE (n:Star {starId: row.starId}) SET n.name = row.name",
+            &params,
+        )
+        .expect("Bolt executor should seed demo stars for link batch");
+
+    let rows: Vec<serde_json::Value> = (0..400)
+        .map(|idx| {
+            serde_json::json!({
+                "fromId": format!("s0-{idx}"),
+                "toId": format!("s0-{}", idx + 1),
+                "distance": idx,
+            })
+        })
+        .collect();
+    params.insert("rows".into(), serde_json::json!(rows));
+
+    let started = std::time::Instant::now();
+    executor
+        .execute_on_database(
+            Some("d3_demo"),
+            "UNWIND $rows AS row MATCH (a:Star {starId: row.fromId}) MATCH (b:Star {starId: row.toId}) MERGE (a)-[r:HYPERLANE]->(b) SET r.distance = row.distance",
+            &params,
+        )
+        .expect("Bolt executor should link a demo-sized hyperlane batch");
+    let elapsed = started.elapsed();
+
+    let count = executor
+        .execute_on_database(
+            Some("d3_demo"),
+            "MATCH ()-[r:HYPERLANE]->() RETURN count(r) AS hyperlanes",
+            &empty,
+        )
+        .expect("Bolt executor should query linked demo hyperlanes");
+    assert_eq!(count.columns, vec!["hyperlanes"]);
+    assert_eq!(count.rows[0][0], serde_json::json!(400));
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "400-row Bolt relationship link batch should stay on the fast path, took {elapsed:?}"
     );
 }

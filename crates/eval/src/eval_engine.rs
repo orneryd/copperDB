@@ -343,6 +343,15 @@ impl EvalEngine {
     ) -> Result<EvalResult, EvalError> {
         // Clear per-query caches so MERGE ON MATCH fires across statements
         self.invalidate_node_lookup_cache();
+        if let Some(result) = self.execute_unwind_simple_merge_set_batch(query, params)? {
+            return Ok(result);
+        }
+        if let Some(result) =
+            self.execute_unwind_match_merge_relationship_set_batch(query, params)?
+        {
+            return Ok(result);
+        }
+
         let mut current_rows = pooled_binding_rows();
         current_rows.push(HashMap::new());
         let mut stats = QueryStats::default();
@@ -1426,8 +1435,7 @@ impl EvalEngine {
             for node_pat in &first_match.pattern.nodes {
                 let mut next = Vec::new();
                 for row in &rows {
-                    let candidates =
-                        self.bound_or_matching_node_props(row, node_pat, params)?;
+                    let candidates = self.bound_or_matching_node_props(row, node_pat, params)?;
                     for props in candidates {
                         let node_val = serde_json::to_value(&props)
                             .map_err(|e| EvalError::SerializationError(e.to_string()))?;
@@ -1485,13 +1493,22 @@ impl EvalEngine {
             }
 
             if find_all {
-                let paths =
-                    self.bfs_all_shortest_paths(&start_id, &end_id, &rel_types, direction, max_hops as usize)?;
+                let paths = self.bfs_all_shortest_paths(
+                    &start_id,
+                    &end_id,
+                    &rel_types,
+                    direction,
+                    max_hops as usize,
+                )?;
                 all_paths.extend(paths);
             } else {
-                if let Some(path) =
-                    self.bfs_shortest_path(&start_id, &end_id, &rel_types, direction, max_hops as usize)?
-                {
+                if let Some(path) = self.bfs_shortest_path(
+                    &start_id,
+                    &end_id,
+                    &rel_types,
+                    direction,
+                    max_hops as usize,
+                )? {
                     all_paths.push(path);
                 }
             }
@@ -1521,7 +1538,12 @@ impl EvalEngine {
         let mut visited: HashMap<String, bool> = HashMap::new();
         let mut queue: VecDeque<(String, Vec<String>, Vec<EdgeRecord>, usize)> = VecDeque::new();
 
-        queue.push_back((start_id.to_string(), vec![start_id.to_string()], Vec::new(), 0));
+        queue.push_back((
+            start_id.to_string(),
+            vec![start_id.to_string()],
+            Vec::new(),
+            0,
+        ));
         visited.insert(start_id.to_string(), true);
 
         while let Some((current_id, node_path, edge_path, depth)) = queue.pop_front() {
@@ -1534,8 +1556,7 @@ impl EvalEngine {
             let edges = self.relationship_candidates_for_node(&current_id, rel_types, direction)?;
 
             for edge in edges {
-                let next_id = related_node_id(&current_id, &edge, direction)
-                    .map(str::to_string);
+                let next_id = related_node_id(&current_id, &edge, direction).map(str::to_string);
 
                 let Some(next_id) = next_id else {
                     continue;
@@ -1583,7 +1604,12 @@ impl EvalEngine {
         let mut results = Vec::new();
         let mut found_depth: Option<usize> = None;
 
-        queue.push_back((start_id.to_string(), vec![start_id.to_string()], Vec::new(), 0));
+        queue.push_back((
+            start_id.to_string(),
+            vec![start_id.to_string()],
+            Vec::new(),
+            0,
+        ));
         visited.insert(start_id.to_string(), 0);
 
         while let Some((current_id, node_path, edge_path, depth)) = queue.pop_front() {
@@ -1603,8 +1629,7 @@ impl EvalEngine {
             let edges = self.relationship_candidates_for_node(&current_id, rel_types, direction)?;
 
             for edge in edges {
-                let next_id = related_node_id(&current_id, &edge, direction)
-                    .map(str::to_string);
+                let next_id = related_node_id(&current_id, &edge, direction).map(str::to_string);
 
                 let Some(next_id) = next_id else {
                     continue;
@@ -1659,7 +1684,9 @@ impl EvalEngine {
             None // multi-type not supported for adjacency lookup; filter below
         };
 
-        let mut edges = self.storage.get_adjacent_edges(node_id, adj_dir, edge_type)?;
+        let mut edges = self
+            .storage
+            .get_adjacent_edges(node_id, adj_dir, edge_type)?;
 
         if rel_types.len() > 1 {
             edges.retain(|e| rel_types.iter().any(|t| e.edge_type == *t));
@@ -1667,7 +1694,8 @@ impl EvalEngine {
 
         let resolver = self.knowledge_policy_resolver()?;
         edges.retain(|e| {
-            self.edge_visible_under_policy(e, &resolver).unwrap_or(false)
+            self.edge_visible_under_policy(e, &resolver)
+                .unwrap_or(false)
         });
 
         Ok(edges)
@@ -1758,7 +1786,12 @@ impl EvalEngine {
             for item in &ret.items {
                 let col = column_name(item);
                 let val = self.evaluate_return_expr_for_path(
-                    &item.expression, &path, &node_vals, &edge_vals, row.clone(), params,
+                    &item.expression,
+                    &path,
+                    &node_vals,
+                    &edge_vals,
+                    row.clone(),
+                    params,
                 )?;
                 row.insert(col, val);
             }
@@ -1819,23 +1852,27 @@ impl EvalEngine {
                             inner_row.insert(lc.variable.clone(), node_val.clone());
                             // Check predicate (WHERE clause)
                             if let Some(ref pred) = lc.predicate {
-                                let pred_val = self.evaluate_expression(pred, &inner_row, params)?;
+                                let pred_val =
+                                    self.evaluate_expression(pred, &inner_row, params)?;
                                 // truthy: not null, not false, not 0, not empty
-                                let is_truthy = !matches!(&pred_val,
-                                    Value::Null | Value::Bool(false)
-                                ) && !matches!(&pred_val,
-                                    Value::Number(n) if n.as_f64() == Some(0.0)
-                                ) && !matches!(&pred_val,
-                                    Value::String(s) if s.is_empty()
-                                ) && !matches!(&pred_val,
-                                    Value::Array(a) if a.is_empty()
-                                );
+                                let is_truthy =
+                                    !matches!(&pred_val, Value::Null | Value::Bool(false))
+                                        && !matches!(&pred_val,
+                                            Value::Number(n) if n.as_f64() == Some(0.0)
+                                        )
+                                        && !matches!(&pred_val,
+                                            Value::String(s) if s.is_empty()
+                                        )
+                                        && !matches!(&pred_val,
+                                            Value::Array(a) if a.is_empty()
+                                        );
                                 if !is_truthy {
                                     continue;
                                 }
                             }
                             // Extract
-                            let val = self.evaluate_expression(&lc.expression, &inner_row, params)?;
+                            let val =
+                                self.evaluate_expression(&lc.expression, &inner_row, params)?;
                             result.push(val);
                         }
                         return Ok(Value::Array(result));
@@ -2305,6 +2342,15 @@ impl EvalEngine {
         params: &HashMap<String, Value>,
         pipeline_clauses: &[PipelineClause],
     ) -> Result<EvalResult, EvalError> {
+        if let Some(result) = self.execute_unwind_simple_merge_set_batch(query, params)? {
+            return Ok(result);
+        }
+        if let Some(result) =
+            self.execute_unwind_match_merge_relationship_set_batch(query, params)?
+        {
+            return Ok(result);
+        }
+
         let pipeline_has_unwind = pipeline_clauses
             .iter()
             .any(|clause| clause.kind == PipelineClauseKind::Unwind);
@@ -2394,10 +2440,15 @@ impl EvalEngine {
                         self.execute_merge_clause(&current_rows, merge, params, &mut stats)?;
                 }
                 Clause::With(with) => {
-                    let mut projected: Vec<Row> = current_rows
-                        .iter()
-                        .map(|row| self.project_row(row, &with.items, params))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let with_agg = has_aggregation_items(&with.items) && !current_rows.is_empty();
+                    let mut projected: Vec<Row> = if with_agg {
+                        apply_aggregation_to_rows(&current_rows, &with.items, params)?
+                    } else {
+                        current_rows
+                            .iter()
+                            .map(|row| self.project_row(row, &with.items, params))
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
 
                     if let Some(where_clause) = &with.where_clause {
                         let mut filtered = pooled_binding_rows();
@@ -2457,10 +2508,24 @@ impl EvalEngine {
                         current_rows.truncate(limit.max(0) as usize);
                     }
 
-                    let mut rows: Vec<Row> = current_rows
-                        .iter()
-                        .map(|row| self.project_row(row, &ret.items, params))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let any_agg = has_aggregation_items(&ret.items);
+                    let mut rows: Vec<Row> = if current_rows.is_empty() && any_agg {
+                        vec![aggregate_identity_row(&ret.items, params)?]
+                    } else if any_agg && !current_rows.is_empty() {
+                        apply_aggregation_to_rows(&current_rows, &ret.items, params)?
+                    } else {
+                        current_rows
+                            .iter()
+                            .map(|row| self.project_row(row, &ret.items, params))
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+
+                    if any_agg && rows.is_empty() && !current_rows.is_empty() {
+                        rows = current_rows
+                            .iter()
+                            .map(|row| self.project_row(row, &ret.items, params))
+                            .collect::<Result<Vec<_>, _>>()?;
+                    }
 
                     if ret.distinct {
                         let mut seen = HashSet::new();
@@ -2487,6 +2552,289 @@ impl EvalEngine {
             rows: Vec::new(),
             stats,
         })
+    }
+
+    fn execute_unwind_simple_merge_set_batch(
+        &self,
+        query: &Query,
+        params: &HashMap<String, Value>,
+    ) -> Result<Option<EvalResult>, EvalError> {
+        let Some(plan) = detect_unwind_simple_merge_set_batch(query) else {
+            return Ok(None);
+        };
+        let Some(Value::Array(items)) = params.get(&plan.param_name) else {
+            return Ok(None);
+        };
+
+        self.invalidate_node_lookup_cache();
+        self.hot_path_trace.mark_unwind_simple_merge_batch();
+        let catalog = IndexCatalog::new(self.storage.as_ref());
+        if catalog.has_preferred_node_lookup_index(&plan.labels, &plan.index_probe_props())? {
+            self.hot_path_trace.mark_merge_schema_lookup();
+        } else {
+            self.hot_path_trace.mark_merge_scan_fallback();
+        }
+
+        let mut stats = QueryStats::default();
+        let mut lookup_cache: HashMap<String, HashMap<String, Value>> = HashMap::new();
+        let mut touched_nodes: HashMap<String, HashMap<String, Value>> = HashMap::new();
+        let mut processed_rows = 0usize;
+
+        for item in items {
+            let Value::Object(row_map) = item else {
+                continue;
+            };
+
+            let mut merge_props = HashMap::with_capacity(plan.match_assignments.len());
+            for assignment in &plan.match_assignments {
+                let Some(value) = row_map.get(&assignment.row_property) else {
+                    return Err(EvalError::ExecutionError(format!(
+                        "UNWIND MERGE batch row is missing property '{}'",
+                        assignment.row_property
+                    )));
+                };
+                merge_props.insert(assignment.node_property.clone(), value.clone());
+            }
+
+            let lookup_key = unwind_merge_batch_key(&plan.labels, &merge_props);
+            let mut props = if let Some(cached) = lookup_cache.get(&lookup_key) {
+                cached.clone()
+            } else {
+                match self
+                    .lookup_matching_node_props(&plan.labels, &merge_props)?
+                    .into_iter()
+                    .next()
+                {
+                    Some(existing) => existing,
+                    None => {
+                        let id = Uuid::new_v4().to_string();
+                        let key = format!(
+                            "{}:{id}",
+                            plan.labels.first().map(String::as_str).unwrap_or("node")
+                        );
+                        let mut created = merge_props.clone();
+                        created.insert("_id".to_string(), Value::String(key));
+                        created.insert(
+                            "_labels".to_string(),
+                            Value::Array(
+                                plan.labels
+                                    .iter()
+                                    .map(|label| Value::String(label.clone()))
+                                    .collect(),
+                            ),
+                        );
+                        stats.nodes_created += 1;
+                        stats.properties_set += plan.match_assignments.len();
+                        created
+                    }
+                }
+            };
+
+            let mut changed = !lookup_cache.contains_key(&lookup_key);
+            for assignment in &plan.set_assignments {
+                let Some(value) = row_map.get(&assignment.row_property) else {
+                    return Err(EvalError::ExecutionError(format!(
+                        "UNWIND SET batch row is missing property '{}'",
+                        assignment.row_property
+                    )));
+                };
+                if props.get(&assignment.node_property) != Some(value) {
+                    props.insert(assignment.node_property.clone(), value.clone());
+                    stats.properties_set += 1;
+                    changed = true;
+                }
+            }
+
+            if changed {
+                self.check_node_constraints(&plan.labels, &props)?;
+                let cached_value = Value::Object(props.clone().into_iter().collect());
+                self.cache_merge_node(&plan.labels, &merge_props, &cached_value);
+                touched_nodes.insert(lookup_key.clone(), props.clone());
+            }
+            lookup_cache.insert(lookup_key, props);
+            processed_rows += 1;
+        }
+
+        if !touched_nodes.is_empty() {
+            let now = now_unix_ms();
+            let mut records = Vec::with_capacity(touched_nodes.len());
+            for props in touched_nodes.values() {
+                let mut record = node_record_from_props(props)?;
+                if let Some(existing) = self.storage.get_node_record(&record.id)? {
+                    record.created_at_unix_ms = existing.created_at_unix_ms;
+                    record.updated_at_unix_ms = now;
+                } else {
+                    record.created_at_unix_ms = now;
+                    record.updated_at_unix_ms = now;
+                }
+                records.push(record);
+            }
+            self.storage.put_node_records_batch(&records)?;
+        }
+
+        let (columns, rows) = if let Some(alias) = plan.count_alias {
+            let mut row = Row::new();
+            row.insert(alias.clone(), Value::from(processed_rows as i64));
+            (vec![alias], vec![row])
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        Ok(Some(EvalResult {
+            columns,
+            rows,
+            stats,
+        }))
+    }
+
+    fn execute_unwind_match_merge_relationship_set_batch(
+        &self,
+        query: &Query,
+        params: &HashMap<String, Value>,
+    ) -> Result<Option<EvalResult>, EvalError> {
+        let Some(plan) = detect_unwind_match_merge_relationship_set_batch(query) else {
+            return Ok(None);
+        };
+        let Some(Value::Array(items)) = params.get(&plan.param_name) else {
+            return Ok(None);
+        };
+
+        if self.storage.load_constraints()?.iter().any(|constraint| {
+            constraint.entity_type == ConstraintEntityType::Relationship
+                && constraint.label == plan.edge_type
+        }) {
+            return Ok(None);
+        }
+
+        self.hot_path_trace
+            .mark_unwind_multi_match_relationship_batch();
+        let start_index = self.unwind_relationship_endpoint_index(&plan.start_match)?;
+        let end_index = if plan.start_match.index_key() == plan.end_match.index_key() {
+            start_index.clone()
+        } else {
+            self.unwind_relationship_endpoint_index(&plan.end_match)?
+        };
+
+        let now = now_unix_ms();
+        let mut stats = QueryStats::default();
+        let mut matched_rows = 0usize;
+        let mut edge_cache: HashMap<String, EdgeRecord> = HashMap::new();
+        let mut touched_edges: HashMap<String, EdgeRecord> = HashMap::new();
+
+        for item in items {
+            let Value::Object(row_map) = item else {
+                continue;
+            };
+            let Some(start_value) = row_map.get(&plan.start_match.row_property) else {
+                continue;
+            };
+            let Some(end_value) = row_map.get(&plan.end_match.row_property) else {
+                continue;
+            };
+            let Some(start_id) = start_index.get(&batch_value_key(start_value)).cloned() else {
+                continue;
+            };
+            let Some(end_id) = end_index.get(&batch_value_key(end_value)).cloned() else {
+                continue;
+            };
+            matched_rows += 1;
+
+            let edge_key = relationship_batch_edge_key(&start_id, &plan.edge_type, &end_id);
+            let mut edge = if let Some(cached) = edge_cache.get(&edge_key) {
+                cached.clone()
+            } else if let Some(existing) =
+                self.storage
+                    .find_edge_between(&start_id, &plan.edge_type, &end_id)?
+            {
+                existing
+            } else {
+                stats.relationships_created += 1;
+                EdgeRecord {
+                    id: format!("edge:{}", Uuid::new_v4()),
+                    start_node: start_id.clone(),
+                    end_node: end_id.clone(),
+                    edge_type: plan.edge_type.clone(),
+                    properties: BTreeMap::new(),
+                    created_at_unix_ms: now,
+                    updated_at_unix_ms: now,
+                }
+            };
+
+            let mut changed = !edge_cache.contains_key(&edge_key)
+                && self.storage.get_edge_record(&edge.id)?.is_none();
+            for assignment in &plan.set_assignments {
+                let Some(value) = row_map.get(&assignment.row_property) else {
+                    return Err(EvalError::ExecutionError(format!(
+                        "UNWIND relationship SET batch row is missing property '{}'",
+                        assignment.row_property
+                    )));
+                };
+                if edge.properties.get(&assignment.edge_property) != Some(value) {
+                    edge.properties
+                        .insert(assignment.edge_property.clone(), value.clone());
+                    stats.properties_set += 1;
+                    changed = true;
+                }
+            }
+
+            if changed {
+                if edge.created_at_unix_ms == 0 {
+                    if let Some(existing) = self.storage.get_edge_record(&edge.id)? {
+                        edge.created_at_unix_ms = existing.created_at_unix_ms;
+                    } else {
+                        edge.created_at_unix_ms = now;
+                    }
+                }
+                edge.updated_at_unix_ms = now;
+                touched_edges.insert(edge_key.clone(), edge.clone());
+            }
+            edge_cache.insert(edge_key, edge);
+        }
+
+        if !touched_edges.is_empty() {
+            let records: Vec<EdgeRecord> = touched_edges.into_values().collect();
+            self.storage.put_edge_records_batch(&records)?;
+        }
+
+        let (columns, rows) = if let Some(alias) = plan.count_alias {
+            let mut row = Row::new();
+            row.insert(alias.clone(), Value::from(matched_rows as i64));
+            (vec![alias], vec![row])
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        Ok(Some(EvalResult {
+            columns,
+            rows,
+            stats,
+        }))
+    }
+
+    fn unwind_relationship_endpoint_index(
+        &self,
+        spec: &UnwindRelationshipNodeMatchSpec,
+    ) -> Result<HashMap<String, String>, EvalError> {
+        let mut out = HashMap::new();
+        let resolver = self.knowledge_policy_resolver()?;
+        let Some(label) = spec.labels.first() else {
+            return Ok(out);
+        };
+
+        for node in self.storage.get_nodes_by_label(label)? {
+            if !self.node_visible_under_policy(&node, &resolver)? {
+                continue;
+            }
+            let props = node_record_to_props(&node);
+            if !node_matches_pattern(&props, &spec.labels, &HashMap::new()) {
+                continue;
+            }
+            if let Some(value) = props.get(&spec.node_property) {
+                self.apply_on_access_for_node(&node, &resolver)?;
+                out.entry(batch_value_key(value)).or_insert(node.id.clone());
+            }
+        }
+        Ok(out)
     }
 
     fn execute_delete_clause(
@@ -3755,10 +4103,9 @@ impl EvalEngine {
                 let start_id_for_check = start_id.clone();
                 let end_id_for_check = end_id.clone();
 
-                let existing_edges = self.storage.get_edges_by_type(&edge_type)?;
-                let found = existing_edges
-                    .iter()
-                    .find(|e| e.start_node == start_id && e.end_node == end_id);
+                let found = self
+                    .storage
+                    .find_edge_between(&start_id, &edge_type, &end_id)?;
                 let (edge_val, is_new) = if let Some(edge) = found {
                     let mut props: HashMap<String, Value> =
                         edge.properties.clone().into_iter().collect();
@@ -4594,6 +4941,366 @@ fn is_agg_function(expr: &Expression) -> bool {
         }
         _ => false,
     }
+}
+
+#[derive(Debug, Clone)]
+struct UnwindMergePropertyAssignment {
+    node_property: String,
+    row_property: String,
+}
+
+#[derive(Debug, Clone)]
+struct UnwindSimpleMergeSetBatchPlan {
+    param_name: String,
+    labels: Vec<String>,
+    match_assignments: Vec<UnwindMergePropertyAssignment>,
+    set_assignments: Vec<UnwindMergePropertyAssignment>,
+    count_alias: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct UnwindRelationshipNodeMatchSpec {
+    variable: String,
+    labels: Vec<String>,
+    node_property: String,
+    row_property: String,
+}
+
+impl UnwindRelationshipNodeMatchSpec {
+    fn index_key(&self) -> String {
+        let mut labels = self.labels.clone();
+        labels.sort();
+        format!("{}\0{}", labels.join(":"), self.node_property)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UnwindRelationshipPropertyAssignment {
+    edge_property: String,
+    row_property: String,
+}
+
+#[derive(Debug, Clone)]
+struct UnwindMatchMergeRelationshipSetBatchPlan {
+    param_name: String,
+    start_match: UnwindRelationshipNodeMatchSpec,
+    end_match: UnwindRelationshipNodeMatchSpec,
+    edge_type: String,
+    set_assignments: Vec<UnwindRelationshipPropertyAssignment>,
+    count_alias: Option<String>,
+}
+
+impl UnwindSimpleMergeSetBatchPlan {
+    fn index_probe_props(&self) -> HashMap<String, Value> {
+        self.match_assignments
+            .iter()
+            .map(|assignment| (assignment.node_property.clone(), Value::Null))
+            .collect()
+    }
+}
+
+fn detect_unwind_simple_merge_set_batch(query: &Query) -> Option<UnwindSimpleMergeSetBatchPlan> {
+    if query.clauses.len() < 3 || query.clauses.len() > 4 {
+        return None;
+    }
+
+    let Clause::Unwind(unwind) = &query.clauses[0] else {
+        return None;
+    };
+    let Expression::Parameter(param_name) = &unwind.expression else {
+        return None;
+    };
+
+    let Clause::Merge(merge) = &query.clauses[1] else {
+        return None;
+    };
+    if !merge.pattern.edges.is_empty()
+        || merge.pattern.nodes.len() != 1
+        || !merge.on_create.is_empty()
+        || !merge.on_match.is_empty()
+    {
+        return None;
+    }
+    let node = &merge.pattern.nodes[0];
+    let merge_var = node.variable.as_ref()?;
+    if node.labels.is_empty() || node.properties.is_empty() {
+        return None;
+    }
+
+    let match_assignments = detect_row_property_assignments(&node.properties, &unwind.variable)?;
+
+    let Clause::Set(set) = &query.clauses[2] else {
+        return None;
+    };
+    let mut set_assignments = Vec::with_capacity(set.items.len());
+    for item in &set.items {
+        let SetItem::Property {
+            variable,
+            property,
+            value,
+        } = item
+        else {
+            return None;
+        };
+        if variable != merge_var {
+            return None;
+        }
+        let Expression::PropertyAccess {
+            variable: value_variable,
+            property: row_property,
+        } = value
+        else {
+            return None;
+        };
+        if value_variable != &unwind.variable {
+            return None;
+        }
+        set_assignments.push(UnwindMergePropertyAssignment {
+            node_property: property.clone(),
+            row_property: row_property.clone(),
+        });
+    }
+
+    let count_alias = match query.clauses.get(3) {
+        None => None,
+        Some(Clause::Return(ret)) => detect_count_return_alias(ret, merge_var)?,
+        Some(_) => return None,
+    };
+
+    Some(UnwindSimpleMergeSetBatchPlan {
+        param_name: param_name.clone(),
+        labels: node.labels.clone(),
+        match_assignments,
+        set_assignments,
+        count_alias,
+    })
+}
+
+fn detect_unwind_match_merge_relationship_set_batch(
+    query: &Query,
+) -> Option<UnwindMatchMergeRelationshipSetBatchPlan> {
+    if query.clauses.len() < 5 || query.clauses.len() > 6 {
+        return None;
+    }
+
+    let Clause::Unwind(unwind) = &query.clauses[0] else {
+        return None;
+    };
+    let Expression::Parameter(param_name) = &unwind.expression else {
+        return None;
+    };
+
+    let Clause::Match(start_match_clause) = &query.clauses[1] else {
+        return None;
+    };
+    let Clause::Match(end_match_clause) = &query.clauses[2] else {
+        return None;
+    };
+    let start_match =
+        detect_unwind_relationship_node_match(&start_match_clause.pattern, &unwind.variable)?;
+    let end_match =
+        detect_unwind_relationship_node_match(&end_match_clause.pattern, &unwind.variable)?;
+
+    let Clause::Merge(merge) = &query.clauses[3] else {
+        return None;
+    };
+    if !merge.on_create.is_empty()
+        || !merge.on_match.is_empty()
+        || merge.pattern.nodes.len() != 2
+        || merge.pattern.edges.len() != 1
+    {
+        return None;
+    }
+    let merge_start_var = merge.pattern.nodes[0].variable.as_ref()?;
+    let merge_end_var = merge.pattern.nodes[1].variable.as_ref()?;
+    if merge_start_var != &start_match.variable || merge_end_var != &end_match.variable {
+        return None;
+    }
+    let edge = &merge.pattern.edges[0];
+    if edge.direction != EdgeDirection::Outgoing
+        || edge.min_hops.is_some()
+        || edge.max_hops.is_some()
+        || !edge.properties.is_empty()
+    {
+        return None;
+    }
+    let edge_var = edge.variable.as_ref()?;
+    let edge_type = edge.rel_type.clone()?;
+
+    let Clause::Set(set) = &query.clauses[4] else {
+        return None;
+    };
+    let mut set_assignments = Vec::with_capacity(set.items.len());
+    for item in &set.items {
+        let SetItem::Property {
+            variable,
+            property,
+            value,
+        } = item
+        else {
+            return None;
+        };
+        if variable != edge_var {
+            return None;
+        }
+        let Expression::PropertyAccess {
+            variable: value_variable,
+            property: row_property,
+        } = value
+        else {
+            return None;
+        };
+        if value_variable != &unwind.variable {
+            return None;
+        }
+        set_assignments.push(UnwindRelationshipPropertyAssignment {
+            edge_property: property.clone(),
+            row_property: row_property.clone(),
+        });
+    }
+
+    let count_alias = match query.clauses.get(5) {
+        None => None,
+        Some(Clause::Return(ret)) => detect_count_return_alias_for_variable(ret, edge_var)?,
+        Some(_) => return None,
+    };
+
+    Some(UnwindMatchMergeRelationshipSetBatchPlan {
+        param_name: param_name.clone(),
+        start_match,
+        end_match,
+        edge_type,
+        set_assignments,
+        count_alias,
+    })
+}
+
+fn detect_unwind_relationship_node_match(
+    pattern: &Pattern,
+    unwind_variable: &str,
+) -> Option<UnwindRelationshipNodeMatchSpec> {
+    if !pattern.edges.is_empty() || pattern.nodes.len() != 1 {
+        return None;
+    }
+    let node = &pattern.nodes[0];
+    if node.labels.is_empty() || node.properties.len() != 1 {
+        return None;
+    }
+    let assignment = detect_row_property_assignments(&node.properties, unwind_variable)?
+        .into_iter()
+        .next()?;
+    Some(UnwindRelationshipNodeMatchSpec {
+        variable: node.variable.clone()?,
+        labels: node.labels.clone(),
+        node_property: assignment.node_property,
+        row_property: assignment.row_property,
+    })
+}
+
+fn detect_row_property_assignments(
+    properties: &[PropertyEntry],
+    unwind_variable: &str,
+) -> Option<Vec<UnwindMergePropertyAssignment>> {
+    let mut assignments = Vec::with_capacity(properties.len());
+    for property in properties {
+        let Expression::PropertyAccess {
+            variable,
+            property: row_property,
+        } = &property.value
+        else {
+            return None;
+        };
+        if variable != unwind_variable {
+            return None;
+        }
+        assignments.push(UnwindMergePropertyAssignment {
+            node_property: property.key.clone(),
+            row_property: row_property.clone(),
+        });
+    }
+    Some(assignments)
+}
+
+fn detect_count_return_alias(ret: &ReturnClause, merge_var: &str) -> Option<Option<String>> {
+    if ret.distinct || !ret.order_by.is_empty() || ret.skip.is_some() || ret.limit.is_some() {
+        return None;
+    }
+    if ret.items.len() != 1 {
+        return None;
+    }
+    let item = &ret.items[0];
+    let Expression::FunctionCall { name, args, .. } = &item.expression else {
+        return None;
+    };
+    if !name.eq_ignore_ascii_case("count") || args.len() != 1 {
+        return None;
+    }
+    match &args[0] {
+        Expression::PropertyAccess { variable, property } => {
+            if !variable.is_empty() || property != merge_var {
+                return None;
+            }
+        }
+        Expression::Parameter(name) if name == merge_var => {}
+        _ => return None,
+    }
+    Some(Some(
+        item.alias.clone().unwrap_or_else(|| column_name(item)),
+    ))
+}
+
+fn detect_count_return_alias_for_variable(
+    ret: &ReturnClause,
+    variable_name: &str,
+) -> Option<Option<String>> {
+    if ret.distinct || !ret.order_by.is_empty() || ret.skip.is_some() || ret.limit.is_some() {
+        return None;
+    }
+    if ret.items.len() != 1 {
+        return None;
+    }
+    let item = &ret.items[0];
+    let Expression::FunctionCall { name, args, .. } = &item.expression else {
+        return None;
+    };
+    if !name.eq_ignore_ascii_case("count") || args.len() != 1 {
+        return None;
+    }
+    match &args[0] {
+        Expression::Variable(variable) if variable == variable_name => {}
+        Expression::Parameter(name) if name == variable_name => {}
+        Expression::PropertyAccess { variable, property }
+            if variable.is_empty() && property == variable_name => {}
+        _ => return None,
+    }
+    Some(Some(
+        item.alias.clone().unwrap_or_else(|| column_name(item)),
+    ))
+}
+
+fn batch_value_key(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+}
+
+fn relationship_batch_edge_key(start_id: &str, edge_type: &str, end_id: &str) -> String {
+    format!("{start_id}\0{edge_type}\0{end_id}")
+}
+
+fn unwind_merge_batch_key(labels: &[String], props: &HashMap<String, Value>) -> String {
+    let mut sorted_labels = labels.to_vec();
+    sorted_labels.sort();
+    let mut sorted_props: Vec<_> = props.iter().collect();
+    sorted_props.sort_by(|left, right| left.0.cmp(right.0));
+
+    let mut key = sorted_labels.join(":");
+    key.push('\u{0}');
+    for (property, value) in sorted_props {
+        key.push_str(property);
+        key.push('=');
+        key.push_str(&serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()));
+        key.push('\u{0}');
+    }
+    key
 }
 
 fn has_aggregation_items(items: &[ReturnItem]) -> bool {

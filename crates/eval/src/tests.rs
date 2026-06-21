@@ -977,6 +977,220 @@
     }
 
     #[test]
+    fn test_unwind_merge_set_batch_duplicate_keys_last_row_wins_and_upserts() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let cypher = "UNWIND $rows AS row MERGE (n:Star {starId: row.starId}) SET n.name = row.name, n.mass = row.mass";
+        let query = parser.parse(cypher).unwrap();
+        let pattern = detect_query_pattern(cypher);
+        let (clauses, ok) = can_execute_as_pipeline(cypher);
+
+        let mut params = HashMap::new();
+        params.insert(
+            "rows".to_string(),
+            Value::Array(vec![
+                serde_json::json!({"starId": "s1", "name": "first", "mass": 1}),
+                serde_json::json!({"starId": "s1", "name": "second", "mass": 2}),
+                serde_json::json!({"starId": "s2", "name": "third", "mass": 3}),
+            ]),
+        );
+
+        let result = engine
+            .execute_with_routes(
+                &query,
+                &params,
+                &pattern,
+                None,
+                ok.then_some(clauses.as_slice()),
+            )
+            .unwrap();
+        assert!(ok);
+        assert_eq!(result.stats.nodes_created, 2);
+
+        params.insert(
+            "rows".to_string(),
+            Value::Array(vec![
+                serde_json::json!({"starId": "s1", "name": "updated", "mass": 10}),
+                serde_json::json!({"starId": "s2", "name": "still-two", "mass": 20}),
+            ]),
+        );
+
+        let result = engine
+            .execute_with_routes(
+                &query,
+                &params,
+                &pattern,
+                None,
+                ok.then_some(clauses.as_slice()),
+            )
+            .unwrap();
+        assert_eq!(result.stats.nodes_created, 0);
+
+        let stored = engine.storage.get_nodes_by_label("Star").unwrap();
+        assert_eq!(stored.len(), 2);
+
+        let s1 = stored
+            .iter()
+            .find(|node| node.properties.get("starId") == Some(&Value::String("s1".into())))
+            .unwrap();
+        assert_eq!(s1.properties.get("name"), Some(&Value::String("updated".into())));
+        assert_eq!(s1.properties.get("mass"), Some(&Value::from(10)));
+
+        let s2 = stored
+            .iter()
+            .find(|node| node.properties.get("starId") == Some(&Value::String("s2".into())))
+            .unwrap();
+        assert_eq!(s2.properties.get("name"), Some(&Value::String("still-two".into())));
+        assert_eq!(s2.properties.get("mass"), Some(&Value::from(20)));
+
+        let trace = engine.hot_path_trace_snapshot();
+        assert!(trace.unwind_simple_merge_batch);
+    }
+
+    #[test]
+    fn test_pipeline_route_with_then_return_aggregation_collapses_rows() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:A {x: 1}), (:A {x: 2}), (:B {z: 10}), (:B {z: 20})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let cypher = "MATCH (a:A) WITH count(a) AS aCount MATCH (b:B) RETURN aCount, count(b) AS bCount";
+        let query = parser.parse(cypher).unwrap();
+        let pattern = detect_query_pattern(cypher);
+        let (clauses, ok) = can_execute_as_pipeline(cypher);
+
+        let result = engine
+            .execute_with_routes(
+                &query,
+                &HashMap::new(),
+                &pattern,
+                None,
+                ok.then_some(clauses.as_slice()),
+            )
+            .unwrap();
+
+        assert!(ok);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("aCount"), Some(&Value::from(2)));
+        assert_eq!(result.rows[0].get("bCount"), Some(&Value::from(2)));
+    }
+
+    #[test]
+    fn test_unwind_match_merge_relationship_set_batch_idempotent_last_row_wins() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        for index in 1..=3 {
+            store_node(
+                engine.storage.as_ref(),
+                &format!("star:{index}"),
+                &["Star"],
+                HashMap::from([("starId".into(), Value::String(format!("s{index}")))]),
+            );
+        }
+
+        let cypher = "UNWIND $rows AS row MATCH (a:Star {starId: row.fromId}) MATCH (b:Star {starId: row.toId}) MERGE (a)-[r:HYPERLANE]->(b) SET r.distance = row.distance RETURN count(r) AS c";
+        let query = parser.parse(cypher).unwrap();
+        let mut params = HashMap::new();
+        params.insert(
+            "rows".to_string(),
+            Value::Array(vec![
+                serde_json::json!({"fromId": "s1", "toId": "s2", "distance": 10}),
+                serde_json::json!({"fromId": "s1", "toId": "s2", "distance": 20}),
+                serde_json::json!({"fromId": "s2", "toId": "s3", "distance": 30}),
+            ]),
+        );
+
+        let result = engine.execute(&query, &params).unwrap();
+        assert_eq!(result.rows[0].get("c"), Some(&Value::from(3)));
+        assert_eq!(result.stats.relationships_created, 2);
+        assert!(
+            engine
+                .hot_path_trace_snapshot()
+                .unwind_multi_match_relationship_batch
+        );
+
+        let edges = engine.storage.get_edges_by_type("HYPERLANE").unwrap();
+        assert_eq!(edges.len(), 2);
+        let s1_s2 = engine
+            .storage
+            .find_edge_between("star:1", "HYPERLANE", "star:2")
+            .unwrap()
+            .unwrap();
+        assert_eq!(s1_s2.properties.get("distance"), Some(&Value::from(20)));
+
+        params.insert(
+            "rows".to_string(),
+            Value::Array(vec![
+                serde_json::json!({"fromId": "s1", "toId": "s2", "distance": 40}),
+                serde_json::json!({"fromId": "s2", "toId": "s3", "distance": 50}),
+            ]),
+        );
+        let result = engine.execute(&query, &params).unwrap();
+        assert_eq!(result.rows[0].get("c"), Some(&Value::from(2)));
+        assert_eq!(result.stats.relationships_created, 0);
+        assert_eq!(engine.storage.get_edges_by_type("HYPERLANE").unwrap().len(), 2);
+
+        let s2_s3 = engine
+            .storage
+            .find_edge_between("star:2", "HYPERLANE", "star:3")
+            .unwrap()
+            .unwrap();
+        assert_eq!(s2_s3.properties.get("distance"), Some(&Value::from(50)));
+    }
+
+    #[test]
+    fn test_unwind_match_merge_relationship_set_batch_browser_sized_performance() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        for index in 0..=400 {
+            store_node(
+                engine.storage.as_ref(),
+                &format!("star:{index}"),
+                &["Star"],
+                HashMap::from([("starId".into(), Value::String(format!("s{index}")))]),
+            );
+        }
+
+        let rows: Vec<Value> = (0..400)
+            .map(|index| {
+                serde_json::json!({
+                    "fromId": format!("s{index}"),
+                    "toId": format!("s{}", index + 1),
+                    "distance": index,
+                })
+            })
+            .collect();
+        let params = HashMap::from([("rows".to_string(), Value::Array(rows))]);
+        let query = parser
+            .parse("UNWIND $rows AS row MATCH (a:Star {starId: row.fromId}) MATCH (b:Star {starId: row.toId}) MERGE (a)-[r:HYPERLANE]->(b) SET r.distance = row.distance")
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let result = engine.execute(&query, &params).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(result.stats.relationships_created, 400);
+        assert_eq!(engine.storage.get_edges_by_type("HYPERLANE").unwrap().len(), 400);
+        assert!(
+            engine
+                .hot_path_trace_snapshot()
+                .unwind_multi_match_relationship_batch
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "400-row relationship seed batch should stay on the fast path, took {elapsed:?}"
+        );
+    }
+
+    #[test]
     fn test_execute_with_routes_compound_fast_path_property_miss_falls_back_cleanly() {
         let engine = make_engine();
         let parser = Parser::new();
@@ -1727,6 +1941,52 @@
             })
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["a", "b", "d"]);
+    }
+
+    #[test]
+    fn test_unbounded_shortest_path_can_exceed_fifty_hops() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for i in 0..=60 {
+            let name = format!("n{i}");
+            store_node(
+                engine.storage.as_ref(),
+                &name,
+                &["Node"],
+                [("name".to_string(), Value::String(name.clone()))]
+                    .into_iter()
+                    .collect(),
+            );
+        }
+        for i in 0..60 {
+            engine
+                .storage
+                .put_edge_record(&EdgeRecord {
+                    id: format!("link:{i}"),
+                    start_node: format!("n{i}"),
+                    end_node: format!("n{}", i + 1),
+                    edge_type: "LINK".to_string(),
+                    properties: BTreeMap::new(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "MATCH p = shortestPath((a:Node {name: 'n0'})-[:LINK*]->(z:Node {name: 'n60'})) RETURN length(p) AS hops",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("hops"), Some(&Value::from(60)));
     }
 
     #[test]

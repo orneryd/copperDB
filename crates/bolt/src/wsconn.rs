@@ -4,9 +4,54 @@ use std::io;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
+#[derive(Debug, Default)]
+pub struct BoltChunkDecoder {
+    pending: Vec<u8>,
+    current: Vec<u8>,
+}
+
+impl BoltChunkDecoder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
+        self.pending.extend_from_slice(data);
+        let mut messages = Vec::new();
+
+        loop {
+            if self.pending.len() < 2 {
+                break;
+            }
+
+            let size = ((self.pending[0] as usize) << 8) | (self.pending[1] as usize);
+            if size == 0 {
+                self.pending.drain(..2);
+                if !self.current.is_empty() {
+                    messages.push(std::mem::take(&mut self.current));
+                }
+                continue;
+            }
+
+            let chunk_end = 2 + size;
+            if self.pending.len() < chunk_end {
+                break;
+            }
+
+            self.current.extend_from_slice(&self.pending[2..chunk_end]);
+            self.pending.drain(..chunk_end);
+        }
+
+        messages
+    }
+}
+
 /// Read the next binary WebSocket message, decoding Bolt chunks.
 /// Returns all decoded messages (multiple if batched in one WS frame).
-pub async fn read_ws_message<S>(ws: &mut WebSocketStream<S>) -> Option<io::Result<Vec<Vec<u8>>>>
+pub async fn read_ws_message<S>(
+    ws: &mut WebSocketStream<S>,
+    decoder: &mut BoltChunkDecoder,
+) -> Option<io::Result<Vec<Vec<u8>>>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -15,7 +60,7 @@ where
         match ws.next().await {
             Some(Ok(Message::Binary(data))) => {
                 tracing::info!("wsconn: recv Binary frame len={}", data.len());
-                let messages = decode_bolt_chunks(&data);
+                let messages = decoder.push(&data);
                 return Some(Ok(messages));
             }
             Some(Ok(Message::Close(_))) => {
@@ -79,28 +124,8 @@ where
 /// Multiple messages may be concatenated in a single byte slice (e.g., when
 /// the client batches RUN+PULL in one WebSocket frame).
 pub fn decode_bolt_chunks(data: &[u8]) -> Vec<Vec<u8>> {
-    let mut messages = Vec::new();
-    let mut current: Vec<u8> = Vec::new();
-    let mut pos = 0;
-    while pos + 1 < data.len() {
-        let size = ((data[pos] as usize) << 8) | (data[pos + 1] as usize);
-        pos += 2;
-        if size == 0 {
-            // End of current message
-            if !current.is_empty() {
-                messages.push(std::mem::take(&mut current));
-            }
-            continue;
-        }
-        let end = (pos + size).min(data.len());
-        current.extend_from_slice(&data[pos..end]);
-        pos = end;
-    }
-    // Push any remaining data (partial message when next frame arrives)
-    if !current.is_empty() {
-        messages.push(current);
-    }
-    messages
+    let mut decoder = BoltChunkDecoder::new();
+    decoder.push(data)
 }
 
 /// Encode data into Bolt chunked format with 2-byte size headers and
@@ -120,4 +145,40 @@ pub fn encode_bolt_chunks(data: &[u8]) -> Vec<u8> {
     out.push(0x00);
     out.push(0x00);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bolt_chunk_decoder_waits_for_terminator() {
+        let raw_hello = vec![0xB1, 0x01, 0xA0];
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&[0x00, 0x03]);
+        frame.extend_from_slice(&raw_hello);
+
+        let mut decoder = BoltChunkDecoder::new();
+        assert!(decoder.push(&frame).is_empty());
+        assert_eq!(decoder.push(&[0x00, 0x00]), vec![raw_hello]);
+    }
+
+    #[test]
+    fn bolt_chunk_decoder_reassembles_split_chunk_body() {
+        let raw_hello = vec![0xB1, 0x01, 0xA0];
+        let encoded = encode_bolt_chunks(&raw_hello);
+        let mut decoder = BoltChunkDecoder::new();
+
+        assert!(decoder.push(&encoded[..3]).is_empty());
+        assert_eq!(decoder.push(&encoded[3..]), vec![raw_hello]);
+    }
+
+    #[test]
+    fn decode_bolt_chunks_decodes_complete_classic_frame() {
+        let raw_hello = vec![0xB1, 0x01, 0xA0];
+        assert_eq!(
+            decode_bolt_chunks(&encode_bolt_chunks(&raw_hello)),
+            vec![raw_hello]
+        );
+    }
 }

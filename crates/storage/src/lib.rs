@@ -34,7 +34,9 @@ pub use crate::mvcc::{
     MvccSnapshot, MvccSnapshotLease, MvccStore, MvccVersion, NamespacedMvccStore,
 };
 pub use crate::namespaced::NamespacedStorageEngine;
-use crate::storage_edge_property_index::is_relationship_property_index;
+use crate::storage_edge_property_index::{
+    is_relationship_property_index, relationship_property_index_key_for_edge,
+};
 pub use crate::storage_node_property_range::RangeIndexComparison;
 use crate::storage_property_index_encoding::property_index_value_key;
 
@@ -1111,6 +1113,16 @@ impl StorageEngine {
         Self::open_with_db(db, None)
     }
 
+    /// Open a storage engine without replaying current records into the MVCC
+    /// overlay. This is intended for small metadata stores such as the
+    /// multi-database catalog that use the record APIs directly and do not run
+    /// graph transactions against the opened engine.
+    pub fn open_metadata(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        let config = sled::Config::new().path(path).flush_every_ms(None);
+        let db = config.open()?;
+        Self::open_with_db_options(db, None, false)
+    }
+
     /// Open (or create) a storage engine whose graph records are encrypted using
     /// provider-backed envelope encryption.
     pub fn open_encrypted(
@@ -1118,9 +1130,7 @@ impl StorageEngine {
         provider: Arc<dyn KeyProvider>,
         key_uri: impl Into<String>,
     ) -> Result<Self, StorageError> {
-        let config = sled::Config::new()
-            .path(path)
-            .flush_every_ms(None);
+        let config = sled::Config::new().path(path).flush_every_ms(None);
         let db = config.open()?;
         let encryption = StorageEncryption::new(provider, key_uri.into())?;
         Self::open_with_db(db, Some(encryption))
@@ -1157,6 +1167,14 @@ impl StorageEngine {
     }
 
     fn open_with_db(db: Db, encryption: Option<StorageEncryption>) -> Result<Self, StorageError> {
+        Self::open_with_db_options(db, encryption, true)
+    }
+
+    fn open_with_db_options(
+        db: Db,
+        encryption: Option<StorageEncryption>,
+        bootstrap_mvcc: bool,
+    ) -> Result<Self, StorageError> {
         let meta = db.open_tree("meta")?;
         let nodes = db.open_tree("nodes")?;
         let edges = db.open_tree("edges")?;
@@ -1179,7 +1197,9 @@ impl StorageEngine {
         };
         engine.ensure_layout_manifest()?;
         engine.ensure_encryption_manifest()?;
-        engine.bootstrap_mvcc_from_current_state()?;
+        if bootstrap_mvcc {
+            engine.bootstrap_mvcc_from_current_state()?;
+        }
         Ok(engine)
     }
 
@@ -1407,6 +1427,63 @@ impl StorageEngine {
             self.notify_node_updated(node);
         } else {
             self.notify_node_created(node);
+        }
+        Ok(())
+    }
+
+    pub fn put_node_records_batch(&self, nodes: &[NodeRecord]) -> Result<(), StorageError> {
+        let property_indexes = self.node_property_index_definitions()?;
+        let fulltext_indexes = self.node_fulltext_index_definitions()?;
+
+        for node in nodes {
+            let old = self.get_node_record(&node.id)?;
+            if let Some(ref old) = old {
+                self.unindex_node_labels(old)?;
+                for index in &property_indexes {
+                    if !old.labels.iter().any(|label| label == &index.label) {
+                        continue;
+                    }
+                    if let Some(key) = node_property_index_key_for_node(index, old) {
+                        self.indexes.remove(key.as_bytes())?;
+                    }
+                }
+                for index in &fulltext_indexes {
+                    if !old.labels.iter().any(|label| label == &index.label) {
+                        continue;
+                    }
+                    self.delete_node_fulltext_entries(index, old)?;
+                }
+                self.apply_node_stats_delta(old, -1)?;
+            }
+
+            self.nodes.insert(
+                node.id.as_bytes(),
+                self.encode_record_bytes(rmp_serde::to_vec(node)?)?,
+            )?;
+            self.index_node_labels(node)?;
+            for index in &property_indexes {
+                if !node.labels.iter().any(|label| label == &index.label) {
+                    continue;
+                }
+                if let Some(key) = node_property_index_key_for_node(index, node) {
+                    self.indexes.insert(key.as_bytes(), [])?;
+                }
+            }
+            for index in &fulltext_indexes {
+                if !node.labels.iter().any(|label| label == &index.label) {
+                    continue;
+                }
+                self.index_node_fulltext_entries(index, node)?;
+            }
+            self.apply_node_stats_delta(node, 1)?;
+            self.update_pending_embedding_index(node)?;
+            self.mvcc.put_node_record(node)?;
+
+            if old.is_some() {
+                self.notify_node_updated(node);
+            } else {
+                self.notify_node_created(node);
+            }
         }
         Ok(())
     }
@@ -2037,6 +2114,78 @@ impl StorageEngine {
         Ok(())
     }
 
+    pub fn put_edge_records_batch(&self, edges: &[EdgeRecord]) -> Result<(), StorageError> {
+        let relationship_property_indexes = self.relationship_property_index_definitions()?;
+        let mut namespace_edge_deltas: HashMap<String, i64> = HashMap::new();
+        for edge in edges {
+            let old = self.get_edge_record(&edge.id)?;
+            if let Some(ref old) = old {
+                self.indexes
+                    .remove(edge_type_index_key(&old.edge_type, &old.id).as_bytes())?;
+                self.indexes.remove(
+                    edge_start_index_key(&old.start_node, &old.edge_type, &old.id).as_bytes(),
+                )?;
+                self.indexes.remove(
+                    edge_end_index_key(&old.end_node, &old.edge_type, &old.id).as_bytes(),
+                )?;
+                for index in &relationship_property_indexes {
+                    if index.label == old.edge_type {
+                        if let Some(key) = relationship_property_index_key_for_edge(index, old) {
+                            self.indexes.remove(key.as_bytes())?;
+                        }
+                    }
+                }
+                if let Some(namespace) = namespace_from_str(&old.id) {
+                    *namespace_edge_deltas
+                        .entry(namespace.to_string())
+                        .or_default() -= 1;
+                }
+            }
+
+            self.edges.insert(
+                edge.id.as_bytes(),
+                self.encode_record_bytes(rmp_serde::to_vec(edge)?)?,
+            )?;
+            self.indexes.insert(
+                edge_type_index_key(&edge.edge_type, &edge.id).as_bytes(),
+                [],
+            )?;
+            self.indexes.insert(
+                edge_start_index_key(&edge.start_node, &edge.edge_type, &edge.id).as_bytes(),
+                [],
+            )?;
+            self.indexes.insert(
+                edge_end_index_key(&edge.end_node, &edge.edge_type, &edge.id).as_bytes(),
+                [],
+            )?;
+            for index in &relationship_property_indexes {
+                if index.label == edge.edge_type {
+                    if let Some(key) = relationship_property_index_key_for_edge(index, edge) {
+                        self.indexes.insert(key.as_bytes(), [])?;
+                    }
+                }
+            }
+            if let Some(namespace) = namespace_from_str(&edge.id) {
+                *namespace_edge_deltas
+                    .entry(namespace.to_string())
+                    .or_default() += 1;
+            }
+            self.mvcc.put_edge_record(edge)?;
+
+            if old.is_some() {
+                self.notify_edge_updated(edge);
+            } else {
+                self.notify_edge_created(edge);
+            }
+        }
+        for (namespace, delta) in namespace_edge_deltas {
+            if delta != 0 {
+                self.adjust_meta_counter(namespace_edge_count_key(&namespace), delta)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn get_edge_record(&self, id: &str) -> Result<Option<EdgeRecord>, StorageError> {
         match self.edges.get(id.as_bytes())? {
             Some(v) => Ok(Some(rmp_serde::from_slice(
@@ -2146,6 +2295,31 @@ impl StorageEngine {
 
         out.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(out)
+    }
+
+    pub fn find_edge_between(
+        &self,
+        start_node: &str,
+        edge_type: &str,
+        end_node: &str,
+    ) -> Result<Option<EdgeRecord>, StorageError> {
+        let prefix = edge_start_type_index_prefix(start_node, edge_type);
+        for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
+            let (key, _) = entry?;
+            let key_str =
+                std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            if self.has_index_tombstone(key_str) {
+                continue;
+            }
+            if let Some(edge_id) = key_str.rsplit('/').next() {
+                if let Some(edge) = self.get_edge_record(edge_id)? {
+                    if edge.end_node == end_node {
+                        return Ok(Some(edge));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     pub fn all_edges(&self) -> Result<Vec<EdgeRecord>, StorageError> {
@@ -3618,7 +3792,6 @@ fn node_property_index_lookup_prefix(
             .join("/")
     ))
 }
-
 fn node_property_index_key_for_node(index: &IndexDefinition, node: &NodeRecord) -> Option<String> {
     let value_refs = index
         .properties

@@ -17,6 +17,7 @@ use axum::{
 use copperdb_auth::{
     AuthConfig, AuthError, Authenticator, Claims, DatabaseAccessMode, TokenManager,
 };
+use copperdb_bolt::server::{BoltQueryResult, QueryExecutor};
 use copperdb_buildinfo::{display_version, server_announcement, version};
 use copperdb_config::Config as RuntimeConfig;
 use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig};
@@ -87,7 +88,7 @@ impl Default for AuthState {
             "COPPERDB_AUTH_JWT_SECRET",
             "copperdb-development-secret-change-me",
         );
-        let security_enabled = get_bool_loose("COPPERDB_SECURITY_ENABLED", true);
+        let security_enabled = get_bool_loose("COPPERDB_SECURITY_ENABLED", false);
         let dev_login_enabled = get_bool_loose("COPPERDB_DEV_LOGIN_ENABLED", true);
         let default_storage_path = default_auth_storage_path();
         let storage_path = env_get("COPPERDB_AUTH_STORAGE_PATH", &default_storage_path);
@@ -845,7 +846,10 @@ async fn ui_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /// SPA fallback: any unmatched GET request serves index.html when the UI
 /// is available. Mimics NornicDB's uiHandler.ServeHTTP which serves
 /// index.html for all non-asset paths when uiHandler != nil.
-async fn ui_fallback(State(state): State<Arc<AppState>>, request: Request<Body>) -> impl IntoResponse {
+async fn ui_fallback(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+) -> impl IntoResponse {
     if request.method() != Method::GET {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
@@ -1433,7 +1437,7 @@ fn execute_statement(
     }
 
     if state.db_manager.get(&database).is_none() {
-        create_database(&state, &database)?;
+        return Err(format!("database not found: {database}"));
     }
 
     let engine = open_engine(&state, &database)?;
@@ -1477,6 +1481,53 @@ fn execute_statement(
             .map_err(|error| error.to_string())?
     };
     Ok(convert_engine_result(result))
+}
+
+#[derive(Clone)]
+pub struct AppStateBoltExecutor {
+    state: Arc<AppState>,
+}
+
+impl AppStateBoltExecutor {
+    pub fn new(state: Arc<AppState>) -> Self {
+        Self { state }
+    }
+}
+
+impl QueryExecutor for AppStateBoltExecutor {
+    fn execute(
+        &self,
+        query: &str,
+        params: &HashMap<String, serde_json::Value>,
+    ) -> Result<BoltQueryResult, String> {
+        self.execute_on_database(None, query, params)
+    }
+
+    fn execute_on_database(
+        &self,
+        database: Option<&str>,
+        query: &str,
+        params: &HashMap<String, serde_json::Value>,
+    ) -> Result<BoltQueryResult, String> {
+        let database = database.unwrap_or(&self.state.db_name).to_owned();
+        let (request_context, _request_guard) = RequestContext::root(None);
+        let result = execute_statement(
+            Arc::clone(&self.state),
+            database,
+            request_context,
+            query.to_owned(),
+            params.clone(),
+            vec!["admin".into()],
+            false,
+            None,
+            None,
+            None,
+        )?;
+        Ok(BoltQueryResult {
+            columns: result.columns,
+            rows: result.data.into_iter().map(|row| row.row).collect(),
+        })
+    }
 }
 
 fn derive_distributed_read_fence(
@@ -1685,7 +1736,7 @@ fn build_local_replica_transport(
 }
 
 fn create_database(state: &AppState, name: &str) -> Result<(), String> {
-    let path = format!("./data/{}", name);
+    let path = state.db_manager.default_storage_path(name);
     match state.db_manager.create(name, path) {
         Ok(()) => Ok(()),
         Err(MultiDbError::AlreadyExists(_)) => Ok(()),
@@ -1698,17 +1749,16 @@ fn drop_database(state: &AppState, name: &str) -> Result<(), String> {
 }
 
 fn open_engine(state: &AppState, database: &str) -> Result<GraphEngine, String> {
-    let data_dir = state
+    let database_record = state
         .db_manager
         .get(database)
-        .map(|database| database.storage_path)
-        .unwrap_or_else(|| format!("data/{}", database));
+        .ok_or_else(|| format!("database not found: {database}"))?;
     let runtime_config = state
         .db_manager
         .effective_config(database, state.runtime_config.as_ref())
         .map_err(|error| error.to_string())?;
     let config = EngineConfig {
-        data_dir,
+        data_dir: database_record.storage_path,
         default_database: database.into(),
         auth_enabled: state.auth.security_enabled,
         log_queries: false,

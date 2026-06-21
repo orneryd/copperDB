@@ -91,7 +91,7 @@ impl DatabaseManager {
 
     pub fn open(catalog_path: impl AsRef<Path>) -> Result<Self, MultiDbError> {
         let catalog_path = catalog_path.as_ref().to_path_buf();
-        let storage = StorageEngine::open(&catalog_path)?;
+        let storage = StorageEngine::open_metadata(&catalog_path)?;
         let catalog = storage.for_namespace("multidb");
         let manager = Self {
             databases: DashMap::new(),
@@ -122,14 +122,6 @@ impl DatabaseManager {
                 status: DatabaseStatus::Online,
                 created_at: 0,
             });
-        self.databases
-            .entry("default".into())
-            .or_insert_with(|| Database {
-                name: "default".into(),
-                storage_path: "./data/default".into(),
-                status: DatabaseStatus::Online,
-                created_at: 0,
-            });
     }
 
     pub fn create(
@@ -154,6 +146,14 @@ impl DatabaseManager {
         self.persist_database(&database)?;
         self.databases.insert(name, database);
         Ok(())
+    }
+
+    pub fn default_storage_path(&self, name: &str) -> String {
+        self.catalog_path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(|base| base.join(name).to_string_lossy().into_owned())
+            .unwrap_or_else(|| format!("./data/{name}"))
     }
 
     pub fn get(&self, name: &str) -> Option<Database> {
@@ -228,7 +228,7 @@ impl DatabaseManager {
         let Some(path) = &self.catalog_path else {
             return Ok(());
         };
-        let storage = StorageEngine::open(path)?;
+        let storage = StorageEngine::open_metadata(path)?;
         self.persist_database_with(&storage, database)?;
         Ok(())
     }
@@ -241,6 +241,7 @@ impl DatabaseManager {
         storage
             .for_namespace("multidb")
             .put_node_record(&database_to_node(database)?)?;
+        storage.flush()?;
         Ok(())
     }
 
@@ -252,7 +253,7 @@ impl DatabaseManager {
         let Some(path) = &self.catalog_path else {
             return Ok(());
         };
-        let storage = StorageEngine::open(path)?;
+        let storage = StorageEngine::open_metadata(path)?;
         let catalog = storage.for_namespace("multidb");
         if overrides.is_empty() {
             match catalog.delete_node_record(&database_config_node_id(name)) {
@@ -263,6 +264,7 @@ impl DatabaseManager {
         } else {
             catalog.put_node_record(&database_config_to_node(name, overrides)?)?;
         }
+        storage.flush()?;
         Ok(())
     }
 
@@ -270,7 +272,7 @@ impl DatabaseManager {
         let Some(path) = &self.catalog_path else {
             return Ok(());
         };
-        let storage = StorageEngine::open(path)?;
+        let storage = StorageEngine::open_metadata(path)?;
         let catalog = storage.for_namespace("multidb");
         catalog.delete_node_record(&database_node_id(name))?;
         match catalog.delete_node_record(&database_config_node_id(name)) {
@@ -278,6 +280,7 @@ impl DatabaseManager {
             Err(copperdb_storage::StorageError::NotFound(_)) => {}
             Err(error) => return Err(error.into()),
         }
+        storage.flush()?;
         Ok(())
     }
 }
@@ -407,7 +410,7 @@ mod tests {
         );
         assert!(reloaded.get("analytics").is_none());
         assert!(reloaded.get("system").is_some());
-        assert!(reloaded.get("default").is_some());
+        assert!(reloaded.get("default").is_none());
     }
 
     #[test]

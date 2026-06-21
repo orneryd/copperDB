@@ -31,6 +31,8 @@ pub struct HotPathTrace {
     pub unwind_simple_merge_batch: bool,
     /// An UNWIND fixed-chain link-batch path was used.
     pub unwind_fixed_chain_link_batch: bool,
+    /// An UNWIND multi-MATCH relationship batch path was used.
+    pub unwind_multi_match_relationship_batch: bool,
     /// A CALL tail-traversal fast path was used.
     pub call_tail_traversal_fast_path: bool,
     /// MERGE used a schema-based lookup (index scan).
@@ -49,6 +51,7 @@ impl HotPathTrace {
             || self.traversal_end_seed_top_k
             || self.unwind_simple_merge_batch
             || self.unwind_fixed_chain_link_batch
+            || self.unwind_multi_match_relationship_batch
             || self.call_tail_traversal_fast_path
             || self.merge_schema_lookup_used
     }
@@ -69,6 +72,7 @@ pub struct HotPathTraceState {
     traversal_end_seed_top_k: AtomicBool,
     unwind_simple_merge_batch: AtomicBool,
     unwind_fixed_chain_link_batch: AtomicBool,
+    unwind_multi_match_relationship_batch: AtomicBool,
     call_tail_traversal_fast_path: AtomicBool,
     merge_schema_lookup_used: AtomicBool,
     merge_scan_fallback_used: AtomicBool,
@@ -98,6 +102,8 @@ impl HotPathTraceState {
             .store(false, Ordering::Relaxed);
         self.unwind_fixed_chain_link_batch
             .store(false, Ordering::Relaxed);
+        self.unwind_multi_match_relationship_batch
+            .store(false, Ordering::Relaxed);
         self.call_tail_traversal_fast_path
             .store(false, Ordering::Relaxed);
         self.merge_schema_lookup_used
@@ -119,6 +125,9 @@ impl HotPathTraceState {
             unwind_simple_merge_batch: self.unwind_simple_merge_batch.load(Ordering::Relaxed),
             unwind_fixed_chain_link_batch: self
                 .unwind_fixed_chain_link_batch
+                .load(Ordering::Relaxed),
+            unwind_multi_match_relationship_batch: self
+                .unwind_multi_match_relationship_batch
                 .load(Ordering::Relaxed),
             call_tail_traversal_fast_path: self
                 .call_tail_traversal_fast_path
@@ -168,6 +177,11 @@ impl HotPathTraceState {
 
     pub fn mark_unwind_fixed_chain_link_batch(&self) {
         self.unwind_fixed_chain_link_batch
+            .store(true, Ordering::Relaxed);
+    }
+
+    pub fn mark_unwind_multi_match_relationship_batch(&self) {
+        self.unwind_multi_match_relationship_batch
             .store(true, Ordering::Relaxed);
     }
 

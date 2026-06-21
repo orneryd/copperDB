@@ -225,7 +225,7 @@ impl StorageEngine {
             .any(|index| index.label == edge_type && index.properties == properties))
     }
 
-    fn relationship_property_index_definitions(
+    pub(crate) fn relationship_property_index_definitions(
         &self,
     ) -> Result<Vec<IndexDefinition>, StorageError> {
         Ok(self
@@ -340,7 +340,7 @@ fn edge_property_index_lookup_prefix(
     ))
 }
 
-fn relationship_property_index_key_for_edge(
+pub(crate) fn relationship_property_index_key_for_edge(
     index: &IndexDefinition,
     edge: &EdgeRecord,
 ) -> Option<String> {

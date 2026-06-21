@@ -659,7 +659,7 @@ class NornicDBClient {
       return this.defaultDatabase;
     }
     await this.fetchDiscovery();
-    return this.defaultDatabase ?? "nornic";
+    return this.defaultDatabase ?? "copperdb";
   }
 
   private async fetchDiscovery(): Promise<DiscoveryResponse | null> {
@@ -673,13 +673,13 @@ class NornicDBClient {
       if (res.ok) {
         const discovery: DiscoveryResponse = await res.json();
         this.discovery = discovery;
-        this.defaultDatabase = discovery.default_database || "nornic";
+        this.defaultDatabase = discovery.default_database || "copperdb";
         return discovery;
       }
     } catch {
       // Fall through to defaults
     }
-    this.defaultDatabase = "nornic";
+    this.defaultDatabase = "copperdb";
     return null;
   }
 
