@@ -1659,6 +1659,88 @@
         assert!(!result.rows.is_empty(), "should find authentication relationship");
     }
 
+    /// Mirrors NornicDB `TestGraphitiExactShape_Search_EdgeFulltext_TemporalFilterUsesCallTailFastPath` —
+    /// verifies edge fulltext search with grouped temporal WHERE: ((e.invalid_at IS NULL) OR (e.invalid_at > $dt)) AND e.group_id IN $group_ids.
+    #[test]
+    fn test_fulltext_query_relationships_temporal_filter() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE FULLTEXT INDEX edge_ft FOR ()-[e:RELATES_TO]-() ON EACH [e.name, e.fact, e.group_id]")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (a:Entity {name: 'A'}), (b:Entity {name: 'B'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        // Edge 1: valid (invalid_at is null), should pass temporal filter
+        engine
+            .execute(
+                &parser.parse(
+                    "MATCH (a:Entity {name: 'A'}), (b:Entity {name: 'B'}) \
+                     CREATE (a)-[:RELATES_TO {name: 'knows', fact: 'alice knows bob', group_id: 'g1', invalid_at: null}]->(b)"
+                ).unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        // Edge 2: invalid_at in the future (after $dt), should pass temporal filter
+        engine
+            .execute(
+                &parser.parse(
+                    "MATCH (a:Entity {name: 'A'}), (b:Entity {name: 'B'}) \
+                     CREATE (a)-[:RELATES_TO {name: 'knows', fact: 'also knows', group_id: 'g1', invalid_at: '2025-06-01'}]->(b)"
+                ).unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        // Edge 3: different fulltext content, should be excluded by fulltext
+        engine
+            .execute(
+                &parser.parse(
+                    "MATCH (a:Entity {name: 'B'}), (b:Entity {name: 'A'}) \
+                     CREATE (a)-[:RELATES_TO {name: 'other', fact: 'not relevant', group_id: 'g1', invalid_at: null}]->(b)"
+                ).unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let mut params = HashMap::new();
+        params.insert("query".to_string(), Value::String("knows".into()));
+        params.insert("dt".to_string(), Value::String("2024-06-01".into()));
+        params.insert("group_ids".to_string(), serde_json::json!(["g1"]));
+        params.insert("limit".to_string(), Value::from(5));
+
+        // Just verify fulltext + YIELD + WHERE with grouped parens compiles and runs
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "CALL db.index.fulltext.queryRelationships('edge_ft', $query, {limit: $limit}) \
+                         YIELD relationship AS rel, score \
+                         WHERE ((rel.invalid_at IS NULL) OR (rel.invalid_at > $dt)) AND rel.group_id IN $group_ids \
+                         RETURN rel.name AS name, rel.fact AS fact, rel.group_id AS group_id, score \
+                         ORDER BY score DESC \
+                         LIMIT $limit",
+                    )
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+        assert!(!result.rows.is_empty(), "should find at least one knows relationship passing temporal filter");
+        for row in &result.rows {
+            let name = row.get("name").and_then(Value::as_str).unwrap_or("");
+            assert!(name.contains("knows"), "only 'knows' edges should match fulltext");
+        }
+    }
+
     /// Tests Phase 3: CREATE VECTOR INDEX on relationships + CALL db.index.vector.queryRelationships.
     #[test]
     fn test_vector_relationship_index_search() {
