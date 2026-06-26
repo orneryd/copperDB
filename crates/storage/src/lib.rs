@@ -10,7 +10,7 @@ use copperdb_kms::KeyProvider;
 use copperdb_util::{RequestCancellation, RequestCancelled};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use sled::{Db, Tree};
+use sled::{Batch, Db, Tree};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs;
@@ -3318,17 +3318,22 @@ impl StorageEngine {
         cancel: &RequestCancellation,
     ) -> Result<(), StorageError> {
         self.delete_node_property_index_entries_with_cancellation(index, cancel)?;
-        let mut count: u64 = 0;
+        let mut batch = Batch::default();
+        let mut pending: usize = 0;
         self.stream_nodes_by_label_with_cancellation(&index.label, cancel, |node| {
             if let Some(key) = node_property_index_key_for_node(index, &node) {
-                self.indexes.insert(key.as_bytes(), [])?;
-            }
-            count += 1;
-            if count % 4096 == 0 {
-                cancel.check_cancelled()?;
+                batch.insert(key.into_bytes(), Vec::<u8>::new());
+                pending += 1;
+                if pending >= 4096 {
+                    self.indexes.apply_batch(std::mem::take(&mut batch))?;
+                    pending = 0;
+                }
             }
             Ok(())
         })?;
+        if pending > 0 {
+            self.indexes.apply_batch(batch)?;
+        }
         Ok(())
     }
 
@@ -3342,15 +3347,41 @@ impl StorageEngine {
         cancel: &RequestCancellation,
     ) -> Result<(), StorageError> {
         self.delete_node_fulltext_index_entries_with_cancellation(index, cancel)?;
-        let mut count: u64 = 0;
+        let mut batch = Batch::default();
+        let mut pending: usize = 0;
         self.stream_nodes_by_label_with_cancellation(&index.label, cancel, |node| {
-            self.index_node_fulltext_entries(index, &node)?;
-            count += 1;
-            if count % 4096 == 0 {
-                cancel.check_cancelled()?;
-            }
+            self.batch_node_fulltext_entries(index, &node, &mut batch, &mut pending)?;
             Ok(())
         })?;
+        if pending > 0 {
+            self.indexes.apply_batch(batch)?;
+        }
+        Ok(())
+    }
+
+    fn batch_node_fulltext_entries(
+        &self,
+        index: &IndexDefinition,
+        node: &NodeRecord,
+        batch: &mut Batch,
+        pending: &mut usize,
+    ) -> Result<(), StorageError> {
+        for property in &index.properties {
+            let Some(value) = node.properties.get(property) else {
+                continue;
+            };
+            for token in fulltext_tokens_for_value(value) {
+                batch.insert(
+                    node_fulltext_index_key(&index.label, property, &token, &node.id).into_bytes(),
+                    Vec::<u8>::new(),
+                );
+                *pending += 1;
+                if *pending >= 4096 {
+                    self.indexes.apply_batch(std::mem::take(batch))?;
+                    *pending = 0;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -3370,14 +3401,20 @@ impl StorageEngine {
         cancel: &RequestCancellation,
     ) -> Result<(), StorageError> {
         let prefix = node_property_index_definition_prefix(&index.label, &index.properties);
-        let mut count: u64 = 0;
+        let mut batch = Batch::default();
+        let mut pending: usize = 0;
         for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
             let (key, _) = entry?;
-            self.indexes.remove(key)?;
-            count += 1;
-            if count % 4096 == 0 {
+            batch.remove(key);
+            pending += 1;
+            if pending >= 4096 {
+                self.indexes.apply_batch(std::mem::take(&mut batch))?;
+                pending = 0;
                 cancel.check_cancelled()?;
             }
+        }
+        if pending > 0 {
+            self.indexes.apply_batch(batch)?;
         }
         Ok(())
     }
@@ -3399,14 +3436,20 @@ impl StorageEngine {
     ) -> Result<(), StorageError> {
         for property in &index.properties {
             let prefix = node_fulltext_property_prefix(&index.label, property);
-            let mut count: u64 = 0;
+            let mut batch = Batch::default();
+            let mut pending: usize = 0;
             for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
                 let (key, _) = entry?;
-                self.indexes.remove(key)?;
-                count += 1;
-                if count % 4096 == 0 {
+                batch.remove(key);
+                pending += 1;
+                if pending >= 4096 {
+                    self.indexes.apply_batch(std::mem::take(&mut batch))?;
+                    pending = 0;
                     cancel.check_cancelled()?;
                 }
+            }
+            if pending > 0 {
+                self.indexes.apply_batch(batch)?;
             }
         }
         Ok(())

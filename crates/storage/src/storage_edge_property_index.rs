@@ -196,15 +196,21 @@ impl StorageEngine {
         cancel: &crate::RequestCancellation,
     ) -> Result<(), StorageError> {
         self.delete_relationship_property_index_entries(index)?;
-        let mut count: u64 = 0;
+        let mut batch = crate::Batch::default();
+        let mut pending: usize = 0;
         for edge in self.get_edges_by_type(&index.label)? {
             if let Some(key) = relationship_property_index_key_for_edge(index, &edge) {
-                self.indexes.insert(key.as_bytes(), [])?;
+                batch.insert(key.into_bytes(), Vec::<u8>::new());
+                pending += 1;
+                if pending >= 4096 {
+                    self.indexes.apply_batch(std::mem::take(&mut batch))?;
+                    pending = 0;
+                    cancel.check_cancelled()?;
+                }
             }
-            count += 1;
-            if count % 4096 == 0 {
-                cancel.check_cancelled()?;
-            }
+        }
+        if pending > 0 {
+            self.indexes.apply_batch(batch)?;
         }
         Ok(())
     }
