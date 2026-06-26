@@ -89,8 +89,8 @@ fn rejects_non_v0_layout_manifest() {
         uuid::Uuid::new_v4()
     ));
     fs::create_dir_all(&test_dir).unwrap();
-    let db = sled::open(&test_dir).unwrap();
-    let meta = db.open_tree("meta").unwrap();
+    let db = fjall::Database::open(fjall::Config::new(&test_dir)).unwrap();
+    let meta = db.keyspace("meta", fjall::KeyspaceCreateOptions::default).unwrap();
 
     let bad_manifest = StorageLayoutManifest {
         version: 1,
@@ -101,7 +101,7 @@ fn rejects_non_v0_layout_manifest() {
         rmp_serde::to_vec(&bad_manifest).unwrap(),
     )
     .unwrap();
-    db.flush().unwrap();
+    db.persist(fjall::PersistMode::SyncAll).unwrap();
     drop(meta);
     drop(db);
 
@@ -188,8 +188,8 @@ fn encrypted_storage_round_trips_records_and_rejects_plain_open() {
     engine.flush().unwrap();
     drop(engine);
 
-    let raw_db = sled::open(&test_dir).unwrap();
-    let raw_nodes = raw_db.open_tree("nodes").unwrap();
+    let raw_db = fjall::Database::open(fjall::Config::new(&test_dir)).unwrap();
+    let raw_nodes = raw_db.keyspace("nodes", fjall::KeyspaceCreateOptions::default).unwrap();
     let stored = raw_nodes.get("db1:n1").unwrap().unwrap();
     assert_ne!(
         stored.as_ref(),

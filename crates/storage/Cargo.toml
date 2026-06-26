@@ -18,7 +18,7 @@ rmp-serde.workspace = true
 parking_lot.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-sled.workspace = true
+fjall.workspace = true
 tempfile.workspace = true
 hex.workspace = true
 copperdb-util = { workspace = true }

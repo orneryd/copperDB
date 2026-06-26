@@ -1530,7 +1530,7 @@
         let result = engine
             .execute(
                 &parser
-                    .parse("MATCH (c:Chunk {group_id: 'kg'}) WHERE c.emb IS NOT NULL WITH c, vector.similarity.cosine(c.emb, $q) AS sim RETURN c.uuid AS uuid, sim ORDER BY sim DESC LIMIT 3")
+                    .parse("MATCH (c:Chunk {group_id: 'kg'}) WHERE c.emb IS NOT NULL WITH c, vector.similarity.cosine(c.emb, $q) AS sim RETURN c.uuid AS uuid, sim ORDER BY sim DESC, c.uuid ASC LIMIT 3")
                     .unwrap(),
                 &params,
             )

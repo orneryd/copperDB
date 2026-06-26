@@ -30,8 +30,8 @@ impl StorageEngine {
         let mut out = Vec::new();
         let mut seen = BTreeSet::new();
         let entries = match end {
-            Some(end) => self.indexes.range(start..end),
-            None => self.indexes.range(start..),
+            Some(end) => self.indexes.sled_range(start..end),
+            None => self.indexes.sled_range(start..),
         };
         for entry in entries {
             let (key, _) = entry?;
@@ -98,8 +98,8 @@ impl StorageEngine {
         let mut out = Vec::new();
         let mut seen = BTreeSet::new();
         let entries = match end {
-            Some(end) => self.indexes.range(start..end),
-            None => self.indexes.range(start..),
+            Some(end) => self.indexes.sled_range(start..end),
+            None => self.indexes.sled_range(start..),
         };
         for entry in entries {
             let (key, _) = entry?;

@@ -2123,24 +2123,33 @@
                     &HashMap::new(),
                 )
                 .unwrap();
-            let mut edges = Vec::with_capacity(edge_count);
+            let mut nodes = Vec::with_capacity(node_count);
             for i in 0..node_count {
-                store_node(storage.as_ref(), &format!("star:{i}"), &["Star"], {
-                    HashMap::from([("starId".into(), Value::String(format!("s0-{i}")))])
+                nodes.push(NodeRecord {
+                    id: format!("star:{i}"),
+                    labels: vec!["Star".to_string()],
+                    properties: BTreeMap::from([("starId".into(), Value::String(format!("s0-{i}")))]),
+                    named_embeddings: BTreeMap::new(),
+                    chunk_embeddings: Vec::new(),
+                    embed_meta: Default::default(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
                 });
-                if i < edge_count {
-                    edges.push(EdgeRecord {
-                        id: format!("lane:chain:{i}"),
-                        start_node: format!("star:{i}"),
-                        end_node: format!("star:{}", i + 1),
-                        edge_type: "HYPERLANE".to_string(),
-                        properties: BTreeMap::new(),
-                        created_at_unix_ms: 0,
-                        updated_at_unix_ms: 0,
-                    });
-                }
             }
-            storage.put_edge_records_batch(&edges).unwrap();
+            storage.put_node_records_batch(&nodes).unwrap();
+            let mut edges = Vec::with_capacity(edge_count);
+            for i in 0..edge_count {
+                edges.push(EdgeRecord {
+                    id: format!("lane:chain:{i}"),
+                    start_node: format!("star:{i}"),
+                    end_node: format!("star:{}", i + 1),
+                    edge_type: "HYPERLANE".to_string(),
+                    properties: BTreeMap::new(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                });
+            }
+            storage.put_new_edge_records_batch(&edges).unwrap();
             let cypher = "MATCH (start:Star {starId: $startId}), (end:Star {starId: $endId}) MATCH p = shortestPath((start)-[:HYPERLANE*]-(end)) RETURN [n IN nodes(p) | n.starId] AS pathIds, length(p) AS hops LIMIT 1";
             let query = parser.parse(cypher).unwrap();
             let pattern = detect_query_pattern(cypher);
@@ -2165,11 +2174,20 @@
                 engine.execute(&parser.parse("CREATE INDEX star_id_idx IF NOT EXISTS FOR (n:Star) ON (n.starId)").unwrap(), &HashMap::new()).unwrap();
             });
             phase!("seed-401-nodes", iter_timings, {
+                let mut nodes = Vec::with_capacity(node_count);
                 for i in 0..node_count {
-                    store_node(storage.as_ref(), &format!("star:{i}"), &["Star"], {
-                        HashMap::from([("starId".into(), Value::String(format!("s0-{i}")))])
+                    nodes.push(NodeRecord {
+                        id: format!("star:{i}"),
+                        labels: vec!["Star".to_string()],
+                        properties: BTreeMap::from([("starId".into(), Value::String(format!("s0-{i}")))]),
+                        named_embeddings: BTreeMap::new(),
+                        chunk_embeddings: Vec::new(),
+                        embed_meta: Default::default(),
+                        created_at_unix_ms: 0,
+                        updated_at_unix_ms: 0,
                     });
                 }
+                storage.put_node_records_batch(&nodes).unwrap();
             });
             let mut edges = Vec::with_capacity(edge_count);
             for i in 0..edge_count {
@@ -2184,7 +2202,7 @@
                 });
             }
             phase!("seed-400-edges-batch", iter_timings, {
-                storage.put_edge_records_batch(&edges).unwrap();
+                storage.put_new_edge_records_batch(&edges).unwrap();
             });
             let cypher = "MATCH (start:Star {starId: $startId}), (end:Star {starId: $endId}) MATCH p = shortestPath((start)-[:HYPERLANE*]-(end)) RETURN [n IN nodes(p) | n.starId] AS pathIds, length(p) AS hops LIMIT 1";
             let query = parser.parse(cypher).unwrap();
@@ -2219,6 +2237,165 @@
             eprintln!("  {label:30} min={min:.2?} max={max:.2?} avg={avg:.2?}");
         }
         eprintln!("=== end profiling ===\n");
+    }
+
+    /// Break down shortestPath cost into parse + plan + execute.
+    #[test]
+    fn prof_shortest_path_cost_breakdown() {
+        let node_count = 401usize;
+        let edge_count = 400usize;
+        let iters = 3usize;
+
+        let cypher = "MATCH (start:Star {starId: $startId}), (end:Star {starId: $endId}) MATCH p = shortestPath((start)-[:HYPERLANE*]-(end)) RETURN [n IN nodes(p) | n.starId] AS pathIds, length(p) AS hops LIMIT 1";
+        let params: HashMap<String, Value> = HashMap::from([
+            ("startId".into(), Value::String("s0-0".into())),
+            ("endId".into(), Value::String(format!("s0-{edge_count}"))),
+        ]);
+
+        for _ in 0..iters {
+            let engine = make_engine();
+            let storage = engine.storage.clone();
+            let parser = Parser::new();
+
+            // Seed data
+            engine.execute(&parser.parse("CREATE INDEX star_id_idx IF NOT EXISTS FOR (n:Star) ON (n.starId)").unwrap(), &HashMap::new()).unwrap();
+            let mut nodes = Vec::with_capacity(node_count);
+            for i in 0..node_count {
+                nodes.push(NodeRecord {
+                    id: format!("star:{i}"),
+                    labels: vec!["Star".to_string()],
+                    properties: BTreeMap::from([("starId".into(), Value::String(format!("s0-{i}")))]),
+                    named_embeddings: BTreeMap::new(),
+                    chunk_embeddings: Vec::new(),
+                    embed_meta: Default::default(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                });
+            }
+            storage.put_node_records_batch(&nodes).unwrap();
+            let mut edges = Vec::with_capacity(edge_count);
+            for i in 0..edge_count {
+                edges.push(EdgeRecord {
+                    id: format!("lane:chain:{i}"),
+                    start_node: format!("star:{i}"),
+                    end_node: format!("star:{}", i + 1),
+                    edge_type: "HYPERLANE".to_string(),
+                    properties: BTreeMap::new(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                });
+            }
+            storage.put_new_edge_records_batch(&edges).unwrap();
+
+            // ── Parse ───────────────────────────────────────────────
+            let t0 = std::time::Instant::now();
+            let query = parser.parse(cypher).unwrap();
+            let parse_time = t0.elapsed();
+
+            // ── Plan (pattern + shape + pipeline detection) ─────────
+            let t1 = std::time::Instant::now();
+            let pattern = detect_query_pattern(cypher);
+            let (shape_match, compound_ok) = match_compound_query_shape(cypher);
+            let (pipeline_clauses, pipeline_ok) = can_execute_as_pipeline(cypher);
+            let plan_time = t1.elapsed();
+
+            // ── Execute ─────────────────────────────────────────────
+            let t2 = std::time::Instant::now();
+            let result = engine
+                .execute_with_routes(
+                    &query,
+                    &params,
+                    &pattern,
+                    compound_ok.then_some(&shape_match),
+                    pipeline_ok.then_some(pipeline_clauses.as_slice()),
+                )
+                .unwrap();
+            let exec_time = t2.elapsed();
+            let total = parse_time + plan_time + exec_time;
+
+            assert_eq!(result.rows.len(), 1);
+            assert_eq!(
+                result.rows[0].get("hops").and_then(Value::as_i64),
+                Some(400)
+            );
+
+            eprintln!(
+                "shortestPath:  parse={parse_time:.2?}  plan={plan_time:.2?}  exec={exec_time:.2?}  total={total:.2?}  hop_count=400"
+            );
+        }
+    }
+
+    /// Break down `put_node_records_batch` cost into construction vs storage I/O.
+    #[test]
+    fn prof_batch_node_insert_cost_breakdown() {
+        let node_count = 401usize;
+        let iters = 3usize;
+
+        for _ in 0..iters {
+            let engine = make_engine();
+            let storage = engine.storage.clone();
+
+            // ── Build + alloc cost ──────────────────────────────────
+            let t0 = std::time::Instant::now();
+            let mut nodes = Vec::with_capacity(node_count);
+            for i in 0..node_count {
+                nodes.push(NodeRecord {
+                    id: format!("star:{i}"),
+                    labels: vec!["Star".to_string()],
+                    properties: BTreeMap::from([(
+                        "starId".into(),
+                        Value::String(format!("s0-{i}")),
+                    )]),
+                    named_embeddings: BTreeMap::new(),
+                    chunk_embeddings: Vec::new(),
+                    embed_meta: Default::default(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                });
+            }
+            let build_time = t0.elapsed();
+
+            // ── Full batch insert ───────────────────────────────────
+            let t1 = std::time::Instant::now();
+            storage.put_node_records_batch(&nodes).unwrap();
+            let insert_time = t1.elapsed();
+
+            // ── Serialisation-only (estimate using storage's encode) ─
+            // Build fresh nodes each time to avoid allocator reuse bias
+            let mut nodes2 = Vec::with_capacity(node_count);
+            for i in 0..node_count {
+                nodes2.push(NodeRecord {
+                    id: format!("star:{i}"),
+                    labels: vec!["Star".to_string()],
+                    properties: BTreeMap::from([(
+                        "starId".into(),
+                        Value::String(format!("s0-{i}")),
+                    )]),
+                    named_embeddings: BTreeMap::new(),
+                    chunk_embeddings: Vec::new(),
+                    embed_meta: Default::default(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                });
+            }
+            let t2 = std::time::Instant::now();
+            // Simulate what storage does: ser + (optionally encrypt)
+            let mut ser_buf = Vec::with_capacity(node_count * 128);
+            for node in &nodes2 {
+                ser_buf.push(rmp_serde::to_vec(node).unwrap());
+            }
+            let ser_only = t2.elapsed();
+
+            let io_and_index = insert_time
+                .checked_sub(ser_only)
+                .unwrap_or_default();
+
+            eprintln!(
+                "nodes={node_count}  build={build_time:.2?}  ser_only={ser_only:.2?}  insert={insert_time:.2?}  io_and_index={io_and_index:.2?}  per_node_insert={:.1}µs  per_node_io={:.1}µs",
+                insert_time.as_micros() as f64 / node_count as f64,
+                io_and_index.as_micros() as f64 / node_count as f64,
+            );
+        }
     }
 
     #[test]
@@ -2310,5 +2487,62 @@
         assert_eq!(names, expected);
     }
 
+    /// Benchmark just the serialization + batch-apply cost of edge creation.
+    #[test]
+    fn prof_edge_batch_raw_cost() {
+        let edge_count = 400usize;
+
+        let engine = make_engine();
+        let storage = engine.storage.clone();
+
+        let mut edges = Vec::with_capacity(edge_count);
+        for i in 0..edge_count {
+            edges.push(EdgeRecord {
+                id: format!("lane:chain:{i}"),
+                start_node: format!("star:{i}"),
+                end_node: format!("star:{}", i + 1),
+                edge_type: "HYPERLANE".to_string(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            });
+        }
+
+        // Ser-only
+        let t0 = std::time::Instant::now();
+        let mut ser_buf = Vec::with_capacity(edge_count);
+        for edge in &edges {
+            ser_buf.push(rmp_serde::to_vec(edge).unwrap());
+        }
+        let ser_time = t0.elapsed();
+
+        // Full batch API
+        let t1 = std::time::Instant::now();
+        storage.put_new_edge_records_batch(&edges).unwrap();
+        let batch_time = t1.elapsed();
+
+        eprintln!(
+            "edges={edge_count}  ser={ser_time:.2?}  batch={batch_time:.2?}  per_edge={:.1}µs",
+            batch_time.as_micros() as f64 / edge_count as f64
+        );
+
+        // ── Index key format cost ──────────────────────────────────
+        let t3 = std::time::Instant::now();
+        let mut key_count = 0usize;
+        for edge in &edges {
+            let _k1 = format!("edge_type/{}/{}", &edge.edge_type, &edge.id);
+            let _k2 = format!("edge_start/{}/{}", &edge.start_node, &edge.id);
+            let _k3 = format!("edge_end/{}/{}", &edge.end_node, &edge.id);
+            key_count += 3;
+            std::hint::black_box((&_k1, &_k2, &_k3));
+        }
+        let key_fmt_time = t3.elapsed();
+
+        eprintln!(
+            "key_format: {key_fmt_time:.2?} for {key_count} keys ({:.1}µs/key, {:.1}µs/edge)",
+            key_fmt_time.as_micros() as f64 / key_count as f64,
+            key_fmt_time.as_micros() as f64 / edge_count as f64,
+        );
+    }
 
 mod regressions;

@@ -54,8 +54,8 @@ impl StorageEngine {
         let mut out = Vec::new();
         let mut seen = BTreeSet::new();
         let entries = match end {
-            Some(end) => self.indexes.range(start..end),
-            None => self.indexes.range(start..),
+            Some(end) => self.indexes.sled_range(start..end),
+            None => self.indexes.sled_range(start..),
         };
         for entry in entries {
             let (key, _) = entry?;
@@ -122,8 +122,8 @@ impl StorageEngine {
         let mut out = Vec::new();
         let mut seen = BTreeSet::new();
         let entries = match end {
-            Some(end) => self.indexes.range(start..end),
-            None => self.indexes.range(start..),
+            Some(end) => self.indexes.sled_range(start..end),
+            None => self.indexes.sled_range(start..),
         };
         for entry in entries {
             let (key, _) = entry?;
@@ -159,7 +159,7 @@ impl StorageEngine {
         for index in self.relationship_property_index_definitions()? {
             if index.label == edge.edge_type {
                 if let Some(key) = relationship_property_index_key_for_edge(&index, edge) {
-                    self.indexes.insert(key.as_bytes(), [])?;
+                    self.indexes.sled_insert(key.as_bytes(), [])?;
                 }
             }
         }
@@ -173,7 +173,7 @@ impl StorageEngine {
         for index in self.relationship_property_index_definitions()? {
             if index.label == edge.edge_type {
                 if let Some(key) = relationship_property_index_key_for_edge(&index, edge) {
-                    self.indexes.remove(key.as_bytes())?;
+                    self.indexes.sled_remove(key.as_bytes())?;
                 }
             }
         }
@@ -196,21 +196,21 @@ impl StorageEngine {
         cancel: &crate::RequestCancellation,
     ) -> Result<(), StorageError> {
         self.delete_relationship_property_index_entries(index)?;
-        let mut batch = crate::Batch::default();
+        let mut batch = crate::Batch::new();
         let mut pending: usize = 0;
         for edge in self.get_edges_by_type(&index.label)? {
             if let Some(key) = relationship_property_index_key_for_edge(index, &edge) {
-                batch.insert(key.into_bytes(), Vec::<u8>::new());
+                batch.push((key.into_bytes(), Some(Vec::<u8>::new())));
                 pending += 1;
                 if pending >= 4096 {
-                    self.indexes.apply_batch(std::mem::take(&mut batch))?;
+                    self.indexes.sled_apply_batch(&std::mem::take(&mut batch))?;
                     pending = 0;
                     cancel.check_cancelled()?;
                 }
             }
         }
         if pending > 0 {
-            self.indexes.apply_batch(batch)?;
+            self.indexes.sled_apply_batch(&batch)?;
         }
         Ok(())
     }
@@ -231,7 +231,7 @@ impl StorageEngine {
             })
             .collect::<Result<Vec<_>, _>>()?;
         for key in keys {
-            self.indexes.remove(key)?;
+            self.indexes.sled_remove(key)?;
         }
         Ok(())
     }
