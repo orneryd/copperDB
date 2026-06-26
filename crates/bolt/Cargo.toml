@@ -19,6 +19,7 @@ futures.workspace = true
 rmp-serde.workspace = true
 tracing.workspace = true
 parking_lot.workspace = true
+time = { workspace = true, features = ["formatting", "parsing"] }
 copperdb-auth = { workspace = true }
 copperdb-eval = { workspace = true }
 copperdb-util = { workspace = true }

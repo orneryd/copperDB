@@ -262,6 +262,19 @@ pub fn value_to_json(value: &Value) -> serde_json::Value {
             }
             serde_json::Value::Object(map)
         }
+        Value::DateTime {
+            seconds,
+            nanoseconds,
+            offset_seconds,
+        } => crate::packstream::datetime_to_rfc3339(*seconds, *nanoseconds, *offset_seconds)
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
+        Value::LocalDateTime {
+            seconds,
+            nanoseconds,
+        } => crate::packstream::datetime_to_rfc3339(*seconds, *nanoseconds, 0)
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
         Value::Struct { fields, .. } => {
             serde_json::Value::Array(fields.iter().map(value_to_json).collect())
         }
@@ -320,7 +333,11 @@ fn encode_json_value(buf: &mut bytes::BytesMut, value: &serde_json::Value) {
                 crate::packstream::encode_null(buf);
             }
         }
-        serde_json::Value::String(s) => crate::packstream::encode_string(buf, s),
+        serde_json::Value::String(s) => {
+            if !crate::packstream::encode_rfc3339_datetime_if_valid(buf, s) {
+                crate::packstream::encode_string(buf, s);
+            }
+        }
         serde_json::Value::Array(items) => {
             crate::packstream::encode_list_header(buf, items.len());
             for item in items {
@@ -355,6 +372,37 @@ mod tests {
             }
             _ => panic!("expected Hello"),
         }
+    }
+
+    #[test]
+    fn local_datetime_packstream_param_normalizes_to_rfc3339_json() {
+        let value = Value::LocalDateTime {
+            seconds: 1_780_315_200,
+            nanoseconds: 123_000_000,
+        };
+
+        assert_eq!(
+            value_to_json(&value),
+            serde_json::json!("2026-06-01T12:00:00.123Z")
+        );
+    }
+
+    #[test]
+    fn rfc3339_json_string_encodes_as_bolt_datetime() {
+        let mut buf = bytes::BytesMut::new();
+        encode_json_value(&mut buf, &serde_json::json!("2026-06-01T12:00:00.123Z"));
+
+        let (decoded, consumed) = crate::packstream::decode(&buf).unwrap();
+
+        assert_eq!(consumed, buf.len());
+        assert_eq!(
+            decoded,
+            Value::DateTime {
+                seconds: 1_780_315_200,
+                nanoseconds: 123_000_000,
+                offset_seconds: 0,
+            }
+        );
     }
 
     #[test]
@@ -506,6 +554,15 @@ mod tests {
                     encode_value(buf, v);
                 }
             }
+            Value::DateTime {
+                seconds,
+                nanoseconds,
+                offset_seconds,
+            } => crate::packstream::encode_datetime(buf, *seconds, *nanoseconds, *offset_seconds),
+            Value::LocalDateTime {
+                seconds,
+                nanoseconds,
+            } => crate::packstream::encode_local_datetime(buf, *seconds, *nanoseconds),
             Value::Struct { signature, fields } => {
                 crate::packstream::encode_struct_header(buf, fields.len(), *signature);
                 for f in fields {

@@ -8,6 +8,7 @@
 use copperdb_storage::{
     EdgeRecord, IndexDefinition, NodeRecord, RangeIndexComparison, StorageEngine, StorageError,
 };
+use copperdb_util::RequestCancellation;
 use serde_json::Value;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -41,20 +42,38 @@ impl<'a> IndexCatalog<'a> {
     }
 
     pub fn create(&self, definition: IndexDefinition) -> Result<(), IndexError> {
+        self.create_with_cancellation(definition, &RequestCancellation::new())
+    }
+
+    pub fn create_with_cancellation(
+        &self,
+        definition: IndexDefinition,
+        cancel: &RequestCancellation,
+    ) -> Result<(), IndexError> {
         validate_definition(&definition)?;
         if self.get(&definition.name)?.is_some() {
             return Err(IndexError::AlreadyExists(definition.name));
         }
-        self.storage.persist_index_definition(&definition)?;
+        self.storage
+            .persist_index_definition_with_cancellation(&definition, cancel)?;
         Ok(())
     }
 
     pub fn create_if_absent(&self, definition: IndexDefinition) -> Result<bool, IndexError> {
+        self.create_if_absent_with_cancellation(definition, &RequestCancellation::new())
+    }
+
+    pub fn create_if_absent_with_cancellation(
+        &self,
+        definition: IndexDefinition,
+        cancel: &RequestCancellation,
+    ) -> Result<bool, IndexError> {
         validate_definition(&definition)?;
         if self.get(&definition.name)?.is_some() {
             return Ok(false);
         }
-        self.storage.persist_index_definition(&definition)?;
+        self.storage
+            .persist_index_definition_with_cancellation(&definition, cancel)?;
         Ok(true)
     }
 

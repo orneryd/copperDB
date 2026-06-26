@@ -46,6 +46,150 @@
         assert_eq!(result.stats.nodes_deleted, 1);
     }
 
+    /// Mirrors NornicDB `TestMatchRelationshipWithLimitReturnsBoundRows`.
+    #[test]
+    fn test_match_relationship_with_limit_returns_bound_rows() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for cypher in [
+            "CREATE (:T {id: 'a'})",
+            "CREATE (:T {id: 'b'})",
+            "CREATE (:T {id: 'c'})",
+            "CREATE (:T {id: 'd'})",
+            "MATCH (a:T {id: 'a'}), (b:T {id: 'b'}) CREATE (a)-[:REL {group_id: 'old'}]->(b)",
+            "MATCH (b:T {id: 'b'}), (c:T {id: 'c'}) CREATE (b)-[:REL {group_id: 'old'}]->(c)",
+            "MATCH (c:T {id: 'c'}), (d:T {id: 'd'}) CREATE (c)-[:REL {group_id: 'old'}]->(d)",
+        ] {
+            engine
+                .execute(&parser.parse(cypher).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH ()-[r:REL]->() WHERE r.group_id = 'old' WITH r LIMIT 1 RETURN r")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+    }
+
+    /// Mirrors NornicDB `TestSetReturnRelationshipCount`.
+    #[test]
+    fn test_set_return_relationship_count() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:SetCountNode {id: 'a'})-[:REL {group_id: 'old'}]->(:SetCountNode {id: 'b'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "MATCH ()-[r:REL]->() WHERE r.group_id = 'old' WITH r LIMIT 1 SET r.group_id = 'new' RETURN count(r) AS updated",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["updated"]);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("updated"), Some(&Value::from(1)));
+
+        let verify = engine
+            .execute(
+                &parser
+                    .parse("MATCH ()-[r:REL]->() WHERE r.group_id = 'new' RETURN count(r) AS updated")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(verify.rows[0].get("updated"), Some(&Value::from(1)));
+    }
+
+    /// Mirrors NornicDB `TestCreateEvaluatesToStringConcatenationProperty`.
+    #[test]
+    fn test_create_evaluates_to_string_concatenation_property() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:T {uuid: 't' + toString(0), label: toString(42)})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:T {uuid: 't0'}) RETURN n.uuid AS uuid, n.label AS label")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("uuid"), Some(&Value::String("t0".to_string())));
+        assert_eq!(result.rows[0].get("label"), Some(&Value::String("42".to_string())));
+    }
+
+    /// Mirrors NornicDB `TestUnwindMatchCreateRelationshipCreatesEdges`.
+    #[test]
+    fn test_unwind_match_create_relationship_creates_edges() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:T {uuid: 't' + toString(0)}), (:T {uuid: 't' + toString(1)})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        let params = HashMap::from([(
+            "rows".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "source": "t0",
+                "target": "t1",
+                "relID": "t0-t1"
+            })]),
+        )]);
+
+        engine
+            .execute(
+                &parser
+                    .parse("UNWIND $rows AS row MATCH (source:T {uuid: row.source}) MATCH (target:T {uuid: row.target}) CREATE (source)-[:REL {uuid: row.relID}]->(target)")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+
+        let count = engine
+            .execute(
+                &parser
+                    .parse("MATCH ()-[r:REL]->() RETURN count(r) AS count")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(count.rows[0].get("count"), Some(&Value::from(1)));
+    }
+
     /// Mirrors NornicDB `TestMultiHopOptionalMatch_ReturnsRowsForUnmatchedPattern`.
     /// ORDER BY resolves through RETURN aliases (Neo4j-compatible).
     #[test]
@@ -1340,6 +1484,131 @@
         assert!(!r.rows.is_empty());
     }
 
+    /// Mirrors NornicDB `TestE2E_VectorCosine_TinyChunkPropertyPatternUsesIndexedPath` at the
+    /// observable query-behavior level; copperDB does not expose the Go search-service counters.
+    #[test]
+    fn test_vector_cosine_tiny_chunk_property_pattern_round_trips() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE VECTOR INDEX tiny_chunk_idx FOR (c:Chunk) ON (c.emb) OPTIONS {indexConfig: {`vector.dimensions`: 4, `vector.similarity_function`: 'cosine'}}")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        for (uuid, vector) in [
+            ("c-00", vec![1.0, 0.0, 0.0, 0.0]),
+            ("c-01", vec![0.8, 0.6, 0.0, 0.0]),
+            ("c-02", vec![0.0, 1.0, 0.0, 0.0]),
+            ("c-03", vec![0.0, 0.0, 1.0, 0.0]),
+        ] {
+            engine
+                .execute(
+                    &parser
+                        .parse(&format!(
+                            "CREATE (:Chunk {{uuid: '{uuid}', group_id: 'kg', emb: {vector:?}}})"
+                        ))
+                        .unwrap(),
+                    &HashMap::new(),
+                )
+                .unwrap();
+        }
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:Chunk {uuid: 'other-group', group_id: 'else', emb: [1.0, 0.0, 0.0, 0.0]}), (:Chunk {uuid: 'no-embedding', group_id: 'kg'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let params = HashMap::from([("q".to_string(), serde_json::json!([1.0, 0.0, 0.0, 0.0]))]);
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (c:Chunk {group_id: 'kg'}) WHERE c.emb IS NOT NULL WITH c, vector.similarity.cosine(c.emb, $q) AS sim RETURN c.uuid AS uuid, sim ORDER BY sim DESC LIMIT 3")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+
+        let uuids = result
+            .rows
+            .iter()
+            .map(|row| row.get("uuid").and_then(Value::as_str).unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(uuids, vec!["c-00", "c-01", "c-02"]);
+        assert!(result.rows[0].get("sim").and_then(Value::as_f64).unwrap() > 0.99);
+    }
+
+    /// Adapts NornicDB `TestNorthwindSeeder_ProductsIncompleteIndexedMatchBucketKeepsFastPath`.
+    /// copperDB's pipeline route scans live storage for matches, so this pins the equivalent
+    /// two-MATCH Northwind product seed shape and its fast-path trace flag.
+    #[test]
+    fn test_northwind_products_seed_two_match_create_keeps_fast_path() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for statement in [
+            "CREATE INDEX category_id IF NOT EXISTS FOR (n:Category) ON (n.categoryID)",
+            "CREATE INDEX supplier_id IF NOT EXISTS FOR (n:Supplier) ON (n.supplierID)",
+            "CREATE (:Category {categoryID: 1, categoryName: 'C1'}), (:Category {categoryID: 2, categoryName: 'C2'}), (:Category {categoryID: 3, categoryName: 'C3'})",
+            "CREATE (:Supplier {supplierID: 1, companyName: 'S1'}), (:Supplier {supplierID: 2, companyName: 'S2'}), (:Supplier {supplierID: 3, companyName: 'S3'})",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let rows = Value::Array(vec![
+            serde_json::json!({"productID": 101, "productName": "P101", "sku": "SKU-00101", "unitPrice": 1.25, "unitsInStock": 10, "discontinued": false, "description": "indexed supplier", "categoryID": 1, "supplierID": 1}),
+            serde_json::json!({"productID": 102, "productName": "P102", "sku": "SKU-00102", "unitPrice": 2.50, "unitsInStock": 11, "discontinued": false, "description": "middle supplier", "categoryID": 2, "supplierID": 2}),
+            serde_json::json!({"productID": 103, "productName": "P103", "sku": "SKU-00103", "unitPrice": 3.75, "unitsInStock": 12, "discontinued": false, "description": "indexed supplier again", "categoryID": 3, "supplierID": 3}),
+        ]);
+        let params = HashMap::from([("rows".to_string(), rows)]);
+        let cypher = "UNWIND $rows AS row MATCH (c:Category {categoryID: row.categoryID}) MATCH (s:Supplier {supplierID: row.supplierID}) CREATE (p:Product {productID: row.productID, productName: row.productName, sku: row.sku, unitPrice: row.unitPrice, unitsInStock: row.unitsInStock, discontinued: row.discontinued, description: row.description}) CREATE (p)-[:PART_OF]->(c) CREATE (s)-[:SUPPLIES]->(p)";
+        let pattern = detect_query_pattern(cypher);
+        let (clauses, ok) = can_execute_as_pipeline(cypher);
+        assert!(ok);
+        let result = engine
+            .execute_with_routes(
+                &parser.parse(cypher).unwrap(),
+                &params,
+                &pattern,
+                None,
+                Some(clauses.as_slice()),
+            )
+            .unwrap();
+
+        assert_eq!(result.stats.nodes_created, 3);
+        assert_eq!(result.stats.relationships_created, 6);
+        assert!(engine.hot_path_trace_snapshot().unwind_fixed_chain_link_batch);
+
+        let product_count = engine
+            .execute(
+                &parser
+                    .parse("MATCH (p:Product) RETURN count(p) AS count")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(product_count.rows[0].get("count"), Some(&Value::from(3)));
+
+        let supplies_count = engine
+            .execute(
+                &parser
+                    .parse("MATCH ()-[r:SUPPLIES]->() RETURN count(r) AS count")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(supplies_count.rows[0].get("count"), Some(&Value::from(3)));
+    }
+
     /// Tests CALL db.index.fulltext.queryRelationships — Phase 3 Graphiti parity.
     #[test]
     fn test_fulltext_query_relationships() {
@@ -1428,6 +1697,141 @@
             )
             .unwrap();
         assert!(!result.rows.is_empty(), "should find vector-similar relationship");
+    }
+
+    /// Mirrors NornicDB `TestVectorProcedures_NodeAndRelationshipManualVectorParityE2E`.
+    #[test]
+    fn test_vector_procedures_node_and_relationship_manual_vector_parity_e2e() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE VECTOR INDEX nzz_idx FOR (n:NZZ) ON (n.emb) OPTIONS {indexConfig: {`vector.dimensions`: 4, `vector.similarity_function`: 'cosine'}}")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:NZZ {uuid: 'n1'}), (:NZZ {uuid: 'n2'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        for (uuid, emb) in [
+            ("n1", serde_json::json!([1.0, 0.0, 0.0, 0.0])),
+            ("n2", serde_json::json!([0.0, 1.0, 0.0, 0.0])),
+        ] {
+            let params = HashMap::from([("v".to_string(), emb)]);
+            engine
+                .execute(
+                    &parser
+                        .parse(&format!(
+                            "MATCH (a:NZZ {{uuid: '{uuid}'}}) WITH a CALL db.create.setNodeVectorProperty(a, 'emb', $v) RETURN a"
+                        ))
+                        .unwrap(),
+                    &params,
+                )
+                .unwrap();
+        }
+
+        let node_prop = engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:NZZ {uuid: 'n1'}) RETURN a.emb AS emb")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(node_prop.rows.len(), 1);
+        assert_eq!(
+            node_prop.rows[0].get("emb"),
+            Some(&serde_json::json!([1.0, 0.0, 0.0, 0.0]))
+        );
+
+        let query_params = HashMap::from([(
+            "v".to_string(),
+            serde_json::json!([0.9, 0.1, 0.0, 0.0]),
+        )]);
+        let node_hits = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.vector.queryNodes('nzz_idx', 5, $v) YIELD node, score RETURN node.uuid AS u, score ORDER BY score DESC")
+                    .unwrap(),
+                &query_params,
+            )
+            .unwrap();
+        assert_eq!(node_hits.rows.len(), 2);
+        assert_eq!(node_hits.rows[0].get("u"), Some(&Value::String("n1".to_string())));
+        assert_eq!(node_hits.rows[1].get("u"), Some(&Value::String("n2".to_string())));
+        assert!(node_hits.rows[0].get("score").and_then(Value::as_f64).unwrap() > 0.99);
+        assert!(node_hits.rows[1].get("score").and_then(Value::as_f64).unwrap() > 0.10);
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE VECTOR INDEX rzz_idx FOR ()-[r:RZZ_REL]-() ON (r.emb) OPTIONS {indexConfig: {`vector.dimensions`: 4, `vector.similarity_function`: 'cosine'}}")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:RZZ {uuid: 'a'})-[:RZZ_REL {uuid: 'z1'}]->(:RZZ {uuid: 'b'}), (:RZZ {uuid: 'c'})-[:RZZ_REL {uuid: 'z2'}]->(:RZZ {uuid: 'd'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        for (uuid, emb) in [
+            ("z1", serde_json::json!([1.0, 0.0, 0.0, 0.0])),
+            ("z2", serde_json::json!([0.0, 1.0, 0.0, 0.0])),
+        ] {
+            let params = HashMap::from([("v".to_string(), emb)]);
+            engine
+                .execute(
+                    &parser
+                        .parse(&format!(
+                            "MATCH (:RZZ)-[r:RZZ_REL {{uuid: '{uuid}'}}]->(:RZZ) WITH r CALL db.create.setRelationshipVectorProperty(r, 'emb', $v) RETURN r"
+                        ))
+                        .unwrap(),
+                    &params,
+                )
+                .unwrap();
+        }
+
+        let rel_prop = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:RZZ)-[r:RZZ_REL {uuid: 'z1'}]->(:RZZ) RETURN r.emb AS emb")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(rel_prop.rows.len(), 1);
+        assert_eq!(
+            rel_prop.rows[0].get("emb"),
+            Some(&serde_json::json!([1.0, 0.0, 0.0, 0.0]))
+        );
+
+        let rel_hits = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.vector.queryRelationships('rzz_idx', 5, $v) YIELD relationship, score RETURN relationship.uuid AS u, score ORDER BY score DESC")
+                    .unwrap(),
+                &query_params,
+            )
+            .unwrap();
+        assert_eq!(rel_hits.rows.len(), 2);
+        assert_eq!(rel_hits.rows[0].get("u"), Some(&Value::String("z1".to_string())));
+        assert_eq!(rel_hits.rows[1].get("u"), Some(&Value::String("z2".to_string())));
+        assert!(rel_hits.rows[0].get("score").and_then(Value::as_f64).unwrap() > 0.99);
+        assert!(rel_hits.rows[1].get("score").and_then(Value::as_f64).unwrap() > 0.10);
     }
 
     /// Tests FOREACH clause: FOREACH (var IN list | SET ...).
@@ -1927,6 +2331,541 @@
             )
             .unwrap();
         assert_eq!(result.rows[0].get("y").and_then(Value::as_i64), Some(2026));
+    }
+
+    /// Mirrors NornicDB `TestTemporalParam_UnwindNestedRowDatetimeRoundTripsAsTime`.
+    #[test]
+    fn test_temporal_param_unwind_nested_row_datetime_round_trips() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        let dt = "2026-06-19T12:00:00.123456Z";
+        let params = HashMap::from([(
+            "rows".to_string(),
+            Value::Array(vec![serde_json::json!({"uuid": "1", "created_at": dt})]),
+        )]);
+
+        engine
+            .execute(
+                &parser
+                    .parse("UNWIND $rows AS row MERGE (n:X {uuid: row.uuid}) SET n.created_at = row.created_at")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:X {uuid: '1'}) RETURN n.created_at AS created_at")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("created_at").and_then(Value::as_str), Some(dt));
+    }
+
+    /// Mirrors NornicDB `TestTemporalParam_UnwindNestedRowDatetimeInMapLiteralRoundTripsAsTime`.
+    #[test]
+    fn test_temporal_param_unwind_nested_row_datetime_in_map_literal_round_trips() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        let dt = "2026-06-19T12:00:00.123456Z";
+        let params = HashMap::from([(
+            "rows".to_string(),
+            Value::Array(vec![serde_json::json!({"uuid": "1", "created_at": dt})]),
+        )]);
+
+        engine
+            .execute(
+                &parser
+                    .parse("UNWIND $rows AS row MERGE (n:X {uuid: row.uuid}) SET n = {uuid: row.uuid, created_at: row.created_at}")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:X {uuid: '1'}) RETURN n.created_at AS created_at")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("created_at").and_then(Value::as_str), Some(dt));
+    }
+
+    /// Mirrors NornicDB `TestTemporalParam_UnwindNestedRowDatetimeOnRelationshipRoundTripsAsTime`.
+    #[test]
+    fn test_temporal_param_unwind_nested_row_datetime_on_relationship_round_trips() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        let dt = "2026-06-19T12:00:00.123456Z";
+        let params = HashMap::from([(
+            "rows".to_string(),
+            Value::Array(vec![serde_json::json!({"uuid": "m1", "created_at": dt})]),
+        )]);
+
+        engine
+            .execute(
+                &parser.parse("CREATE (:X {uuid: 'a'}), (:X {uuid: 'b'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("UNWIND $rows AS row MATCH (a:X {uuid: 'a'}) MATCH (b:X {uuid: 'b'}) MERGE (a)-[r:MENTIONS {uuid: row.uuid}]->(b) SET r.created_at = row.created_at")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:X)-[r:MENTIONS {uuid: 'm1'}]->(:X) RETURN r.created_at AS created_at")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("created_at").and_then(Value::as_str), Some(dt));
+    }
+
+    /// Mirrors NornicDB `TestTemporalParam_UnwindNestedRowDatetimeInWholeRowMapsRoundTripsAsTime`.
+    #[test]
+    fn test_temporal_param_unwind_nested_row_datetime_in_whole_row_maps_round_trips() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        let dt = "2026-06-19T12:00:00.123456Z";
+        let node_params = HashMap::from([(
+            "rows".to_string(),
+            Value::Array(vec![serde_json::json!({"uuid": "1", "created_at": dt})]),
+        )]);
+        let rel_params = HashMap::from([(
+            "rows".to_string(),
+            Value::Array(vec![serde_json::json!({"uuid": "m1", "created_at": dt})]),
+        )]);
+
+        engine
+            .execute(
+                &parser
+                    .parse("UNWIND $rows AS row MERGE (n:X {uuid: row.uuid}) SET n = row")
+                    .unwrap(),
+                &node_params,
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser.parse("CREATE (:X {uuid: 'a'}), (:X {uuid: 'b'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("UNWIND $rows AS row MATCH (a:X {uuid: 'a'}) MATCH (b:X {uuid: 'b'}) MERGE (a)-[r:MENTIONS {uuid: row.uuid}]->(b) SET r += row")
+                    .unwrap(),
+                &rel_params,
+            )
+            .unwrap();
+
+        let node_result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:X {uuid: '1'}) RETURN n.created_at AS created_at")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(node_result.rows.len(), 1);
+        assert_eq!(node_result.rows[0].get("created_at").and_then(Value::as_str), Some(dt));
+
+        let rel_result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:X)-[r:MENTIONS {uuid: 'm1'}]->(:X) RETURN r.created_at AS created_at")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(rel_result.rows.len(), 1);
+        assert_eq!(rel_result.rows[0].get("created_at").and_then(Value::as_str), Some(dt));
+    }
+
+    /// Mirrors NornicDB `TestUnwindRelationshipMergeBatch_NArityMatchAndRowReplace`.
+    #[test]
+    fn test_unwind_relationship_merge_batch_n_arity_match_and_row_replace() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:Service {key: 'svc-a'}), (:Topic {key: 'topic-b'}), (:Tenant {key: 'tenant-c'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let query = parser
+            .parse(
+                "UNWIND $rows AS row MATCH (source:Service {key: row.source_key}) MATCH (target:Topic {key: row.target_key}) MATCH (tenant:Tenant {key: row.tenant}) MERGE (source)-[rel:PUBLISHES {uuid: row.uuid, tenant: row.tenant}]->(target) SET rel = row RETURN row.uuid AS uuid, row.tenant AS tenant",
+            )
+            .unwrap();
+        let mut params = HashMap::from([(
+            "rows".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "source_key": "svc-a",
+                "target_key": "topic-b",
+                "tenant": "tenant-c",
+                "uuid": "edge-1",
+                "fact": "first",
+                "embedding": [1.0, 0.0, 0.0]
+            })]),
+        )]);
+
+        let result = engine.execute(&query, &params).unwrap();
+        assert_eq!(result.columns, vec!["uuid", "tenant"]);
+        assert_eq!(result.rows.len(), 1);
+
+        params.insert(
+            "rows".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "source_key": "svc-a",
+                "target_key": "topic-b",
+                "tenant": "tenant-c",
+                "uuid": "edge-1",
+                "fact": "updated",
+                "embedding": [0.0, 1.0, 0.0]
+            })]),
+        );
+        let result = engine.execute(&query, &params).unwrap();
+        assert_eq!(result.rows.len(), 1);
+
+        let count = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:Service {key: 'svc-a'})-[rel:PUBLISHES]->(:Topic {key: 'topic-b'}) WHERE rel.uuid = 'edge-1' RETURN count(rel) AS count")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(count.rows[0].get("count"), Some(&Value::from(1)));
+
+        let stored = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:Service {key: 'svc-a'})-[rel:PUBLISHES {uuid: 'edge-1'}]->(:Topic {key: 'topic-b'}) RETURN rel.fact AS fact, rel.embedding AS embedding, rel.tenant AS tenant")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(stored.rows.len(), 1);
+        assert_eq!(stored.rows[0].get("fact"), Some(&Value::String("updated".to_string())));
+        assert_eq!(stored.rows[0].get("tenant"), Some(&Value::String("tenant-c".to_string())));
+        assert_eq!(
+            stored.rows[0].get("embedding"),
+            Some(&serde_json::json!([0.0, 1.0, 0.0]))
+        );
+    }
+
+    /// Mirrors NornicDB `TestRelationshipBatchScalarEdgeKeyMatchesStoredProperties` at the
+    /// query contract level: scalar relationship MERGE keys must correspond to stored properties.
+    #[test]
+    fn test_relationship_merge_scalar_key_properties_match_stored_edges() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:Service {key: 'svc'}), (:Topic {key: 'topic'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let query = parser
+            .parse(
+                "UNWIND $rows AS row MATCH (source:Service {key: row.source_key}) MATCH (target:Topic {key: row.target_key}) MERGE (source)-[rel:PUBLISHES {uuid: row.uuid, tenant: row.tenant, scope: 'public'}]->(target) SET rel.fact = row.fact RETURN row.uuid AS uuid ORDER BY uuid",
+            )
+            .unwrap();
+        let params = HashMap::from([(
+            "rows".to_string(),
+            Value::Array(vec![
+                serde_json::json!({"source_key": "svc", "target_key": "topic", "uuid": "edge-001", "tenant": "tenant-a", "fact": "first"}),
+                serde_json::json!({"source_key": "svc", "target_key": "topic", "uuid": "edge-002", "tenant": "tenant-a", "fact": "second"}),
+            ]),
+        )]);
+
+        let result = engine.execute(&query, &params).unwrap();
+        assert_eq!(result.rows.len(), 2);
+
+        let count = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:Service)-[rel:PUBLISHES]->(:Topic) RETURN count(rel) AS count")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(count.rows[0].get("count"), Some(&Value::from(2)));
+
+        let stored = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:Service)-[rel:PUBLISHES {uuid: 'edge-002', tenant: 'tenant-a', scope: 'public'}]->(:Topic) RETURN rel.fact AS fact")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(stored.rows.len(), 1);
+        assert_eq!(
+            stored.rows[0].get("fact"),
+            Some(&Value::String("second".to_string()))
+        );
+    }
+
+    /// Mirrors NornicDB `TestUnwindRelationshipMergeBatch_AmbiguousMatchFallsBack`.
+    #[test]
+    fn test_unwind_relationship_merge_batch_ambiguous_match_falls_back() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:Service {key: 'svc'}), (:Service {key: 'svc'}), (:Topic {key: 'topic'}), (:Tenant {key: 'tenant-a'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let params = HashMap::from([(
+            "rows".to_string(),
+            Value::Array(vec![serde_json::json!({
+                "source_key": "svc",
+                "target_key": "topic",
+                "tenant": "tenant-a",
+                "uuid": "edge-ambiguous",
+                "embedding": [1.0, 0.0, 0.0, 0.0]
+            })]),
+        )]);
+        let result = engine
+            .execute(
+                &parser
+                    .parse("UNWIND $rows AS row MATCH (source:Service {key: row.source_key}) MATCH (target:Topic {key: row.target_key}) MATCH (tenant:Tenant {key: row.tenant}) MERGE (source)-[rel:PUBLISHES {uuid: row.uuid, tenant: row.tenant}]->(target) SET rel = row RETURN row.uuid AS uuid")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 2);
+        assert!(!engine.hot_path_trace_snapshot().unwind_multi_match_relationship_batch);
+    }
+
+    /// Mirrors NornicDB `TestUnwindRelationshipMergeBatch_RepeatedIndexedMatchKeyUsesAllRowFields`.
+    #[test]
+    fn test_unwind_relationship_merge_batch_repeated_match_key_uses_all_row_fields() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:Component {key: 'left-1'}), (:Component {key: 'left-2'}), (:Component {key: 'right-1'}), (:Component {key: 'right-2'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let params = HashMap::from([(
+            "rows".to_string(),
+            Value::Array(vec![
+                serde_json::json!({"left_key": "left-1", "right_key": "right-1", "uuid": "edge-1", "embedding": [1.0, 0.0, 0.0]}),
+                serde_json::json!({"left_key": "left-2", "right_key": "right-2", "uuid": "edge-2", "embedding": [0.0, 1.0, 0.0]}),
+            ]),
+        )]);
+        let result = engine
+            .execute(
+                &parser
+                    .parse("UNWIND $rows AS row MATCH (left:Component {key: row.left_key}) MATCH (right:Component {key: row.right_key}) MERGE (left)-[rel:DEPENDS_ON {uuid: row.uuid}]->(right) SET rel = row RETURN row.uuid AS uuid")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 2);
+        let count = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:Component)-[rel:DEPENDS_ON]->(:Component) RETURN count(rel) AS count")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(count.rows[0].get("count"), Some(&Value::from(2)));
+    }
+
+    /// Adapts NornicDB `TestUnwindRelationshipMergeBatch_IncompleteIndexedMatchBucketKeepsFastPath`.
+    /// copperDB builds the batch endpoint index from live label scans rather than trusting property-index buckets,
+    /// so this pins the equivalent fast-path contract for the supported two-MATCH relationship batch shape.
+    #[test]
+    fn test_unwind_relationship_merge_batch_indexed_labels_keep_fast_path() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for statement in [
+            "CREATE INDEX service_key_idx IF NOT EXISTS FOR (n:Service) ON (n.key)",
+            "CREATE INDEX topic_key_idx IF NOT EXISTS FOR (n:Topic) ON (n.key)",
+            "CREATE (:Service {key: 'svc-1'}), (:Service {key: 'svc-2'}), (:Topic {key: 'topic-1'}), (:Topic {key: 'topic-2'})",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let params = HashMap::from([(
+            "rows".to_string(),
+            Value::Array(vec![
+                serde_json::json!({"source_key": "svc-1", "target_key": "topic-1", "tenant": "tenant-a", "uuid": "edge-1", "embedding": [1.0, 0.0, 0.0, 0.0]}),
+                serde_json::json!({"source_key": "svc-2", "target_key": "topic-2", "tenant": "tenant-b", "uuid": "edge-2", "embedding": [0.0, 1.0, 0.0, 0.0]}),
+            ]),
+        )]);
+        let result = engine
+            .execute(
+                &parser
+                    .parse("UNWIND $rows AS row MATCH (source:Service {key: row.source_key}) MATCH (target:Topic {key: row.target_key}) MERGE (source)-[rel:PUBLISHES]->(target) SET rel.uuid = row.uuid, rel.tenant = row.tenant, rel.embedding = row.embedding RETURN count(rel) AS count")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+
+        assert_eq!(result.rows[0].get("count"), Some(&Value::from(2)));
+        assert_eq!(result.stats.relationships_created, 2);
+        assert!(
+            engine
+                .hot_path_trace_snapshot()
+                .unwind_multi_match_relationship_batch
+        );
+
+        let stored = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:Service)-[rel:PUBLISHES]->(:Topic) RETURN rel.uuid AS uuid, rel.tenant AS tenant ORDER BY uuid")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(stored.rows.len(), 2);
+        assert_eq!(
+            stored.rows[0].get("uuid"),
+            Some(&Value::String("edge-1".to_string()))
+        );
+        assert_eq!(
+            stored.rows[1].get("tenant"),
+            Some(&Value::String("tenant-b".to_string()))
+        );
+    }
+
+    /// Mirrors NornicDB `TestCallSubqueryVariableScopeInTransactionsDetachDelete`.
+    /// copperDB currently has CALL subquery scoping but not the Go `IN TRANSACTIONS` batch suffix.
+    #[test]
+    fn test_call_subquery_variable_scope_detach_delete() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for cypher in [
+            "CREATE (:ScopedTxDelete {uuid: 'a', group_id: 'g'})",
+            "CREATE (:ScopedTxDelete {uuid: 'b', group_id: 'g'})",
+            "MATCH (a:ScopedTxDelete {uuid: 'a'}), (b:ScopedTxDelete {uuid: 'b'}) CREATE (a)-[:SCOPED_TX_REL]->(b)",
+        ] {
+            engine
+                .execute(&parser.parse(cypher).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let params = HashMap::from([("group_id".to_string(), Value::String("g".to_string()))]);
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:ScopedTxDelete {group_id: $group_id}) CALL { DETACH DELETE n }")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+
+        assert_eq!(result.stats.nodes_deleted, 2);
+        assert_eq!(result.stats.relationships_deleted, 1);
+
+        let count = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:ScopedTxDelete) RETURN count(n) AS count")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(count.rows[0].get("count"), Some(&Value::from(0)));
+    }
+
+    /// Mirrors NornicDB `TestExecuteChainedCallSubquery_ImplicitScalarCorrelationOptionalAggregate`.
+    #[test]
+    fn test_chained_call_subquery_implicit_scalar_correlation_optional_aggregate() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:Person {person_id: 'a1', person_name: 'Alice'}), (:Person {person_id: 'a2', person_name: 'Bob'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:Order {owner_id: 'a1', order_id: 'ORD-001', amount: 125}), (:Order {owner_id: 'a2', order_id: 'ORD-002', amount: 90})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let outer = engine
+            .execute(
+                &parser
+                    .parse("MATCH (p:Person) WITH p.person_id AS person_id RETURN person_id ORDER BY person_id")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(outer.rows[0].get("person_id"), Some(&Value::String("a1".to_string())));
+
+        let params = HashMap::from([("min_amount".to_string(), Value::from(100))]);
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (p:Person) WITH p.person_id AS person_id, p.person_name AS person_name CALL { OPTIONAL MATCH (o:Order) WHERE o.owner_id = person_id AND o.amount >= $min_amount RETURN collect(o.order_id) AS order_ids, count(o) AS order_count } RETURN person_id, person_name, order_ids, order_count ORDER BY person_id")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0].get("person_id"), Some(&Value::String("a1".to_string())));
+        assert_eq!(
+            result.rows[0].get("order_ids"),
+            Some(&Value::Array(vec![Value::String("ORD-001".to_string())]))
+        );
+        assert_eq!(result.rows[0].get("order_count"), Some(&Value::from(1)));
+        assert_eq!(result.rows[1].get("person_id"), Some(&Value::String("a2".to_string())));
+        assert_eq!(result.rows[1].get("order_ids"), Some(&Value::Array(Vec::new())));
+        assert_eq!(result.rows[1].get("order_count"), Some(&Value::from(0)));
     }
 
     /// Tests MERGE idempotency: repeated MERGE creates only one node.
@@ -3055,10 +3994,7 @@
             )
             .unwrap();
 
-        // Verify the options were persisted (use direct storage access)
-        let storage = StorageEngine::open_temporary().unwrap();
-        // The engine creates a temporary storage; we need to check the same storage.
-        // Instead, verify via SHOW INDEXES that the index exists.
+        // Verify via SHOW INDEXES that the index exists on the same engine storage.
         let result = engine
             .execute(
                 &parser.parse("SHOW VECTOR INDEXES").unwrap(),

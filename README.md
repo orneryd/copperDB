@@ -100,8 +100,45 @@ make test
 make run
 ```
 
+## Production Build
+
+For a non-debug build, compile the release binary directly:
+
+```bash
+cargo build --release --package copperdb
+```
+
+If you want the UI assets included for a production run, build them first and then
+start the release binary:
+
+```bash
+cd ui && npm install && npm run build
+cd .. && cargo run --release --package copperdb -- --http-port 7474 --bolt-port 7687
+```
+
+You can also run the release binary with the same environment variables used by
+`make run`:
+
+```bash
+RUST_LOG=info COPPERDB_ADDRESS=0.0.0.0 COPPERDB_HTTP_PORT=7474 COPPERDB_BOLT_PORT=7687 COPPERDB_BASE_PATH=/ COPPERDB_STATIC_DIR=ui/dist cargo run --release --package copperdb -- --address 0.0.0.0 --http-port 7474 --bolt-port 7687 --base-path / --static-dir ui/dist
+```
+
 `make build` also prints the exact environment variables and `cargo run` command
 needed to start the server manually.
+
+## Clean Build Cache
+
+To reclaim the space used by Rust build artifacts in `target/`, run:
+
+```bash
+make clean
+```
+
+If you want to clean only the Rust artifacts directly, use:
+
+```bash
+cargo clean
+```
 
 By default, copperDB now mirrors NornicDB's startup ports:
 

@@ -35,6 +35,7 @@ use uuid::Uuid;
 pub use copperdb_filter::Row;
 
 const VAR_LENGTH_UNBOUNDED_MAX_HOPS: u32 = 1 << 16;
+const BFS_CANCEL_CHECK_MASK: usize = 0xFF;
 
 #[derive(Debug, Error)]
 pub enum EvalError {
@@ -98,6 +99,12 @@ struct ShortestPathFound {
     node_ids: Vec<String>,
     edges: Vec<EdgeRecord>,
     hops: usize,
+}
+
+struct BfsPredecessor {
+    parent: Option<String>,
+    edge: Option<EdgeRecord>,
+    depth: usize,
 }
 
 struct RelationshipStepMatch {

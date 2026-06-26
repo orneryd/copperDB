@@ -40,6 +40,28 @@ use crate::storage_edge_property_index::{
 pub use crate::storage_node_property_range::RangeIndexComparison;
 use crate::storage_property_index_encoding::property_index_value_key;
 
+pub fn parse_database_prefix(id: &str) -> Option<(&str, &str)> {
+    let idx = id.find(':')?;
+    if idx == 0 || idx >= id.len() - 1 {
+        return None;
+    }
+    Some((&id[..idx], &id[idx + 1..]))
+}
+
+pub fn strip_database_prefix<'a>(database: &str, id: &'a str) -> &'a str {
+    if database.is_empty() || id.is_empty() {
+        return id;
+    }
+    id.strip_prefix(&format!("{database}:")).unwrap_or(id)
+}
+
+pub fn ensure_database_prefix(database: &str, id: &str) -> String {
+    if database.is_empty() || id.is_empty() || parse_database_prefix(id).is_some() {
+        return id.to_string();
+    }
+    format!("{database}:{id}")
+}
+
 pub const STORAGE_LAYOUT_VERSION: u8 = 0;
 const META_LAYOUT_MANIFEST_KEY: &[u8] = b"layout_manifest";
 const META_ENCRYPTION_MANIFEST_KEY: &[u8] = b"encryption_manifest";
@@ -1670,6 +1692,54 @@ impl StorageEngine {
         Ok(out)
     }
 
+    /// Stream nodes matching a label, checking cancellation periodically.
+    pub(crate) fn stream_nodes_by_label_with_cancellation<F>(
+        &self,
+        label: &str,
+        cancel: &RequestCancellation,
+        mut visit: F,
+    ) -> Result<u64, StorageError>
+    where
+        F: FnMut(NodeRecord) -> Result<(), StorageError>,
+    {
+        let prefix = label_index_prefix(label);
+        let mut visited = 0u64;
+
+        for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
+            let (key, _) = entry?;
+            let key_str =
+                std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            if self.has_index_tombstone(key_str) {
+                continue;
+            }
+            if let Some(node_id) = key_str.rsplit('/').next() {
+                if let Some(node) = self.get_node_record(node_id)? {
+                    visit(node)?;
+                    visited += 1;
+                }
+            }
+        }
+
+        if visited == 0 {
+            for entry in self.nodes.iter() {
+                cancel.check_cancelled()?;
+                let (key, value) = entry?;
+                let key_str =
+                    std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+                let raw = self.decode_record_bytes(value.as_ref())?;
+                let Some(node) = compat_node_record_from_bytes(key_str, &raw)? else {
+                    continue;
+                };
+                if node.labels.iter().any(|node_label| node_label == label) {
+                    visit(node)?;
+                    visited += 1;
+                }
+            }
+        }
+
+        Ok(visited)
+    }
+
     pub fn find_node_needing_embedding(&self) -> Result<Option<NodeRecord>, StorageError> {
         for entry in self.meta.scan_prefix(META_PENDING_EMBEDDING_PREFIX) {
             let (key, _) = entry?;
@@ -2633,14 +2703,22 @@ impl StorageEngine {
     }
 
     pub fn persist_index_definition(&self, index: &IndexDefinition) -> Result<(), StorageError> {
+        self.persist_index_definition_with_cancellation(index, &RequestCancellation::new())
+    }
+
+    pub fn persist_index_definition_with_cancellation(
+        &self,
+        index: &IndexDefinition,
+        cancel: &RequestCancellation,
+    ) -> Result<(), StorageError> {
         let key = [META_SCHEMA_INDEX_PREFIX, index.name.as_bytes()].concat();
         self.meta.insert(key, rmp_serde::to_vec(index)?)?;
         if is_node_property_index(index) {
-            self.rebuild_node_property_index(index)?;
+            self.rebuild_node_property_index_with_cancellation(index, cancel)?;
         } else if is_node_fulltext_index(index) {
-            self.rebuild_node_fulltext_index(index)?;
+            self.rebuild_node_fulltext_index_with_cancellation(index, cancel)?;
         } else if is_relationship_property_index(index) {
-            self.rebuild_relationship_property_index(index)?;
+            self.rebuild_relationship_property_index_with_cancellation(index, cancel)?;
         }
         Ok(())
     }
@@ -3231,20 +3309,48 @@ impl StorageEngine {
     }
 
     fn rebuild_node_property_index(&self, index: &IndexDefinition) -> Result<(), StorageError> {
-        self.delete_node_property_index_entries(index)?;
-        for node in self.get_nodes_by_label(&index.label)? {
+        self.rebuild_node_property_index_with_cancellation(index, &RequestCancellation::new())
+    }
+
+    fn rebuild_node_property_index_with_cancellation(
+        &self,
+        index: &IndexDefinition,
+        cancel: &RequestCancellation,
+    ) -> Result<(), StorageError> {
+        self.delete_node_property_index_entries_with_cancellation(index, cancel)?;
+        let mut count: u64 = 0;
+        self.stream_nodes_by_label_with_cancellation(&index.label, cancel, |node| {
             if let Some(key) = node_property_index_key_for_node(index, &node) {
                 self.indexes.insert(key.as_bytes(), [])?;
             }
-        }
+            count += 1;
+            if count % 4096 == 0 {
+                cancel.check_cancelled()?;
+            }
+            Ok(())
+        })?;
         Ok(())
     }
 
     fn rebuild_node_fulltext_index(&self, index: &IndexDefinition) -> Result<(), StorageError> {
-        self.delete_node_fulltext_index_entries(index)?;
-        for node in self.get_nodes_by_label(&index.label)? {
+        self.rebuild_node_fulltext_index_with_cancellation(index, &RequestCancellation::new())
+    }
+
+    fn rebuild_node_fulltext_index_with_cancellation(
+        &self,
+        index: &IndexDefinition,
+        cancel: &RequestCancellation,
+    ) -> Result<(), StorageError> {
+        self.delete_node_fulltext_index_entries_with_cancellation(index, cancel)?;
+        let mut count: u64 = 0;
+        self.stream_nodes_by_label_with_cancellation(&index.label, cancel, |node| {
             self.index_node_fulltext_entries(index, &node)?;
-        }
+            count += 1;
+            if count % 4096 == 0 {
+                cancel.check_cancelled()?;
+            }
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -3252,18 +3358,26 @@ impl StorageEngine {
         &self,
         index: &IndexDefinition,
     ) -> Result<(), StorageError> {
+        self.delete_node_property_index_entries_with_cancellation(
+            index,
+            &RequestCancellation::new(),
+        )
+    }
+
+    fn delete_node_property_index_entries_with_cancellation(
+        &self,
+        index: &IndexDefinition,
+        cancel: &RequestCancellation,
+    ) -> Result<(), StorageError> {
         let prefix = node_property_index_definition_prefix(&index.label, &index.properties);
-        let keys = self
-            .indexes
-            .scan_prefix(prefix.as_bytes())
-            .map(|entry| {
-                entry
-                    .map(|(key, _)| key.to_vec())
-                    .map_err(StorageError::from)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        for key in keys {
+        let mut count: u64 = 0;
+        for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
+            let (key, _) = entry?;
             self.indexes.remove(key)?;
+            count += 1;
+            if count % 4096 == 0 {
+                cancel.check_cancelled()?;
+            }
         }
         Ok(())
     }
@@ -3272,19 +3386,27 @@ impl StorageEngine {
         &self,
         index: &IndexDefinition,
     ) -> Result<(), StorageError> {
+        self.delete_node_fulltext_index_entries_with_cancellation(
+            index,
+            &RequestCancellation::new(),
+        )
+    }
+
+    fn delete_node_fulltext_index_entries_with_cancellation(
+        &self,
+        index: &IndexDefinition,
+        cancel: &RequestCancellation,
+    ) -> Result<(), StorageError> {
         for property in &index.properties {
             let prefix = node_fulltext_property_prefix(&index.label, property);
-            let keys = self
-                .indexes
-                .scan_prefix(prefix.as_bytes())
-                .map(|entry| {
-                    entry
-                        .map(|(key, _)| key.to_vec())
-                        .map_err(StorageError::from)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            for key in keys {
+            let mut count: u64 = 0;
+            for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
+                let (key, _) = entry?;
                 self.indexes.remove(key)?;
+                count += 1;
+                if count % 4096 == 0 {
+                    cancel.check_cancelled()?;
+                }
             }
         }
         Ok(())
@@ -4169,7 +4291,7 @@ fn node_record_to_legacy_props(node: &NodeRecord) -> BTreeMap<String, serde_json
 }
 
 fn namespace_from_str(id: &str) -> Option<&str> {
-    id.split_once(':').map(|(ns, _)| ns)
+    parse_database_prefix(id).map(|(namespace, _)| namespace)
 }
 
 fn namespace_from_prefix(prefix: &str) -> Option<&str> {

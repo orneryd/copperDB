@@ -4329,4 +4329,28 @@ fn appstate_bolt_executor_links_demo_sized_hyperlane_batch() {
         elapsed < std::time::Duration::from_secs(5),
         "400-row Bolt relationship link batch should stay on the fast path, took {elapsed:?}"
     );
+
+    let shortest_path = "MATCH (start:Star {starId: $startId}), (end:Star {starId: $endId}) MATCH p = shortestPath((start)-[:HYPERLANE*]-(end)) RETURN [n IN nodes(p) | n.starId] AS pathIds, length(p) AS hops LIMIT 1";
+    let shortest_params = HashMap::from([
+        ("startId".into(), serde_json::json!("s0-0")),
+        ("endId".into(), serde_json::json!("s0-400")),
+    ]);
+    let started = std::time::Instant::now();
+    let shortest = executor
+        .execute_on_database(Some("d3_demo"), shortest_path, &shortest_params)
+        .expect("Bolt executor should answer demo-sized shortest path quickly");
+    let elapsed = started.elapsed();
+
+    assert_eq!(shortest.columns, vec!["pathIds", "hops"]);
+    assert_eq!(shortest.rows.len(), 1);
+    let path_ids = shortest.rows[0][0]
+        .as_array()
+        .expect("expected shortest path star ids");
+    assert_eq!(path_ids.first(), Some(&serde_json::json!("s0-0")));
+    assert_eq!(path_ids.last(), Some(&serde_json::json!("s0-400")));
+    assert_eq!(shortest.rows[0][1], serde_json::json!(400));
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "400-hop Bolt shortest path should stay on the optimized BFS path, took {elapsed:?}"
+    );
 }

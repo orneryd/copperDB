@@ -1990,6 +1990,238 @@
     }
 
     #[test]
+    fn test_execute_with_routes_shortest_path_demo_mesh_performance() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE INDEX star_id_idx IF NOT EXISTS FOR (n:Star) ON (n.starId)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let star_count = 512;
+        for index in 0..=star_count {
+            store_node(
+                engine.storage.as_ref(),
+                &format!("star:{index}"),
+                &["Star"],
+                HashMap::from([("starId".into(), Value::String(format!("s{index}")))]),
+            );
+        }
+
+        let mut edges = Vec::new();
+        for index in 0..star_count {
+            edges.push(EdgeRecord {
+                id: format!("lane:chain:{index}"),
+                start_node: format!("star:{index}"),
+                end_node: format!("star:{}", index + 1),
+                edge_type: "HYPERLANE".to_string(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            });
+            if index + 7 <= star_count {
+                edges.push(EdgeRecord {
+                    id: format!("lane:skip7:{index}"),
+                    start_node: format!("star:{index}"),
+                    end_node: format!("star:{}", index + 7),
+                    edge_type: "HYPERLANE".to_string(),
+                    properties: BTreeMap::new(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                });
+            }
+            if index + 31 <= star_count {
+                edges.push(EdgeRecord {
+                    id: format!("lane:skip31:{index}"),
+                    start_node: format!("star:{index}"),
+                    end_node: format!("star:{}", index + 31),
+                    edge_type: "HYPERLANE".to_string(),
+                    properties: BTreeMap::new(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                });
+            }
+        }
+        engine.storage.put_edge_records_batch(&edges).unwrap();
+
+        let cypher = "MATCH (start:Star {starId: $startId}), (end:Star {starId: $endId}) MATCH p = shortestPath((start)-[:HYPERLANE*]-(end)) RETURN [n IN nodes(p) | n.starId] AS pathIds, length(p) AS hops LIMIT 1";
+        let query = parser.parse(cypher).unwrap();
+        let pattern = detect_query_pattern(cypher);
+        let (shape_match, compound_ok) = match_compound_query_shape(cypher);
+        let (pipeline_clauses, pipeline_ok) = can_execute_as_pipeline(cypher);
+        let params = HashMap::from([
+            ("startId".to_string(), Value::String("s0".to_string())),
+            (
+                "endId".to_string(),
+                Value::String(format!("s{star_count}")),
+            ),
+        ]);
+
+        let started = std::time::Instant::now();
+        let result = engine
+            .execute_with_routes(
+                &query,
+                &params,
+                &pattern,
+                compound_ok.then_some(&shape_match),
+                pipeline_ok.then_some(pipeline_clauses.as_slice()),
+            )
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(result.rows.len(), 1);
+        let path_ids = result.rows[0]
+            .get("pathIds")
+            .and_then(Value::as_array)
+            .expect("expected star id path");
+        assert_eq!(path_ids.first(), Some(&Value::String("s0".to_string())));
+        assert_eq!(
+            path_ids.last(),
+            Some(&Value::String(format!("s{star_count}")))
+        );
+        assert!(result.rows[0].get("hops").and_then(Value::as_i64).unwrap_or(0) > 0);
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "demo-shaped shortestPath should stay on the optimized BFS path, took {elapsed:?}"
+        );
+    }
+
+    /// d3_demo profiling harness: measures per-phase latency so we can
+    /// isolate bottlenecks and compare before/after optimisations.
+    /// Run with: cargo test -p copperdb-eval --lib prof_d3_demo -- --nocapture
+    #[test]
+    fn prof_d3_demo_phases() {
+        let warmup_iters = 2usize;
+        let timed_iters = 5usize;
+        let node_count = 401usize;
+        let edge_count = 400usize;
+
+        macro_rules! phase {
+            ($label:expr, $timings:expr, $body:block) => {{
+                let start = std::time::Instant::now();
+                let _r = { $body };
+                let elapsed = start.elapsed();
+                eprintln!("  [{}]: {:.2?}", $label, elapsed);
+                $timings.push(($label, elapsed));
+            }};
+        }
+
+        // ── Warmup (discarded) ──────────────────────────────────────
+        for _ in 0..warmup_iters {
+            let engine = make_engine();
+            let storage = engine.storage.clone();
+            let parser = Parser::new();
+            engine
+                .execute(
+                    &parser
+                        .parse("CREATE INDEX star_id_idx IF NOT EXISTS FOR (n:Star) ON (n.starId)")
+                        .unwrap(),
+                    &HashMap::new(),
+                )
+                .unwrap();
+            let mut edges = Vec::with_capacity(edge_count);
+            for i in 0..node_count {
+                store_node(storage.as_ref(), &format!("star:{i}"), &["Star"], {
+                    HashMap::from([("starId".into(), Value::String(format!("s0-{i}")))])
+                });
+                if i < edge_count {
+                    edges.push(EdgeRecord {
+                        id: format!("lane:chain:{i}"),
+                        start_node: format!("star:{i}"),
+                        end_node: format!("star:{}", i + 1),
+                        edge_type: "HYPERLANE".to_string(),
+                        properties: BTreeMap::new(),
+                        created_at_unix_ms: 0,
+                        updated_at_unix_ms: 0,
+                    });
+                }
+            }
+            storage.put_edge_records_batch(&edges).unwrap();
+            let cypher = "MATCH (start:Star {starId: $startId}), (end:Star {starId: $endId}) MATCH p = shortestPath((start)-[:HYPERLANE*]-(end)) RETURN [n IN nodes(p) | n.starId] AS pathIds, length(p) AS hops LIMIT 1";
+            let query = parser.parse(cypher).unwrap();
+            let pattern = detect_query_pattern(cypher);
+            let (shape_match, compound_ok) = match_compound_query_shape(cypher);
+            let (pipeline_clauses, pipeline_ok) = can_execute_as_pipeline(cypher);
+            let params = HashMap::from([
+                ("startId".into(), Value::String("s0-0".into())),
+                ("endId".into(), Value::String(format!("s0-{edge_count}"))),
+            ]);
+            engine.execute_with_routes(&query, &params, &pattern, compound_ok.then_some(&shape_match), pipeline_ok.then_some(pipeline_clauses.as_slice())).unwrap();
+        }
+
+        // ── Timed iterations ────────────────────────────────────────
+        let mut phase_sums: HashMap<&str, Vec<std::time::Duration>> = HashMap::new();
+        for _iter in 0..timed_iters {
+            let engine = make_engine();
+            let storage = engine.storage.clone();
+            let parser = Parser::new();
+
+            let mut iter_timings: Vec<(&str, std::time::Duration)> = Vec::new();
+            phase!("create-index", iter_timings, {
+                engine.execute(&parser.parse("CREATE INDEX star_id_idx IF NOT EXISTS FOR (n:Star) ON (n.starId)").unwrap(), &HashMap::new()).unwrap();
+            });
+            phase!("seed-401-nodes", iter_timings, {
+                for i in 0..node_count {
+                    store_node(storage.as_ref(), &format!("star:{i}"), &["Star"], {
+                        HashMap::from([("starId".into(), Value::String(format!("s0-{i}")))])
+                    });
+                }
+            });
+            let mut edges = Vec::with_capacity(edge_count);
+            for i in 0..edge_count {
+                edges.push(EdgeRecord {
+                    id: format!("lane:chain:{i}"),
+                    start_node: format!("star:{i}"),
+                    end_node: format!("star:{}", i + 1),
+                    edge_type: "HYPERLANE".to_string(),
+                    properties: BTreeMap::new(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                });
+            }
+            phase!("seed-400-edges-batch", iter_timings, {
+                storage.put_edge_records_batch(&edges).unwrap();
+            });
+            let cypher = "MATCH (start:Star {starId: $startId}), (end:Star {starId: $endId}) MATCH p = shortestPath((start)-[:HYPERLANE*]-(end)) RETURN [n IN nodes(p) | n.starId] AS pathIds, length(p) AS hops LIMIT 1";
+            let query = parser.parse(cypher).unwrap();
+            let pattern = detect_query_pattern(cypher);
+            let (shape_match, compound_ok) = match_compound_query_shape(cypher);
+            let (pipeline_clauses, pipeline_ok) = can_execute_as_pipeline(cypher);
+            let params: HashMap<String, Value> = HashMap::from([
+                ("startId".into(), Value::String("s0-0".into())),
+                ("endId".into(), Value::String(format!("s0-{edge_count}"))),
+            ]);
+            phase!("shortest-path", iter_timings, {
+                let t0 = std::time::Instant::now();
+                let result = engine.execute_with_routes(&query, &params, &pattern, compound_ok.then_some(&shape_match), pipeline_ok.then_some(pipeline_clauses.as_slice())).unwrap();
+                let t1 = t0.elapsed();
+                eprintln!("    execute_with_routes={:.2?}", t1);
+                assert_eq!(result.rows.len(), 1);
+                assert_eq!(result.rows[0].get("hops").and_then(Value::as_i64), Some(400));
+            });
+
+            for (label, dur) in iter_timings {
+                phase_sums.entry(label).or_default().push(dur);
+            }
+        }
+
+        // ── Print summary ───────────────────────────────────────────
+        eprintln!("\n=== d3_demo profiling summary ({timed_iters} iters) ===");
+        for label in &["create-index", "seed-401-nodes", "seed-400-edges-batch", "shortest-path"] {
+            let durs = &phase_sums[*label];
+            let min = durs.iter().min().unwrap();
+            let max = durs.iter().max().unwrap();
+            let avg = durs.iter().sum::<std::time::Duration>() / durs.len() as u32;
+            eprintln!("  {label:30} min={min:.2?} max={max:.2?} avg={avg:.2?}");
+        }
+        eprintln!("=== end profiling ===\n");
+    }
+
+    #[test]
     fn test_create_path_variable_materializes_path_accessors() {
         let engine = make_engine();
         let parser = Parser::new();

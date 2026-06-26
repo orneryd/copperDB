@@ -1773,6 +1773,30 @@ mod tests {
     }
 
     #[test]
+    fn test_comparison_string_predicates_all_variants() {
+        let cases = [
+            ("CONTAINS", "Hello World", "World", true),
+            ("CONTAINS", "Hello World", "missing", false),
+            ("STARTS WITH", "Hello World", "Hello", true),
+            ("STARTS WITH", "Hello World", "World", false),
+            ("ENDS WITH", "Hello World", "World", true),
+            ("ENDS WITH", "Hello World", "Hello", false),
+        ];
+
+        for (op, left, right, expected) in cases {
+            let expr = Expression::Comparison {
+                operands: binary(literal_string(left), literal_string(right)),
+                op: op.to_string(),
+            };
+            assert_eq!(
+                eval_expression(&expr, &HashMap::new(), &HashMap::new()).unwrap(),
+                json!(expected),
+                "operator {op}"
+            );
+        }
+    }
+
+    #[test]
     fn test_comparison_regex_match() {
         let expr = Expression::Comparison {
             operands: binary(literal_string("Alice"), literal_string("A.*")),
@@ -1823,6 +1847,24 @@ mod tests {
     fn test_or_short_circuit() {
         let expr = Expression::Or(binary(literal_bool(true), literal_bool(false)));
         assert!(eval_predicate(&expr, &HashMap::new(), &HashMap::new()).unwrap());
+    }
+
+    #[test]
+    fn test_xor_truth_table() {
+        let cases = [
+            (true, true, false),
+            (true, false, true),
+            (false, true, true),
+            (false, false, false),
+        ];
+
+        for (left, right, expected) in cases {
+            let expr = Expression::Xor(binary(literal_bool(left), literal_bool(right)));
+            assert_eq!(
+                eval_predicate(&expr, &HashMap::new(), &HashMap::new()).unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]

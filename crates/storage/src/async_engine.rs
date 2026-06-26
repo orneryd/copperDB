@@ -1755,7 +1755,7 @@ fn handle_request(
 }
 
 fn namespace_from_id(id: &str) -> Option<&str> {
-    id.split_once(':').map(|(namespace, _)| namespace)
+    crate::parse_database_prefix(id).map(|(namespace, _)| namespace)
 }
 
 fn pending_adjacent_edge_ids(

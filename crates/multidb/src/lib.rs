@@ -160,15 +160,16 @@ impl DatabaseManager {
         self.databases.get(name).map(|d| d.clone())
     }
 
-    pub fn drop(&self, name: &str) -> Result<(), MultiDbError> {
+    pub fn drop(&self, name: &str) -> Result<Database, MultiDbError> {
         if name == "system" {
             return Err(MultiDbError::CannotDropSystem);
         }
-        self.databases
+        let (_key, database) = self
+            .databases
             .remove(name)
             .ok_or_else(|| MultiDbError::NotFound(name.to_owned()))?;
         self.delete_database_record(name)?;
-        Ok(())
+        Ok(database)
     }
 
     pub fn list(&self) -> Vec<Database> {

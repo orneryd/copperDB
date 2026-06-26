@@ -72,6 +72,11 @@ impl<'a> ParseContext<'a> {
                                         self.advance();
                                         sub_clauses.push(Clause::Delete(self.parse_delete(false)?));
                                     }
+                                    t if t.eq_ignore_ascii_case("DETACH") => {
+                                        self.advance();
+                                        self.expect("DELETE")?;
+                                        sub_clauses.push(Clause::Delete(self.parse_delete(true)?));
+                                    }
                                     t if t.eq_ignore_ascii_case("WHERE") => {
                                         self.advance();
                                         sub_clauses.push(Clause::Where(self.parse_where()?));

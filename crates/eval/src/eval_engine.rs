@@ -545,9 +545,13 @@ impl EvalEngine {
                         properties: create.properties.clone(),
                     };
                     if create.if_not_exists {
-                        catalog.create_if_absent(definition)?;
+                        catalog.create_if_absent_with_cancellation(
+                            definition,
+                            request_context.cancellation(),
+                        )?;
                     } else {
-                        catalog.create(definition)?;
+                        catalog
+                            .create_with_cancellation(definition, request_context.cancellation())?;
                     }
 
                     // Persist vector index options separately
@@ -1048,8 +1052,12 @@ impl EvalEngine {
                 }
 
                 Clause::Delete(del) => {
-                    current_rows =
-                        self.execute_delete_clause(&current_rows, &del.variables, &mut stats)?;
+                    current_rows = self.execute_delete_clause(
+                        &current_rows,
+                        &del.variables,
+                        del.detach,
+                        &mut stats,
+                    )?;
                 }
 
                 Clause::Set(set) => {
@@ -1137,7 +1145,7 @@ impl EvalEngine {
                 }
 
                 Clause::Subquery(sub) => {
-                    current_rows = self.execute_subquery(&current_rows, sub, params)?;
+                    current_rows = self.execute_subquery(&current_rows, sub, params, &mut stats)?;
                 }
 
                 Clause::WhereExists(sub) => {
@@ -1453,7 +1461,12 @@ impl EvalEngine {
 
         if seeded.is_empty() {
             // No matching rows from first MATCH — return empty
-            return self.build_shortest_path_result(query, params, Vec::new());
+            return self.build_shortest_path_result(
+                query,
+                params,
+                Vec::new(),
+                &self.knowledge_policy_resolver()?,
+            );
         }
 
         let rel_types: Vec<String> = edge_pat
@@ -1464,7 +1477,7 @@ impl EvalEngine {
         let direction = &edge_pat.direction;
         let max_hops = edge_pat
             .max_hops
-            .unwrap_or(50) // NornicDB default is 10; we use 50 for large graphs
+            .unwrap_or(VAR_LENGTH_UNBOUNDED_MAX_HOPS)
             .max(edge_pat.min_hops.unwrap_or(1));
 
         let find_all = sp_pattern.all_shortest_paths;
@@ -1514,11 +1527,73 @@ impl EvalEngine {
             }
         }
 
-        self.build_shortest_path_result(query, params, all_paths)
+        let result = self.build_shortest_path_result(
+            query,
+            params,
+            all_paths,
+            &self.knowledge_policy_resolver()?,
+        );
+        result
     }
 
-    /// Dedicated BFS that returns the first (shortest) path to the target, or None.
-    fn bfs_shortest_path(
+    /// Build an in-memory adjacency map for all edges of the specified types,
+    /// filtering by knowledge-policy visibility. This replaces O(N) per-node
+    /// sled prefix scans during BFS with a single upfront scan.
+    pub(crate) fn bfs_adjacency_map(
+        &self,
+        rel_types: &[String],
+        direction: &EdgeDirection,
+        resolver: &Resolver,
+    ) -> Result<HashMap<String, Vec<EdgeRecord>>, EvalError> {
+        let edge_type_filter: Option<&str> = if rel_types.len() == 1 {
+            Some(rel_types[0].as_str())
+        } else {
+            None
+        };
+        let mut adjacency: HashMap<String, Vec<EdgeRecord>> = HashMap::new();
+        let edges = if let Some(edge_type) = edge_type_filter {
+            self.storage.get_edges_by_type(edge_type)?
+        } else {
+            self.storage.all_edges()?
+        };
+        for edge in edges {
+            if rel_types.len() > 1 && !rel_types.iter().any(|t| *t == edge.edge_type) {
+                continue;
+            }
+            if !self
+                .edge_visible_under_policy(&edge, resolver)
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            match direction {
+                EdgeDirection::Outgoing => {
+                    adjacency
+                        .entry(edge.start_node.clone())
+                        .or_default()
+                        .push(edge.clone());
+                }
+                EdgeDirection::Incoming => {
+                    adjacency
+                        .entry(edge.end_node.clone())
+                        .or_default()
+                        .push(edge.clone());
+                }
+                EdgeDirection::Both => {
+                    adjacency
+                        .entry(edge.start_node.clone())
+                        .or_default()
+                        .push(edge.clone());
+                    adjacency
+                        .entry(edge.end_node.clone())
+                        .or_default()
+                        .push(edge);
+                }
+            }
+        }
+        Ok(adjacency)
+    }
+    pub(crate) fn bfs_shortest_path(
         &self,
         start_id: &str,
         end_id: &str,
@@ -1526,66 +1601,95 @@ impl EvalEngine {
         direction: &EdgeDirection,
         max_hops: usize,
     ) -> Result<Option<ShortestPathFound>, EvalError> {
-        use std::collections::VecDeque;
+        let resolver = self.knowledge_policy_resolver()?;
+        let adjacency = self.bfs_adjacency_map(rel_types, direction, &resolver)?;
 
-        let start_props = match self.node_props_by_id(start_id)? {
-            Some(props) => props,
-            None => return Ok(None),
-        };
-        let _start_val = serde_json::to_value(&start_props)
-            .map_err(|e| EvalError::SerializationError(e.to_string()))?;
-
-        let mut visited: HashMap<String, bool> = HashMap::new();
-        let mut queue: VecDeque<(String, Vec<String>, Vec<EdgeRecord>, usize)> = VecDeque::new();
-
-        queue.push_back((
+        let mut predecessors: HashMap<String, BfsPredecessor> = HashMap::new();
+        predecessors.insert(
             start_id.to_string(),
-            vec![start_id.to_string()],
-            Vec::new(),
-            0,
-        ));
-        visited.insert(start_id.to_string(), true);
+            BfsPredecessor {
+                parent: None,
+                edge: None,
+                depth: 0,
+            },
+        );
 
-        while let Some((current_id, node_path, edge_path, depth)) = queue.pop_front() {
-            Self::check_current_request_context()?;
+        let mut queue = vec![start_id.to_string()];
+        let mut head = 0;
+        while head < queue.len() {
+            if head & BFS_CANCEL_CHECK_MASK == 0 {
+                Self::check_current_request_context()?;
+            }
+            let current_id = queue[head].clone();
+            head += 1;
+            let depth = predecessors
+                .get(&current_id)
+                .map(|predecessor| predecessor.depth)
+                .unwrap_or(0);
             if depth >= max_hops {
                 continue;
             }
 
-            // Get edges from current node
-            let edges = self.relationship_candidates_for_node(&current_id, rel_types, direction)?;
-
-            for edge in edges {
-                let next_id = related_node_id(&current_id, &edge, direction).map(str::to_string);
-
+            let neighbors = adjacency.get(&current_id);
+            let Some(neighbors) = neighbors else { continue };
+            for edge in neighbors {
+                let next_id = related_node_id(&current_id, edge, direction).map(str::to_string);
                 let Some(next_id) = next_id else {
                     continue;
                 };
-
-                if visited.contains_key(&next_id) {
+                if predecessors.contains_key(&next_id) {
                     continue;
                 }
 
-                let mut next_node_path = node_path.clone();
-                next_node_path.push(next_id.clone());
-                let mut next_edge_path = edge_path.clone();
-                next_edge_path.push(edge.clone());
+                predecessors.insert(
+                    next_id.clone(),
+                    BfsPredecessor {
+                        parent: Some(current_id.clone()),
+                        edge: Some(edge.clone()),
+                        depth: depth + 1,
+                    },
+                );
 
                 if next_id == end_id {
-                    // Found the target — build and return path
-                    return Ok(Some(ShortestPathFound {
-                        node_ids: next_node_path,
-                        edges: next_edge_path,
-                        hops: depth + 1,
-                    }));
+                    return self.reconstruct_shortest_path(start_id, end_id, &predecessors);
                 }
 
-                visited.insert(next_id.clone(), true);
-                queue.push_back((next_id, next_node_path, next_edge_path, depth + 1));
+                queue.push(next_id);
             }
         }
 
         Ok(None)
+    }
+
+    fn reconstruct_shortest_path(
+        &self,
+        start_id: &str,
+        end_id: &str,
+        predecessors: &HashMap<String, BfsPredecessor>,
+    ) -> Result<Option<ShortestPathFound>, EvalError> {
+        let mut current_id = end_id.to_string();
+        let mut node_ids = vec![current_id.clone()];
+        let mut edges = Vec::new();
+
+        while current_id != start_id {
+            let Some(predecessor) = predecessors.get(&current_id) else {
+                return Ok(None);
+            };
+            let (Some(parent), Some(edge)) = (&predecessor.parent, &predecessor.edge) else {
+                return Ok(None);
+            };
+            edges.push(edge.clone());
+            node_ids.push(parent.clone());
+            current_id = parent.clone();
+        }
+
+        node_ids.reverse();
+        edges.reverse();
+        Ok(Some(ShortestPathFound {
+            hops: edges.len(),
+            node_ids,
+            edges,
+        }))
     }
 
     /// BFS that finds all shortest paths to the target.
@@ -1599,10 +1703,14 @@ impl EvalEngine {
     ) -> Result<Vec<ShortestPathFound>, EvalError> {
         use std::collections::VecDeque;
 
+        let resolver = self.knowledge_policy_resolver()?;
+        let adjacency = self.bfs_adjacency_map(rel_types, direction, &resolver)?;
+
         let mut queue: VecDeque<(String, Vec<String>, Vec<EdgeRecord>, usize)> = VecDeque::new();
         let mut visited: HashMap<String, usize> = HashMap::new(); // node -> depth
         let mut results = Vec::new();
         let mut found_depth: Option<usize> = None;
+        let mut dequeue_count = 0;
 
         queue.push_back((
             start_id.to_string(),
@@ -1613,7 +1721,10 @@ impl EvalEngine {
         visited.insert(start_id.to_string(), 0);
 
         while let Some((current_id, node_path, edge_path, depth)) = queue.pop_front() {
-            Self::check_current_request_context()?;
+            if dequeue_count & BFS_CANCEL_CHECK_MASK == 0 {
+                Self::check_current_request_context()?;
+            }
+            dequeue_count += 1;
 
             // If we found paths at a shallower depth, stop
             if let Some(fd) = found_depth {
@@ -1626,7 +1737,9 @@ impl EvalEngine {
                 continue;
             }
 
-            let edges = self.relationship_candidates_for_node(&current_id, rel_types, direction)?;
+            let neighbors = adjacency.get(&current_id);
+            let empty = Vec::new();
+            let edges = neighbors.unwrap_or(&empty);
 
             for edge in edges {
                 let next_id = related_node_id(&current_id, &edge, direction).map(str::to_string);
@@ -1664,49 +1777,13 @@ impl EvalEngine {
         Ok(results)
     }
 
-    /// Get all outgoing/incoming/both edges for a node, filtered by type.
-    fn relationship_candidates_for_node(
-        &self,
-        node_id: &str,
-        rel_types: &[String],
-        direction: &EdgeDirection,
-    ) -> Result<Vec<EdgeRecord>, EvalError> {
-        let adj_dir = match direction {
-            EdgeDirection::Outgoing => EdgeAdjacencyDirection::Outgoing,
-            EdgeDirection::Incoming => EdgeAdjacencyDirection::Incoming,
-            EdgeDirection::Both => EdgeAdjacencyDirection::Both,
-        };
-        let edge_type = if rel_types.len() == 1 {
-            Some(rel_types[0].as_str())
-        } else if rel_types.is_empty() {
-            None
-        } else {
-            None // multi-type not supported for adjacency lookup; filter below
-        };
-
-        let mut edges = self
-            .storage
-            .get_adjacent_edges(node_id, adj_dir, edge_type)?;
-
-        if rel_types.len() > 1 {
-            edges.retain(|e| rel_types.iter().any(|t| e.edge_type == *t));
-        }
-
-        let resolver = self.knowledge_policy_resolver()?;
-        edges.retain(|e| {
-            self.edge_visible_under_policy(e, &resolver)
-                .unwrap_or(false)
-        });
-
-        Ok(edges)
-    }
-
     /// Build the final EvalResult from found shortest paths.
     fn build_shortest_path_result(
         &self,
         query: &Query,
         params: &HashMap<String, Value>,
         paths: Vec<ShortestPathFound>,
+        resolver: &Resolver,
     ) -> Result<Option<EvalResult>, EvalError> {
         // Find the RETURN clause
         let ret = match query.clauses.iter().find_map(|c| {
@@ -1740,11 +1817,12 @@ impl EvalEngine {
             }
 
             // Build node + edge values for the path
+            let _t_nodes0 = std::time::Instant::now();
             let node_vals: Result<Vec<Value>, _> = path
                 .node_ids
                 .iter()
                 .map(|id| {
-                    self.node_props_by_id(id)?
+                    self.node_props_by_id_with_resolver(id, resolver)?
                         .ok_or_else(|| EvalError::ExecutionError(format!("node {id} not found")))
                         .and_then(|props| {
                             serde_json::to_value(&props)
@@ -1843,18 +1921,21 @@ impl EvalEngine {
             }
             // [n IN nodes(p) | n.prop] → list comprehension
             Expression::ListComprehension(lc) => {
-                // Check if list is nodes(p) or similar
                 if let Expression::FunctionCall { name, .. } = lc.list.as_ref() {
                     if name.eq_ignore_ascii_case("nodes") {
-                        let mut result = Vec::new();
+                        // Lazy materialization: extract only the needed property
+                        // from each node directly, avoiding full node-value clone
+                        // and expression-evaluation overhead per iteration.
+                        let projections: Vec<&str> =
+                            extract_list_comprehension_properties(&lc.expression);
+                        let mut result = Vec::with_capacity(node_vals.len());
                         for node_val in node_vals {
-                            let mut inner_row = row.clone();
-                            inner_row.insert(lc.variable.clone(), node_val.clone());
-                            // Check predicate (WHERE clause)
+                            // Check predicate (WHERE clause) — rare path, still uses row
                             if let Some(ref pred) = lc.predicate {
+                                let mut inner_row = row.clone();
+                                inner_row.insert(lc.variable.clone(), node_val.clone());
                                 let pred_val =
                                     self.evaluate_expression(pred, &inner_row, params)?;
-                                // truthy: not null, not false, not 0, not empty
                                 let is_truthy =
                                     !matches!(&pred_val, Value::Null | Value::Bool(false))
                                         && !matches!(&pred_val,
@@ -1870,10 +1951,23 @@ impl EvalEngine {
                                     continue;
                                 }
                             }
-                            // Extract
-                            let val =
-                                self.evaluate_expression(&lc.expression, &inner_row, params)?;
-                            result.push(val);
+                            if projections.len() == 1 {
+                                // Fast path: single property extraction without cloning
+                                if let Value::Object(ref props) = node_val {
+                                    result.push(
+                                        props.get(projections[0]).cloned().unwrap_or(Value::Null),
+                                    );
+                                } else {
+                                    result.push(Value::Null);
+                                }
+                            } else {
+                                // Fallback: use expression evaluation
+                                let mut inner_row = row.clone();
+                                inner_row.insert(lc.variable.clone(), node_val.clone());
+                                let val =
+                                    self.evaluate_expression(&lc.expression, &inner_row, params)?;
+                                result.push(val);
+                            }
                         }
                         return Ok(Value::Array(result));
                     }
@@ -2484,8 +2578,12 @@ impl EvalEngine {
                     replace_binding_rows(&mut current_rows, new_rows);
                 }
                 Clause::Delete(del) => {
-                    current_rows =
-                        self.execute_delete_clause(&current_rows, &del.variables, &mut stats)?;
+                    current_rows = self.execute_delete_clause(
+                        &current_rows,
+                        &del.variables,
+                        del.detach,
+                        &mut stats,
+                    )?;
                 }
                 Clause::Set(set) => {
                     self.execute_set_clause(&mut current_rows, &set.items, params, &mut stats)?;
@@ -2841,6 +2939,7 @@ impl EvalEngine {
         &self,
         base_rows: &[Row],
         variables: &[String],
+        detach: bool,
         stats: &mut QueryStats,
     ) -> Result<Vec<Row>, EvalError> {
         self.invalidate_node_lookup_cache();
@@ -2848,7 +2947,7 @@ impl EvalEngine {
 
         for row in base_rows {
             for var in variables {
-                self.delete_bound_value(row.get(var), stats)?;
+                self.delete_bound_value(row.get(var), detach, stats)?;
             }
             remaining_rows.push(row.clone());
         }
@@ -3023,6 +3122,7 @@ impl EvalEngine {
     fn delete_bound_value(
         &self,
         value: Option<&Value>,
+        detach: bool,
         stats: &mut QueryStats,
     ) -> Result<(), EvalError> {
         let Some(Value::Object(props)) = value else {
@@ -3034,11 +3134,27 @@ impl EvalEngine {
 
         if props.contains_key("_type") && props.contains_key("_start") && props.contains_key("_end")
         {
-            self.storage.delete_edge_record(id)?;
-            stats.relationships_deleted += 1;
+            if self.storage.get_edge_record(id)?.is_some() {
+                self.storage.delete_edge_record(id)?;
+                stats.relationships_deleted += 1;
+            }
         } else {
-            self.storage.delete_node_record(id)?;
-            stats.nodes_deleted += 1;
+            let node_exists = self.storage.get_node_record(id)?.is_some();
+            if detach {
+                for edge in
+                    self.storage
+                        .get_adjacent_edges(id, EdgeAdjacencyDirection::Both, None)?
+                {
+                    if self.storage.get_edge_record(&edge.id)?.is_some() {
+                        self.storage.delete_edge_record(&edge.id)?;
+                        stats.relationships_deleted += 1;
+                    }
+                }
+            }
+            if node_exists {
+                self.storage.delete_node_record(id)?;
+                stats.nodes_deleted += 1;
+            }
         }
 
         Ok(())
@@ -3769,11 +3885,13 @@ impl EvalEngine {
         params: &HashMap<String, Value>,
     ) -> Result<Vec<Row>, EvalError> {
         let mut result = Vec::new();
+        let mut stats = QueryStats::default();
         for row in rows {
             let sub_results = self.execute_subquery_block(
                 std::slice::from_ref(row),
                 &sub.blocks[0].clauses,
                 params,
+                &mut stats,
             )?;
             if !sub_results.is_empty() {
                 result.push(row.clone());
@@ -3788,10 +3906,12 @@ impl EvalEngine {
         outer_rows: &[Row],
         sub: &SubqueryClause,
         params: &HashMap<String, Value>,
+        stats: &mut QueryStats,
     ) -> Result<Vec<Row>, EvalError> {
         let mut result = Vec::new();
         for block in &sub.blocks {
-            let block_rows = self.execute_subquery_block(outer_rows, &block.clauses, params)?;
+            let block_rows =
+                self.execute_subquery_block(outer_rows, &block.clauses, params, stats)?;
             result.extend(block_rows);
         }
         // UNION (without ALL): deduplicate
@@ -3807,6 +3927,7 @@ impl EvalEngine {
         outer_rows: &[Row],
         clauses: &[Clause],
         params: &HashMap<String, Value>,
+        stats: &mut QueryStats,
     ) -> Result<Vec<Row>, EvalError> {
         let mut result = Vec::new();
         for outer_row in outer_rows {
@@ -3840,12 +3961,21 @@ impl EvalEngine {
                     Clause::OptionalMatch(m) => {
                         let mut new_rows = Vec::new();
                         for row in &current {
-                            let matched = self.match_relationship_pattern(
-                                std::slice::from_ref(row),
-                                &m.pattern,
-                                params,
-                                None,
-                            )?;
+                            let matched = if m.pattern.edges.is_empty() {
+                                self.execute_node_match_clause(
+                                    std::slice::from_ref(row),
+                                    &m.pattern,
+                                    params,
+                                    None,
+                                )?
+                            } else {
+                                self.match_relationship_pattern(
+                                    std::slice::from_ref(row),
+                                    &m.pattern,
+                                    params,
+                                    None,
+                                )?
+                            };
                             if matched.is_empty() {
                                 let mut null_row = row.clone();
                                 bind_optional_pattern_nulls(&mut null_row, &m.pattern);
@@ -3862,17 +3992,50 @@ impl EvalEngine {
                         });
                     }
                     Clause::With(w) => {
-                        let mut new_rows = Vec::new();
-                        for row in &current {
-                            new_rows.push(self.project_row(row, &w.items, params)?);
-                        }
-                        current = new_rows;
+                        current = if has_aggregation_items(&w.items) && !current.is_empty() {
+                            apply_aggregation_to_rows(&current, &w.items, params)?
+                        } else {
+                            current
+                                .iter()
+                                .map(|row| self.project_row(row, &w.items, params))
+                                .collect::<Result<Vec<_>, _>>()?
+                        };
                     }
                     Clause::Return(r) => {
-                        let mut rows: Vec<Row> = current
-                            .iter()
-                            .map(|row| self.project_row(row, &r.items, params))
-                            .collect::<Result<Vec<_>, _>>()?;
+                        let any_agg = has_aggregation_items(&r.items);
+                        let mut rows: Vec<Row> = if current.is_empty() && any_agg {
+                            vec![aggregate_identity_row(&r.items, params)?]
+                        } else if any_agg && !current.is_empty() {
+                            apply_aggregation_to_rows(&current, &r.items, params)?
+                        } else {
+                            current
+                                .iter()
+                                .map(|row| self.project_row(row, &r.items, params))
+                                .collect::<Result<Vec<_>, _>>()?
+                        };
+                        rows = if any_agg {
+                            let base = current
+                                .first()
+                                .cloned()
+                                .unwrap_or_else(|| outer_row.clone());
+                            rows.into_iter()
+                                .map(|projected| {
+                                    let mut merged = base.clone();
+                                    merged.extend(projected);
+                                    merged
+                                })
+                                .collect()
+                        } else {
+                            current
+                                .iter()
+                                .cloned()
+                                .zip(rows)
+                                .map(|(mut base, projected)| {
+                                    base.extend(projected);
+                                    base
+                                })
+                                .collect()
+                        };
                         if r.distinct {
                             let mut seen = std::collections::HashSet::new();
                             rows.retain(|r| seen.insert(row_key(r)));
@@ -3884,21 +4047,17 @@ impl EvalEngine {
                         let mut new_rows = Vec::new();
                         for row in &current {
                             let mut r = row.clone();
-                            let mut stats = QueryStats::default();
-                            self.execute_pattern_create_segment(
-                                &mut r, &c.pattern, &mut stats, params,
-                            )?;
+                            self.execute_pattern_create_segment(&mut r, &c.pattern, stats, params)?;
                             new_rows.push(r);
                         }
                         current = new_rows;
                     }
                     Clause::Set(s) => {
-                        self.execute_set_clause(
-                            &mut current,
-                            &s.items,
-                            params,
-                            &mut QueryStats::default(),
-                        )?;
+                        self.execute_set_clause(&mut current, &s.items, params, stats)?;
+                    }
+                    Clause::Delete(d) => {
+                        current =
+                            self.execute_delete_clause(&current, &d.variables, d.detach, stats)?;
                     }
                     _ => {
                         return Err(EvalError::ExecutionError(
@@ -4102,10 +4261,25 @@ impl EvalEngine {
                 let edge_type_for_check = edge_type.clone();
                 let start_id_for_check = start_id.clone();
                 let end_id_for_check = end_id.clone();
+                let expected_edge_props =
+                    evaluate_pattern_properties(&edge_pat.properties, base_row, params)?;
 
-                let found = self
-                    .storage
-                    .find_edge_between(&start_id, &edge_type, &end_id)?;
+                let found = if expected_edge_props.is_empty() {
+                    self.storage
+                        .find_edge_between(&start_id, &edge_type, &end_id)?
+                } else {
+                    self.storage
+                        .get_adjacent_edges(
+                            &start_id,
+                            EdgeAdjacencyDirection::Outgoing,
+                            Some(&edge_type),
+                        )?
+                        .into_iter()
+                        .find(|edge| {
+                            edge.end_node == end_id
+                                && edge_matches_pattern(edge, &expected_edge_props)
+                        })
+                };
                 let (edge_val, is_new) = if let Some(edge) = found {
                     let mut props: HashMap<String, Value> =
                         edge.properties.clone().into_iter().collect();
@@ -4120,22 +4294,32 @@ impl EvalEngine {
                     )
                 } else {
                     let id = format!("edge:{}", Uuid::new_v4());
-                    let edge_record = EdgeRecord {
+                    let edge_record = self.persist_edge_record(EdgeRecord {
                         id,
                         start_node: start_id.clone(),
                         end_node: end_id.clone(),
                         edge_type: edge_type.clone(),
-                        properties: BTreeMap::new(),
+                        properties: expected_edge_props.clone().into_iter().collect(),
                         created_at_unix_ms: 0,
                         updated_at_unix_ms: 0,
-                    };
-                    self.storage.put_edge_record(&edge_record)?;
+                    })?;
                     stats.relationships_created += 1;
-                    let mut props: HashMap<String, Value> = HashMap::new();
+                    stats.properties_set += expected_edge_props.len();
+                    let mut props: HashMap<String, Value> =
+                        edge_record.properties.clone().into_iter().collect();
                     props.insert("_id".to_string(), Value::String(edge_record.id.clone()));
-                    props.insert("_type".to_string(), Value::String(edge_type));
-                    props.insert("_start".to_string(), Value::String(start_id));
-                    props.insert("_end".to_string(), Value::String(end_id));
+                    props.insert(
+                        "_type".to_string(),
+                        Value::String(edge_record.edge_type.clone()),
+                    );
+                    props.insert(
+                        "_start".to_string(),
+                        Value::String(edge_record.start_node.clone()),
+                    );
+                    props.insert(
+                        "_end".to_string(),
+                        Value::String(edge_record.end_node.clone()),
+                    );
                     (
                         serde_json::to_value(&props)
                             .map_err(|e| EvalError::SerializationError(e.to_string()))?,
@@ -4726,6 +4910,21 @@ impl EvalEngine {
         Ok(Some(node_record_to_props(&node)))
     }
 
+    fn node_props_by_id_with_resolver(
+        &self,
+        node_id: &str,
+        resolver: &Resolver,
+    ) -> Result<Option<HashMap<String, Value>>, EvalError> {
+        let Some(node) = self.storage.get_node_record(node_id)? else {
+            return Ok(None);
+        };
+        if !self.node_visible_under_policy(&node, resolver)? {
+            return Ok(None);
+        }
+        self.apply_on_access_for_node(&node, resolver)?;
+        Ok(Some(node_record_to_props(&node)))
+    }
+
     fn node_visible_under_policy(
         &self,
         node: &NodeRecord,
@@ -4937,7 +5136,10 @@ fn is_agg_function(expr: &Expression) -> bool {
     match expr {
         Expression::FunctionCall { name, .. } => {
             let lower = name.to_ascii_lowercase();
-            matches!(lower.as_str(), "avg" | "sum" | "min" | "max" | "count")
+            matches!(
+                lower.as_str(),
+                "avg" | "sum" | "min" | "max" | "count" | "collect"
+            )
         }
         _ => false,
     }
@@ -5329,6 +5531,7 @@ fn aggregate_identity_row(
             Expression::FunctionCall { name, .. } => match name.to_ascii_lowercase().as_str() {
                 "count" => Value::from(0),
                 "sum" => Value::from(0),
+                "collect" => Value::Array(Vec::new()),
                 "avg" | "min" | "max" => Value::Null,
                 _ => Value::Null,
             },
@@ -5433,6 +5636,17 @@ fn compute_agg(
                 Ok(Value::from(rows.len() as i64))
             }
         }
+        "collect" => {
+            let arg = arg.ok_or_else(|| {
+                EvalError::ExecutionError("collect() requires an argument".into())
+            })?;
+            Ok(Value::Array(
+                rows.iter()
+                    .filter_map(|row| copperdb_filter::eval_expression(arg, row, params).ok())
+                    .filter(|value| value != &Value::Null)
+                    .collect(),
+            ))
+        }
         "sum" => {
             let arg =
                 arg.ok_or_else(|| EvalError::ExecutionError("sum() requires an argument".into()))?;
@@ -5502,6 +5716,17 @@ fn compute_agg(
         _ => Err(EvalError::ExecutionError(format!(
             "unsupported aggregation function: {fn_name}"
         ))),
+    }
+}
+
+/// Extract simple property names from a list-comprehension projection expression.
+/// Returns e.g. `["starId"]` for `n.starId`, or empty vec for complex expressions.
+fn extract_list_comprehension_properties(expr: &Expression) -> Vec<&str> {
+    match expr {
+        Expression::PropertyAccess { property, .. } => {
+            vec![property.as_str()]
+        }
+        _ => Vec::new(),
     }
 }
 

@@ -1,7 +1,7 @@
 use super::*;
 use copperdb_kms::{LocalKms, LocalKmsConfig};
 use copperdb_util::RequestCancellation;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::fs;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -36,6 +36,40 @@ fn sample_edge(id: &str, t: &str, start: &str, end: &str) -> EdgeRecord {
         created_at_unix_ms: 123,
         updated_at_unix_ms: 456,
     }
+}
+
+#[test]
+fn parse_database_prefix_splits_first_separator_only() {
+    let cases = [
+        ("db:node-1", Some(("db", "node-1"))),
+        ("db:n1:extra", Some(("db", "n1:extra"))),
+        ("node-1", None),
+        (":node-1", None),
+        ("db:", None),
+        (":", None),
+    ];
+
+    for (input, expected) in cases {
+        assert_eq!(parse_database_prefix(input), expected, "input={input}");
+    }
+}
+
+#[test]
+fn strip_database_prefix_only_removes_matching_database() {
+    assert_eq!(strip_database_prefix("db", "db:node-1"), "node-1");
+    assert_eq!(strip_database_prefix("db", "other:node-1"), "other:node-1");
+    assert_eq!(strip_database_prefix("", "db:node-1"), "db:node-1");
+    assert_eq!(strip_database_prefix("db", ""), "");
+}
+
+#[test]
+fn ensure_database_prefix_preserves_existing_valid_prefixes() {
+    assert_eq!(ensure_database_prefix("db", "node-1"), "db:node-1");
+    assert_eq!(ensure_database_prefix("db", "db:node-1"), "db:node-1");
+    assert_eq!(ensure_database_prefix("db", "other:node-1"), "other:node-1");
+    assert_eq!(ensure_database_prefix("", "node-1"), "node-1");
+    assert_eq!(ensure_database_prefix("db", ""), "");
+    assert_eq!(ensure_database_prefix("db", ":node-1"), "db::node-1");
 }
 
 #[test]
@@ -102,6 +136,33 @@ fn raw_node_edge_round_trip() {
 
     assert!(engine.get_node("node:1").unwrap().is_none());
     assert!(engine.get_edge("edge:1").unwrap().is_none());
+}
+
+#[test]
+fn node_properties_preserve_homogeneous_uint_arrays_round_trip() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let mut node = sample_node("db1:uint-node", &["Metric"]);
+    node.properties.insert(
+        "uints".to_string(),
+        Value::Array(vec![
+            Value::from(0_u64),
+            Value::from(1_u64),
+            Value::from(u64::MAX),
+        ]),
+    );
+
+    engine.put_node_record(&node).unwrap();
+    let loaded = engine.get_node_record("db1:uint-node").unwrap().unwrap();
+
+    assert_eq!(loaded.properties.get("uints"), node.properties.get("uints"));
+    let values = loaded
+        .properties
+        .get("uints")
+        .and_then(Value::as_array)
+        .unwrap();
+    assert_eq!(values[0].as_u64(), Some(0));
+    assert_eq!(values[1].as_u64(), Some(1));
+    assert_eq!(values[2].as_u64(), Some(u64::MAX));
 }
 
 #[test]
@@ -5729,7 +5790,7 @@ fn rebuild_all_indexes_rebuilds_created_index() {
         .unwrap();
 
     // Rebuild all indexes — should be idempotent
-    let (np, nf, rp) = engine.rebuild_all_indexes().unwrap();
+    let (np, _nf, _rp) = engine.rebuild_all_indexes().unwrap();
     assert!(np >= 1); // at least the one we just created
 
     // Nodes should still be queryable by property

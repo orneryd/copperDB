@@ -184,10 +184,26 @@ impl StorageEngine {
         &self,
         index: &IndexDefinition,
     ) -> Result<(), StorageError> {
+        self.rebuild_relationship_property_index_with_cancellation(
+            index,
+            &crate::RequestCancellation::new(),
+        )
+    }
+
+    pub(crate) fn rebuild_relationship_property_index_with_cancellation(
+        &self,
+        index: &IndexDefinition,
+        cancel: &crate::RequestCancellation,
+    ) -> Result<(), StorageError> {
         self.delete_relationship_property_index_entries(index)?;
+        let mut count: u64 = 0;
         for edge in self.get_edges_by_type(&index.label)? {
             if let Some(key) = relationship_property_index_key_for_edge(index, &edge) {
                 self.indexes.insert(key.as_bytes(), [])?;
+            }
+            count += 1;
+            if count % 4096 == 0 {
+                cancel.check_cancelled()?;
             }
         }
         Ok(())

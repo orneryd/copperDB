@@ -8,6 +8,11 @@
 //! Reference: https://7687.org/packstream/packstream-specification-1.html
 
 use bytes::{BufMut, BytesMut};
+use time::{format_description::well_known::Rfc3339, OffsetDateTime, UtcOffset};
+
+const DATETIME_UTC_PATCHED_SIGNATURE: u8 = 0x49;
+const DATETIME_LEGACY_SIGNATURE: u8 = 0x46;
+const LOCAL_DATETIME_SIGNATURE: u8 = 0x64;
 
 /// PackStream type markers (from the Bolt spec).
 pub mod markers {
@@ -166,7 +171,19 @@ pub enum Value {
     String(String),
     List(Vec<Value>),
     Map(Vec<(String, Value)>),
-    Struct { signature: u8, fields: Vec<Value> },
+    DateTime {
+        seconds: i64,
+        nanoseconds: i64,
+        offset_seconds: i64,
+    },
+    LocalDateTime {
+        seconds: i64,
+        nanoseconds: i64,
+    },
+    Struct {
+        signature: u8,
+        fields: Vec<Value>,
+    },
 }
 
 /// Decode a PackStream value from a byte slice. Returns the value and bytes consumed.
@@ -450,7 +467,34 @@ fn decode_struct_body(
         fields.push(val);
         pos += consumed;
     }
+    if let Some(value) = decode_temporal_struct(signature, &fields) {
+        return Ok((value, pos));
+    }
     Ok((Value::Struct { signature, fields }, pos))
+}
+
+fn decode_temporal_struct(signature: u8, fields: &[Value]) -> Option<Value> {
+    match signature {
+        DATETIME_UTC_PATCHED_SIGNATURE | DATETIME_LEGACY_SIGNATURE if fields.len() >= 3 => {
+            Some(Value::DateTime {
+                seconds: integer_field(&fields[0])?,
+                nanoseconds: integer_field(&fields[1])?,
+                offset_seconds: integer_field(&fields[2])?,
+            })
+        }
+        LOCAL_DATETIME_SIGNATURE if fields.len() >= 2 => Some(Value::LocalDateTime {
+            seconds: integer_field(&fields[0])?,
+            nanoseconds: integer_field(&fields[1])?,
+        }),
+        _ => None,
+    }
+}
+
+fn integer_field(value: &Value) -> Option<i64> {
+    match value {
+        Value::Integer(value) => Some(*value),
+        _ => None,
+    }
 }
 
 /// Encode a `Value` into a `BytesMut` buffer.
@@ -475,6 +519,15 @@ pub fn encode_value(buf: &mut BytesMut, value: &Value) {
                 encode_value(buf, v);
             }
         }
+        Value::DateTime {
+            seconds,
+            nanoseconds,
+            offset_seconds,
+        } => encode_datetime(buf, *seconds, *nanoseconds, *offset_seconds),
+        Value::LocalDateTime {
+            seconds,
+            nanoseconds,
+        } => encode_local_datetime(buf, *seconds, *nanoseconds),
         Value::Struct { signature, fields } => {
             encode_struct_header(buf, fields.len(), *signature);
             for f in fields {
@@ -482,6 +535,42 @@ pub fn encode_value(buf: &mut BytesMut, value: &Value) {
             }
         }
     }
+}
+
+pub fn encode_datetime(buf: &mut BytesMut, seconds: i64, nanoseconds: i64, offset_seconds: i64) {
+    encode_struct_header(buf, 3, DATETIME_UTC_PATCHED_SIGNATURE);
+    encode_int(buf, seconds);
+    encode_int(buf, nanoseconds);
+    encode_int(buf, offset_seconds);
+}
+
+pub fn encode_local_datetime(buf: &mut BytesMut, seconds: i64, nanoseconds: i64) {
+    encode_struct_header(buf, 2, LOCAL_DATETIME_SIGNATURE);
+    encode_int(buf, seconds);
+    encode_int(buf, nanoseconds);
+}
+
+pub fn encode_rfc3339_datetime_if_valid(buf: &mut BytesMut, value: &str) -> bool {
+    let Ok(parsed) = OffsetDateTime::parse(value, &Rfc3339) else {
+        return false;
+    };
+    encode_datetime(
+        buf,
+        parsed.unix_timestamp(),
+        i64::from(parsed.nanosecond()),
+        i64::from(parsed.offset().whole_seconds()),
+    );
+    true
+}
+
+pub fn datetime_to_rfc3339(seconds: i64, nanoseconds: i64, offset_seconds: i64) -> Option<String> {
+    let offset = UtcOffset::from_whole_seconds(offset_seconds as i32).ok()?;
+    let datetime = OffsetDateTime::from_unix_timestamp(seconds)
+        .ok()?
+        .replace_nanosecond(nanoseconds.try_into().ok()?)
+        .ok()?
+        .to_offset(offset);
+    datetime.format(&Rfc3339).ok()
 }
 
 #[cfg(test)]
@@ -629,6 +718,64 @@ mod tests {
             ],
         };
         assert_eq!(round_trip(&v), v);
+    }
+
+    #[test]
+    fn test_decode_local_datetime_structure() {
+        let mut buf = BytesMut::new();
+        encode_struct_header(&mut buf, 2, LOCAL_DATETIME_SIGNATURE);
+        encode_int(&mut buf, 1_780_315_200);
+        encode_int(&mut buf, 123_000_000);
+
+        let (decoded, consumed) = decode(&buf).unwrap();
+
+        assert_eq!(consumed, buf.len());
+        assert_eq!(
+            decoded,
+            Value::LocalDateTime {
+                seconds: 1_780_315_200,
+                nanoseconds: 123_000_000,
+            }
+        );
+    }
+
+    #[test]
+    fn test_round_trip_datetime_utc_structure() {
+        let v = Value::DateTime {
+            seconds: 1_780_315_200,
+            nanoseconds: 123_000_000,
+            offset_seconds: 0,
+        };
+        assert_eq!(round_trip(&v), v);
+    }
+
+    #[test]
+    fn test_rfc3339_string_encodes_as_datetime_structure() {
+        let mut buf = BytesMut::new();
+        assert!(encode_rfc3339_datetime_if_valid(
+            &mut buf,
+            "2026-06-01T12:00:00.123Z"
+        ));
+
+        let (decoded, consumed) = decode(&buf).unwrap();
+
+        assert_eq!(consumed, buf.len());
+        assert_eq!(
+            decoded,
+            Value::DateTime {
+                seconds: 1_780_315_200,
+                nanoseconds: 123_000_000,
+                offset_seconds: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn test_temporal_values_format_as_rfc3339() {
+        assert_eq!(
+            datetime_to_rfc3339(1_780_315_200, 123_000_000, 0).unwrap(),
+            "2026-06-01T12:00:00.123Z"
+        );
     }
 
     #[test]
