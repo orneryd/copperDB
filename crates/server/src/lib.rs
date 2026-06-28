@@ -197,6 +197,10 @@ pub struct AppState {
     pub distributed_cypher_enabled: bool,
     /// GraphQL schema wired to storage.
     pub graphql_schema: GraphQlSchema,
+    /// Cached graph engines keyed by database name.  Opening a storage engine
+    /// from disk triggers LSM-tree recovery (WAL replay, manifest rebuild)
+    /// which can take 400–600 ms.  Caching avoids this cost per query.
+    pub engine_cache: Arc<RwLock<HashMap<String, Arc<GraphEngine>>>>,
 }
 
 #[derive(Clone)]
@@ -552,6 +556,7 @@ impl Default for AppState {
             }),
             distributed_cypher_enabled: get_bool_loose("COPPERDB_DISTRIBUTED_CYPHER", false),
             graphql_schema: copperdb_graphql::build_default_schema(),
+            engine_cache: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -1511,9 +1516,19 @@ impl QueryExecutor for AppStateBoltExecutor {
     ) -> Result<BoltQueryResult, String> {
         let database = database.unwrap_or(&self.state.db_name).to_owned();
         let (request_context, _request_guard) = RequestContext::root(None);
+        self.execute_on_database_with_context(&database, query, params, request_context)
+    }
+
+    fn execute_on_database_with_context(
+        &self,
+        database: &str,
+        query: &str,
+        params: &HashMap<String, serde_json::Value>,
+        request_context: RequestContext,
+    ) -> Result<BoltQueryResult, String> {
         let result = execute_statement(
             Arc::clone(&self.state),
-            database,
+            database.to_owned(),
             request_context,
             query.to_owned(),
             params.clone(),
@@ -1752,7 +1767,14 @@ fn drop_database(state: &AppState, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn open_engine(state: &AppState, database: &str) -> Result<GraphEngine, String> {
+fn open_engine(state: &AppState, database: &str) -> Result<Arc<GraphEngine>, String> {
+    // Check cache first — avoids LSM-tree recovery (400–600 ms) per query.
+    {
+        let cache = state.engine_cache.read();
+        if let Some(engine) = cache.get(database) {
+            return Ok(Arc::clone(engine));
+        }
+    }
     let database_record = state
         .db_manager
         .get(database)
@@ -1769,7 +1791,10 @@ fn open_engine(state: &AppState, database: &str) -> Result<GraphEngine, String> 
         runtime_config,
         ..Default::default()
     };
-    GraphEngine::open(config).map_err(|error| error.to_string())
+    let engine = Arc::new(GraphEngine::open(config).map_err(|error| error.to_string())?);
+    let mut cache = state.engine_cache.write();
+    cache.insert(database.to_string(), Arc::clone(&engine));
+    Ok(engine)
 }
 
 async fn list_fabric_databases(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
@@ -2689,7 +2714,7 @@ async fn mcp_handler(
         }
     };
     let engine = match open_engine(&state, &state.db_name) {
-        Ok(engine) => Arc::new(parking_lot::Mutex::new(engine)),
+        Ok(engine) => engine,  // already Arc<GraphEngine>
         Err(e) => {
             return Json(serde_json::json!({
                 "jsonrpc": "2.0",

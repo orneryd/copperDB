@@ -309,7 +309,15 @@ impl EvalEngine {
     ) -> Result<EvalResult, EvalError> {
         self.hot_path_trace.reset();
         self.with_request_context(request_context, || {
-            self.with_access_buffer(|| self.execute_inner(request_context, query, params))
+            self.with_access_buffer(|| {
+                // Try dedicated shortestPath BFS before falling back to general evaluator
+                if let Some(result) =
+                    self.execute_dedicated_shortest_path(request_context, query, params)?
+                {
+                    return Ok(result);
+                }
+                self.execute_inner(request_context, query, params)
+            })
         })
     }
 
@@ -1438,6 +1446,7 @@ impl EvalEngine {
 
         // Build seeded rows from the first MATCH clause by cross-joining
         // its node patterns
+        let t_seed = std::time::Instant::now();
         let seeded = {
             let mut rows = vec![Row::new()];
             for node_pat in &first_match.pattern.nodes {
@@ -1458,6 +1467,7 @@ impl EvalEngine {
             }
             rows
         };
+        let t_seed_elapsed = t_seed.elapsed();
 
         if seeded.is_empty() {
             // No matching rows from first MATCH — return empty
@@ -1484,6 +1494,7 @@ impl EvalEngine {
 
         // Resolve start and end nodes for each seeded row
         let mut all_paths = Vec::new();
+        let t_bfs_start = std::time::Instant::now();
         for row in &seeded {
             request_context.check_active()?;
 
@@ -1526,13 +1537,28 @@ impl EvalEngine {
                 }
             }
         }
+        let t_bfs_elapsed = t_bfs_start.elapsed();
 
+        let t_build = std::time::Instant::now();
+        let path_count = all_paths.len();
+        let seed_count = seeded.len();
         let result = self.build_shortest_path_result(
             query,
             params,
             all_paths,
             &self.knowledge_policy_resolver()?,
         );
+        let t_build_elapsed = t_build.elapsed();
+
+        tracing::info!(
+            seed_nodes = seed_count,
+            bfs_paths = path_count,
+            phase_seed_us = t_seed_elapsed.as_micros(),
+            phase_bfs_us = t_bfs_elapsed.as_micros(),
+            phase_build_us = t_build_elapsed.as_micros(),
+            "shortestPath phase breakdown"
+        );
+
         result
     }
 
@@ -1545,53 +1571,57 @@ impl EvalEngine {
         direction: &EdgeDirection,
         resolver: &Resolver,
     ) -> Result<HashMap<String, Vec<EdgeRecord>>, EvalError> {
-        let edge_type_filter: Option<&str> = if rel_types.len() == 1 {
-            Some(rel_types[0].as_str())
-        } else {
-            None
-        };
         let mut adjacency: HashMap<String, Vec<EdgeRecord>> = HashMap::new();
-        let edges = if let Some(edge_type) = edge_type_filter {
-            self.storage.get_edges_by_type(edge_type)?
-        } else {
-            self.storage.all_edges()?
-        };
-        for edge in edges {
-            if rel_types.len() > 1 && !rel_types.iter().any(|t| *t == edge.edge_type) {
-                continue;
+
+        // Full sequential scan is fastest for LSM trees — avoids per-edge
+        // random lookups that index-based approaches would incur.
+        let edge_count = self.storage.bfs_stream_edges(|edge| {
+            if !rel_types.is_empty() && !rel_types.iter().any(|t| *t == edge.edge_type) {
+                return Ok(());
             }
             if !self
                 .edge_visible_under_policy(&edge, resolver)
                 .unwrap_or(false)
             {
-                continue;
+                return Ok(());
             }
-            match direction {
-                EdgeDirection::Outgoing => {
-                    adjacency
-                        .entry(edge.start_node.clone())
-                        .or_default()
-                        .push(edge.clone());
-                }
-                EdgeDirection::Incoming => {
-                    adjacency
-                        .entry(edge.end_node.clone())
-                        .or_default()
-                        .push(edge.clone());
-                }
-                EdgeDirection::Both => {
-                    adjacency
-                        .entry(edge.start_node.clone())
-                        .or_default()
-                        .push(edge.clone());
-                    adjacency
-                        .entry(edge.end_node.clone())
-                        .or_default()
-                        .push(edge);
-                }
+            Self::add_edge_to_adjacency(&mut adjacency, edge, direction);
+            Ok(())
+        })?;
+        let _ = edge_count;
+        Ok(adjacency)
+    }
+
+    /// Insert an edge into the adjacency map accounting for direction.
+    fn add_edge_to_adjacency(
+        adjacency: &mut HashMap<String, Vec<EdgeRecord>>,
+        edge: EdgeRecord,
+        direction: &EdgeDirection,
+    ) {
+        match direction {
+            EdgeDirection::Outgoing => {
+                adjacency
+                    .entry(edge.start_node.clone())
+                    .or_default()
+                    .push(edge);
+            }
+            EdgeDirection::Incoming => {
+                adjacency
+                    .entry(edge.end_node.clone())
+                    .or_default()
+                    .push(edge);
+            }
+            EdgeDirection::Both => {
+                adjacency
+                    .entry(edge.start_node.clone())
+                    .or_default()
+                    .push(edge.clone());
+                adjacency
+                    .entry(edge.end_node.clone())
+                    .or_default()
+                    .push(edge);
             }
         }
-        Ok(adjacency)
     }
     pub(crate) fn bfs_shortest_path(
         &self,

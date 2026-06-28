@@ -42,6 +42,22 @@ pub trait QueryExecutor: Send + Sync {
         let _ = database;
         self.execute(query, params)
     }
+
+    /// Execute on a specific database with a pre-created [`RequestContext`].
+    ///
+    /// The caller is responsible for creating the context via
+    /// [`RequestContext::root`] and keeping the guard in the outer async scope
+    /// so that a client-disconnect drops the guard and cancels the query.
+    fn execute_on_database_with_context(
+        &self,
+        database: &str,
+        query: &str,
+        params: &HashMap<String, serde_json::Value>,
+        request_context: copperdb_util::RequestContext,
+    ) -> Result<BoltQueryResult, String> {
+        let _ = request_context;
+        self.execute_on_database(Some(database), query, params)
+    }
 }
 
 /// A no-op query executor that returns empty results for all queries.
@@ -584,11 +600,20 @@ async fn process_message(
             let execution_database = database.clone();
             let execution_query = query.clone();
             let execution_parameters = parameters.clone();
+
+            // Create request context OUTSIDE spawn_blocking so the guard
+            // lives in the async scope.  When the client disconnects, the
+            // guard is dropped → cancel fires → the BFS (or any long-running
+            // query) observes RequestCancelled and aborts.
+            let (request_context, _request_guard) =
+                copperdb_util::RequestContext::root(None);
+
             let execution_result = tokio::task::spawn_blocking(move || {
-                executor.execute_on_database(
-                    execution_database.as_deref(),
+                executor.execute_on_database_with_context(
+                    execution_database.as_deref().unwrap_or("copperdb"),
                     &execution_query,
                     &execution_parameters,
+                    request_context,
                 )
             })
             .await

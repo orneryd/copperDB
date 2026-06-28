@@ -257,6 +257,7 @@ impl CopperDb {
 
         let _flush_guard = self.storage.hold_flush();
 
+        let t0 = std::time::Instant::now();
         let hash = QueryCache::<copperdb_cypher::Query>::key(cypher, &[]);
         let parsed = if let Some(cached) = self.query_cache.get(hash) {
             cached
@@ -279,7 +280,9 @@ impl CopperDb {
             self.query_cache.put(hash, q.clone());
             q
         };
+        let t_parse_cache = t0.elapsed();
 
+        let t1 = std::time::Instant::now();
         if let Err(err) = self.enforce_compliance(&parsed, roles) {
             self.record_query_audit(
                 cypher,
@@ -291,10 +294,15 @@ impl CopperDb {
             )?;
             return Err(err.into());
         }
+        let t_compliance = t1.elapsed();
 
+        let t2 = std::time::Instant::now();
         let pattern_info = detect_query_pattern(cypher);
         let (compound_shape, compound_ok) = match_compound_query_shape(cypher);
         let (pipeline_clauses, pipeline_ok) = can_execute_as_pipeline(cypher);
+        let t_pattern = t2.elapsed();
+
+        let t3 = std::time::Instant::now();
         let eval_result = match self.eval.execute_with_routes_with_context(
             request_context,
             &parsed,
@@ -316,10 +324,12 @@ impl CopperDb {
                 return Err(err.into());
             }
         };
+        let t_eval = t3.elapsed();
 
         let elapsed_ms = start.elapsed().as_millis() as u64;
         let mut stats = ResultStats::from(eval_result.stats);
         stats.execution_time_ms = elapsed_ms;
+
         self.record_query_audit(
             cypher,
             query_action(&parsed.query_type),
@@ -328,6 +338,23 @@ impl CopperDb {
             Some(hash),
             elapsed_ms,
         )?;
+
+        // ── Profiling: log phase timings (after audit) ────────────
+        let t_total = start.elapsed();
+        let non_audit_us = t_parse_cache.as_micros()
+            + t_compliance.as_micros()
+            + t_pattern.as_micros()
+            + t_eval.as_micros();
+        tracing::info!(
+            query = cypher,
+            phase_parse_cache_us = t_parse_cache.as_micros(),
+            phase_compliance_us = t_compliance.as_micros(),
+            phase_pattern_us = t_pattern.as_micros(),
+            phase_eval_us = t_eval.as_micros(),
+            phase_audit_us = t_total.as_micros().saturating_sub(non_audit_us as u128),
+            phase_total_us = t_total.as_micros(),
+            "query phase breakdown"
+        );
 
         Ok(QueryResult {
             columns: eval_result.columns,

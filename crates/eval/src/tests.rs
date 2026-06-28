@@ -2325,6 +2325,122 @@
         }
     }
 
+    /// Profile BFS adjacency map build and queue loop for a dense mesh.
+    /// Run with: cargo test -p copperdb-eval --lib prof_bfs_mesh_cost_breakdown -- --nocapture
+    #[test]
+    fn prof_bfs_mesh_cost_breakdown() {
+        let iters = 5usize;
+
+        for round in 0..iters {
+            let engine = make_engine();
+            let storage = engine.storage.clone();
+
+            // Create a chain of 48 nodes (guaranteed 47-hop path) but also add
+            // cross-edges to create a mesh — each node connects to 4 neighbors
+            // ahead, simulating a realistic dense graph.
+            let node_count = 48usize;
+            let cross_edges_per_node = 4usize;
+
+            let mut nodes = Vec::with_capacity(node_count);
+            for i in 0..node_count {
+                nodes.push(NodeRecord {
+                    id: format!("n{i}"),
+                    labels: vec!["Mesh".to_string()],
+                    properties: BTreeMap::from([(
+                        "idx".to_string(),
+                        Value::from(i as i64),
+                    )]),
+                    named_embeddings: BTreeMap::new(),
+                    chunk_embeddings: Vec::new(),
+                    embed_meta: Default::default(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                });
+            }
+            storage.put_node_records_batch(&nodes).unwrap();
+
+            let mut edges = Vec::new();
+            let mut edge_id = 0usize;
+            // Chain backbone: n0→n1→n2→...→n47
+            for i in 0..node_count - 1 {
+                edges.push(EdgeRecord {
+                    id: format!("e_chain_{i}"),
+                    start_node: format!("n{i}"),
+                    end_node: format!("n{}", i + 1),
+                    edge_type: "CONNECTS".to_string(),
+                    properties: BTreeMap::new(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                });
+                edge_id += 1;
+            }
+            // Cross-edges: each node connects to nodes i+2, i+3, i+4, i+5
+            for i in 0..node_count {
+                for skip in 2..2 + cross_edges_per_node {
+                    let j = i + skip;
+                    if j < node_count {
+                        edges.push(EdgeRecord {
+                            id: format!("e_x_{edge_id}"),
+                            start_node: format!("n{i}"),
+                            end_node: format!("n{j}"),
+                            edge_type: "CONNECTS".to_string(),
+                            properties: BTreeMap::new(),
+                            created_at_unix_ms: 0,
+                            updated_at_unix_ms: 0,
+                        });
+                        edge_id += 1;
+                    }
+                }
+            }
+            let edge_count = edges.len();
+            storage.put_new_edge_records_batch(&edges).unwrap();
+
+            // ── Adjacency map build ────────────────────────────────
+            let resolver = engine.knowledge_policy_resolver().unwrap();
+            let direction = crate::EdgeDirection::Both;
+            let rel_types = vec!["CONNECTS".to_string()];
+
+            let t0 = std::time::Instant::now();
+            let adjacency =
+                engine.bfs_adjacency_map(&rel_types, &direction, &resolver).unwrap();
+            let adj_time = t0.elapsed();
+            let adj_entries: usize = adjacency.values().map(|v| v.len()).sum();
+
+            // ── BFS queue loop ─────────────────────────────────────
+            let t1 = std::time::Instant::now();
+            let path = engine
+                .bfs_shortest_path("n0", "n47", &rel_types, &direction, 100)
+                .unwrap();
+            let bfs_time = t1.elapsed();
+
+            // ── Full Cypher e2e (public API, now includes dedicated BFS) ──
+            let parser = Parser::new();
+            let cypher = "MATCH (start:Mesh {idx: 0}), (end:Mesh {idx: 47}) MATCH p = shortestPath((start)-[:CONNECTS*]-(end)) RETURN length(p) AS hops LIMIT 1";
+            let params: HashMap<String, Value> = HashMap::new();
+
+            let t_start = std::time::Instant::now();
+            let parsed = parser.parse(cypher).unwrap();
+            let parse_us = t_start.elapsed().as_micros();
+
+            let t_exec_start = std::time::Instant::now();
+            let result = engine
+                .execute(&parsed, &params)
+                .unwrap();
+            let exec_us = t_exec_start.elapsed().as_micros();
+            let e2e_us = t_start.elapsed().as_micros();
+
+            let hops = result.rows[0]
+                .get("hops")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            let bfs_hops = path.as_ref().map(|p| p.hops).unwrap_or(0);
+
+            eprintln!(
+                "bfs_mesh  nodes={node_count} edges={edge_count} adj_entries={adj_entries}  adj={adj_time:.2?}  bfs={bfs_time:.2?}  e2e_total={e2e_us}µs  hops={hops}  bfs_hops={bfs_hops}  parse={parse_us}µs  exec={exec_us}µs",
+            );
+        }
+    }
+
     /// Break down `put_node_records_batch` cost into construction vs storage I/O.
     #[test]
     fn prof_batch_node_insert_cost_breakdown() {
