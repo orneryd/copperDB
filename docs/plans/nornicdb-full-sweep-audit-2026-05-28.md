@@ -428,7 +428,7 @@ Layer 2 storage findings:
 - WAL maturity: NornicDB has segmenting, compaction, repair, corruption diagnostics, degraded mode, atomic records, recovery chunking, and durability tests. copperDB currently has a narrower WAL/storage contract.
 - Index maintenance: NornicDB maintains property indexes in storage with rebuild/update/deindex paths; copperDB has storage/indexing contracts and index-definition persistence, but the full storage-maintenance breadth should remain visible.
 - Async cache consistency: NornicDB's async engine tracks in-flight versus committed state; copperDB's cache crate is a read/query/write-through acceleration layer and not a storage write-behind consistency model.
-- Underlying KV layout differs: NornicDB uses Badger keyspaces for nodes, edges, constraints, indexes, and metadata; copperDB uses sled trees for metadata, nodes, edges, and indexes. This is acceptable as an implementation-language/storage choice but should not hide missing operational behavior.
+- Underlying KV layout differs: NornicDB uses Badger keyspaces for nodes, edges, constraints, indexes, and metadata; copperDB uses fjall trees for metadata, nodes, edges, and indexes. This is acceptable as an implementation-language/storage choice but should not hide missing operational behavior.
 
 Layer 2 auto-indexing/index-default findings:
 

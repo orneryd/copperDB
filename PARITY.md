@@ -14,7 +14,7 @@ Highest risk gaps:
 
 1. Bolt is only a TCP listener plus handshake and metric counters. It does not dispatch Bolt messages into auth, transactions, Cypher execution, or result streaming.
 2. Cypher/eval supports a useful subset, including recent ports for list/map literals, `IN`, `NOT IN`, regex `=~` predicates, and single-hop plus variable-length relationship `MATCH` over durable edge adjacency indexes. Relationship `OPTIONAL MATCH`, path materialization/functions, and `shortestPath`/`allShortestPaths` are still incomplete, and the upstream grammar/evaluator surface is far larger.
-3. Storage has baseline sled, MVCC, WAL, schema, and catalog primitives, but is missing the upstream lifecycle, async write-behind, reader registry, pruning/rebuild controller, full index maintenance, and namespace transaction semantics.
+3. Storage has baseline fjall, MVCC, WAL, schema, and catalog primitives, but is missing the upstream lifecycle, async write-behind, reader registry, pruning/rebuild controller, full index maintenance, and namespace transaction semantics.
 4. `knowledgepolicy`, `lifecycle`, and `errors` have no Rust crate equivalents yet. `observability` appears intentionally renamed to `otel`, but only part of the observability implementation has been ported.
 5. Several crates are present but effectively stubs or local-only models: `graphql`, `mcp`, `qdrantgrpc`, `nornicgrpc`, `inference`, `localllm`, and parts of `gpu`.
 6. The running `copperdb` binary wires HTTP, Bolt, config, and otel, but it does not start or coordinate many subsystem crates through a lifecycle supervisor.
@@ -219,7 +219,7 @@ Status: baseline engine with important pieces, not parity.
 
 What exists:
 
-- sled-backed key/value storage.
+- fjall-backed key/value storage.
 - Node/edge put/get/delete/scan helpers.
 - MVCC version/head model and snapshot-visible reads.
 - WAL primitives with append/batch/replay/checksum/degraded signaling.

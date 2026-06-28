@@ -48,7 +48,7 @@ impl From<NodeRecord> for GraphNode {
 }
 
 /// Shared engine handle accessible from GraphQL resolvers via Context.
-/// Wrapped in a Mutex because `StorageEngine` (sled-backed) is `!Sync`.
+/// Wrapped in a Mutex because `StorageEngine` (fjall-backed) is `!Sync`.
 pub struct GraphQlContext {
     pub engine: Arc<Mutex<StorageEngine>>,
 }

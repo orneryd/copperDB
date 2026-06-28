@@ -1564,7 +1564,7 @@ impl EvalEngine {
 
     /// Build an in-memory adjacency map for all edges of the specified types,
     /// filtering by knowledge-policy visibility. This replaces O(N) per-node
-    /// sled prefix scans during BFS with a single upfront scan.
+    /// fjall prefix scans during BFS with a single upfront scan.
     pub(crate) fn bfs_adjacency_map(
         &self,
         rel_types: &[String],

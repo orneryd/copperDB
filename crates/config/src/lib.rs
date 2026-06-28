@@ -441,7 +441,7 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StorageConfig {
-    /// Path to the sled database directory.
+    /// Path to the fjall database directory.
     pub path: String,
     /// Maximum size of the in-memory cache (bytes).
     pub cache_size: usize,

@@ -20,39 +20,37 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
-// ── Sled→Fjall compatibility layer ──────────────────────────────────────────
+// ── fjall→Fjall compatibility layer ──────────────────────────────────────────
 
-/// Re-export for backward compatibility: fjall Keyspace replaces sled Tree.
+/// Re-export for backward compatibility: fjall Keyspace replaces fjall Tree.
 pub type Tree = Keyspace;
 
 /// A batch of key-value operations: (key, optional_value). None = delete.
 pub type Batch = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
-/// Extension trait making fjall's Keyspace behave like sled's Tree.
+/// Extension trait making fjall's Keyspace behave like fjall's Tree.
 trait KeyspaceExt {
     fn scan_prefix<'a>(
         &'a self,
         prefix: &'a [u8],
     ) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StorageError>> + 'a>;
 
-    fn sled_iter<'a>(
+    fn fjall_iter<'a>(
         &'a self,
     ) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StorageError>> + 'a>;
 
-    fn sled_get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError>;
+    fn fjall_get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError>;
 
     /// Insert and return the previous value.
-    fn sled_insert(&self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError>;
+    fn fjall_insert(&self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError>;
 
     /// Remove and return the previous value.
-    fn sled_remove(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError>;
+    fn fjall_remove(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError>;
 
-    fn sled_apply_batch(&self, batch: &[(Vec<u8>, Option<Vec<u8>>)]) -> Result<(), StorageError>;
+    fn fjall_apply_batch(&self, batch: &[(Vec<u8>, Option<Vec<u8>>)]) -> Result<(), StorageError>;
 
-    fn sled_contains_key(&self, key: impl AsRef<[u8]>) -> Result<bool, StorageError>;
-
-    /// Range scan returning sled-compatible iterator.
-    fn sled_range<'a, R: std::ops::RangeBounds<Vec<u8>> + 'a>(
+    /// Range scan returning fjall-compatible iterator.
+    fn fjall_range<'a, R: std::ops::RangeBounds<Vec<u8>> + 'a>(
         &'a self,
         range: R,
     ) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StorageError>> + 'a>;
@@ -74,7 +72,7 @@ impl KeyspaceExt for Keyspace {
         )
     }
 
-    fn sled_iter<'a>(
+    fn fjall_iter<'a>(
         &'a self,
     ) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StorageError>> + 'a> {
         Box::new(
@@ -88,25 +86,25 @@ impl KeyspaceExt for Keyspace {
         )
     }
 
-    fn sled_get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError> {
+    fn fjall_get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError> {
         Ok(self.get(key.as_ref()).map_err(StorageError::Fjall)?.map(|v| v.to_vec()))
     }
 
-    fn sled_insert(&self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError> {
+    fn fjall_insert(&self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError> {
         let k = key.as_ref();
         let old = self.get(k).map_err(StorageError::Fjall)?.map(|v| v.to_vec());
         self.insert(k, value.as_ref()).map_err(StorageError::Fjall)?;
         Ok(old)
     }
 
-    fn sled_remove(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError> {
+    fn fjall_remove(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError> {
         let k = key.as_ref();
         let old = self.get(k).map_err(StorageError::Fjall)?.map(|v| v.to_vec());
         self.remove(k).map_err(StorageError::Fjall)?;
         Ok(old)
     }
 
-    fn sled_apply_batch(
+    fn fjall_apply_batch(
         &self,
         batch: &[(Vec<u8>, Option<Vec<u8>>)],
     ) -> Result<(), StorageError> {
@@ -119,11 +117,7 @@ impl KeyspaceExt for Keyspace {
         Ok(())
     }
 
-    fn sled_contains_key(&self, key: impl AsRef<[u8]>) -> Result<bool, StorageError> {
-        self.contains_key(key.as_ref()).map_err(StorageError::Fjall)
-    }
-
-    fn sled_range<'a, R: std::ops::RangeBounds<Vec<u8>> + 'a>(
+    fn fjall_range<'a, R: std::ops::RangeBounds<Vec<u8>> + 'a>(
         &'a self,
         range: R,
     ) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StorageError>> + 'a> {
@@ -1370,7 +1364,7 @@ impl StorageEngine {
     }
 
     fn ensure_layout_manifest(&self) -> Result<(), StorageError> {
-        if let Some(raw) = self.meta.sled_get(META_LAYOUT_MANIFEST_KEY)? {
+        if let Some(raw) = self.meta.fjall_get(META_LAYOUT_MANIFEST_KEY)? {
             let manifest: StorageLayoutManifest = rmp_serde::from_slice(raw.as_ref())?;
             if manifest.version != STORAGE_LAYOUT_VERSION {
                 return Err(StorageError::UnsupportedLayoutVersion {
@@ -1392,7 +1386,7 @@ impl StorageEngine {
 
     fn ensure_encryption_manifest(&self) -> Result<(), StorageError> {
         match (
-            self.meta.sled_get(META_ENCRYPTION_MANIFEST_KEY)?,
+            self.meta.fjall_get(META_ENCRYPTION_MANIFEST_KEY)?,
             &self.encryption,
         ) {
             (Some(raw), Some(encryption)) => {
@@ -1454,7 +1448,7 @@ impl StorageEngine {
     }
 
     pub fn encryption_manifest(&self) -> Result<Option<StorageEncryptionManifest>, StorageError> {
-        match self.meta.sled_get(META_ENCRYPTION_MANIFEST_KEY)? {
+        match self.meta.fjall_get(META_ENCRYPTION_MANIFEST_KEY)? {
             Some(raw) => Ok(Some(rmp_serde::from_slice(raw.as_ref())?)),
             None => Ok(None),
         }
@@ -1489,7 +1483,7 @@ impl StorageEngine {
 
     /// Retrieve a node's serialized properties.
     pub fn get_node(&self, id: &str) -> Result<Option<Vec<u8>>, StorageError> {
-        match self.nodes.sled_get(id.as_bytes())? {
+        match self.nodes.fjall_get(id.as_bytes())? {
             Some(v) => {
                 let raw = self.decode_record_bytes(v.as_ref())?;
                 if let Some(node) = compat_node_record_from_bytes(id, &raw)? {
@@ -1505,7 +1499,7 @@ impl StorageEngine {
 
     /// Delete a node.
     pub fn delete_node(&self, id: &str) -> Result<(), StorageError> {
-        self.nodes.sled_remove(id.as_bytes())?;
+        self.nodes.fjall_remove(id.as_bytes())?;
         Ok(())
     }
 
@@ -1546,7 +1540,7 @@ impl StorageEngine {
 
     /// Delete an edge.
     pub fn delete_edge(&self, id: &str) -> Result<(), StorageError> {
-        self.edges.sled_remove(id.as_bytes())?;
+        self.edges.fjall_remove(id.as_bytes())?;
         Ok(())
     }
 
@@ -1559,7 +1553,7 @@ impl StorageEngine {
             self.unindex_node_properties(old)?;
             self.apply_node_stats_delta(old, -1)?;
         }
-        self.nodes.sled_insert(
+        self.nodes.fjall_insert(
             node.id.as_bytes(),
             self.encode_record_bytes(rmp_serde::to_vec(node)?)?,
         )?;
@@ -1590,7 +1584,7 @@ impl StorageEngine {
                         continue;
                     }
                     if let Some(key) = node_property_index_key_for_node(index, old) {
-                        self.indexes.sled_remove(key.as_bytes())?;
+                        self.indexes.fjall_remove(key.as_bytes())?;
                     }
                 }
                 for index in &fulltext_indexes {
@@ -1602,7 +1596,7 @@ impl StorageEngine {
                 self.apply_node_stats_delta(old, -1)?;
             }
 
-            self.nodes.sled_insert(
+            self.nodes.fjall_insert(
                 node.id.as_bytes(),
                 self.encode_record_bytes(rmp_serde::to_vec(node)?)?,
             )?;
@@ -1612,7 +1606,7 @@ impl StorageEngine {
                     continue;
                 }
                 if let Some(key) = node_property_index_key_for_node(index, node) {
-                    self.indexes.sled_insert(key.as_bytes(), [])?;
+                    self.indexes.fjall_insert(key.as_bytes(), [])?;
                 }
             }
             for index in &fulltext_indexes {
@@ -1635,7 +1629,7 @@ impl StorageEngine {
     }
 
     pub fn get_node_record(&self, id: &str) -> Result<Option<NodeRecord>, StorageError> {
-        match self.nodes.sled_get(id.as_bytes())? {
+        match self.nodes.fjall_get(id.as_bytes())? {
             Some(v) => {
                 compat_node_record_from_bytes(id, self.decode_record_bytes(v.as_ref())?.as_slice())
             }
@@ -1649,7 +1643,7 @@ impl StorageEngine {
             self.unindex_node_properties(&existing)?;
             self.apply_node_stats_delta(&existing, -1)?;
             self.mark_node_embedded(id)?;
-            self.nodes.sled_remove(id.as_bytes())?;
+            self.nodes.fjall_remove(id.as_bytes())?;
             self.mvcc.delete_node_record(id)?;
             self.notify_node_deleted(id);
         }
@@ -1681,7 +1675,7 @@ impl StorageEngine {
     /// Execute a batch of storage operations atomically.
     ///
     /// All node/edge puts and deletes within the closure are applied as a single
-    /// sled batch. Indexes, stats, and MVCC are updated atomically. If the
+    /// fjall batch. Indexes, stats, and MVCC are updated atomically. If the
     /// closure returns an error, the batch is discarded and no changes are made.
     ///
     /// This is the foundation for namespace-pinned transaction semantics:
@@ -1782,7 +1776,7 @@ impl StorageEngine {
         }
 
         if out.is_empty() {
-            for entry in self.nodes.sled_iter() {
+            for entry in self.nodes.fjall_iter() {
                 let (key, value) = entry?;
                 let key_str =
                     std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
@@ -1803,7 +1797,7 @@ impl StorageEngine {
 
     pub fn all_node_records(&self) -> Result<Vec<NodeRecord>, StorageError> {
         let mut out: Vec<NodeRecord> = Vec::new();
-        for entry in self.nodes.sled_iter() {
+        for entry in self.nodes.fjall_iter() {
             let (key, value) = entry?;
             let key_str =
                 std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
@@ -1845,7 +1839,7 @@ impl StorageEngine {
         }
 
         if visited == 0 {
-            for entry in self.nodes.sled_iter() {
+            for entry in self.nodes.fjall_iter() {
                 cancel.check_cancelled()?;
                 let (key, value) = entry?;
                 let key_str =
@@ -1879,7 +1873,7 @@ impl StorageEngine {
     }
 
     pub fn mark_node_embedded(&self, id: &str) -> Result<(), StorageError> {
-        self.meta.sled_remove(pending_embedding_key(id))?;
+        self.meta.fjall_remove(pending_embedding_key(id))?;
         Ok(())
     }
 
@@ -1917,10 +1911,10 @@ impl StorageEngine {
             })
             .collect::<Result<Vec<_>, _>>()?;
         for key in keys {
-            self.meta.sled_remove(key)?;
+            self.meta.fjall_remove(key)?;
         }
         for id in &valid_ids {
-            self.meta.sled_insert(pending_embedding_key(id), [])?;
+            self.meta.fjall_insert(pending_embedding_key(id), [])?;
         }
         Ok(valid_ids.len())
     }
@@ -1974,7 +1968,7 @@ impl StorageEngine {
     /// Enqueue a node for deferred index cleanup (e.g., when visibility drops below threshold).
     pub fn enqueue_deindex_work(&self, entity_id: &str) -> Result<(), StorageError> {
         let key = [META_PENDING_DEINDEX_PREFIX, entity_id.as_bytes()].concat();
-        self.meta.sled_insert(key, [] as [u8; 0])?;
+        self.meta.fjall_insert(key, [] as [u8; 0])?;
         Ok(())
     }
 
@@ -2013,7 +2007,7 @@ impl StorageEngine {
             }
             // If entity is gone, no tombstones needed — just remove the marker
 
-            self.meta.sled_remove(key)?;
+            self.meta.fjall_remove(key)?;
             deindexed += 1;
         }
 
@@ -2037,7 +2031,7 @@ impl StorageEngine {
     /// allowing restore when entity visibility recovers.
     pub fn write_index_tombstones(&self, index_keys: &[String]) -> Result<(), StorageError> {
         for key in index_keys {
-            self.meta.sled_insert(tombstone_key(key), [])?;
+            self.meta.fjall_insert(tombstone_key(key), [])?;
         }
         Ok(())
     }
@@ -2046,7 +2040,7 @@ impl StorageEngine {
     /// recovers visibility (decay score rises above threshold).
     pub fn delete_index_tombstones(&self, index_keys: &[String]) -> Result<(), StorageError> {
         for key in index_keys {
-            self.meta.sled_remove(tombstone_key(key))?;
+            self.meta.fjall_remove(tombstone_key(key))?;
         }
         Ok(())
     }
@@ -2070,7 +2064,7 @@ impl StorageEngine {
             let key_str =
                 std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
             if key_str.contains(entity_id) {
-                self.meta.sled_remove(&key[..])?;
+                self.meta.fjall_remove(&key[..])?;
                 removed += 1;
             }
         }
@@ -2079,9 +2073,9 @@ impl StorageEngine {
 
     fn update_pending_embedding_index(&self, node: &NodeRecord) -> Result<(), StorageError> {
         if node.needs_embedding() {
-            self.meta.sled_insert(pending_embedding_key(&node.id), [])?;
+            self.meta.fjall_insert(pending_embedding_key(&node.id), [])?;
         } else {
-            self.meta.sled_remove(pending_embedding_key(&node.id))?;
+            self.meta.fjall_remove(pending_embedding_key(&node.id))?;
         }
         Ok(())
     }
@@ -2101,7 +2095,7 @@ impl StorageEngine {
     where
         F: FnMut(NodeRecord) -> Result<(), StorageError>,
     {
-        self.stream_node_records_from_entries(self.nodes.sled_iter(), cancel, visit)
+        self.stream_node_records_from_entries(self.nodes.fjall_iter(), cancel, visit)
     }
 
     pub fn stream_node_records_by_prefix<F>(
@@ -2292,7 +2286,7 @@ impl StorageEngine {
             self.unindex_edge(old)?;
             self.apply_edge_stats_delta(old, -1)?;
         }
-        self.edges.sled_insert(
+        self.edges.fjall_insert(
             edge.id.as_bytes(),
             self.encode_record_bytes(rmp_serde::to_vec(edge)?)?,
         )?;
@@ -2316,16 +2310,16 @@ impl StorageEngine {
             if let Some(ref old) = old {
                 self.indexes
                     .remove(edge_type_index_key(&old.edge_type, &old.id).as_bytes())?;
-                self.indexes.sled_remove(
+                self.indexes.fjall_remove(
                     edge_start_index_key(&old.start_node, &old.edge_type, &old.id).as_bytes(),
                 )?;
-                self.indexes.sled_remove(
+                self.indexes.fjall_remove(
                     edge_end_index_key(&old.end_node, &old.edge_type, &old.id).as_bytes(),
                 )?;
                 for index in &relationship_property_indexes {
                     if index.label == old.edge_type {
                         if let Some(key) = relationship_property_index_key_for_edge(index, old) {
-                            self.indexes.sled_remove(key.as_bytes())?;
+                            self.indexes.fjall_remove(key.as_bytes())?;
                         }
                     }
                 }
@@ -2336,26 +2330,26 @@ impl StorageEngine {
                 }
             }
 
-            self.edges.sled_insert(
+            self.edges.fjall_insert(
                 edge.id.as_bytes(),
                 self.encode_record_bytes(rmp_serde::to_vec(edge)?)?,
             )?;
-            self.indexes.sled_insert(
+            self.indexes.fjall_insert(
                 edge_type_index_key(&edge.edge_type, &edge.id).as_bytes(),
                 [],
             )?;
-            self.indexes.sled_insert(
+            self.indexes.fjall_insert(
                 edge_start_index_key(&edge.start_node, &edge.edge_type, &edge.id).as_bytes(),
                 [],
             )?;
-            self.indexes.sled_insert(
+            self.indexes.fjall_insert(
                 edge_end_index_key(&edge.end_node, &edge.edge_type, &edge.id).as_bytes(),
                 [],
             )?;
             for index in &relationship_property_indexes {
                 if index.label == edge.edge_type {
                     if let Some(key) = relationship_property_index_key_for_edge(index, edge) {
-                        self.indexes.sled_insert(key.as_bytes(), [])?;
+                        self.indexes.fjall_insert(key.as_bytes(), [])?;
                     }
                 }
             }
@@ -2381,7 +2375,7 @@ impl StorageEngine {
     }
 
     /// Batch-insert edges, skipping the old-edge lookup. Use when all edges are
-    /// known to be new (e.g. initial data load). Uses sled::Batch internally
+    /// known to be new (e.g. initial data load). Uses fjall::Batch internally
     /// for maximum throughput (mirrors Badger's WriteBatch in NornicDB).
     ///
     /// Skips MVCC tracking — only safe when no concurrent readers exist.
@@ -2423,14 +2417,14 @@ impl StorageEngine {
 
             pending += 1;
             if pending >= FLUSH_EVERY {
-                self.edges.sled_apply_batch(&std::mem::take(&mut edges_batch))?;
-                self.indexes.sled_apply_batch(&std::mem::take(&mut indexes_batch))?;
+                self.edges.fjall_apply_batch(&std::mem::take(&mut edges_batch))?;
+                self.indexes.fjall_apply_batch(&std::mem::take(&mut indexes_batch))?;
                 pending = 0;
             }
         }
         if pending > 0 {
-            self.edges.sled_apply_batch(&edges_batch)?;
-            self.indexes.sled_apply_batch(&indexes_batch)?;
+            self.edges.fjall_apply_batch(&edges_batch)?;
+            self.indexes.fjall_apply_batch(&indexes_batch)?;
         }
         for (namespace, delta) in namespace_edge_deltas {
             if delta != 0 {
@@ -2441,7 +2435,7 @@ impl StorageEngine {
     }
 
     pub fn get_edge_record(&self, id: &str) -> Result<Option<EdgeRecord>, StorageError> {
-        match self.edges.sled_get(id.as_bytes())? {
+        match self.edges.fjall_get(id.as_bytes())? {
             Some(v) => Ok(Some(rmp_serde::from_slice(
                 self.decode_record_bytes(v.as_ref())?.as_slice(),
             )?)),
@@ -2453,7 +2447,7 @@ impl StorageEngine {
         if let Some(existing) = self.get_edge_record(id)? {
             self.unindex_edge(&existing)?;
             self.apply_edge_stats_delta(&existing, -1)?;
-            self.edges.sled_remove(id.as_bytes())?;
+            self.edges.fjall_remove(id.as_bytes())?;
             self.mvcc.delete_edge_record(id)?;
             self.notify_edge_deleted(id);
         }
@@ -2579,7 +2573,7 @@ impl StorageEngine {
 
     pub fn all_edges(&self) -> Result<Vec<EdgeRecord>, StorageError> {
         let mut out = Vec::new();
-        for entry in self.edges.sled_iter() {
+        for entry in self.edges.fjall_iter() {
             let (key, _) = entry?;
             let key_str =
                 std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
@@ -2607,12 +2601,11 @@ impl StorageEngine {
         F: FnMut(EdgeRecord) -> Result<(), StorageError>,
     {
         let mut streamed = 0;
-        for entry in self.edges.sled_iter() {
+        for entry in self.edges.fjall_iter() {
             cancel.check_cancelled()?;
-            let (key, value) = entry?;
+            let (_key, value) = entry?;
             let raw = self.decode_record_bytes(value.as_ref())?;
             let edge: EdgeRecord = rmp_serde::from_slice(raw.as_slice())?;
-            let _ = key; // key not needed — value carries the full record
             match visit(edge) {
                 Ok(()) => streamed += 1,
                 Err(StorageError::IterationStopped) => {
@@ -2634,8 +2627,8 @@ impl StorageEngine {
         F: FnMut(EdgeRecord) -> Result<(), StorageError>,
     {
         let mut streamed = 0u64;
-        for entry in self.edges.sled_iter() {
-            let (key, value) = entry?;
+        for entry in self.edges.fjall_iter() {
+            let (_key, value) = entry?;
             let raw = self.decode_record_bytes(value.as_ref())?;
             let edge: EdgeRecord = rmp_serde::from_slice(raw.as_slice())?;
             match visit(edge) {
@@ -2672,7 +2665,7 @@ impl StorageEngine {
             }
             if let Some(edge_id) = key_str.rsplit('/').next() {
                 // Look up the edge value directly — index only carries IDs
-                if let Some(raw) = self.edges.sled_get(edge_id.as_bytes())? {
+                if let Some(raw) = self.edges.fjall_get(edge_id.as_bytes())? {
                     let decoded = self.decode_record_bytes(raw.as_ref())?;
                     let edge: EdgeRecord = rmp_serde::from_slice(decoded.as_slice())?;
                     match visit(edge) {
@@ -2787,7 +2780,7 @@ impl StorageEngine {
         peer: &copperdb_topology::MeshPeer,
     ) -> Result<(), StorageError> {
         let key = [META_TOPOLOGY_PEER_PREFIX, peer.node_id.as_bytes()].concat();
-        self.meta.sled_insert(key, rmp_serde::to_vec(peer)?)?;
+        self.meta.fjall_insert(key, rmp_serde::to_vec(peer)?)?;
         Ok(())
     }
 
@@ -2806,7 +2799,7 @@ impl StorageEngine {
         profile: &copperdb_topology::HyperscalerProfile,
     ) -> Result<(), StorageError> {
         let key = [META_TOPOLOGY_PROFILE_PREFIX, profile.profile_id.as_bytes()].concat();
-        self.meta.sled_insert(key, rmp_serde::to_vec(profile)?)?;
+        self.meta.fjall_insert(key, rmp_serde::to_vec(profile)?)?;
         Ok(())
     }
 
@@ -2828,7 +2821,7 @@ impl StorageEngine {
     ) -> Result<(), StorageError> {
         let stable_id = placement.key.stable_id();
         let key = [META_TOPOLOGY_PLACEMENT_PREFIX, stable_id.as_bytes()].concat();
-        self.meta.sled_insert(key, rmp_serde::to_vec(placement)?)?;
+        self.meta.fjall_insert(key, rmp_serde::to_vec(placement)?)?;
         Ok(())
     }
 
@@ -2875,7 +2868,7 @@ impl StorageEngine {
             .map_err(|err| StorageError::TopologyInvalid(err.to_string()))?;
         let stable_id = database.stable_id();
         let key = [META_FABRIC_DATABASE_PREFIX, stable_id.as_bytes()].concat();
-        self.meta.sled_insert(key, rmp_serde::to_vec(database)?)?;
+        self.meta.fjall_insert(key, rmp_serde::to_vec(database)?)?;
         Ok(())
     }
 
@@ -2898,7 +2891,7 @@ impl StorageEngine {
 
     pub fn persist_constraint(&self, constraint: &Constraint) -> Result<(), StorageError> {
         let key = [META_SCHEMA_CONSTRAINT_PREFIX, constraint.name.as_bytes()].concat();
-        self.meta.sled_insert(key, rmp_serde::to_vec(constraint)?)?;
+        self.meta.fjall_insert(key, rmp_serde::to_vec(constraint)?)?;
         Ok(())
     }
 
@@ -2908,7 +2901,7 @@ impl StorageEngine {
         constraint: &Constraint,
     ) -> Result<(), StorageError> {
         let key = namespace_schema_constraint_key(namespace, &constraint.name);
-        self.meta.sled_insert(key, rmp_serde::to_vec(constraint)?)?;
+        self.meta.fjall_insert(key, rmp_serde::to_vec(constraint)?)?;
         Ok(())
     }
 
@@ -2938,7 +2931,7 @@ impl StorageEngine {
 
     pub fn delete_constraint(&self, name: &str) -> Result<bool, StorageError> {
         let key = [META_SCHEMA_CONSTRAINT_PREFIX, name.as_bytes()].concat();
-        Ok(self.meta.sled_remove(key)?.is_some())
+        Ok(self.meta.fjall_remove(key)?.is_some())
     }
 
     pub fn delete_constraint_for_namespace(
@@ -2947,7 +2940,7 @@ impl StorageEngine {
         name: &str,
     ) -> Result<bool, StorageError> {
         let key = namespace_schema_constraint_key(namespace, name);
-        Ok(self.meta.sled_remove(key)?.is_some())
+        Ok(self.meta.fjall_remove(key)?.is_some())
     }
 
     pub fn persist_index_definition(&self, index: &IndexDefinition) -> Result<(), StorageError> {
@@ -2960,7 +2953,7 @@ impl StorageEngine {
         cancel: &RequestCancellation,
     ) -> Result<(), StorageError> {
         let key = [META_SCHEMA_INDEX_PREFIX, index.name.as_bytes()].concat();
-        self.meta.sled_insert(key, rmp_serde::to_vec(index)?)?;
+        self.meta.fjall_insert(key, rmp_serde::to_vec(index)?)?;
         if is_node_property_index(index) {
             self.rebuild_node_property_index_with_cancellation(index, cancel)?;
         } else if is_node_fulltext_index(index) {
@@ -2979,7 +2972,7 @@ impl StorageEngine {
         options: &HashMap<String, serde_json::Value>,
     ) -> Result<(), StorageError> {
         let key = [META_INDEX_OPTIONS_PREFIX, index_name.as_bytes()].concat();
-        self.meta.sled_insert(key, rmp_serde::to_vec(options)?)?;
+        self.meta.fjall_insert(key, rmp_serde::to_vec(options)?)?;
         Ok(())
     }
 
@@ -2989,7 +2982,7 @@ impl StorageEngine {
         index_name: &str,
     ) -> Result<Option<HashMap<String, serde_json::Value>>, StorageError> {
         let key = [META_INDEX_OPTIONS_PREFIX, index_name.as_bytes()].concat();
-        let Some(value) = self.meta.sled_get(key)? else {
+        let Some(value) = self.meta.fjall_get(key)? else {
             return Ok(None);
         };
         Ok(Some(rmp_serde::from_slice(value.as_ref())?))
@@ -2998,7 +2991,7 @@ impl StorageEngine {
     /// Delete index options for a named index.
     pub fn delete_index_options(&self, index_name: &str) -> Result<(), StorageError> {
         let key = [META_INDEX_OPTIONS_PREFIX, index_name.as_bytes()].concat();
-        self.meta.sled_remove(key)?;
+        self.meta.fjall_remove(key)?;
         Ok(())
     }
 
@@ -3037,7 +3030,7 @@ impl StorageEngine {
         index: &IndexDefinition,
     ) -> Result<(), StorageError> {
         let key = namespace_schema_index_key(namespace, &index.name);
-        self.meta.sled_insert(key, rmp_serde::to_vec(index)?)?;
+        self.meta.fjall_insert(key, rmp_serde::to_vec(index)?)?;
         Ok(())
     }
 
@@ -3078,7 +3071,7 @@ impl StorageEngine {
             .into_iter()
             .find(|index| index.name == name);
         let key = [META_SCHEMA_INDEX_PREFIX, name.as_bytes()].concat();
-        let deleted = self.meta.sled_remove(key)?.is_some();
+        let deleted = self.meta.fjall_remove(key)?.is_some();
         if deleted {
             if let Some(index) = existing {
                 if is_node_property_index(&index) {
@@ -3100,13 +3093,13 @@ impl StorageEngine {
         validate_decay_profile(profile)?;
         let key = [META_KP_DECAY_PROFILE_PREFIX, profile.name.as_bytes()].concat();
         let binding_key = [META_KP_DECAY_BINDING_PREFIX, profile.name.as_bytes()].concat();
-        if self.meta.sled_get(&key)?.is_some() || self.meta.sled_get(binding_key)?.is_some() {
+        if self.meta.fjall_get(&key)?.is_some() || self.meta.fjall_get(binding_key)?.is_some() {
             return Err(StorageError::KnowledgePolicyAlreadyExists(format!(
                 "decay profile {}",
                 profile.name
             )));
         }
-        self.meta.sled_insert(key, rmp_serde::to_vec(profile)?)?;
+        self.meta.fjall_insert(key, rmp_serde::to_vec(profile)?)?;
         Ok(())
     }
 
@@ -3117,7 +3110,7 @@ impl StorageEngine {
         validate_decay_profile_binding(binding)?;
         if let Some(profile_ref) = &binding.profile_ref {
             let profile_key = [META_KP_DECAY_PROFILE_PREFIX, profile_ref.as_bytes()].concat();
-            if self.meta.sled_get(profile_key)?.is_none() {
+            if self.meta.fjall_get(profile_key)?.is_none() {
                 return Err(StorageError::KnowledgePolicyNotFound(format!(
                     "decay profile {}",
                     profile_ref
@@ -3127,7 +3120,7 @@ impl StorageEngine {
 
         let key = [META_KP_DECAY_BINDING_PREFIX, binding.name.as_bytes()].concat();
         let profile_key = [META_KP_DECAY_PROFILE_PREFIX, binding.name.as_bytes()].concat();
-        if self.meta.sled_get(&key)?.is_some() || self.meta.sled_get(profile_key)?.is_some() {
+        if self.meta.fjall_get(&key)?.is_some() || self.meta.fjall_get(profile_key)?.is_some() {
             return Err(StorageError::KnowledgePolicyAlreadyExists(format!(
                 "decay profile {}",
                 binding.name
@@ -3136,7 +3129,7 @@ impl StorageEngine {
 
         let mut persisted = binding.clone();
         persisted.target_labels.sort();
-        self.meta.sled_insert(key, rmp_serde::to_vec(&persisted)?)?;
+        self.meta.fjall_insert(key, rmp_serde::to_vec(&persisted)?)?;
         Ok(())
     }
 
@@ -3168,7 +3161,7 @@ impl StorageEngine {
         updates: &BTreeMap<String, serde_json::Value>,
     ) -> Result<(), StorageError> {
         let key = [META_KP_DECAY_PROFILE_PREFIX, name.as_bytes()].concat();
-        let raw = self.meta.sled_get(&key)?.ok_or_else(|| {
+        let raw = self.meta.fjall_get(&key)?.ok_or_else(|| {
             StorageError::KnowledgePolicyNotFound(format!("decay profile {}", name))
         })?;
         let mut profile: DecayProfileSchema = rmp_serde::from_slice(raw.as_ref())?;
@@ -3210,7 +3203,7 @@ impl StorageEngine {
             }
         }
         validate_decay_profile(&profile)?;
-        self.meta.sled_insert(key, rmp_serde::to_vec(&profile)?)?;
+        self.meta.fjall_insert(key, rmp_serde::to_vec(&profile)?)?;
         Ok(())
     }
 
@@ -3228,7 +3221,7 @@ impl StorageEngine {
             }
         }
         let key = [META_KP_DECAY_PROFILE_PREFIX, name.as_bytes()].concat();
-        let deleted = self.meta.sled_remove(key)?.is_some();
+        let deleted = self.meta.fjall_remove(key)?.is_some();
         if !deleted && !if_exists {
             return Err(StorageError::KnowledgePolicyNotFound(format!(
                 "decay profile {}",
@@ -3244,7 +3237,7 @@ impl StorageEngine {
         if_exists: bool,
     ) -> Result<(), StorageError> {
         let key = [META_KP_DECAY_BINDING_PREFIX, name.as_bytes()].concat();
-        let deleted = self.meta.sled_remove(key)?.is_some();
+        let deleted = self.meta.fjall_remove(key)?.is_some();
         if !deleted && !if_exists {
             return Err(StorageError::KnowledgePolicyNotFound(format!(
                 "decay profile {}",
@@ -3260,7 +3253,7 @@ impl StorageEngine {
         metadata: &KnowledgePolicyAccessMetadata,
     ) -> Result<(), StorageError> {
         let key = [META_KP_ACCESS_METADATA_PREFIX, entity_id.as_bytes()].concat();
-        self.meta.sled_insert(key, rmp_serde::to_vec(metadata)?)?;
+        self.meta.fjall_insert(key, rmp_serde::to_vec(metadata)?)?;
         Ok(())
     }
 
@@ -3281,7 +3274,7 @@ impl StorageEngine {
         entity_id: &str,
     ) -> Result<(), StorageError> {
         let key = [META_KP_ACCESS_METADATA_PREFIX, entity_id.as_bytes()].concat();
-        self.meta.sled_remove(key)?;
+        self.meta.fjall_remove(key)?;
         Ok(())
     }
 
@@ -3291,13 +3284,13 @@ impl StorageEngine {
     ) -> Result<(), StorageError> {
         validate_promotion_profile(profile)?;
         let key = [META_KP_PROMOTION_PROFILE_PREFIX, profile.name.as_bytes()].concat();
-        if self.meta.sled_get(&key)?.is_some() {
+        if self.meta.fjall_get(&key)?.is_some() {
             return Err(StorageError::KnowledgePolicyAlreadyExists(format!(
                 "promotion profile {}",
                 profile.name
             )));
         }
-        self.meta.sled_insert(key, rmp_serde::to_vec(profile)?)?;
+        self.meta.fjall_insert(key, rmp_serde::to_vec(profile)?)?;
         Ok(())
     }
 
@@ -3319,7 +3312,7 @@ impl StorageEngine {
         updates: &BTreeMap<String, serde_json::Value>,
     ) -> Result<(), StorageError> {
         let key = [META_KP_PROMOTION_PROFILE_PREFIX, name.as_bytes()].concat();
-        let raw = self.meta.sled_get(&key)?.ok_or_else(|| {
+        let raw = self.meta.fjall_get(&key)?.ok_or_else(|| {
             StorageError::KnowledgePolicyNotFound(format!("promotion profile {}", name))
         })?;
         let mut profile: PromotionProfileSchema = rmp_serde::from_slice(raw.as_ref())?;
@@ -3339,7 +3332,7 @@ impl StorageEngine {
             }
         }
         validate_promotion_profile(&profile)?;
-        self.meta.sled_insert(key, rmp_serde::to_vec(&profile)?)?;
+        self.meta.fjall_insert(key, rmp_serde::to_vec(&profile)?)?;
         Ok(())
     }
 
@@ -3359,7 +3352,7 @@ impl StorageEngine {
             }
         }
         let key = [META_KP_PROMOTION_PROFILE_PREFIX, name.as_bytes()].concat();
-        let deleted = self.meta.sled_remove(key)?.is_some();
+        let deleted = self.meta.fjall_remove(key)?.is_some();
         if !deleted && !if_exists {
             return Err(StorageError::KnowledgePolicyNotFound(format!(
                 "promotion profile {}",
@@ -3377,13 +3370,13 @@ impl StorageEngine {
         let existing_policies = self.load_promotion_policy_schemas()?;
         validate_promotion_policy(policy, &profiles, &existing_policies)?;
         let key = [META_KP_PROMOTION_POLICY_PREFIX, policy.name.as_bytes()].concat();
-        if self.meta.sled_get(&key)?.is_some() {
+        if self.meta.fjall_get(&key)?.is_some() {
             return Err(StorageError::KnowledgePolicyAlreadyExists(format!(
                 "promotion policy {}",
                 policy.name
             )));
         }
-        self.meta.sled_insert(key, rmp_serde::to_vec(policy)?)?;
+        self.meta.fjall_insert(key, rmp_serde::to_vec(policy)?)?;
         Ok(())
     }
 
@@ -3405,7 +3398,7 @@ impl StorageEngine {
         updates: &BTreeMap<String, serde_json::Value>,
     ) -> Result<(), StorageError> {
         let key = [META_KP_PROMOTION_POLICY_PREFIX, name.as_bytes()].concat();
-        let raw = self.meta.sled_get(&key)?.ok_or_else(|| {
+        let raw = self.meta.fjall_get(&key)?.ok_or_else(|| {
             StorageError::KnowledgePolicyNotFound(format!("promotion policy {}", name))
         })?;
         let mut policy: PromotionPolicySchema = rmp_serde::from_slice(raw.as_ref())?;
@@ -3427,7 +3420,7 @@ impl StorageEngine {
             .filter(|existing| existing.name != name)
             .collect::<Vec<_>>();
         validate_promotion_policy(&policy, &profiles, &existing_policies)?;
-        self.meta.sled_insert(key, rmp_serde::to_vec(&policy)?)?;
+        self.meta.fjall_insert(key, rmp_serde::to_vec(&policy)?)?;
         Ok(())
     }
 
@@ -3437,7 +3430,7 @@ impl StorageEngine {
         if_exists: bool,
     ) -> Result<(), StorageError> {
         let key = [META_KP_PROMOTION_POLICY_PREFIX, name.as_bytes()].concat();
-        let deleted = self.meta.sled_remove(key)?.is_some();
+        let deleted = self.meta.fjall_remove(key)?.is_some();
         if !deleted && !if_exists {
             return Err(StorageError::KnowledgePolicyNotFound(format!(
                 "promotion policy {}",
@@ -3451,13 +3444,13 @@ impl StorageEngine {
 
     /// Store an index entry.
     pub fn put_index(&self, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
-        self.indexes.sled_insert(key, value)?;
+        self.indexes.fjall_insert(key, value)?;
         Ok(())
     }
 
     /// Get an index entry.
     pub fn get_index(&self, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self.indexes.sled_get(key)?.map(|v| v.to_vec()))
+        Ok(self.indexes.fjall_get(key)?.map(|v| v.to_vec()))
     }
 
     /// Flush all pending writes to disk.
@@ -3492,7 +3485,7 @@ impl StorageEngine {
                 continue;
             }
             if let Some(key) = node_property_index_key_for_node(&index, node) {
-                self.indexes.sled_insert(key.as_bytes(), [])?;
+                self.indexes.fjall_insert(key.as_bytes(), [])?;
             }
         }
         for index in self.node_fulltext_index_definitions()? {
@@ -3510,7 +3503,7 @@ impl StorageEngine {
                 continue;
             }
             if let Some(key) = node_property_index_key_for_node(&index, node) {
-                self.indexes.sled_remove(key.as_bytes())?;
+                self.indexes.fjall_remove(key.as_bytes())?;
             }
         }
         for index in self.node_fulltext_index_definitions()? {
@@ -3573,14 +3566,14 @@ impl StorageEngine {
                 batch.push((key.into_bytes(), Some(Vec::<u8>::new())));
                 pending += 1;
                 if pending >= 4096 {
-                    self.indexes.sled_apply_batch(&std::mem::take(&mut batch))?;
+                    self.indexes.fjall_apply_batch(&std::mem::take(&mut batch))?;
                     pending = 0;
                 }
             }
             Ok(())
         })?;
         if pending > 0 {
-            self.indexes.sled_apply_batch(&batch)?;
+            self.indexes.fjall_apply_batch(&batch)?;
         }
         Ok(())
     }
@@ -3602,7 +3595,7 @@ impl StorageEngine {
             Ok(())
         })?;
         if pending > 0 {
-            self.indexes.sled_apply_batch(&batch)?;
+            self.indexes.fjall_apply_batch(&batch)?;
         }
         Ok(())
     }
@@ -3625,7 +3618,7 @@ impl StorageEngine {
                 ));
                 *pending += 1;
                 if *pending >= 4096 {
-                    self.indexes.sled_apply_batch(&std::mem::take(batch))?;
+                    self.indexes.fjall_apply_batch(&std::mem::take(batch))?;
                     *pending = 0;
                 }
             }
@@ -3656,13 +3649,13 @@ impl StorageEngine {
             batch.push((key, None));
             pending += 1;
             if pending >= 4096 {
-                self.indexes.sled_apply_batch(&std::mem::take(&mut batch))?;
+                self.indexes.fjall_apply_batch(&std::mem::take(&mut batch))?;
                 pending = 0;
                 cancel.check_cancelled()?;
             }
         }
         if pending > 0 {
-            self.indexes.sled_apply_batch(&batch)?;
+            self.indexes.fjall_apply_batch(&batch)?;
         }
         Ok(())
     }
@@ -3691,13 +3684,13 @@ impl StorageEngine {
                 batch.push((key, None));
                 pending += 1;
                 if pending >= 4096 {
-                    self.indexes.sled_apply_batch(&std::mem::take(&mut batch))?;
+                    self.indexes.fjall_apply_batch(&std::mem::take(&mut batch))?;
                     pending = 0;
                     cancel.check_cancelled()?;
                 }
             }
             if pending > 0 {
-                self.indexes.sled_apply_batch(&batch)?;
+                self.indexes.fjall_apply_batch(&batch)?;
             }
         }
         Ok(())
@@ -3713,7 +3706,7 @@ impl StorageEngine {
                 continue;
             };
             for token in fulltext_tokens_for_value(value) {
-                self.indexes.sled_insert(
+                self.indexes.fjall_insert(
                     node_fulltext_index_key(&index.label, property, &token, &node.id).as_bytes(),
                     [],
                 )?;
@@ -3732,7 +3725,7 @@ impl StorageEngine {
                 continue;
             };
             for token in fulltext_tokens_for_value(value) {
-                self.indexes.sled_remove(
+                self.indexes.fjall_remove(
                     node_fulltext_index_key(&index.label, property, &token, &node.id).as_bytes(),
                 )?;
             }
@@ -3791,15 +3784,15 @@ impl StorageEngine {
     // ── Batch write infrastructure ───────────────────────────────────────
 
     fn index_edge(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
-        self.indexes.sled_insert(
+        self.indexes.fjall_insert(
             edge_type_index_key(&edge.edge_type, &edge.id).as_bytes(),
             [],
         )?;
-        self.indexes.sled_insert(
+        self.indexes.fjall_insert(
             edge_start_index_key(&edge.start_node, &edge.edge_type, &edge.id).as_bytes(),
             [],
         )?;
-        self.indexes.sled_insert(
+        self.indexes.fjall_insert(
             edge_end_index_key(&edge.end_node, &edge.edge_type, &edge.id).as_bytes(),
             [],
         )?;
@@ -3837,7 +3830,7 @@ impl StorageEngine {
     }
 
     fn meta_counter(&self, key: Vec<u8>) -> Result<u64, StorageError> {
-        match self.meta.sled_get(key)? {
+        match self.meta.fjall_get(key)? {
             Some(raw) => Ok(rmp_serde::from_slice(raw.as_ref())?),
             None => Ok(0),
         }
@@ -3852,9 +3845,9 @@ impl StorageEngine {
         };
 
         if updated == 0 {
-            self.meta.sled_remove(key)?;
+            self.meta.fjall_remove(key)?;
         } else {
-            self.meta.sled_insert(key, rmp_serde::to_vec(&updated)?)?;
+            self.meta.fjall_insert(key, rmp_serde::to_vec(&updated)?)?;
         }
         Ok(())
     }
@@ -3912,8 +3905,8 @@ impl StorageEngine {
     }
 
     fn delete_namespace_metadata(&self, namespace: &str) -> Result<(), StorageError> {
-        self.meta.sled_remove(namespace_node_count_key(namespace))?;
-        self.meta.sled_remove(namespace_edge_count_key(namespace))?;
+        self.meta.fjall_remove(namespace_node_count_key(namespace))?;
+        self.meta.fjall_remove(namespace_edge_count_key(namespace))?;
         self.delete_meta_prefix(&namespace_label_count_prefix(namespace))?;
         self.delete_meta_prefix(namespace_schema_constraint_prefix(namespace).as_bytes())?;
         self.delete_meta_prefix(namespace_schema_index_prefix(namespace).as_bytes())?;
@@ -3931,7 +3924,7 @@ impl StorageEngine {
             })
             .collect::<Result<Vec<_>, _>>()?;
         for key in keys {
-            self.meta.sled_remove(key)?;
+            self.meta.fjall_remove(key)?;
         }
         Ok(())
     }
@@ -3944,10 +3937,10 @@ pub struct FlushGuard {
 
 impl Drop for FlushGuard {
     fn drop(&mut self) {
-        // Flush sled to disk. Failures are logged but do not panic — a flush
+        // Flush fjall to disk. Failures are logged but do not panic — a flush
         // failure should not crash the server.
         if let Err(e) = self.storage.db.persist(fjall::PersistMode::SyncAll).map_err(StorageError::Fjall) {
-            tracing::warn!(error = %e, "sled flush failed during FlushGuard drop");
+            tracing::warn!(error = %e, "fjall flush failed during FlushGuard drop");
         }
     }
 }

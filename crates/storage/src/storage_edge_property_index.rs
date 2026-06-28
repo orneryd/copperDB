@@ -54,8 +54,8 @@ impl StorageEngine {
         let mut out = Vec::new();
         let mut seen = BTreeSet::new();
         let entries = match end {
-            Some(end) => self.indexes.sled_range(start..end),
-            None => self.indexes.sled_range(start..),
+            Some(end) => self.indexes.fjall_range(start..end),
+            None => self.indexes.fjall_range(start..),
         };
         for entry in entries {
             let (key, _) = entry?;
@@ -122,8 +122,8 @@ impl StorageEngine {
         let mut out = Vec::new();
         let mut seen = BTreeSet::new();
         let entries = match end {
-            Some(end) => self.indexes.sled_range(start..end),
-            None => self.indexes.sled_range(start..),
+            Some(end) => self.indexes.fjall_range(start..end),
+            None => self.indexes.fjall_range(start..),
         };
         for entry in entries {
             let (key, _) = entry?;
@@ -159,7 +159,7 @@ impl StorageEngine {
         for index in self.relationship_property_index_definitions()? {
             if index.label == edge.edge_type {
                 if let Some(key) = relationship_property_index_key_for_edge(&index, edge) {
-                    self.indexes.sled_insert(key.as_bytes(), [])?;
+                    self.indexes.fjall_insert(key.as_bytes(), [])?;
                 }
             }
         }
@@ -173,7 +173,7 @@ impl StorageEngine {
         for index in self.relationship_property_index_definitions()? {
             if index.label == edge.edge_type {
                 if let Some(key) = relationship_property_index_key_for_edge(&index, edge) {
-                    self.indexes.sled_remove(key.as_bytes())?;
+                    self.indexes.fjall_remove(key.as_bytes())?;
                 }
             }
         }
@@ -203,14 +203,14 @@ impl StorageEngine {
                 batch.push((key.into_bytes(), Some(Vec::<u8>::new())));
                 pending += 1;
                 if pending >= 4096 {
-                    self.indexes.sled_apply_batch(&std::mem::take(&mut batch))?;
+                    self.indexes.fjall_apply_batch(&std::mem::take(&mut batch))?;
                     pending = 0;
                     cancel.check_cancelled()?;
                 }
             }
         }
         if pending > 0 {
-            self.indexes.sled_apply_batch(&batch)?;
+            self.indexes.fjall_apply_batch(&batch)?;
         }
         Ok(())
     }
@@ -231,7 +231,7 @@ impl StorageEngine {
             })
             .collect::<Result<Vec<_>, _>>()?;
         for key in keys {
-            self.indexes.sled_remove(key)?;
+            self.indexes.fjall_remove(key)?;
         }
         Ok(())
     }

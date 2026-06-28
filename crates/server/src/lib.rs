@@ -1762,7 +1762,7 @@ fn create_database(state: &AppState, name: &str) -> Result<(), String> {
 fn drop_database(state: &AppState, name: &str) -> Result<(), String> {
     let database =
         DatabaseManager::drop(&state.db_manager, name).map_err(|error| error.to_string())?;
-    // Remove sled data files so disk space is reclaimed.
+    // Remove fjall data files so disk space is reclaimed.
     let _ = std::fs::remove_dir_all(&database.storage_path);
     Ok(())
 }

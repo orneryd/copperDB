@@ -182,7 +182,7 @@ The following table maps every significant NornicDB Go dependency to its Rust eq
 
 | NornicDB Go Dependency | Purpose | Rust Equivalent |
 |------------------------|---------|-----------------|
-| `github.com/dgraph-io/badger/v4` | Embedded key-value store | `sled = "0.34"` |
+| `github.com/dgraph-io/badger/v4` | Embedded key-value store | `fjall = "3"` |
 | `github.com/antlr4-go/antlr/v4` | Cypher query parser (ANTLR4 runtime) | ⚠️ **No direct equivalent** — see note below |
 | `github.com/neo4j/neo4j-go-driver/v5` | Neo4j Bolt client | `neo4rs` (client only) |
 | `github.com/qdrant/go-client` | Qdrant vector DB gRPC client | `qdrant-client = "1"` *(add when needed)* |
@@ -326,11 +326,11 @@ See `crates/nornicgrpc/src/lib.rs` for the build.rs example.
 ## Architecture Notes
 
 ### Storage Engine
-copperDB uses `sled` (an embedded Rust key-value store) instead of BadgerDB.
+copperDB uses `fjall` (an embedded Rust key-value store) instead of BadgerDB.
 Both are LSM-tree based and offer similar performance characteristics.
 Key differences:
-- `sled` uses lock-free B-trees internally (not pure LSM)
-- `sled` is pure Rust (no CGo); BadgerDB is pure Go
+- `fjall` uses lock-free B-trees internally (not pure LSM)
+- `fjall` is pure Rust (no CGo); BadgerDB is pure Go
 - For higher write throughput, consider `rocksdb` crate (FFI to RocksDB)
 
 ### Replication
@@ -368,7 +368,7 @@ backlog unless it can be added without reintroducing query-time strategy switchi
 | `math` | ✅ Scaffolded | Full impl |
 | `config` | ✅ Scaffolded | Full impl |
 | `cache` | ✅ Scaffolded | Full LRU+TTL impl |
-| `storage` | ✅ Scaffolded | Full sled impl |
+| `storage` | ✅ Scaffolded | Full fjall impl |
 | `auth` | ✅ Scaffolded | JWT+RBAC impl |
 | `encryption` | ✅ Scaffolded | AES-256-GCM DEK/KEK impl |
 | `kms` | ✅ Scaffolded | Local KMS impl; AWS/Azure/GCP stubs |
