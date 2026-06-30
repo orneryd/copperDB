@@ -11,7 +11,7 @@ use copperdb_storage::{
 use copperdb_util::RequestCancellation;
 use serde_json::Value;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
 pub use copperdb_storage::{
@@ -99,6 +99,15 @@ impl<'a> IndexCatalog<'a> {
             .map(String::as_str)
             .filter(|label| !label.is_empty())
         else {
+            // Labelless pattern: try to use any property index that covers the
+            // requested properties, unioning across all (label, prop) indexes.
+            // This turns graphify's `MATCH (a {id:$src}),(b {id:$tgt})` into O(1)
+            // lookups instead of a full node scan.
+            if !properties.is_empty() {
+                if let Some(nodes) = self.lookup_labelless_by_any_property_index(properties)? {
+                    return Ok(nodes);
+                }
+            }
             let mut nodes = self.storage.all_node_records()?;
             nodes.retain(|node| node_matches_properties(node, properties));
             return Ok(nodes);
@@ -290,6 +299,75 @@ impl<'a> IndexCatalog<'a> {
 
     pub fn drop_if_present(&self, name: &str) -> Result<bool, IndexError> {
         Ok(self.storage.delete_index_definition(name)?)
+    }
+
+    /// Labelless-pattern counterpart to `lookup_nodes`: when the pattern has
+    /// inline equality properties but no label (e.g. `MATCH (n {id: $x})`),
+    /// unions results across ALL indexes that cover any of the requested
+    /// properties, regardless of the label they were declared against.
+    /// Returns `None` when no usable index exists (caller falls back to scan).
+    fn lookup_labelless_by_any_property_index(
+        &self,
+        properties: &HashMap<String, Value>,
+    ) -> Result<Option<Vec<NodeRecord>>, IndexError> {
+        // Find indexes that cover any of the requested properties
+        let mut covering: Vec<(IndexDefinition, &String, &Value)> = Vec::new();
+        for definition in self.list()?.into_iter().filter(|d| {
+            d.entity_type == CatalogIndexEntityType::Node
+                && supports_property_lookup_index_kind(d.kind)
+        }) {
+            for (prop, val) in properties {
+                if definition.properties.iter().any(|p| p == prop) {
+                    covering.push((definition.clone(), prop, val));
+                    break; // one match per index is enough
+                }
+            }
+        }
+
+        if covering.is_empty() {
+            return Ok(None);
+        }
+
+        // Build candidate sets from each covering index, then intersect
+        let mut sets: Vec<HashSet<String>> = Vec::new();
+        for (def, prop, val) in &covering {
+            let nodes = if def.properties.len() == 1 {
+                self.storage.get_nodes_by_property(&def.label, prop, val)?
+            } else {
+                self.storage
+                    .get_nodes_by_properties(&def.label, &def.properties, properties)?
+            };
+            let ids: HashSet<String> = nodes.into_iter().map(|n| n.id.clone()).collect();
+            if !ids.is_empty() {
+                sets.push(ids);
+            }
+        }
+
+        if sets.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        // Intersect: only keep nodes that appear in ALL index result sets.
+        // Start from the smallest set for efficiency.
+        sets.sort_by_key(|s| s.len());
+        let first = &sets[0];
+        let mut result: Vec<NodeRecord> = Vec::with_capacity(first.len());
+        for node_id in first {
+            let mut in_all = true;
+            for other in &sets[1..] {
+                if !other.contains(node_id) {
+                    in_all = false;
+                    break;
+                }
+            }
+            if in_all {
+                if let Some(node) = self.storage.get_node_record(node_id)? {
+                    result.push(node);
+                }
+            }
+        }
+
+        Ok(Some(result))
     }
 
     fn preferred_node_index_definition(
