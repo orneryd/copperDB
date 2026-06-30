@@ -23,7 +23,7 @@ function neo4jBrowserChannelPlugin(): Plugin {
   const matcher =
     /neo4j-driver-bolt-connection\/lib\/channel\/node(?:\/index\.js)?$/;
   return {
-    name: "nornicdb:neo4j-browser-channel",
+    name: "copperdb:neo4j-browser-channel",
     enforce: "pre",
     async resolveId(source, importer, options) {
       if (!matcher.test(source) && !source.endsWith("./node")) {
@@ -67,7 +67,7 @@ function nodeShimPlugin(): Plugin {
   const builtins = new Set(["net", "tls", "fs", "os", "path", "crypto"]);
   const empty = path.resolve(__dirname, "src/utils/empty-shim.ts");
   return {
-    name: "nornicdb:node-shim",
+    name: "copperdb:node-shim",
     enforce: "pre",
     resolveId(source) {
       if (
@@ -95,26 +95,26 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 5174,
       proxy: {
-        // Proxy API requests to NornicDB server
+        // Proxy API requests to copperDB server
         "/api": {
-          target: "http://localhost:7475",
+          target: "http://localhost:7474",
           changeOrigin: true,
           rewrite: (path) => path.replace(/^\/api/, ""),
         },
         "/db": {
-          target: "http://localhost:7475",
+          target: "http://localhost:7474",
           changeOrigin: true,
         },
         "/auth": {
-          target: "http://localhost:7475",
+          target: "http://localhost:7474",
           changeOrigin: true,
         },
-        "/nornicdb": {
-          target: "http://localhost:7475",
+        "/copperdb": {
+          target: "http://localhost:7474",
           changeOrigin: true,
         },
         "/admin": {
-          target: "http://localhost:7475",
+          target: "http://localhost:7474",
           changeOrigin: true,
         },
       },

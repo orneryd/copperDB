@@ -22,7 +22,7 @@ export function RegenerateConfirmModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="bg-norse-deep border border-norse-rune rounded-xl p-6 max-w-md mx-4 shadow-2xl">
+      <div className="bg-norse-deep border border-midnight-graphite rounded-xl p-6 max-w-md mx-4 shadow-2xl">
         <div className="flex items-center gap-3 mb-4">
           <div className="p-2 bg-red-500/20 rounded-lg">
             <Zap className="w-6 h-6 text-red-400" />
@@ -31,16 +31,16 @@ export function RegenerateConfirmModal({
             Regenerate All Embeddings?
           </h3>
         </div>
-        <p className="text-norse-silver mb-2">
+        <p className="text-silver-steel mb-2">
           This will{" "}
           <span className="text-red-400 font-medium">
             clear all existing embeddings
           </span>{" "}
           and regenerate them from scratch.
         </p>
-        <p className="text-norse-silver text-sm mb-6">
+        <p className="text-silver-steel text-sm mb-6">
           This operation runs in the background. You have{" "}
-          <span className="text-valhalla-gold">
+          <span className="text-copper">
             {totalEmbeddings.toLocaleString()}
           </span>{" "}
           embeddings that will be regenerated.
@@ -49,7 +49,7 @@ export function RegenerateConfirmModal({
           <button
             type="button"
             onClick={onCancel}
-            className="px-4 py-2 rounded-lg text-norse-silver hover:text-white hover:bg-norse-rune transition-all"
+            className="px-4 py-2 rounded-lg text-silver-steel hover:text-white hover:bg-midnight-graphite transition-all"
           >
             Cancel
           </button>

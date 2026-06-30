@@ -25,24 +25,24 @@ export function JsonPreview({ data, expanded = false }: JsonPreviewProps) {
   if (Array.isArray(data)) {
     if (expanded) {
       return (
-        <pre className="text-xs text-norse-silver bg-norse-shadow/50 rounded p-2 overflow-x-auto max-h-48 overflow-y-auto break-words whitespace-pre-wrap">
+        <pre className="text-xs text-silver-steel bg-midnight-navy/50 rounded p-2 overflow-x-auto max-h-48 overflow-y-auto break-words whitespace-pre-wrap">
           {JSON.stringify(data, null, 2)}
         </pre>
       );
     }
-    return <span className="text-norse-silver">[{data.length} items]</span>;
+    return <span className="text-silver-steel">[{data.length} items]</span>;
   }
   if (typeof data === "object") {
     if (expanded) {
       return (
-        <pre className="text-xs text-norse-silver bg-norse-shadow/50 rounded p-2 overflow-x-auto max-h-48 overflow-y-auto break-words whitespace-pre-wrap">
+        <pre className="text-xs text-silver-steel bg-midnight-navy/50 rounded p-2 overflow-x-auto max-h-48 overflow-y-auto break-words whitespace-pre-wrap">
           {JSON.stringify(data, null, 2)}
         </pre>
       );
     }
     const keys = Object.keys(data);
     return (
-      <span className="text-norse-silver">
+      <span className="text-silver-steel">
         {"{"}...{keys.length} props{"}"}
       </span>
     );

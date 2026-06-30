@@ -441,7 +441,7 @@ export function DatabaseAccess() {
             toggleDbForRole(role, db);
             setDirty(true);
           }}
-          className="w-4 h-4 rounded border-norse-rune bg-norse-stone text-nornic-primary disabled:opacity-70"
+          className="w-4 h-4 rounded border-midnight-graphite bg-midnight-graphite text-verdigris disabled:opacity-70"
           title={isAdminSystemOrDefault ? 'Admin always has access to system and default database' : undefined}
         />
       </div>
@@ -469,7 +469,7 @@ export function DatabaseAccess() {
           checked={getEntitlementsForRole(role).includes(ctx.column.name)}
           disabled={adminEntitlementsReadOnly}
           onChange={() => toggleEntitlementForRole(role, ctx.column.name)}
-          className="w-4 h-4 rounded border-norse-rune bg-norse-stone text-nornic-primary disabled:opacity-70"
+          className="w-4 h-4 rounded border-midnight-graphite bg-midnight-graphite text-verdigris disabled:opacity-70"
         />
       </div>
     );
@@ -485,7 +485,7 @@ export function DatabaseAccess() {
     return (
       <PageLayout>
         <div className="flex items-center justify-center flex-1">
-          <div className="w-12 h-12 border-4 border-nornic-primary border-t-transparent rounded-full animate-spin" />
+          <div className="w-12 h-12 border-4 border-verdigris border-t-transparent rounded-full animate-spin" />
         </div>
       </PageLayout>
     );
@@ -518,26 +518,26 @@ export function DatabaseAccess() {
           <Alert type="success" message={success} dismissible onDismiss={() => setSuccess('')} />
         )}
 
-        <p className="text-norse-silver text-sm">
+        <p className="text-silver-steel text-sm">
           Assign which databases each role can see and access. Empty list means <strong>all databases</strong>.
           Read-only / read-write labels are derived from per-database privileges when set, otherwise from each role's entitlements below (Read/Write).
         </p>
 
         {/* Database access by role */}
-        <div className="bg-norse-shadow border border-norse-rune rounded-lg overflow-hidden">
-          <h2 className="px-4 py-3 bg-norse-stone text-sm font-semibold text-norse-silver flex items-center gap-2">
+        <div className="bg-midnight-navy border border-midnight-graphite rounded-lg overflow-hidden">
+          <h2 className="px-4 py-3 bg-midnight-graphite text-sm font-semibold text-silver-steel flex items-center gap-2">
             <Database className="w-4 h-4" />
             Access by role
           </h2>
-          <div className="nornic-grid p-4">
+          <div className="copper-grid p-4">
             <UiGrid options={accessGridOptions} cellRenderers={accessCellRenderers} />
           </div>
         </div>
 
         {/* Role entitlements (global permissions per role) */}
         {globalEntitlements.length > 0 && (
-          <div className="bg-norse-shadow border border-norse-rune rounded-lg overflow-hidden">
-            <h2 className="px-4 py-3 bg-norse-stone text-sm font-semibold text-norse-silver flex items-center justify-between gap-2">
+          <div className="bg-midnight-navy border border-midnight-graphite rounded-lg overflow-hidden">
+            <h2 className="px-4 py-3 bg-midnight-graphite text-sm font-semibold text-silver-steel flex items-center justify-between gap-2">
               <span className="flex items-center gap-2">
                 <Shield className="w-4 h-4" />
                 Role entitlements
@@ -553,18 +553,18 @@ export function DatabaseAccess() {
                 Save entitlements
               </Button>
             </h2>
-            <p className="px-4 py-2 text-xs text-norse-fog border-b border-norse-rune">
+            <p className="px-4 py-2 text-xs text-silver-structural border-b border-midnight-graphite">
               Assign global permissions to each role. These control API access (read, write, admin, user management, etc.).
             </p>
-            <div className="nornic-grid p-4">
+            <div className="copper-grid p-4">
               <UiGrid options={entitlementGridOptions} cellRenderers={entitlementCellRenderers} />
             </div>
           </div>
         )}
 
         {/* User-defined roles */}
-        <div className="bg-norse-shadow border border-norse-rune rounded-lg overflow-hidden">
-          <h2 className="px-4 py-3 bg-norse-stone text-sm font-semibold text-norse-silver">
+        <div className="bg-midnight-navy border border-midnight-graphite rounded-lg overflow-hidden">
+          <h2 className="px-4 py-3 bg-midnight-graphite text-sm font-semibold text-silver-steel">
             User-defined roles
           </h2>
           <div className="p-4 space-y-4">
@@ -594,10 +594,10 @@ export function DatabaseAccess() {
                 {userDefinedRoles.map((role) => (
                   <li
                     key={role}
-                    className="flex items-center justify-between py-2 px-3 rounded bg-norse-stone/50"
+                    className="flex items-center justify-between py-2 px-3 rounded bg-midnight-graphite/50"
                   >
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-norse-silver">{role}</span>
+                      <span className="text-silver-steel">{role}</span>
                       {getEffectivePermissionTagsForRole(role, privilegesMatrix, roleEntitlements).map((tag) => (
                         <span
                           key={tag}
@@ -634,7 +634,7 @@ export function DatabaseAccess() {
                 ))}
               </ul>
             ) : (
-              <p className="text-norse-fog text-sm">No user-defined roles. Create one above.</p>
+              <p className="text-silver-structural text-sm">No user-defined roles. Create one above.</p>
             )}
           </div>
         </div>

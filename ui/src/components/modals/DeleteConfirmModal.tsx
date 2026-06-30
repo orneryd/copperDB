@@ -24,7 +24,7 @@ export function DeleteConfirmModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="bg-norse-deep border border-norse-rune rounded-xl p-6 max-w-md mx-4 shadow-2xl">
+      <div className="bg-norse-deep border border-midnight-graphite rounded-xl p-6 max-w-md mx-4 shadow-2xl">
         <div className="flex items-center gap-3 mb-4">
           <div className="p-2 bg-red-500/20 rounded-lg">
             <Trash2 className="w-6 h-6 text-red-400" />
@@ -33,14 +33,14 @@ export function DeleteConfirmModal({
             Delete {nodeCount} Node{nodeCount !== 1 ? "s" : ""}?
           </h3>
         </div>
-        <p className="text-norse-silver mb-2">
+        <p className="text-silver-steel mb-2">
           This will{" "}
           <span className="text-red-400 font-medium">
             permanently delete
           </span>{" "}
           the selected node{nodeCount !== 1 ? "s" : ""} and all associated data.
         </p>
-        <p className="text-norse-silver text-sm mb-6">
+        <p className="text-silver-steel text-sm mb-6">
           This action will remove:
           <ul className="list-disc list-inside mt-2 space-y-1">
             <li>
@@ -58,7 +58,7 @@ export function DeleteConfirmModal({
             type="button"
             onClick={onCancel}
             disabled={deleting}
-            className="px-4 py-2 rounded-lg text-norse-silver hover:text-white hover:bg-norse-rune transition-all disabled:opacity-50"
+            className="px-4 py-2 rounded-lg text-silver-steel hover:text-white hover:bg-midnight-graphite transition-all disabled:opacity-50"
           >
             Cancel
           </button>

@@ -280,13 +280,13 @@ export function GraphExplorerPanel({
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
           <h2 className="text-sm font-medium text-white">Neighborhood Graph</h2>
-          <p className="text-xs text-norse-silver mt-1">
+          <p className="text-xs text-silver-steel mt-1">
             Explore connected nodes and click any node or relationship to
             reflect it in details.
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <label className="text-xs text-norse-silver flex items-center gap-2">
+          <label className="text-xs text-silver-steel flex items-center gap-2">
             Depth
             <input
               type="number"
@@ -301,14 +301,14 @@ export function GraphExplorerPanel({
                 }
                 setDepth(Math.max(1, Math.trunc(nextDepth)));
               }}
-              className="w-20 px-2 py-1 bg-norse-stone border border-norse-rune rounded text-white"
+              className="w-20 px-2 py-1 bg-midnight-graphite border border-midnight-graphite rounded text-white"
             />
           </label>
           <button
             type="button"
             onClick={() => void loadNeighborhood()}
             disabled={loading || !effectiveRootNodeId}
-            className="inline-flex items-center gap-2 px-3 py-1.5 text-sm bg-norse-stone border border-norse-rune rounded text-white hover:bg-norse-rune disabled:opacity-50"
+            className="inline-flex items-center gap-2 px-3 py-1.5 text-sm bg-midnight-graphite border border-midnight-graphite rounded text-white hover:bg-midnight-graphite disabled:opacity-50"
           >
             <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
             Refresh
@@ -319,7 +319,7 @@ export function GraphExplorerPanel({
               <button
                 type="button"
                 onClick={() => onRootNodeChange(selectedNodeId)}
-                className="px-3 py-1.5 text-sm bg-nornic-primary text-white rounded hover:bg-nornic-secondary"
+                className="px-3 py-1.5 text-sm bg-verdigris text-white rounded hover:bg-verdigris-teal"
               >
                 Use Selected Node As Root
               </button>
@@ -328,13 +328,13 @@ export function GraphExplorerPanel({
       </div>
 
       {!effectiveRootNodeId && (
-        <div className="flex-1 flex items-center justify-center rounded-xl border border-dashed border-norse-rune bg-norse-shadow/30 p-6 text-center text-norse-silver">
+        <div className="flex-1 flex items-center justify-center rounded-xl border border-dashed border-midnight-graphite bg-midnight-navy/30 p-6 text-center text-silver-steel">
           <div>
             <p>
               Select a node from search, then click this tab to view
               neighborhood.
             </p>
-            <p className="text-sm text-norse-fog mt-2">
+            <p className="text-sm text-silver-structural mt-2">
               The graph explorer is additive and uses the existing node details
               panel on the right.
             </p>
@@ -349,15 +349,15 @@ export function GraphExplorerPanel({
       )}
 
       {effectiveRootNodeId && !error && (
-        <div className="flex-1 min-h-0 rounded-xl border border-norse-rune bg-norse-shadow/30 overflow-hidden">
+        <div className="flex-1 min-h-0 rounded-xl border border-midnight-graphite bg-midnight-navy/30 overflow-hidden">
           {loading && !graph ? (
-            <div className="h-full flex items-center justify-center text-norse-silver gap-2">
+            <div className="h-full flex items-center justify-center text-silver-steel gap-2">
               <Loader2 className="w-5 h-5 animate-spin" />
               Loading neighborhood graph...
             </div>
           ) : graph ? (
             <div className="h-full flex flex-col">
-              <div className="px-4 py-2 border-b border-norse-rune text-xs text-norse-silver flex items-center justify-between">
+              <div className="px-4 py-2 border-b border-midnight-graphite text-xs text-silver-steel flex items-center justify-between">
                 <span>
                   Root:{" "}
                   <span className="text-white font-mono">
@@ -482,7 +482,7 @@ export function GraphExplorerPanel({
                             height={52}
                             className="pointer-events-none"
                           >
-                            <div className="text-center text-[11px] leading-4 text-norse-silver break-words px-1">
+                            <div className="text-center text-[11px] leading-4 text-silver-steel break-words px-1">
                               {label}
                             </div>
                           </foreignObject>
@@ -508,7 +508,7 @@ export function GraphExplorerPanel({
               </div>
             </div>
           ) : (
-            <div className="h-full flex items-center justify-center text-norse-silver">
+            <div className="h-full flex items-center justify-center text-silver-steel">
               No graph data returned for the selected root node.
             </div>
           )}
@@ -516,7 +516,7 @@ export function GraphExplorerPanel({
       )}
 
       {effectiveRootNodeId && graph && nodesById.has(effectiveRootNodeId) && (
-        <div className="text-xs text-norse-silver">
+        <div className="text-xs text-silver-steel">
           Root preview:{" "}
           <span className="text-white">
             {getGraphNodeLabel(

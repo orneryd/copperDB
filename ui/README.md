@@ -1,15 +1,15 @@
-# NornicDB Browser
+# copperDB Browser
 
-A modern web UI for NornicDB - the Neo4j-compatible graph database with GPU-accelerated vector search.
+A modern web UI for copperDB — the Neo4j-compatible graph database that learns.
 
 ## Features
 
-- **Cypher Query Editor** - Execute Cypher queries with syntax highlighting and history
-- **Semantic Search** - Full-text and vector similarity search
-- **Node Browser** - View node details, labels, and properties
-- **Find Similar** - Discover semantically related nodes using embeddings
-- **Live Stats** - Real-time connection status and database metrics
-- **Authentication** - Supports none, dev mode, and OAuth
+- **Cypher Query Editor** — Execute Cypher queries with syntax highlighting and history
+- **Semantic Search** — Full-text and vector similarity search
+- **Node Browser** — View node details, labels, and properties
+- **Find Similar** — Discover semantically related nodes using embeddings
+- **Live Stats** — Real-time connection status and database metrics
+- **Authentication** — Supports none, dev mode, and OAuth
 
 ## Quick Start
 
@@ -26,26 +26,26 @@ npm run build
 
 ## Configuration
 
-The UI proxies requests to NornicDB server at `localhost:7475`. Configure in `vite.config.ts`:
+The UI proxies requests to the copperDB server at `localhost:7474`. Configure in `vite.config.ts`:
 
 ```typescript
 proxy: {
-  '/api': { target: 'http://localhost:7475' },
-  '/db': { target: 'http://localhost:7475' },
-  '/nornicdb': { target: 'http://localhost:7475' },
-  '/auth': { target: 'http://localhost:7475' },
+  '/api': { target: 'http://localhost:7474' },
+  '/db': { target: 'http://localhost:7474' },
+  '/copperdb': { target: 'http://localhost:7474' },
+  '/auth': { target: 'http://localhost:7474' },
 }
 ```
 
 ## Theme
 
-The UI uses a Norse-inspired dark theme with NornicDB's signature emerald green accent:
+The UI uses a deep-tech dark theme with metallic copper and verdigris accents:
 
-- **Background**: `#0a0e1a` (Norse Night)
-- **Cards/Panels**: `#141824` (Norse Shadow)
-- **Primary**: `#10b981` (Nornic Green)
-- **Accent**: `#4a9eff` (Frost Ice)
-- **Highlight**: `#d4af37` (Valhalla Gold)
+- **Background**: `#060B12` (Midnight Black)
+- **Cards/Panels**: `#0C1622` (Deep Navy)
+- **Primary Accent**: `#00B8C8` (Verdigris Blue)
+- **Copper Accent**: `#B87333` (Copper Metallic)
+- **Text**: `#F3F6FA` / `#B8C1CC`
 
 ## Authentication Modes
 

@@ -214,7 +214,7 @@ export function QueryResultsTable({
       const nodeData = row.__nodeData ?? null;
 
       if (!nodeData) {
-        return <div className="text-xs text-norse-fog py-1">-</div>;
+        return <div className="text-xs text-silver-structural py-1">-</div>;
       }
 
       return (
@@ -222,7 +222,7 @@ export function QueryResultsTable({
           <button
             type="button"
             onClick={() => onNodeSelect(nodeData)}
-            className="inline-flex items-center rounded-full border border-nornic-primary/40 bg-nornic-primary/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-nornic-primary hover:border-nornic-primary hover:bg-nornic-primary/20 hover:text-white"
+            className="inline-flex items-center rounded-full border border-verdigris/40 bg-verdigris/10 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-verdigris hover:border-verdigris hover:bg-verdigris/20 hover:text-white"
           >
             Select
           </button>
@@ -270,14 +270,14 @@ export function QueryResultsTable({
 
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="flex-1 overflow-hidden nornic-grid">
+      <div className="flex-1 overflow-hidden copper-grid">
         <UiGrid
           options={gridOptions}
           cellRenderers={cellRenderers}
           onRegisterApi={setGridApi}
         />
       </div>
-      <p className="text-xs text-norse-silver mt-2 px-2">
+      <p className="text-xs text-silver-steel mt-2 px-2">
         {result.data.length} row(s) returned
       </p>
     </div>

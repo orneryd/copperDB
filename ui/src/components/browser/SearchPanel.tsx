@@ -69,24 +69,24 @@ export function SearchPanel({
 
   return (
     <div className="flex-1 flex flex-col p-4 gap-4">
-      <p className="text-xs text-norse-silver">
-        Searching in: <span className="font-medium text-norse-silver">{searchTargetLabel}</span>
+      <p className="text-xs text-silver-steel">
+        Searching in: <span className="font-medium text-silver-steel">{searchTargetLabel}</span>
       </p>
       <form onSubmit={handleSubmit} className="flex gap-2">
         <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-norse-fog" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-silver-structural" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 bg-norse-stone border border-norse-rune rounded-lg text-white placeholder-norse-fog focus:outline-none focus:ring-2 focus:ring-nornic-primary"
+            className="w-full pl-10 pr-4 py-2 bg-midnight-graphite border border-midnight-graphite rounded-lg text-white placeholder-norse-fog focus:outline-none focus:ring-2 focus:ring-nornic-primary"
             placeholder="Search nodes semantically..."
           />
         </div>
         <button
           type="submit"
           disabled={searchLoading}
-          className="px-4 py-2 bg-nornic-primary text-white rounded-lg hover:bg-nornic-secondary disabled:opacity-50 transition-colors"
+          className="px-4 py-2 bg-verdigris text-white rounded-lg hover:bg-verdigris-teal disabled:opacity-50 transition-colors"
         >
           {searchLoading ? "..." : "Search"}
         </button>
@@ -129,7 +129,7 @@ export function SearchPanel({
                 }}
                 className="cursor-pointer mr-2"
               />
-              <span className="text-xs text-norse-silver">Select all</span>
+              <span className="text-xs text-silver-steel">Select all</span>
             </div>
           )}
 
@@ -154,7 +154,7 @@ export function SearchPanel({
           {searchResults.length === 0 &&
             searchQuery &&
             !searchLoading && (
-              <p className="text-center text-norse-silver py-8">
+              <p className="text-center text-silver-steel py-8">
                 No results found
               </p>
             )}

@@ -3,39 +3,39 @@
 
 @config "../tailwind.config.js";
 
-.nornic-grid {
-  --ui-grid-surface: #141824;
-  --ui-grid-border-color: #2a3247;
-  --ui-grid-header-background: #1e2433;
+.copper-grid {
+  --ui-grid-surface: #0C1622;
+  --ui-grid-border-color: #1E2630;
+  --ui-grid-header-background: #1E2630;
   --ui-grid-header-weight: 600;
-  --ui-grid-cell-color: #f3f4f6;
-  --ui-grid-muted-color: #9ca3af;
-  --ui-grid-row-odd: #141824;
-  --ui-grid-row-even: #1a1f2e;
-  --ui-grid-row-hover: rgba(16, 185, 129, 0.08);
-  --ui-grid-accent: #10b981;
-  --ui-grid-group-background: #1e2433;
+  --ui-grid-cell-color: #F3F6FA;
+  --ui-grid-muted-color: #9CA7B5;
+  --ui-grid-row-odd: #0C1622;
+  --ui-grid-row-even: #060B12;
+  --ui-grid-row-hover: rgba(0, 184, 200, 0.08);
+  --ui-grid-accent: #00B8C8;
+  --ui-grid-group-background: #1E2630;
   --ui-grid-radius: 8px;
   --ui-grid-shadow: none;
-  --ui-grid-control-background: #141824;
-  --ui-grid-control-border-color: #2a3247;
-  --ui-grid-control-color: #9ca3af;
-  --ui-grid-control-background-active: rgba(16, 185, 129, 0.14);
-  --ui-grid-control-border-color-active: rgba(16, 185, 129, 0.35);
-  --ui-grid-control-color-active: #10b981;
-  --ui-grid-filter-input-focus-outline: 2px solid rgba(16, 185, 129, 0.2);
-  --ui-grid-cell-focus-background: rgba(16, 185, 129, 0.08);
-  --ui-grid-cell-focus-ring: inset 0 0 0 1px rgba(16, 185, 129, 0.28);
-  --ui-grid-cell-editing-background: rgba(16, 185, 129, 0.06);
-  --ui-grid-cell-editor-border-color: rgba(16, 185, 129, 0.45);
-  --ui-grid-cell-editor-focus-outline: 2px solid rgba(16, 185, 129, 0.2);
-  --ui-grid-expandable-row-background: rgba(16, 185, 129, 0.04);
+  --ui-grid-control-background: #0C1622;
+  --ui-grid-control-border-color: #1E2630;
+  --ui-grid-control-color: #9CA7B5;
+  --ui-grid-control-background-active: rgba(0, 184, 200, 0.14);
+  --ui-grid-control-border-color-active: rgba(0, 184, 200, 0.35);
+  --ui-grid-control-color-active: #00B8C8;
+  --ui-grid-filter-input-focus-outline: 2px solid rgba(0, 184, 200, 0.2);
+  --ui-grid-cell-focus-background: rgba(0, 184, 200, 0.08);
+  --ui-grid-cell-focus-ring: inset 0 0 0 1px rgba(0, 184, 200, 0.28);
+  --ui-grid-cell-editing-background: rgba(0, 184, 200, 0.06);
+  --ui-grid-cell-editor-border-color: rgba(0, 184, 200, 0.45);
+  --ui-grid-cell-editor-focus-outline: 2px solid rgba(0, 184, 200, 0.2);
+  --ui-grid-expandable-row-background: rgba(0, 184, 200, 0.04);
   --ui-grid-empty-state-min-height: 10rem;
 }
 
 body {
-  background-color: #0a0e1a;
-  color: #f3f4f6;
+  background-color: #060B12;
+  color: #F3F6FA;
   font-family: Inter, system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -48,31 +48,31 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  background-color: #141824;
+  background-color: #0C1622;
 }
 
 ::-webkit-scrollbar-thumb {
-  background-color: #2a3247;
+  background-color: #1E2630;
   border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background-color: #10b981;
+  background-color: #00B8C8;
 }
 
 /* Code editor styling */
 .cypher-editor {
   font-family: "JetBrains Mono", "Fira Code", monospace;
   font-size: 0.875rem;
-  background-color: #141824;
-  border: 1px solid #2a3247;
+  background-color: #0C1622;
+  border: 1px solid #1E2630;
   border-radius: 0.5rem;
 }
 
 .cypher-editor:focus {
   outline: none;
   border-color: transparent;
-  box-shadow: 0 0 0 2px #10b981;
+  box-shadow: 0 0 0 2px #00B8C8;
 }
 
 /* Result table styling */
@@ -82,42 +82,42 @@ body {
 }
 
 .result-table th {
-  background-color: #1e2433;
+  background-color: #1E2630;
   text-align: left;
   padding: 0.5rem 1rem;
   font-weight: 500;
-  color: #34d399;
-  border-bottom: 1px solid #2a3247;
+  color: #00B8C8;
+  border-bottom: 1px solid #1E2630;
 }
 
 .result-table td {
   padding: 0.5rem 1rem;
-  border-bottom: 1px solid rgb(42 50 71 / 0.5);
+  border-bottom: 1px solid rgb(30 38 48 / 0.5);
 }
 
 .result-table tr:hover {
-  background-color: rgb(30 36 51 / 0.5);
+  background-color: rgb(30 38 48 / 0.5);
 }
 
 /* JSON viewer */
 .json-key {
-  color: #4a9eff;
+  color: #00B8C8;
 }
 
 .json-string {
-  color: #34d399;
+  color: #B87333;
 }
 
 .json-number {
-  color: #d4af37;
+  color: #B87333;
 }
 
 .json-boolean {
-  color: #c084fc;
+  color: #1F8E96;
 }
 
 .json-null {
-  color: #9ca3af;
+  color: #9CA7B5;
   font-style: italic;
 }
 
@@ -125,10 +125,10 @@ body {
 @keyframes pulse-glow {
   0%,
   100% {
-    box-shadow: 0 0 5px rgba(16, 185, 129, 0.3);
+    box-shadow: 0 0 5px rgba(0, 184, 200, 0.3);
   }
   50% {
-    box-shadow: 0 0 20px rgba(16, 185, 129, 0.6);
+    box-shadow: 0 0 20px rgba(0, 184, 200, 0.6);
   }
 }
 

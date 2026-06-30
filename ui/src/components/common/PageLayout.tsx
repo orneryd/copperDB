@@ -19,7 +19,7 @@ export function PageLayout({
   className = "",
 }: PageLayoutProps) {
   return (
-    <div className={`min-h-screen bg-norse-night flex flex-col ${className}`}>
+    <div className={`min-h-screen bg-midnight flex flex-col ${className}`}>
       {showHeader && header && <header>{header}</header>}
       <main className="flex-1">{children}</main>
     </div>

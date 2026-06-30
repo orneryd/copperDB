@@ -7,27 +7,30 @@ export default {
   theme: {
     extend: {
       colors: {
-        'norse': {
-          'night': '#0a0e1a',
-          'shadow': '#141824',
-          'stone': '#1e2433',
-          'rune': '#2a3247',
-          'fog': '#3d4659',
-          'silver': '#9ca3af',
+        'midnight': {
+          'DEFAULT': '#060B12',
+          'navy': '#0C1622',
+          'graphite': '#1E2630',
         },
-        'valhalla': {
-          'gold': '#d4af37',
-          'amber': '#e8b84a',
-          'bronze': '#cd7f32',
+        'silver': {
+          'DEFAULT': '#C7CDD6',
+          'steel': '#9CA7B5',
+          'structural': '#4B5563',
         },
-        'frost': {
-          'ice': '#4a9eff',
-          'glacier': '#7dd3fc',
+        'copper': {
+          'DEFAULT': '#B87333',
+          'oxidized': '#C96A19',
+          'bronze': '#8A4D1E',
         },
-        'nornic': {
-          'primary': '#10b981',
-          'secondary': '#059669',
-          'accent': '#34d399',
+        'verdigris': {
+          'DEFAULT': '#00B8C8',
+          'teal': '#1F8E96',
+          'deep': '#0E4F57',
+        },
+        'text': {
+          'primary': '#F3F6FA',
+          'secondary': '#B8C1CC',
+          'muted': '#7D8896',
         },
       },
       fontFamily: {

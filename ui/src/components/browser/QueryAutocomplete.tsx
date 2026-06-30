@@ -218,7 +218,7 @@ export function QueryAutocomplete({
     <div className="relative">
       {/* Loading indicator */}
       {isLoading && (
-        <div className="absolute top-2 right-2 flex items-center gap-2 text-norse-silver text-xs">
+        <div className="absolute top-2 right-2 flex items-center gap-2 text-silver-steel text-xs">
           <Loader2 className="w-3 h-3 animate-spin" />
           <span>AI suggesting...</span>
         </div>
@@ -226,9 +226,9 @@ export function QueryAutocomplete({
 
       {/* Suggestions dropdown */}
       {showSuggestions && suggestions.length > 0 && (
-        <div className="absolute top-full left-0 right-0 mt-1 bg-norse-shadow border border-norse-rune rounded-lg shadow-xl z-50 max-h-60 overflow-y-auto">
+        <div className="absolute top-full left-0 right-0 mt-1 bg-midnight-navy border border-midnight-graphite rounded-lg shadow-xl z-50 max-h-60 overflow-y-auto">
           <div className="p-2">
-            <div className="flex items-center gap-2 px-2 py-1 text-xs text-norse-silver mb-1">
+            <div className="flex items-center gap-2 px-2 py-1 text-xs text-silver-steel mb-1">
               <Sparkles className="w-3 h-3" />
               <span>AI Suggestion</span>
             </div>
@@ -243,8 +243,8 @@ export function QueryAutocomplete({
                 }}
                 className={`w-full text-left px-3 py-2 rounded text-sm font-mono transition-colors ${
                   index === selectedIndex
-                    ? "bg-nornic-primary/20 text-white"
-                    : "text-norse-silver hover:bg-norse-rune hover:text-white"
+                    ? "bg-verdigris/20 text-white"
+                    : "text-silver-steel hover:bg-midnight-graphite hover:text-white"
                 }`}
                 onMouseEnter={() => setSelectedIndex(index)}
               >
@@ -253,7 +253,7 @@ export function QueryAutocomplete({
                 </div>
               </button>
             ))}
-            <div className="px-2 py-1 text-xs text-norse-fog mt-1 border-t border-norse-rune">
+            <div className="px-2 py-1 text-xs text-silver-structural mt-1 border-t border-midnight-graphite">
               Press Enter to accept, Esc to dismiss
             </div>
           </div>

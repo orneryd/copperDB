@@ -243,7 +243,7 @@ export function Databases() {
 
   const configGridData = useMemo<GridRecord[]>(() => configKeys.map((meta) => ({
     __gridId: meta.key,
-    key: meta.key.replace(/^NORNICDB_/, ""),
+    key: meta.key.replace(/^copperDB_/, ""),
     rawKey: meta.key,
     type: meta.type,
     category: meta.category || "Other",
@@ -347,7 +347,7 @@ export function Databases() {
             checked={String(row.value) === "true"}
             disabled={row.useDefault}
             onChange={(e) => setConfigFormValue(row.rawKey, e.target.checked ? "true" : "false")}
-            className="rounded border-norse-rune bg-norse-stone text-nornic-primary"
+            className="rounded border-midnight-graphite bg-midnight-graphite text-verdigris"
           />
         </div>
       );
@@ -360,14 +360,14 @@ export function Databases() {
             type="checkbox"
             checked={row.useDefault}
             onChange={(e) => setConfigUseDefaultForKey(row.rawKey, e.target.checked)}
-            className="rounded border-norse-rune bg-norse-stone text-nornic-primary"
+            className="rounded border-midnight-graphite bg-midnight-graphite text-verdigris"
           />
         </div>
       );
     }
 
     if (ctx.column.name === "effectiveDefault") {
-      return <div className="py-1 text-norse-silver">{String(ctx.value || "—")}</div>;
+      return <div className="py-1 text-silver-steel">{String(ctx.value || "—")}</div>;
     }
 
     if (ctx.column.name === "key") {
@@ -375,7 +375,7 @@ export function Databases() {
     }
 
     if (ctx.column.name === "value" && row.useDefault) {
-      return <div className="py-1 text-norse-fog">{String(row.value || "—")}</div>;
+      return <div className="py-1 text-silver-structural">{String(row.value || "—")}</div>;
     }
 
     return null;
@@ -393,7 +393,7 @@ export function Databases() {
       <PageLayout>
         <PageHeader title="Databases" backTo="/" backLabel="Back to Browser" />
         <div className="flex items-center justify-center min-h-[400px]">
-          <div className="text-norse-silver">Loading databases...</div>
+          <div className="text-silver-steel">Loading databases...</div>
         </div>
       </PageLayout>
     );
@@ -437,12 +437,12 @@ export function Databases() {
         )}
 
         {databases.length === 0 ? (
-          <div className="bg-norse-shadow border border-norse-rune rounded-lg p-12 text-center">
-            <Database className="w-16 h-16 text-norse-silver mx-auto mb-4" />
+          <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-12 text-center">
+            <Database className="w-16 h-16 text-silver-steel mx-auto mb-4" />
             <h3 className="text-lg font-semibold text-white mb-2">
               No Databases
             </h3>
-            <p className="text-norse-silver mb-6">
+            <p className="text-silver-steel mb-6">
               Create your first database to start organizing data
             </p>
             <Button
@@ -471,14 +471,14 @@ export function Databases() {
                 return (
                   <div
                     key={db.name}
-                    className="bg-norse-shadow border border-norse-rune rounded-lg p-4 hover:border-nornic-primary transition-colors"
+                    className="bg-midnight-navy border border-midnight-graphite rounded-lg p-4 hover:border-verdigris transition-colors"
                   >
                   <div className="flex items-start justify-between mb-3">
                     <div className="flex-1">
                       <h3 className="text-lg font-semibold text-white mb-1">
                         {db.name}
                       </h3>
-                      <div className="flex items-center gap-2 text-sm text-norse-silver flex-wrap">
+                      <div className="flex items-center gap-2 text-sm text-silver-steel flex-wrap">
                         <span
                           className={`px-2 py-1 rounded text-xs ${
                             db.status === "online"
@@ -512,7 +512,7 @@ export function Databases() {
                           </span>
                         )}
                         {db.default && (
-                          <span className="px-2 py-1 rounded text-xs bg-valhalla-gold/20 text-valhalla-gold">
+                          <span className="px-2 py-1 rounded text-xs bg-copper/20 text-copper">
                             default
                           </span>
                         )}
@@ -587,7 +587,7 @@ export function Databases() {
 
                   {isComposite ? (
                     <div className="space-y-2 text-sm">
-                      <div className="text-norse-silver text-xs font-medium uppercase tracking-wide">
+                      <div className="text-silver-steel text-xs font-medium uppercase tracking-wide">
                         Constituents
                       </div>
                       {db.constituents && db.constituents.length > 0 ? (
@@ -601,8 +601,8 @@ export function Databases() {
                                 <span className="text-white font-medium truncate">
                                   {c.alias}
                                 </span>
-                                <span className="text-norse-silver">→</span>
-                                <span className="text-norse-silver truncate">
+                                <span className="text-silver-steel">→</span>
+                                <span className="text-silver-steel truncate">
                                   {c.type === "remote" && c.uri
                                     ? c.uri
                                     : c.databaseName}
@@ -612,7 +612,7 @@ export function Databases() {
                                 className={`px-1.5 py-0.5 rounded text-[10px] shrink-0 ${
                                   c.type === "remote"
                                     ? "bg-purple-900/30 text-purple-400"
-                                    : "bg-norse-rune/50 text-norse-silver"
+                                    : "bg-midnight-graphite/50 text-silver-steel"
                                 }`}
                               >
                                 {c.type}
@@ -621,7 +621,7 @@ export function Databases() {
                           ))}
                         </div>
                       ) : (
-                        <div className="text-norse-silver italic">
+                        <div className="text-silver-steel italic">
                           No constituents
                         </div>
                       )}
@@ -630,32 +630,32 @@ export function Databases() {
                     <div className="space-y-2 text-sm">
                       {!ready && (
                         <div className="flex justify-between">
-                          <span className="text-norse-silver">Search ETA:</span>
+                          <span className="text-silver-steel">Search ETA:</span>
                           <span className="text-yellow-300 font-medium">
                             {formatEta(db.searchEtaSeconds)}
                           </span>
                         </div>
                       )}
                       <div className="flex justify-between">
-                        <span className="text-norse-silver">Nodes:</span>
+                        <span className="text-silver-steel">Nodes:</span>
                         <span className="text-white font-medium">
                           {db.nodeCount.toLocaleString()}
                         </span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-norse-silver">Edges:</span>
+                        <span className="text-silver-steel">Edges:</span>
                         <span className="text-white font-medium">
                           {db.edgeCount.toLocaleString()}
                         </span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-norse-silver">Node Storage:</span>
+                        <span className="text-silver-steel">Node Storage:</span>
                         <span className="text-white font-medium">
                           {formatBytes(db.nodeStorageBytes)}
                         </span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-norse-silver">
+                        <span className="text-silver-steel">
                           Managed Embeddings:
                         </span>
                         <span className="text-white font-medium">
@@ -672,14 +672,14 @@ export function Databases() {
             {configDbName && (
               <section
                 ref={configSectionRef}
-                className="mt-8 bg-norse-shadow border border-norse-rune rounded-lg"
+                className="mt-8 bg-midnight-navy border border-midnight-graphite rounded-lg"
               >
-                <div className="flex items-start justify-between gap-4 border-b border-norse-rune px-6 py-5">
+                <div className="flex items-start justify-between gap-4 border-b border-midnight-graphite px-6 py-5">
                   <div>
                     <h2 className="text-xl font-semibold text-white">
                       Database Settings
                     </h2>
-                    <p className="mt-1 text-sm text-norse-silver">
+                    <p className="mt-1 text-sm text-silver-steel">
                       Editing configuration for {configDbName}.
                     </p>
                   </div>
@@ -705,7 +705,7 @@ export function Databases() {
 
                 <div className="p-6 space-y-4">
                   {configLoading ? (
-                    <div className="text-norse-silver py-8 text-center">Loading...</div>
+                    <div className="text-silver-steel py-8 text-center">Loading...</div>
                   ) : (
                     <>
                       {configError && (
@@ -716,7 +716,7 @@ export function Databases() {
                           onDismiss={() => setConfigError("")}
                         />
                       )}
-                      <div className="nornic-grid">
+                      <div className="copper-grid">
                         <UiGrid
                           options={configGridOptions}
                           onRegisterApi={setConfigGridApi}
@@ -755,7 +755,7 @@ export function Databases() {
             required
             disabled={creating}
           />
-          <div className="text-sm text-norse-silver">
+          <div className="text-sm text-silver-steel">
             Creates a new database namespace. Qdrant collections are also mapped
             to databases.
           </div>
@@ -794,7 +794,7 @@ export function Databases() {
               onDismiss={() => setDeleteError("")}
             />
           )}
-          <p className="text-norse-silver">
+          <p className="text-silver-steel">
             Delete database{" "}
             <span className="text-white font-semibold">
               {deleteTarget?.name}
@@ -831,27 +831,27 @@ export function Databases() {
         {selectedDatabase ? (
           <div className="space-y-3 text-sm">
             <div className="flex justify-between">
-              <span className="text-norse-silver">Name:</span>
+              <span className="text-silver-steel">Name:</span>
               <span className="text-white font-medium">
                 {selectedDatabase.name}
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-norse-silver">Type:</span>
+              <span className="text-silver-steel">Type:</span>
               <span className="text-white font-medium">
                 {selectedDatabase.type ?? "standard"}
               </span>
             </div>
             <div className="flex justify-between">
-              <span className="text-norse-silver">Status:</span>
+              <span className="text-silver-steel">Status:</span>
               <span className="text-white font-medium">
                 {selectedDatabase.status}
               </span>
             </div>
             {selectedDatabase.type === "composite" ? (
               <>
-                <div className="border-t border-norse-rune pt-3 mt-3">
-                  <div className="text-norse-silver text-xs font-medium uppercase tracking-wide mb-2">
+                <div className="border-t border-midnight-graphite pt-3 mt-3">
+                  <div className="text-silver-steel text-xs font-medium uppercase tracking-wide mb-2">
                     Constituents
                   </div>
                   {selectedDatabase.constituents &&
@@ -860,7 +860,7 @@ export function Databases() {
                       {selectedDatabase.constituents.map((c) => (
                         <div
                           key={c.alias}
-                          className="bg-norse-stone/50 rounded px-3 py-2 space-y-1"
+                          className="bg-midnight-graphite/50 rounded px-3 py-2 space-y-1"
                         >
                           <div className="flex items-center justify-between">
                             <span className="text-white font-medium">
@@ -871,17 +871,17 @@ export function Databases() {
                                 className={`px-1.5 py-0.5 rounded text-[10px] ${
                                   c.type === "remote"
                                     ? "bg-purple-900/30 text-purple-400"
-                                    : "bg-norse-rune/50 text-norse-silver"
+                                    : "bg-midnight-graphite/50 text-silver-steel"
                                 }`}
                               >
                                 {c.type}
                               </span>
-                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-norse-rune/50 text-norse-silver">
+                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-midnight-graphite/50 text-silver-steel">
                                 {c.accessMode}
                               </span>
                             </div>
                           </div>
-                          <div className="text-norse-silver text-xs truncate">
+                          <div className="text-silver-steel text-xs truncate">
                             {c.type === "remote" && c.uri
                               ? c.uri
                               : c.databaseName}
@@ -890,7 +890,7 @@ export function Databases() {
                       ))}
                     </div>
                   ) : (
-                    <div className="text-norse-silver italic">
+                    <div className="text-silver-steel italic">
                       No constituents
                     </div>
                   )}
@@ -899,7 +899,7 @@ export function Databases() {
             ) : (
               <>
                 <div className="flex justify-between">
-                  <span className="text-norse-silver">Search:</span>
+                  <span className="text-silver-steel">Search:</span>
                   <span
                     className={`font-medium ${selectedDatabase.searchReady ? "text-green-300" : "text-yellow-300"}`}
                   >
@@ -911,39 +911,39 @@ export function Databases() {
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-norse-silver">Search Strategy:</span>
+                  <span className="text-silver-steel">Search Strategy:</span>
                   <span className="text-white font-medium">
                     {selectedDatabase.searchStrategy || "unknown"}
                   </span>
                 </div>
                 {!selectedDatabase.searchReady && (
                   <div className="flex justify-between">
-                    <span className="text-norse-silver">Search ETA:</span>
+                    <span className="text-silver-steel">Search ETA:</span>
                     <span className="text-yellow-300 font-medium">
                       {formatEta(selectedDatabase.searchEtaSeconds)}
                     </span>
                   </div>
                 )}
                 <div className="flex justify-between">
-                  <span className="text-norse-silver">Nodes:</span>
+                  <span className="text-silver-steel">Nodes:</span>
                   <span className="text-white font-medium">
                     {selectedDatabase.nodeCount.toLocaleString()}
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-norse-silver">Edges:</span>
+                  <span className="text-silver-steel">Edges:</span>
                   <span className="text-white font-medium">
                     {selectedDatabase.edgeCount.toLocaleString()}
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-norse-silver">Node Storage:</span>
+                  <span className="text-silver-steel">Node Storage:</span>
                   <span className="text-white font-medium">
                     {formatBytes(selectedDatabase.nodeStorageBytes)}
                   </span>
                 </div>
                 <div className="flex justify-between">
-                  <span className="text-norse-silver">Managed Embeddings:</span>
+                  <span className="text-silver-steel">Managed Embeddings:</span>
                   <span className="text-white font-medium">
                     {formatBytes(selectedDatabase.managedEmbeddingBytes)}
                   </span>
@@ -952,7 +952,7 @@ export function Databases() {
             )}
           </div>
         ) : (
-          <div className="text-norse-silver">No database selected.</div>
+          <div className="text-silver-steel">No database selected.</div>
         )}
       </Modal>
     </PageLayout>

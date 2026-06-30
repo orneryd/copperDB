@@ -57,7 +57,7 @@ export function Login() {
     return (
       <PageLayout showHeader={false}>
         <div className="flex items-center justify-center flex-1">
-          <div className="w-12 h-12 border-4 border-nornic-primary border-t-transparent rounded-full animate-spin" />
+          <div className="w-12 h-12 border-4 border-verdigris border-t-transparent rounded-full animate-spin" />
         </div>
       </PageLayout>
     );
@@ -67,17 +67,17 @@ export function Login() {
     <PageLayout showHeader={false}>
       <div className="flex items-center justify-center flex-1">
         {/* Background pattern */}
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(16,185,129,0.1),transparent_50%)]" />
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(0,184,200,0.1),transparent_50%)]" />
         
         <div className="relative max-w-md w-full mx-4">
-          <div className="bg-norse-shadow border border-norse-rune rounded-xl p-8 shadow-2xl">
+          <div className="bg-midnight-navy border border-midnight-graphite rounded-xl p-8 shadow-2xl">
             {/* Logo */}
             <div className="text-center mb-8">
               <div className="inline-flex items-center justify-center mb-4">
-                <img src="/nornicdb.svg" alt="NornicDB" className="w-16 h-16" />
+                <img src="/copperdb.svg" alt="copperDB" className="w-16 h-16" />
               </div>
-              <h1 className="text-2xl font-bold text-white">NornicDB</h1>
-              <p className="text-norse-silver text-sm mt-1">Graph Database Browser</p>
+              <h1 className="text-2xl font-bold text-text-primary">copperDB</h1>
+              <p className="text-silver-steel text-sm mt-1">Graph Database Browser</p>
             </div>
 
             <div className="space-y-4">
@@ -115,7 +115,7 @@ export function Login() {
                     Connect
                   </Button>
 
-                  <p className="text-xs text-center text-norse-fog mt-4">
+                  <p className="text-xs text-center text-silver-structural mt-4">
                     Development Mode - Use configured credentials
                   </p>
                 </form>
@@ -127,10 +127,10 @@ export function Login() {
                   {authConfig.devLoginEnabled && (
                     <div className="relative">
                       <div className="absolute inset-0 flex items-center">
-                        <div className="w-full border-t border-norse-rune"></div>
+                        <div className="w-full border-t border-midnight-graphite"></div>
                       </div>
                       <div className="relative flex justify-center text-sm">
-                        <span className="px-2 bg-norse-shadow text-norse-silver">or</span>
+                        <span className="px-2 bg-midnight-navy text-silver-steel">or</span>
                       </div>
                     </div>
                   )}
@@ -139,7 +139,7 @@ export function Login() {
                       <a
                         key={provider.name}
                         href={provider.url}
-                        className="flex items-center justify-center gap-2 w-full py-2 px-4 bg-norse-stone border border-norse-rune rounded-lg text-white hover:bg-norse-rune transition-colors"
+                        className="flex items-center justify-center gap-2 w-full py-2 px-4 bg-midnight-graphite border border-midnight-graphite rounded-lg text-white hover:bg-midnight-graphite transition-colors"
                       >
                         <Lock className="w-4 h-4" />
                         Sign in with {provider.displayName}

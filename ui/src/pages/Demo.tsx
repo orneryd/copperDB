@@ -167,9 +167,9 @@ function sectorColor(hue: number): string {
   return `hsl(${hue}, 80%, 60%)`;
 }
 
-const HIGHLIGHT_COLOR = "#a855f7"; // purple-500
-const HIGHLIGHT_HALO = 0xa855f7;
-const SELECTED_COLOR = "#f0abfc"; // pink-300, for click-selected endpoints
+const HIGHLIGHT_COLOR = "#00B8C8"; // verdigris
+const HIGHLIGHT_HALO = 0x00B8C8;
+const SELECTED_COLOR = "#B87333"; // copper, for click-selected endpoints
 const NORMAL_LINK_COLOR = "rgba(125,211,252,0.55)";
 const NORMAL_LINK_WIDTH = 0.7;
 const HIGHLIGHT_LINK_WIDTH = 1.4;
@@ -181,7 +181,7 @@ export function Demo() {
   const [galaxy] = useState<DemoGalaxy>(() => generateGalaxy(0xfeed_d3));
 
   const [phase, setPhase] = useState<Phase>("checking");
-  const [statusLine, setStatusLine] = useState("Connecting to NornicDB...");
+  const [statusLine, setStatusLine] = useState("Connecting to copperDB...");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [seededCount, setSeededCount] = useState(0);
   const [seedTotal, setSeedTotal] = useState(0);
@@ -445,7 +445,7 @@ export function Demo() {
     const fgRaw = new ForceGraph3D(el);
     const fg = fgRaw as unknown as DemoForceGraph;
 
-    fg.backgroundColor("#04060c")
+    fg.backgroundColor("#060B12")
       .showNavInfo(false)
       .width(el.clientWidth)
       .height(el.clientHeight)
@@ -657,20 +657,20 @@ export function Demo() {
   })();
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden bg-[#04060c] text-norse-silver font-display">
+    <div className="relative w-screen h-screen overflow-hidden bg-[#060B12] text-silver-steel font-display">
       <div ref={containerRef} className="absolute inset-0" />
 
       {/* Title strip */}
       <div className="absolute top-4 left-4 z-10 pointer-events-none select-none">
         <div className="flex items-baseline gap-3">
           <span className="text-2xl font-semibold tracking-wide text-white">
-            NornicDB
+            copperDB
           </span>
-          <span className="text-nornic-accent text-sm uppercase tracking-[0.3em]">
+          <span className="text-verdigris text-sm uppercase tracking-[0.3em]">
             Galactic Mesh
           </span>
         </div>
-        <div className="mt-1 text-xs text-norse-silver/70 max-w-md">
+        <div className="mt-1 text-xs text-silver-steel/70 max-w-md">
           {sectors} sectors · {totalNodes} stars · {totalEdges} hyperlanes
         </div>
         <div className="mt-1 text-xs text-purple-300/90 font-mono max-w-md truncate">
@@ -679,25 +679,25 @@ export function Demo() {
       </div>
 
       {/* Latency HUD (top-right) */}
-      <div className="absolute top-4 right-4 z-10 w-80 rounded-lg border border-purple-500/30 bg-norse-shadow/85 backdrop-blur px-4 py-3 shadow-[0_0_24px_rgba(168,85,247,0.18)]">
+      <div className="absolute top-4 right-4 z-10 w-80 rounded-lg border border-verdigris/30 bg-midnight-navy/85 backdrop-blur px-4 py-3 shadow-[0_0_24px_rgba(0,184,200,0.18)]">
         <div className="flex items-baseline justify-between">
           <span className="text-xs uppercase tracking-[0.25em] text-purple-300">
             Traversal Latency
           </span>
-          <span className="text-[10px] text-norse-silver/60">shortestPath</span>
+          <span className="text-[10px] text-silver-steel/60">shortestPath</span>
         </div>
         <div className="mt-2 flex items-baseline gap-2">
           <span className="text-3xl font-mono font-semibold text-white tabular-nums">
             {lastLatency ? lastLatency.ms.toFixed(1) : "—"}
           </span>
-          <span className="text-sm text-norse-silver/70 font-mono">ms</span>
+          <span className="text-sm text-silver-steel/70 font-mono">ms</span>
           {lastLatency && (
             <span className="ml-auto text-xs font-mono text-purple-300 tabular-nums">
               {lastLatency.hops} hops
             </span>
           )}
         </div>
-        <div className="mt-1 text-[11px] text-norse-silver/70 truncate font-mono">
+        <div className="mt-1 text-[11px] text-silver-steel/70 truncate font-mono">
           {lastLatency ? lastLatency.label : "waiting for first traversal..."}
         </div>
 
@@ -716,7 +716,7 @@ export function Demo() {
                 style={{
                   height: `${h}%`,
                   background: sample
-                    ? "linear-gradient(180deg, #c084fc 0%, #a855f7 100%)"
+                    ? "linear-gradient(180deg, #00B8C8 0%, #B87333 100%)"
                     : "rgba(42,50,71,0.5)",
                 }}
               />
@@ -726,41 +726,41 @@ export function Demo() {
 
         <div className="mt-2 grid grid-cols-3 text-[10px] font-mono">
           <div>
-            <div className="text-norse-silver/50">avg</div>
+            <div className="text-silver-steel/50">avg</div>
             <div className="text-white tabular-nums">
               {avgLatency.toFixed(1)}
             </div>
           </div>
           <div>
-            <div className="text-norse-silver/50">peak</div>
+            <div className="text-silver-steel/50">peak</div>
             <div className="text-white tabular-nums">
               {maxLatency.toFixed(1)}
             </div>
           </div>
           <div>
-            <div className="text-norse-silver/50">samples</div>
+            <div className="text-silver-steel/50">samples</div>
             <div className="text-white tabular-nums">{latency.length}</div>
           </div>
         </div>
 
-        <div className="mt-3 pt-3 border-t border-norse-rune/60 text-[11px] text-purple-200/80 font-mono leading-snug">
+        <div className="mt-3 pt-3 border-t border-midnight-graphite/60 text-[11px] text-verdigris/80 font-mono leading-snug">
           {selectionHint}
         </div>
       </div>
 
       {/* Status / progress bar (bottom) */}
-      <div className="absolute bottom-4 left-4 right-4 z-10 flex items-center gap-4 rounded-lg border border-norse-rune bg-norse-shadow/80 backdrop-blur px-4 py-3">
+      <div className="absolute bottom-4 left-4 right-4 z-10 flex items-center gap-4 rounded-lg border border-midnight-graphite bg-midnight-navy/80 backdrop-blur px-4 py-3">
         <div
           className={`w-2.5 h-2.5 rounded-full ${
             phase === "ready"
-              ? "bg-nornic-primary status-connected"
+              ? "bg-verdigris status-connected"
               : phase === "error"
                 ? "bg-red-500"
                 : "bg-frost-glacier animate-pulse"
           }`}
         />
         <div className="flex-1 min-w-0">
-          <div className="text-xs uppercase tracking-[0.2em] text-norse-silver/60">
+          <div className="text-xs uppercase tracking-[0.2em] text-silver-steel/60">
             {phase === "checking" && "checking"}
             {phase === "creating" && "creating database"}
             {phase === "indexing" && "indexing"}
@@ -773,9 +773,9 @@ export function Demo() {
             {statusLine}
           </div>
           {phase === "seeding" && seedTotal > 0 && (
-            <div className="mt-1 h-1 w-full bg-norse-rune rounded">
+            <div className="mt-1 h-1 w-full bg-midnight-graphite rounded">
               <div
-                className="h-1 bg-nornic-primary rounded transition-all"
+                className="h-1 bg-verdigris rounded transition-all"
                 style={{
                   width: `${Math.min(100, (seededCount / seedTotal) * 100)}%`,
                 }}
@@ -785,7 +785,7 @@ export function Demo() {
         </div>
         {pathInfo && (
           <div className="text-right hidden sm:block">
-            <div className="text-[10px] uppercase tracking-[0.2em] text-norse-silver/60">
+            <div className="text-[10px] uppercase tracking-[0.2em] text-silver-steel/60">
               Hops
             </div>
             <div className="font-mono text-purple-300 text-sm">
@@ -797,7 +797,7 @@ export function Demo() {
 
       {errorMessage && (
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/70">
-          <div className="max-w-lg rounded-lg border border-red-500/40 bg-norse-shadow p-6">
+          <div className="max-w-lg rounded-lg border border-red-500/40 bg-midnight-navy p-6">
             <div className="text-red-400 text-sm uppercase tracking-[0.2em]">
               Demo failed
             </div>

@@ -56,10 +56,10 @@ export function NodeDetailsPanel({
   if (!selectedNode && !selectedRelationship) {
     return (
       <div className="flex-1 flex items-center justify-center">
-        <div className="text-center text-norse-silver">
+        <div className="text-center text-silver-steel">
           <Database className="w-12 h-12 mx-auto mb-3 opacity-30" />
           <p>Select a node to view details</p>
-          <p className="text-sm text-norse-fog mt-1">
+          <p className="text-sm text-silver-structural mt-1">
             Run a query or search to get started
           </p>
         </div>
@@ -70,35 +70,35 @@ export function NodeDetailsPanel({
   if (selectedRelationship) {
     return (
       <>
-        <div className="flex items-center justify-between p-4 border-b border-norse-rune">
+        <div className="flex items-center justify-between p-4 border-b border-midnight-graphite">
           <h2 className="font-medium text-white">Relationship Details</h2>
           <button
             type="button"
             onClick={onClose}
-            className="p-1 hover:bg-norse-rune rounded transition-colors"
+            className="p-1 hover:bg-midnight-graphite rounded transition-colors"
           >
-            <X className="w-4 h-4 text-norse-silver" />
+            <X className="w-4 h-4 text-silver-steel" />
           </button>
         </div>
 
         <div className="flex-1 overflow-auto p-4 space-y-4">
           <div>
-            <h3 className="text-xs font-medium text-norse-silver mb-2">TYPE</h3>
-            <span className="inline-flex px-3 py-1 bg-frost-ice/20 text-frost-ice rounded-full text-sm">
+            <h3 className="text-xs font-medium text-silver-steel mb-2">TYPE</h3>
+            <span className="inline-flex px-3 py-1 bg-verdigris/20 text-verdigris rounded-full text-sm">
               {selectedRelationship.type}
             </span>
           </div>
 
           <div>
-            <h3 className="text-xs font-medium text-norse-silver mb-2">ID</h3>
-            <code className="text-sm text-valhalla-gold font-mono break-all">
+            <h3 className="text-xs font-medium text-silver-steel mb-2">ID</h3>
+            <code className="text-sm text-copper font-mono break-all">
               {selectedRelationship.id}
             </code>
           </div>
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
-              <h3 className="text-xs font-medium text-norse-silver mb-2">
+              <h3 className="text-xs font-medium text-silver-steel mb-2">
                 SOURCE
               </h3>
               <code className="text-sm text-white font-mono break-all">
@@ -106,7 +106,7 @@ export function NodeDetailsPanel({
               </code>
             </div>
             <div>
-              <h3 className="text-xs font-medium text-norse-silver mb-2">
+              <h3 className="text-xs font-medium text-silver-steel mb-2">
                 TARGET
               </h3>
               <code className="text-sm text-white font-mono break-all">
@@ -116,14 +116,14 @@ export function NodeDetailsPanel({
           </div>
 
           <div>
-            <h3 className="text-xs font-medium text-norse-silver mb-2">
+            <h3 className="text-xs font-medium text-silver-steel mb-2">
               PROPERTIES
             </h3>
             <div className="space-y-2">
-              <div className="bg-norse-stone rounded-lg p-3">
+              <div className="bg-midnight-graphite rounded-lg p-3">
                 <div className="flex items-center gap-2 mb-1">
-                  <ChevronRight className="w-3 h-3 text-norse-fog" />
-                  <span className="text-sm text-frost-ice font-medium">
+                  <ChevronRight className="w-3 h-3 text-silver-structural" />
+                  <span className="text-sm text-verdigris font-medium">
                     semantic
                   </span>
                 </div>
@@ -135,10 +135,10 @@ export function NodeDetailsPanel({
                 </div>
               </div>
               {selectedRelationship.status !== undefined && (
-                <div className="bg-norse-stone rounded-lg p-3">
+                <div className="bg-midnight-graphite rounded-lg p-3">
                   <div className="flex items-center gap-2 mb-1">
-                    <ChevronRight className="w-3 h-3 text-norse-fog" />
-                    <span className="text-sm text-frost-ice font-medium">
+                    <ChevronRight className="w-3 h-3 text-silver-structural" />
+                    <span className="text-sm text-verdigris font-medium">
                       status
                     </span>
                   </div>
@@ -147,10 +147,10 @@ export function NodeDetailsPanel({
                   </div>
                 </div>
               )}
-              <div className="bg-norse-stone rounded-lg p-3">
+              <div className="bg-midnight-graphite rounded-lg p-3">
                 <div className="flex items-center gap-2 mb-1">
-                  <ChevronRight className="w-3 h-3 text-norse-fog" />
-                  <span className="text-sm text-frost-ice font-medium">
+                  <ChevronRight className="w-3 h-3 text-silver-structural" />
+                  <span className="text-sm text-verdigris font-medium">
                     edge_properties
                   </span>
                 </div>
@@ -176,7 +176,7 @@ export function NodeDetailsPanel({
 
   return (
     <>
-      <div className="flex items-center justify-between p-4 border-b border-norse-rune">
+      <div className="flex items-center justify-between p-4 border-b border-midnight-graphite">
         <h2 className="font-medium text-white">Node Details</h2>
         <div className="flex items-center gap-2">
           <button
@@ -190,8 +190,8 @@ export function NodeDetailsPanel({
             }}
             className={`flex items-center gap-1 px-3 py-1 text-sm rounded transition-colors ${
               isExpanded
-                ? "bg-frost-ice text-norse-night hover:bg-frost-ice/90"
-                : "bg-frost-ice/20 text-frost-ice hover:bg-frost-ice/30"
+                ? "bg-verdigris text-midnight hover:bg-verdigris/90"
+                : "bg-verdigris/20 text-verdigris hover:bg-verdigris/30"
             }`}
           >
             <Sparkles className="w-3 h-3" />
@@ -200,9 +200,9 @@ export function NodeDetailsPanel({
           <button
             type="button"
             onClick={onClose}
-            className="p-1 hover:bg-norse-rune rounded transition-colors"
+            className="p-1 hover:bg-midnight-graphite rounded transition-colors"
           >
-            <X className="w-4 h-4 text-norse-silver" />
+            <X className="w-4 h-4 text-silver-steel" />
           </button>
         </div>
       </div>
@@ -210,12 +210,12 @@ export function NodeDetailsPanel({
       <div className="flex-1 overflow-auto p-4">
         {/* Labels */}
         <div className="mb-4">
-          <h3 className="text-xs font-medium text-norse-silver mb-2">LABELS</h3>
+          <h3 className="text-xs font-medium text-silver-steel mb-2">LABELS</h3>
           <div className="flex flex-wrap gap-2">
             {(selectedNode.node.labels as string[]).map((label) => (
               <span
                 key={label}
-                className="px-3 py-1 bg-frost-ice/20 text-frost-ice rounded-full text-sm"
+                className="px-3 py-1 bg-verdigris/20 text-verdigris rounded-full text-sm"
               >
                 {String(label)}
               </span>
@@ -225,8 +225,8 @@ export function NodeDetailsPanel({
 
         {/* ID */}
         <div className="mb-4">
-          <h3 className="text-xs font-medium text-norse-silver mb-2">ID</h3>
-          <code className="text-sm text-valhalla-gold font-mono">
+          <h3 className="text-xs font-medium text-silver-steel mb-2">ID</h3>
+          <code className="text-sm text-copper font-mono">
             {selectedNode.node.id}
           </code>
         </div>
@@ -234,7 +234,7 @@ export function NodeDetailsPanel({
         {/* Embedding Status */}
         {selectedNode.node.properties.has_embedding === true && (
           <div className="mb-4">
-            <h3 className="text-xs font-medium text-norse-silver mb-2">
+            <h3 className="text-xs font-medium text-silver-steel mb-2">
               EMBEDDING
             </h3>
             <EmbeddingStatus
@@ -254,18 +254,18 @@ export function NodeDetailsPanel({
           selectedNode.node.properties.suppressed != null ||
           selectedNode.node.properties.access_count != null) && (
           <div className="mb-4">
-            <h3 className="text-xs font-medium text-norse-silver mb-2">
+            <h3 className="text-xs font-medium text-silver-steel mb-2">
               KNOWLEDGE POLICY
             </h3>
             <div className="space-y-1 text-sm">
               {selectedNode.node.properties.decay_score != null && (
                 <div className="flex justify-between">
-                  <span className="text-norse-silver">Decay Score</span>
+                  <span className="text-silver-steel">Decay Score</span>
                   <span className={
                     Number(selectedNode.node.properties.decay_score) > 0.5
                       ? "text-green-400"
                       : Number(selectedNode.node.properties.decay_score) > 0.1
-                      ? "text-valhalla-gold"
+                      ? "text-copper"
                       : "text-red-400"
                   }>
                     {Number(selectedNode.node.properties.decay_score).toFixed(4)}
@@ -274,7 +274,7 @@ export function NodeDetailsPanel({
               )}
               {selectedNode.node.properties.suppressed != null && (
                 <div className="flex justify-between">
-                  <span className="text-norse-silver">Suppressed</span>
+                  <span className="text-silver-steel">Suppressed</span>
                   <span className={selectedNode.node.properties.suppressed ? "text-red-400" : "text-green-400"}>
                     {selectedNode.node.properties.suppressed ? "Yes" : "No"}
                   </span>
@@ -282,22 +282,22 @@ export function NodeDetailsPanel({
               )}
               {selectedNode.node.properties.access_count != null && (
                 <div className="flex justify-between">
-                  <span className="text-norse-silver">Access Count</span>
-                  <span className="text-frost-ice">{String(selectedNode.node.properties.access_count)}</span>
+                  <span className="text-silver-steel">Access Count</span>
+                  <span className="text-verdigris">{String(selectedNode.node.properties.access_count)}</span>
                 </div>
               )}
               {selectedNode.node.properties.last_accessed != null && (
                 <div className="flex justify-between">
-                  <span className="text-norse-silver">Last Accessed</span>
-                  <span className="text-frost-ice">
+                  <span className="text-silver-steel">Last Accessed</span>
+                  <span className="text-verdigris">
                     {new Date(selectedNode.node.properties.last_accessed as string).toLocaleString()}
                   </span>
                 </div>
               )}
               {selectedNode.node.properties.traversal_count != null && (
                 <div className="flex justify-between">
-                  <span className="text-norse-silver">Traversal Count</span>
-                  <span className="text-frost-ice">{String(selectedNode.node.properties.traversal_count)}</span>
+                  <span className="text-silver-steel">Traversal Count</span>
+                  <span className="text-verdigris">{String(selectedNode.node.properties.traversal_count)}</span>
                 </div>
               )}
             </div>
@@ -311,10 +311,10 @@ export function NodeDetailsPanel({
           <div className="mb-4 flex gap-4">
             {selectedNode.rrf_score != null && (
               <div>
-                <h3 className="text-xs font-medium text-norse-silver mb-1">
+                <h3 className="text-xs font-medium text-silver-steel mb-1">
                   RRF Score
                 </h3>
-                <span className="text-nornic-accent">
+                <span className="text-verdigris">
                   {selectedNode.rrf_score.toFixed(4)}
                 </span>
               </div>
@@ -322,20 +322,20 @@ export function NodeDetailsPanel({
             {selectedNode.vector_rank != null &&
               selectedNode.vector_rank > 0 && (
                 <div>
-                  <h3 className="text-xs font-medium text-norse-silver mb-1">
+                  <h3 className="text-xs font-medium text-silver-steel mb-1">
                     Vector Rank
                   </h3>
-                  <span className="text-frost-ice">
+                  <span className="text-verdigris">
                     #{selectedNode.vector_rank}
                   </span>
                 </div>
               )}
             {selectedNode.bm25_rank != null && selectedNode.bm25_rank > 0 && (
               <div>
-                <h3 className="text-xs font-medium text-norse-silver mb-1">
+                <h3 className="text-xs font-medium text-silver-steel mb-1">
                   BM25 Rank
                 </h3>
-                <span className="text-valhalla-gold">
+                <span className="text-copper">
                   #{selectedNode.bm25_rank}
                 </span>
               </div>
@@ -346,7 +346,7 @@ export function NodeDetailsPanel({
         {/* Properties */}
         <div className="mb-4">
           <div className="flex items-center justify-between mb-2">
-            <h3 className="text-xs font-medium text-norse-silver">
+            <h3 className="text-xs font-medium text-silver-steel">
               PROPERTIES
             </h3>
             {editingNodeId !== selectedNode.node.id && (
@@ -356,7 +356,7 @@ export function NodeDetailsPanel({
                   setEditingNodeId(selectedNode.node.id);
                   setEditingProperties({ ...selectedNode.node.properties });
                 }}
-                className="flex items-center gap-1 px-2 py-1 text-xs bg-nornic-primary/20 hover:bg-nornic-primary/30 text-nornic-primary rounded"
+                className="flex items-center gap-1 px-2 py-1 text-xs bg-verdigris/20 hover:bg-verdigris/30 text-verdigris rounded"
               >
                 <Edit className="w-3 h-3" />
                 Edit
@@ -394,17 +394,17 @@ export function NodeDetailsPanel({
                   return (
                     <div
                       key={key}
-                      className={`bg-norse-stone rounded-lg p-3 ${
+                      className={`bg-midnight-graphite rounded-lg p-3 ${
                         isReadOnly ? "opacity-75" : ""
                       }`}
                     >
                       <div className="flex items-center gap-2 mb-1">
-                        <ChevronRight className="w-3 h-3 text-norse-fog" />
-                        <span className="text-sm text-frost-ice font-medium">
+                        <ChevronRight className="w-3 h-3 text-silver-structural" />
+                        <span className="text-sm text-verdigris font-medium">
                           {key}
                         </span>
                         {isReadOnly && (
-                          <span className="text-xs text-norse-fog italic">
+                          <span className="text-xs text-silver-structural italic">
                             (read-only)
                           </span>
                         )}
@@ -423,7 +423,7 @@ export function NodeDetailsPanel({
         {isExpanded && expandedSimilar && (
           <div className="ml-4 mt-2 mb-3 border-l-2 border-frost-ice/30 pl-3 animate-in slide-in-from-top-2 duration-200">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-medium text-frost-ice flex items-center gap-1">
+              <span className="text-xs font-medium text-verdigris flex items-center gap-1">
                 <Sparkles className="w-3 h-3" />
                 Similar Items ({expandedSimilar.results.length})
               </span>
@@ -431,7 +431,7 @@ export function NodeDetailsPanel({
                 <button
                   type="button"
                   onClick={onCollapseSimilar}
-                  className="text-xs text-norse-fog hover:text-white transition-colors"
+                  className="text-xs text-silver-structural hover:text-white transition-colors"
                 >
                   Close
                 </button>
@@ -439,12 +439,12 @@ export function NodeDetailsPanel({
             </div>
 
             {expandedSimilar.loading ? (
-              <div className="flex items-center gap-2 text-norse-fog text-sm py-2">
+              <div className="flex items-center gap-2 text-silver-structural text-sm py-2">
                 <Loader2 className="w-4 h-4 animate-spin" />
                 Finding similar...
               </div>
             ) : expandedSimilar.results.length === 0 ? (
-              <p className="text-xs text-norse-fog py-2">
+              <p className="text-xs text-silver-structural py-2">
                 No similar items found
               </p>
             ) : (
@@ -454,24 +454,24 @@ export function NodeDetailsPanel({
                     type="button"
                     key={similar.node.id}
                     onClick={() => onNodeSelect(similar)}
-                    className="w-full text-left p-2 rounded bg-norse-shadow/50 hover:bg-norse-shadow border border-transparent hover:border-frost-ice/20 transition-colors"
+                    className="w-full text-left p-2 rounded bg-midnight-navy/50 hover:bg-midnight-navy border border-transparent hover:border-frost-ice/20 transition-colors"
                   >
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-1 flex-wrap min-w-0">
                         {similar.node.labels.slice(0, 2).map((label) => (
                           <span
                             key={label}
-                            className="px-1.5 py-0.5 text-xs bg-frost-ice/10 text-frost-ice/80 rounded flex-shrink-0"
+                            className="px-1.5 py-0.5 text-xs bg-verdigris/10 text-verdigris/80 rounded flex-shrink-0"
                           >
                             {label}
                           </span>
                         ))}
                       </div>
-                      <span className="text-xs text-valhalla-gold/70 flex-shrink-0">
+                      <span className="text-xs text-copper/70 flex-shrink-0">
                         {similar.score.toFixed(2)}
                       </span>
                     </div>
-                    <p className="text-xs text-norse-silver/80 break-words overflow-wrap-anywhere mt-1 min-w-0">
+                    <p className="text-xs text-silver-steel/80 break-words overflow-wrap-anywhere mt-1 min-w-0">
                       {getNodePreview(similar.node.properties)}
                     </p>
                   </button>

@@ -9,7 +9,7 @@ interface EmbeddingStatusProps {
 
 export function EmbeddingStatus({ embedding }: EmbeddingStatusProps) {
   if (!embedding || typeof embedding !== "object") {
-    return <span className="text-norse-silver">No embedding data</span>;
+    return <span className="text-silver-steel">No embedding data</span>;
   }
 
   const emb = embedding as Record<string, unknown>;
@@ -25,33 +25,33 @@ export function EmbeddingStatus({ embedding }: EmbeddingStatusProps) {
   const isPending = status === "pending";
 
   return (
-    <div className="bg-norse-stone rounded-lg p-3">
+    <div className="bg-midnight-graphite rounded-lg p-3">
       <div className="flex items-center gap-3">
         {/* Status indicator */}
         <div
           className={`flex items-center gap-2 px-3 py-1.5 rounded-full ${
             isReady
-              ? "bg-nornic-primary/20"
+              ? "bg-verdigris/20"
               : isPending
-              ? "bg-valhalla-gold/20"
+              ? "bg-copper/20"
               : "bg-red-500/20"
           }`}
         >
           <div
             className={`w-2 h-2 rounded-full ${
               isReady
-                ? "bg-nornic-primary animate-pulse"
+                ? "bg-verdigris animate-pulse"
                 : isPending
-                ? "bg-valhalla-gold animate-pulse"
+                ? "bg-copper animate-pulse"
                 : "bg-red-400"
             }`}
           />
           <span
             className={`text-sm font-medium ${
               isReady
-                ? "text-nornic-primary"
+                ? "text-verdigris"
                 : isPending
-                ? "text-valhalla-gold"
+                ? "text-copper"
                 : "text-red-400"
             }`}
           >
@@ -62,8 +62,8 @@ export function EmbeddingStatus({ embedding }: EmbeddingStatusProps) {
         {/* Dimensions */}
         {dimensions > 0 && (
           <div className="flex items-center gap-1">
-            <span className="text-xs text-norse-silver">Dimensions:</span>
-            <span className="text-sm text-frost-ice font-mono">
+            <span className="text-xs text-silver-steel">Dimensions:</span>
+            <span className="text-sm text-verdigris font-mono">
               {dimensions}
             </span>
           </div>
@@ -72,14 +72,14 @@ export function EmbeddingStatus({ embedding }: EmbeddingStatusProps) {
         {/* Model */}
         {model && (
           <div className="flex items-center gap-1">
-            <span className="text-xs text-norse-silver">Model:</span>
-            <span className="text-sm text-nornic-accent">{model}</span>
+            <span className="text-xs text-silver-steel">Model:</span>
+            <span className="text-sm text-verdigris">{model}</span>
           </div>
         )}
       </div>
 
       {isPending && (
-        <p className="text-xs text-norse-fog mt-2">
+        <p className="text-xs text-silver-structural mt-2">
           Embedding will be generated automatically by the background queue.
         </p>
       )}

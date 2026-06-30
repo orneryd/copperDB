@@ -22,7 +22,7 @@ export function PageHeader({
   const navigate = useNavigate();
 
   return (
-    <header className="bg-norse-shadow border-b border-norse-rune px-4 py-3">
+    <header className="bg-midnight-navy border-b border-midnight-graphite px-4 py-3">
       <div className="max-w-6xl mx-auto flex items-center justify-between">
         <div className="flex items-center gap-4">
           {backTo && (

@@ -293,7 +293,7 @@ export function AdminUsers() {
             const checked = row.roles.includes(role);
             const disableRemoval = checked && row.roles.length === 1;
             return (
-              <label key={role} className="inline-flex items-center gap-2 text-xs text-norse-silver">
+              <label key={role} className="inline-flex items-center gap-2 text-xs text-silver-steel">
                 <input
                   type="checkbox"
                   checked={checked}
@@ -306,7 +306,7 @@ export function AdminUsers() {
                       void handleUpdateUser(row, { roles: nextRoles });
                     }
                   }}
-                  className="w-4 h-4 rounded border-norse-rune bg-norse-stone text-nornic-primary"
+                  className="w-4 h-4 rounded border-midnight-graphite bg-midnight-graphite text-verdigris"
                 />
                 <span className="capitalize">{role}</span>
               </label>
@@ -359,7 +359,7 @@ export function AdminUsers() {
 
     if (ctx.column.name === 'last_login') {
       return (
-        <div className="text-sm text-norse-fog py-1">
+        <div className="text-sm text-silver-structural py-1">
           {row.last_login ? new Date(row.last_login).toLocaleString() : 'Never'}
         </div>
       );
@@ -367,7 +367,7 @@ export function AdminUsers() {
 
     if (ctx.column.name === 'email') {
       return (
-        <div className="text-norse-silver py-1">{String(ctx.value || '—')}</div>
+        <div className="text-silver-steel py-1">{String(ctx.value || '—')}</div>
       );
     }
 
@@ -389,7 +389,7 @@ export function AdminUsers() {
     return (
       <PageLayout>
         <div className="flex items-center justify-center flex-1">
-          <div className="w-12 h-12 border-4 border-nornic-primary border-t-transparent rounded-full animate-spin" />
+          <div className="w-12 h-12 border-4 border-verdigris border-t-transparent rounded-full animate-spin" />
         </div>
       </PageLayout>
     );
@@ -418,7 +418,7 @@ export function AdminUsers() {
 
         {/* Create User Form */}
         {showCreateForm && (
-          <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 mb-6">
+          <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 mb-6">
             <h2 className="text-lg font-semibold text-white mb-4">Create New User</h2>
             <form onSubmit={handleCreateUser} className="space-y-4">
               <FormInput
@@ -437,7 +437,7 @@ export function AdminUsers() {
                 onChange={setNewPassword}
                 required
               />
-              <p className="text-xs text-norse-fog -mt-2">Minimum 8 characters</p>
+              <p className="text-xs text-silver-structural -mt-2">Minimum 8 characters</p>
 
               <FormInput
                 id={createEmailId}
@@ -448,7 +448,7 @@ export function AdminUsers() {
               />
 
               <fieldset>
-                <legend id={createRolesId} className="text-sm text-norse-silver mb-2">Roles *</legend>
+                <legend id={createRolesId} className="text-sm text-silver-steel mb-2">Roles *</legend>
                 <div className="flex gap-4 flex-wrap">
                   {availableRoles.map(role => (
                     <label key={role} className="flex items-center gap-2 cursor-pointer">
@@ -456,10 +456,10 @@ export function AdminUsers() {
                         type="checkbox"
                         checked={newRoles.includes(role)}
                         onChange={() => toggleRole(role, newRoles, setNewRoles)}
-                        className="w-4 h-4 rounded border-norse-rune bg-norse-stone text-nornic-primary focus:ring-nornic-primary"
+                        className="w-4 h-4 rounded border-midnight-graphite bg-midnight-graphite text-verdigris focus:ring-nornic-primary"
                         aria-describedby={createRolesId}
                       />
-                      <span className="text-sm capitalize text-norse-silver">{role}</span>
+                      <span className="text-sm capitalize text-silver-steel">{role}</span>
                     </label>
                   ))}
                 </div>
@@ -480,8 +480,8 @@ export function AdminUsers() {
         )}
 
         {/* Users Table */}
-        <div className="bg-norse-shadow border border-norse-rune rounded-lg overflow-hidden">
-          <div className="nornic-grid p-4">
+        <div className="bg-midnight-navy border border-midnight-graphite rounded-lg overflow-hidden">
+          <div className="copper-grid p-4">
             <UiGrid
               options={userGridOptions}
               onRegisterApi={setUsersGridApi}

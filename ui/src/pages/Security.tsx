@@ -125,7 +125,7 @@ export function Security() {
     return (
       <PageLayout>
         <div className="flex items-center justify-center flex-1">
-          <div className="w-12 h-12 border-4 border-nornic-primary border-t-transparent rounded-full animate-spin" />
+          <div className="w-12 h-12 border-4 border-verdigris border-t-transparent rounded-full animate-spin" />
         </div>
       </PageLayout>
     );
@@ -178,8 +178,8 @@ export function Security() {
       <main className="max-w-4xl mx-auto p-6">
         {/* Authentication Info */}
         {userInfo && (
-          <div className="bg-norse-shadow border border-norse-rune rounded-lg p-4 mb-6">
-            <h2 className="text-sm font-semibold text-norse-silver mb-2">
+          <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-4 mb-6">
+            <h2 className="text-sm font-semibold text-silver-steel mb-2">
               Authentication Method
             </h2>
             <div className="flex items-center gap-2">
@@ -187,19 +187,19 @@ export function Security() {
                 <>
                   <span className="text-green-400">🔐 OAuth</span>
                   {userInfo.oauth_provider && (
-                    <span className="text-norse-fog text-sm">
+                    <span className="text-silver-structural text-sm">
                       ({userInfo.oauth_provider})
                     </span>
                   )}
-                  <span className="text-norse-fog text-sm ml-auto">
+                  <span className="text-silver-structural text-sm ml-auto">
                     Your account is managed by the OAuth provider. You can
-                    generate NornicDB API tokens below for programmatic access.
+                    generate copperDB API tokens below for programmatic access.
                   </span>
                 </>
               ) : (
                 <>
                   <span className="text-blue-400">🔑 Password</span>
-                  <span className="text-norse-fog text-sm ml-auto">
+                  <span className="text-silver-structural text-sm ml-auto">
                     Your account uses password authentication. You can generate
                     API tokens for programmatic access.
                   </span>
@@ -211,7 +211,7 @@ export function Security() {
 
         {/* Profile Update Section */}
         {userInfo && userInfo.auth_method !== "oauth" && (
-          <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 mb-8">
+          <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 mb-8">
             <h2 className="text-lg font-semibold text-white mb-4">
               Profile Settings
             </h2>
@@ -291,7 +291,7 @@ export function Security() {
 
         {/* Password Change Section */}
         {userInfo && userInfo.auth_method !== "oauth" && (
-          <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 mb-8">
+          <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 mb-8">
             <h2 className="text-lg font-semibold text-white mb-4">
               Change Password
             </h2>
@@ -411,7 +411,7 @@ export function Security() {
 
         {/* Token Generator - Admin Only */}
         {isAdmin && (
-          <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 mb-8">
+          <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 mb-8">
             <h2 className="text-lg font-semibold text-white mb-4">
               Generate API Token
             </h2>
@@ -424,13 +424,13 @@ export function Security() {
                 onChange={setSubject}
                 placeholder="e.g., my-mcp-server, prod-api, cursor-agent"
               />
-              <p className="text-xs text-norse-fog -mt-2">
+              <p className="text-xs text-silver-structural -mt-2">
                 A descriptive label to help you identify this token later
               </p>
 
               {/* Expiration */}
               <div>
-                <span className="block text-sm text-norse-silver mb-2">
+                <span className="block text-sm text-silver-steel mb-2">
                   Token Expiration
                 </span>
                 <div className="flex gap-2 flex-wrap">
@@ -450,8 +450,8 @@ export function Security() {
                       onClick={() => setExpiresIn(option)}
                       className={`px-3 py-1.5 rounded text-sm transition-colors ${
                         expiresIn === option
-                          ? "bg-nornic-primary text-white"
-                          : "bg-norse-stone text-norse-silver hover:bg-norse-rune"
+                          ? "bg-verdigris text-white"
+                          : "bg-midnight-graphite text-silver-steel hover:bg-midnight-graphite"
                       }`}
                     >
                       {option === "never"
@@ -490,19 +490,19 @@ export function Security() {
 
         {/* Generated Token Display */}
         {generatedToken && (
-          <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 mb-8">
+          <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 mb-8">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold text-green-400">
                 ✓ Token Generated
               </h2>
-              <span className="text-xs text-norse-fog">
+              <span className="text-xs text-silver-structural">
                 {generatedToken.expires_at
                   ? `Expires: ${new Date(generatedToken.expires_at).toLocaleString()}`
                   : "Never expires"}
               </span>
             </div>
 
-            <div className="bg-norse-stone rounded p-4 mb-4">
+            <div className="bg-midnight-graphite rounded p-4 mb-4">
               <div className="flex items-start justify-between gap-4">
                 <code className="text-sm text-green-300 break-all flex-1 font-mono">
                   {generatedToken.token}
@@ -520,13 +520,13 @@ export function Security() {
 
             <div className="grid grid-cols-2 gap-4 text-sm mb-4">
               <div>
-                <span className="text-norse-fog">Subject:</span>
+                <span className="text-silver-structural">Subject:</span>
                 <span className="text-white ml-2">
                   {generatedToken.subject}
                 </span>
               </div>
               <div>
-                <span className="text-norse-fog">Roles:</span>
+                <span className="text-silver-structural">Roles:</span>
                 <span className="text-white ml-2">
                   {generatedToken.roles.join(", ")}
                 </span>
@@ -534,14 +534,14 @@ export function Security() {
             </div>
 
             {/* Usage Example */}
-            <div className="mt-4 pt-4 border-t border-norse-rune">
-              <h3 className="text-sm font-semibold text-norse-silver mb-2">
+            <div className="mt-4 pt-4 border-t border-midnight-graphite">
+              <h3 className="text-sm font-semibold text-silver-steel mb-2">
                 Usage Example (Claude Desktop / MCP Config)
               </h3>
-              <pre className="bg-norse-stone rounded p-3 text-xs overflow-x-auto break-words whitespace-pre-wrap">
-                <code className="text-norse-silver">{`{
+              <pre className="bg-midnight-graphite rounded p-3 text-xs overflow-x-auto break-words whitespace-pre-wrap">
+                <code className="text-silver-steel">{`{
   "mcpServers": {
-    "nornicdb": {
+    "copperDB": {
       "url": "http://127.0.0.1:7474/mcp",
       "name": "Knowledge Graph TODO MCP Server",
       "description": "MCP server for TODO tracking with Graph-RAG memory system",
@@ -552,9 +552,9 @@ export function Security() {
   }
 }`}</code>
               </pre>
-              <p className="text-xs text-norse-fog mt-2">
+              <p className="text-xs text-silver-structural mt-2">
                 For Claude Desktop: Add this to your{" "}
-                <code className="text-norse-silver">
+                <code className="text-silver-steel">
                   ~/Library/Application
                   Support/Claude/claude_desktop_config.json
                 </code>
@@ -564,35 +564,35 @@ export function Security() {
         )}
 
         {/* Security Tips */}
-        <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6">
+        <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6">
           <h2 className="text-lg font-semibold text-white mb-4">
             🔐 Security Best Practices
           </h2>
-          <ul className="space-y-2 text-sm text-norse-silver">
+          <ul className="space-y-2 text-sm text-silver-steel">
             <li className="flex gap-2">
-              <span className="text-valhalla-gold">•</span>
+              <span className="text-copper">•</span>
               <span>
                 Use descriptive labels to track which token is used where
               </span>
             </li>
             <li className="flex gap-2">
-              <span className="text-valhalla-gold">•</span>
+              <span className="text-copper">•</span>
               <span>
                 Set appropriate expiration times — shorter is more secure
               </span>
             </li>
             <li className="flex gap-2">
-              <span className="text-valhalla-gold">•</span>
+              <span className="text-copper">•</span>
               <span>
                 Store tokens securely (environment variables, secrets managers)
               </span>
             </li>
             <li className="flex gap-2">
-              <span className="text-valhalla-gold">•</span>
+              <span className="text-copper">•</span>
               <span>Never commit tokens to version control</span>
             </li>
             <li className="flex gap-2">
-              <span className="text-valhalla-gold">•</span>
+              <span className="text-copper">•</span>
               <span>
                 Rotate tokens periodically, especially for long-lived
                 integrations

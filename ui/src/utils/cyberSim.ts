@@ -2,7 +2,7 @@
 //
 // The simulator keeps an in-memory mirror of fleet state (so the 3D
 // visualization can render at 60fps without round-tripping every frame to
-// the DB) and pushes batched per-tick deltas to NornicDB. The oracle reads
+// the DB) and pushes batched per-tick deltas to copperDB. The oracle reads
 // back via cypher queries — those represent the "experimentation cycles":
 // each tick we ask the graph a question and surface the answer.
 

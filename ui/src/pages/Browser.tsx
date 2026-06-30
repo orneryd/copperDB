@@ -94,7 +94,7 @@ export function Browser() {
     const fetchEmbedStats = async () => {
       try {
         const res = await fetch(
-          joinBasePath(BASE_PATH, "/nornicdb/embed/stats"),
+          joinBasePath(BASE_PATH, "/copperdb/embed/stats"),
         );
         if (res.ok) {
           const data = await res.json();
@@ -119,7 +119,7 @@ export function Browser() {
     setEmbedMessage(null);
     try {
       const res = await fetch(
-        joinBasePath(BASE_PATH, "/nornicdb/embed/trigger?regenerate=true"),
+        joinBasePath(BASE_PATH, "/copperdb/embed/trigger?regenerate=true"),
         {
           method: "POST",
         },
@@ -258,7 +258,7 @@ export function Browser() {
   };
 
   return (
-    <div className="min-h-screen bg-norse-night flex flex-col">
+    <div className="min-h-screen bg-midnight flex flex-col">
       <Header
         stats={stats}
         connected={connected}
@@ -273,16 +273,16 @@ export function Browser() {
       {/* Main Content */}
       <div className="flex-1 flex">
         {/* Left Panel - Query/Search */}
-        <div className="w-1/2 border-r border-norse-rune flex flex-col">
+        <div className="w-1/2 border-r border-midnight-graphite flex flex-col">
           {/* Database selector - all queries run against this database */}
-          <div className="flex items-center gap-2 px-4 py-2 border-b border-norse-rune bg-norse-shadow/30">
+          <div className="flex items-center gap-2 px-4 py-2 border-b border-midnight-graphite bg-midnight-navy/30">
             <Database
-              className="w-4 h-4 text-norse-silver shrink-0"
+              className="w-4 h-4 text-silver-steel shrink-0"
               aria-hidden
             />
             <label
               htmlFor={databaseSelectId}
-              className="text-sm text-norse-silver shrink-0"
+              className="text-sm text-silver-steel shrink-0"
             >
               Database
             </label>
@@ -290,7 +290,7 @@ export function Browser() {
               id={databaseSelectId}
               value={selectedDatabase ?? ""}
               onChange={(e) => handleDatabaseChange(e.target.value)}
-              className="flex-1 min-w-0 px-3 py-1.5 text-sm bg-norse-stone border border-norse-rune rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-nornic-primary focus:border-transparent"
+              className="flex-1 min-w-0 px-3 py-1.5 text-sm bg-midnight-graphite border border-midnight-graphite rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-nornic-primary focus:border-transparent"
               title="Cypher queries and semantic search run against this database"
             >
               <option value="">Default (from server)</option>
@@ -302,14 +302,14 @@ export function Browser() {
             </select>
           </div>
           {/* Tabs */}
-          <div className="flex border-b border-norse-rune">
+          <div className="flex border-b border-midnight-graphite">
             <button
               type="button"
               onClick={() => setActiveTab("query")}
               className={`flex items-center gap-2 px-4 py-3 text-sm font-medium transition-colors ${
                 activeTab === "query"
-                  ? "text-nornic-primary border-b-2 border-nornic-primary bg-norse-shadow/50"
-                  : "text-norse-silver hover:text-white"
+                  ? "text-verdigris border-b-2 border-verdigris bg-midnight-navy/50"
+                  : "text-silver-steel hover:text-white"
               }`}
             >
               <Terminal className="w-4 h-4" />
@@ -320,8 +320,8 @@ export function Browser() {
               onClick={() => setActiveTab("search")}
               className={`flex items-center gap-2 px-4 py-3 text-sm font-medium transition-colors ${
                 activeTab === "search"
-                  ? "text-nornic-primary border-b-2 border-nornic-primary bg-norse-shadow/50"
-                  : "text-norse-silver hover:text-white"
+                  ? "text-verdigris border-b-2 border-verdigris bg-midnight-navy/50"
+                  : "text-silver-steel hover:text-white"
               }`}
             >
               <Sparkles className="w-4 h-4" />
@@ -332,8 +332,8 @@ export function Browser() {
               onClick={handleActivateGraphTab}
               className={`flex items-center gap-2 px-4 py-3 text-sm font-medium transition-colors ${
                 activeTab === "graph"
-                  ? "text-nornic-primary border-b-2 border-nornic-primary bg-norse-shadow/50"
-                  : "text-norse-silver hover:text-white"
+                  ? "text-verdigris border-b-2 border-verdigris bg-midnight-navy/50"
+                  : "text-silver-steel hover:text-white"
               }`}
             >
               <Share2 className="w-4 h-4" />
@@ -409,7 +409,7 @@ export function Browser() {
         </div>
 
         {/* Right Panel - Node Details */}
-        <div className="w-1/2 flex flex-col bg-norse-shadow/30">
+        <div className="w-1/2 flex flex-col bg-midnight-navy/30">
           <NodeDetailsPanel
             selectedNode={selectedNode}
             selectedRelationship={selectedRelationship}

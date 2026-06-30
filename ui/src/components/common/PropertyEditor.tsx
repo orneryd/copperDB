@@ -162,21 +162,21 @@ export function PropertyEditor({
       {/* Read-only properties display */}
       {readOnlyProps.length > 0 && (
         <div className="mb-4">
-          <h4 className="text-xs font-medium text-norse-silver mb-2">
+          <h4 className="text-xs font-medium text-silver-steel mb-2">
             READ-ONLY PROPERTIES
           </h4>
           <div className="space-y-2">
             {readOnlyProps.map(({ key, value }) => (
               <div
                 key={key}
-                className="bg-norse-shadow/50 rounded-lg p-3 opacity-75"
+                className="bg-midnight-navy/50 rounded-lg p-3 opacity-75"
               >
                 <div className="flex items-center gap-2 mb-1">
-                  <ChevronRight className="w-3 h-3 text-norse-fog" />
-                  <span className="text-sm text-frost-ice font-medium">
+                  <ChevronRight className="w-3 h-3 text-silver-structural" />
+                  <span className="text-sm text-verdigris font-medium">
                     {key}
                   </span>
-                  <span className="text-xs text-norse-fog italic">
+                  <span className="text-xs text-silver-structural italic">
                     (read-only)
                   </span>
                 </div>
@@ -191,11 +191,11 @@ export function PropertyEditor({
 
       {/* Editable properties */}
       <div>
-        <h4 className="text-xs font-medium text-norse-silver mb-2">
+        <h4 className="text-xs font-medium text-silver-steel mb-2">
           EDITABLE PROPERTIES
         </h4>
         {Object.values(editedProps).map((prop) => (
-          <div key={prop.key} className="bg-norse-stone rounded-lg p-3 mb-2">
+          <div key={prop.key} className="bg-midnight-graphite rounded-lg p-3 mb-2">
             <div className="flex items-center gap-2 mb-2">
               <input
                 type="text"
@@ -203,7 +203,7 @@ export function PropertyEditor({
                 onChange={(e) =>
                   updateProperty(prop.key, e.target.value, prop.value, prop.type)
                 }
-                className="flex-1 px-2 py-1 bg-norse-shadow border border-norse-rune rounded text-sm text-white"
+                className="flex-1 px-2 py-1 bg-midnight-navy border border-midnight-graphite rounded text-sm text-white"
                 placeholder="Property key"
               />
               <select
@@ -216,7 +216,7 @@ export function PropertyEditor({
                     e.target.value as "string" | "number" | "boolean" | "json"
                   )
                 }
-                className="px-2 py-1 bg-norse-shadow border border-norse-rune rounded text-sm text-white"
+                className="px-2 py-1 bg-midnight-navy border border-midnight-graphite rounded text-sm text-white"
               >
                 <option value="string">String</option>
                 <option value="number">Number</option>
@@ -236,7 +236,7 @@ export function PropertyEditor({
               onChange={(e) =>
                 updateProperty(prop.key, prop.key, e.target.value, prop.type)
               }
-              className="w-full px-2 py-1 bg-norse-shadow border border-norse-rune rounded text-sm text-white font-mono"
+              className="w-full px-2 py-1 bg-midnight-navy border border-midnight-graphite rounded text-sm text-white font-mono"
               rows={prop.type === "json" ? 4 : 1}
               placeholder={`Enter ${prop.type} value`}
             />
@@ -245,13 +245,13 @@ export function PropertyEditor({
       </div>
 
       {/* Add new property */}
-      <div className="bg-norse-stone rounded-lg p-3 border-2 border-dashed border-norse-rune">
+      <div className="bg-midnight-graphite rounded-lg p-3 border-2 border-dashed border-midnight-graphite">
         <div className="flex items-center gap-2 mb-2">
           <input
             type="text"
             value={newPropKey}
             onChange={(e) => setNewPropKey(e.target.value)}
-            className="flex-1 px-2 py-1 bg-norse-shadow border border-norse-rune rounded text-sm text-white"
+            className="flex-1 px-2 py-1 bg-midnight-navy border border-midnight-graphite rounded text-sm text-white"
             placeholder="New property key"
             onKeyDown={(e) => {
               if (e.key === "Enter") {
@@ -267,7 +267,7 @@ export function PropertyEditor({
                 e.target.value as "string" | "number" | "boolean" | "json"
               )
             }
-            className="px-2 py-1 bg-norse-shadow border border-norse-rune rounded text-sm text-white"
+            className="px-2 py-1 bg-midnight-navy border border-midnight-graphite rounded text-sm text-white"
           >
             <option value="string">String</option>
             <option value="number">Number</option>
@@ -277,7 +277,7 @@ export function PropertyEditor({
           <button
             type="button"
             onClick={addNewProperty}
-            className="px-2 py-1 bg-nornic-primary/20 hover:bg-nornic-primary/30 text-nornic-primary rounded text-sm"
+            className="px-2 py-1 bg-verdigris/20 hover:bg-verdigris/30 text-verdigris rounded text-sm"
           >
             <Plus className="w-4 h-4" />
           </button>
@@ -285,7 +285,7 @@ export function PropertyEditor({
         <textarea
           value={newPropValue}
           onChange={(e) => setNewPropValue(e.target.value)}
-          className="w-full px-2 py-1 bg-norse-shadow border border-norse-rune rounded text-sm text-white font-mono"
+          className="w-full px-2 py-1 bg-midnight-navy border border-midnight-graphite rounded text-sm text-white font-mono"
           rows={newPropType === "json" ? 4 : 1}
           placeholder={`Enter ${newPropType} value`}
           onKeyDown={(e) => {
@@ -303,7 +303,7 @@ export function PropertyEditor({
           type="button"
           onClick={handleSave}
           disabled={saving}
-          className="flex items-center gap-1 px-4 py-2 bg-nornic-primary text-white rounded hover:bg-nornic-secondary disabled:opacity-50"
+          className="flex items-center gap-1 px-4 py-2 bg-verdigris text-white rounded hover:bg-verdigris-teal disabled:opacity-50"
         >
           <Check className="w-4 h-4" />
           {saving ? "Saving..." : "Save"}
@@ -311,7 +311,7 @@ export function PropertyEditor({
         <button
           type="button"
           onClick={onCancel}
-          className="px-4 py-2 bg-norse-rune text-norse-silver rounded hover:bg-norse-fog"
+          className="px-4 py-2 bg-midnight-graphite text-silver-steel rounded hover:bg-silver-structural"
         >
           Cancel
         </button>

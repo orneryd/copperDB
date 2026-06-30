@@ -21,8 +21,8 @@ export function SelectionToolbar({
   const hasSelection = selectedCount > 0;
 
   return (
-    <div className="flex items-center gap-2 p-2 bg-norse-shadow border-b border-norse-rune">
-      <span className="text-sm text-norse-silver">
+    <div className="flex items-center gap-2 p-2 bg-midnight-navy border-b border-midnight-graphite">
+      <span className="text-sm text-silver-steel">
         {selectedCount} selected
       </span>
       <button
@@ -38,7 +38,7 @@ export function SelectionToolbar({
         type="button"
         onClick={onClear}
         disabled={!hasSelection}
-        className="px-3 py-1 text-sm text-norse-silver hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
+        className="px-3 py-1 text-sm text-silver-steel hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
       >
         Clear
       </button>

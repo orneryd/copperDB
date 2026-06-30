@@ -1,4 +1,4 @@
-// NornicDB API Client
+// copperDB API Client
 
 // neo4j-driver ships a `browser` field in its package.json that swaps
 // the package's node-internal channel for the browser channel at bundle
@@ -388,7 +388,7 @@ interface DiscoveryResponse {
   transaction: string;
   neo4j_version: string;
   neo4j_edition: string;
-  default_database?: string; // NornicDB extension
+  default_database?: string; // copperDB extension
 }
 
 function asString(value: unknown): string {
@@ -516,7 +516,7 @@ function escapeCypherStringLiteral(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
-class NornicDBClient {
+class CopperDBClient {
   private defaultDatabase: string | null = null;
   // Bolt-over-WebSocket driver state. The driver is constructed lazily
   // on first executeCypher call (after discovery returns ws_direct).
@@ -592,7 +592,7 @@ class NornicDBClient {
   // CypherResponse format the UI's parseCypherRows / display layer
   // already consumes. This replaces the HTTP /tx/commit path.
   //
-  // Auth: the WS upgrade carries the same-origin nornicdb_token cookie
+  // Auth: the WS upgrade carries the same-origin copperdb_token cookie
   // (browsers attach automatically) or an Authorization: Bearer header
   // if a third-party caller set one; the server promotes the HELLO
   // scheme=none to those claims. See docs/user-guides/connecting-bolt.md.
@@ -734,7 +734,7 @@ class NornicDBClient {
       // those claims.
       const noneAuth = { scheme: "none" } as unknown as AuthToken;
       const driver = neo4j.driver(url, noneAuth, {
-        userAgent: "nornicdb-ui/0.1",
+        userAgent: "copperdb-ui/0.1",
       });
       this.boltDriver = driver;
       return driver;
@@ -862,7 +862,7 @@ class NornicDBClient {
     if (database != null && database !== "") {
       body.database = database;
     }
-    const res = await fetch(joinBasePath(BASE_PATH, "/nornicdb/search"), {
+    const res = await fetch(joinBasePath(BASE_PATH, "/copperDB/search"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
@@ -893,7 +893,7 @@ class NornicDBClient {
     if (database != null && database !== "") {
       body.database = database;
     }
-    const res = await fetch(joinBasePath(BASE_PATH, "/nornicdb/similar"), {
+    const res = await fetch(joinBasePath(BASE_PATH, "/copperDB/similar"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
@@ -932,7 +932,7 @@ class NornicDBClient {
     const res = await fetch(
       joinBasePath(
         BASE_PATH,
-        `/nornicdb/graph/${encodeURIComponent(dbName)}/neighborhood`,
+        `/copperDB/graph/${encodeURIComponent(dbName)}/neighborhood`,
       ),
       {
         method: "POST",
@@ -1699,11 +1699,11 @@ class NornicDBClient {
     const [profilesResp, infoResp] = await Promise.all([
       this.executeCypherOnDatabase(
         dbName,
-        "CALL nornicdb.knowledgepolicy.profiles()",
+        "CALL copperDB.knowledgepolicy.profiles()",
       ),
       this.executeCypherOnDatabase(
         dbName,
-        "CALL nornicdb.knowledgepolicy.info()",
+        "CALL copperDB.knowledgepolicy.info()",
       ),
     ]);
     this.assertCypherSuccess(
@@ -1762,7 +1762,7 @@ class NornicDBClient {
     const dbName = await this.getResolvedDatabaseName(database);
     const resp = await this.executeCypherOnDatabase(
       dbName,
-      "CALL nornicdb.knowledgepolicy.policies()",
+      "CALL copperDB.knowledgepolicy.policies()",
     );
     this.assertCypherSuccess(resp, "Failed to load knowledge policy policies");
 
@@ -1808,7 +1808,7 @@ class NornicDBClient {
     database?: string;
   }): Promise<ScoringResolution> {
     const dbName = await this.getResolvedDatabaseName(params.database);
-    const statement = `CALL nornicdb.knowledgepolicy.resolve('${escapeCypherStringLiteral(
+    const statement = `CALL copperDB.knowledgepolicy.resolve('${escapeCypherStringLiteral(
       params.entityId ?? "",
     )}', '${escapeCypherStringLiteral((params.labels ?? []).join(","))}', '${escapeCypherStringLiteral(
       params.edgeType ?? "",
@@ -1842,7 +1842,7 @@ class NornicDBClient {
     const dbName = await this.getResolvedDatabaseName(database);
     const resp = await this.executeCypherOnDatabase(
       dbName,
-      "CALL nornicdb.knowledgepolicy.deindexStatus()",
+      "CALL copperDB.knowledgepolicy.deindexStatus()",
     );
     this.assertCypherSuccess(resp, "Failed to load deindex status");
 
@@ -1867,4 +1867,4 @@ class NornicDBClient {
   }
 }
 
-export const api = new NornicDBClient();
+export const api = new CopperDBClient();

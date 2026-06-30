@@ -412,7 +412,7 @@ export function LifecycleAdmin() {
     return (
       <PageLayout>
         <div className="flex items-center justify-center flex-1">
-          <div className="w-12 h-12 border-4 border-nornic-primary border-t-transparent rounded-full animate-spin" />
+          <div className="w-12 h-12 border-4 border-verdigris border-t-transparent rounded-full animate-spin" />
         </div>
       </PageLayout>
     );
@@ -456,14 +456,14 @@ export function LifecycleAdmin() {
           />
         )}
 
-        <section className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+        <section className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div className="space-y-2">
               <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                <Database className="w-5 h-5 text-nornic-accent" />
+                <Database className="w-5 h-5 text-verdigris" />
                 Lifecycle Control Plane
               </h2>
-              <p className="text-sm text-norse-silver max-w-3xl">
+              <p className="text-sm text-silver-steel max-w-3xl">
                 This panel drives the admin lifecycle API end to end: status
                 inspection, debt review, pause or resume, manual prune, and
                 runtime schedule control.
@@ -472,7 +472,7 @@ export function LifecycleAdmin() {
             <div className="w-full lg:w-72">
               <label
                 htmlFor="lifecycle-db"
-                className="block text-sm font-medium text-norse-silver mb-2"
+                className="block text-sm font-medium text-silver-steel mb-2"
               >
                 Target database
               </label>
@@ -480,7 +480,7 @@ export function LifecycleAdmin() {
                 id="lifecycle-db"
                 value={selectedDb}
                 onChange={(event) => setSelectedDb(event.target.value)}
-                className="w-full px-4 py-2 bg-norse-stone border border-norse-rune rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-nornic-primary"
+                className="w-full px-4 py-2 bg-midnight-graphite border border-midnight-graphite rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-nornic-primary"
               >
                 {supportedDatabases.map((db) => (
                   <option key={db.name} value={db.name}>
@@ -500,19 +500,19 @@ export function LifecycleAdmin() {
         </section>
 
         {!selectedDb ? (
-          <section className="bg-norse-shadow border border-norse-rune rounded-lg p-12 text-center">
-            <Database className="w-12 h-12 text-norse-silver mx-auto mb-3" />
+          <section className="bg-midnight-navy border border-midnight-graphite rounded-lg p-12 text-center">
+            <Database className="w-12 h-12 text-silver-steel mx-auto mb-3" />
             <h2 className="text-lg font-semibold text-white mb-2">
               No lifecycle-capable database available
             </h2>
-            <p className="text-norse-silver">
+            <p className="text-silver-steel">
               Create or open a standard database to manage MVCC lifecycle
               operations.
             </p>
           </section>
         ) : loading ? (
-          <section className="bg-norse-shadow border border-norse-rune rounded-lg p-12 flex items-center justify-center">
-            <div className="w-10 h-10 border-4 border-nornic-primary border-t-transparent rounded-full animate-spin" />
+          <section className="bg-midnight-navy border border-midnight-graphite rounded-lg p-12 flex items-center justify-center">
+            <div className="w-10 h-10 border-4 border-verdigris border-t-transparent rounded-full animate-spin" />
           </section>
         ) : (
           <>
@@ -531,40 +531,40 @@ export function LifecycleAdmin() {
                   {formatBytes(status?.mvcc_bytes_pinned_by_oldest_reader)}
                 </div>
               </div>
-              <div className="rounded-lg border border-norse-rune bg-norse-shadow p-4">
-                <div className="text-xs uppercase tracking-wide text-norse-silver mb-2">
+              <div className="rounded-lg border border-midnight-graphite bg-midnight-navy p-4">
+                <div className="text-xs uppercase tracking-wide text-silver-steel mb-2">
                   Runtime mode
                 </div>
                 <div className="text-2xl font-semibold text-white">
                   {status?.automatic ? "Automatic" : "Manual-only"}
                 </div>
-                <div className="text-sm text-norse-silver mt-2">
+                <div className="text-sm text-silver-steel mt-2">
                   Interval: {status?.cycle_interval || "—"}
                 </div>
-                <div className="text-sm text-norse-silver">
+                <div className="text-sm text-silver-steel">
                   Paused: {status?.paused ? "yes" : "no"}
                 </div>
               </div>
-              <div className="rounded-lg border border-norse-rune bg-norse-shadow p-4">
-                <div className="text-xs uppercase tracking-wide text-norse-silver mb-2">
+              <div className="rounded-lg border border-midnight-graphite bg-midnight-navy p-4">
+                <div className="text-xs uppercase tracking-wide text-silver-steel mb-2">
                   Debt
                 </div>
                 <div className="text-2xl font-semibold text-white">
                   {formatBytes(status?.mvcc_compaction_debt_bytes)}
                 </div>
-                <div className="text-sm text-norse-silver mt-2">
+                <div className="text-sm text-silver-steel mt-2">
                   Keys:{" "}
                   {(status?.mvcc_compaction_debt_keys ?? 0).toLocaleString()}
                 </div>
               </div>
-              <div className="rounded-lg border border-norse-rune bg-norse-shadow p-4">
-                <div className="text-xs uppercase tracking-wide text-norse-silver mb-2">
+              <div className="rounded-lg border border-midnight-graphite bg-midnight-navy p-4">
+                <div className="text-xs uppercase tracking-wide text-silver-steel mb-2">
                   Readers
                 </div>
                 <div className="text-2xl font-semibold text-white">
                   {(status?.mvcc_active_snapshot_readers ?? 0).toLocaleString()}
                 </div>
-                <div className="text-sm text-norse-silver mt-2">
+                <div className="text-sm text-silver-steel mt-2">
                   Oldest age:{" "}
                   {formatDurationSeconds(
                     status?.mvcc_oldest_reader_age_seconds,
@@ -574,14 +574,14 @@ export function LifecycleAdmin() {
             </section>
 
             <section className="grid grid-cols-1 xl:grid-cols-[1.1fr_0.9fr] gap-6">
-              <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-5">
+              <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-5">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                      <TimerReset className="w-5 h-5 text-nornic-accent" />
+                      <TimerReset className="w-5 h-5 text-verdigris" />
                       Runtime controls
                     </h2>
-                    <p className="text-sm text-norse-silver mt-1">
+                    <p className="text-sm text-silver-steel mt-1">
                       Tune the scheduler, switch to manual-only mode, or run
                       maintenance on demand.
                     </p>
@@ -652,8 +652,8 @@ export function LifecycleAdmin() {
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-                  <div className="rounded-lg bg-norse-stone/50 border border-norse-rune p-4">
-                    <div className="text-sm text-norse-silver mb-1">
+                  <div className="rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4">
+                    <div className="text-sm text-silver-steel mb-1">
                       Last run
                     </div>
                     <div className="text-white font-medium">
@@ -661,22 +661,22 @@ export function LifecycleAdmin() {
                         status?.mvcc_prune_run_duration_seconds,
                       )}
                     </div>
-                    <div className="text-xs text-norse-fog mt-2">
+                    <div className="text-xs text-silver-structural mt-2">
                       Keys processed:{" "}
                       {(status?.last_run?.keys_processed ?? 0).toLocaleString()}
                     </div>
-                    <div className="text-xs text-norse-fog">
+                    <div className="text-xs text-silver-structural">
                       Versions deleted:{" "}
                       {(
                         status?.last_run?.versions_deleted ?? 0
                       ).toLocaleString()}
                     </div>
-                    <div className="text-xs text-norse-fog">
+                    <div className="text-xs text-silver-structural">
                       Bytes freed: {formatBytes(status?.last_run?.bytes_freed)}
                     </div>
                   </div>
-                  <div className="rounded-lg bg-norse-stone/50 border border-norse-rune p-4">
-                    <div className="text-sm text-norse-silver mb-1">
+                  <div className="rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4">
+                    <div className="text-sm text-silver-steel mb-1">
                       Planner friction
                     </div>
                     <div className="text-white font-medium">
@@ -685,17 +685,17 @@ export function LifecycleAdmin() {
                       ).toLocaleString()}{" "}
                       stale-plan skips
                     </div>
-                    <div className="text-xs text-norse-fog mt-2">
+                    <div className="text-xs text-silver-structural mt-2">
                       Hot contention keys:{" "}
                       {(
                         status?.last_run?.hot_contention_keys ?? 0
                       ).toLocaleString()}
                     </div>
-                    <div className="text-xs text-norse-fog">
+                    <div className="text-xs text-silver-structural">
                       Floor lag versions:{" "}
                       {(status?.mvcc_floor_lag_versions ?? 0).toLocaleString()}
                     </div>
-                    <div className="text-xs text-norse-fog">
+                    <div className="text-xs text-silver-structural">
                       Tombstone max depth:{" "}
                       {(
                         status?.mvcc_tombstone_chain_max_depth ?? 0
@@ -705,13 +705,13 @@ export function LifecycleAdmin() {
                 </div>
               </div>
 
-              <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-5">
+              <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-5">
                 <div>
                   <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                    <Gauge className="w-5 h-5 text-nornic-accent" />
+                    <Gauge className="w-5 h-5 text-verdigris" />
                     Rollups and pressure
                   </h2>
-                  <p className="text-sm text-norse-silver mt-1">
+                  <p className="text-sm text-silver-steel mt-1">
                     Short-window summaries help operators see whether debt is
                     improving or churn is winning.
                   </p>
@@ -724,32 +724,32 @@ export function LifecycleAdmin() {
                     return (
                       <div
                         key={windowKey}
-                        className="rounded-lg bg-norse-stone/50 border border-norse-rune p-4"
+                        className="rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4"
                       >
                         <div className="flex items-center justify-between mb-3">
                           <div className="text-sm font-medium text-white">
                             {windowKey} rollup
                           </div>
-                          <div className="text-xs text-norse-fog">
+                          <div className="text-xs text-silver-structural">
                             Max debt{" "}
                             {formatBytes(rollup?.compaction_debt_bytes_max)}
                           </div>
                         </div>
                         <div className="grid grid-cols-2 gap-3 text-sm">
                           <div>
-                            <div className="text-norse-silver">Prune runs</div>
+                            <div className="text-silver-steel">Prune runs</div>
                             <div className="text-white font-medium">
                               {(rollup?.prune_runs ?? 0).toLocaleString()}
                             </div>
                           </div>
                           <div>
-                            <div className="text-norse-silver">Bytes freed</div>
+                            <div className="text-silver-steel">Bytes freed</div>
                             <div className="text-white font-medium">
                               {formatBytes(rollup?.bytes_freed)}
                             </div>
                           </div>
                           <div>
-                            <div className="text-norse-silver">
+                            <div className="text-silver-steel">
                               Versions deleted
                             </div>
                             <div className="text-white font-medium">
@@ -757,7 +757,7 @@ export function LifecycleAdmin() {
                             </div>
                           </div>
                           <div>
-                            <div className="text-norse-silver">
+                            <div className="text-silver-steel">
                               Fence mismatches
                             </div>
                             <div className="text-white font-medium">
@@ -796,14 +796,14 @@ export function LifecycleAdmin() {
             </section>
 
             <section className="grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-6">
-              <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+              <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                      <Activity className="w-5 h-5 text-nornic-accent" />
+                      <Activity className="w-5 h-5 text-verdigris" />
                       Top debt keys
                     </h2>
-                    <p className="text-sm text-norse-silver mt-1">
+                    <p className="text-sm text-silver-steel mt-1">
                       Inspect the hottest logical keys before forcing a prune or
                       tightening cadence.
                     </p>
@@ -817,18 +817,18 @@ export function LifecycleAdmin() {
                     />
                   </div>
                 </div>
-                <div className="nornic-grid border border-norse-rune rounded-lg p-4">
+                <div className="copper-grid border border-midnight-graphite rounded-lg p-4">
                   <UiGrid options={debtGridOptions} />
                 </div>
               </div>
 
-              <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+              <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
                 <div>
                   <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                    <ShieldCheck className="w-5 h-5 text-nornic-accent" />
+                    <ShieldCheck className="w-5 h-5 text-verdigris" />
                     Per-namespace summary
                   </h2>
-                  <p className="text-sm text-norse-silver mt-1">
+                  <p className="text-sm text-silver-steel mt-1">
                     Use this view to confirm a single namespace is not
                     monopolizing compaction work.
                   </p>
@@ -840,20 +840,20 @@ export function LifecycleAdmin() {
                       ([namespace, metrics]) => (
                         <div
                           key={namespace}
-                          className="rounded-lg bg-norse-stone/50 border border-norse-rune p-4"
+                          className="rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4"
                         >
                           <div className="flex items-center justify-between mb-2">
                             <div className="font-medium text-white">
                               {namespace}
                             </div>
-                            <div className="text-xs text-norse-fog">
+                            <div className="text-xs text-silver-structural">
                               {metrics.compaction_debt_keys.toLocaleString()}{" "}
                               debt keys
                             </div>
                           </div>
                           <div className="grid grid-cols-2 gap-3 text-sm">
                             <div>
-                              <div className="text-norse-silver">
+                              <div className="text-silver-steel">
                                 Debt bytes
                               </div>
                               <div className="text-white">
@@ -861,13 +861,13 @@ export function LifecycleAdmin() {
                               </div>
                             </div>
                             <div>
-                              <div className="text-norse-silver">Prunable</div>
+                              <div className="text-silver-steel">Prunable</div>
                               <div className="text-white">
                                 {formatBytes(metrics.prunable_bytes_total)}
                               </div>
                             </div>
                             <div>
-                              <div className="text-norse-silver">
+                              <div className="text-silver-steel">
                                 Pruned total
                               </div>
                               <div className="text-white">
@@ -879,7 +879,7 @@ export function LifecycleAdmin() {
                       ),
                     )
                   ) : (
-                    <div className="rounded-lg bg-norse-stone/50 border border-norse-rune p-4 text-sm text-norse-silver">
+                    <div className="rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4 text-sm text-silver-steel">
                       No per-namespace metrics are currently populated for this
                       database.
                     </div>
@@ -889,29 +889,29 @@ export function LifecycleAdmin() {
             </section>
 
             <section className="grid grid-cols-1 xl:grid-cols-[0.95fr_1.05fr] gap-6">
-              <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+              <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
                 <div>
                   <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                    <ShieldAlert className="w-5 h-5 text-nornic-accent" />
+                    <ShieldAlert className="w-5 h-5 text-verdigris" />
                     Active readers
                   </h2>
-                  <p className="text-sm text-norse-silver mt-1">
+                  <p className="text-sm text-silver-steel mt-1">
                     Long-lived readers are the primary reason debt stays pinned
                     behind the floor.
                   </p>
                 </div>
-                <div className="nornic-grid border border-norse-rune rounded-lg p-4">
+                <div className="copper-grid border border-midnight-graphite rounded-lg p-4">
                   <UiGrid options={readerGridOptions} />
                 </div>
               </div>
 
-              <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+              <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
                 <div>
                   <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                    <AlertTriangle className="w-5 h-5 text-nornic-accent" />
+                    <AlertTriangle className="w-5 h-5 text-verdigris" />
                     API surface used by this panel
                   </h2>
-                  <p className="text-sm text-norse-silver mt-1">
+                  <p className="text-sm text-silver-steel mt-1">
                     Operators can match every control here to the admin
                     endpoints behind it.
                   </p>
@@ -951,11 +951,11 @@ export function LifecycleAdmin() {
                   ].map(([method, path, description]) => (
                     <div
                       key={path}
-                      className="rounded-lg bg-norse-stone/50 border border-norse-rune p-4"
+                      className="rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4"
                     >
                       <div className="flex flex-wrap items-center gap-2 mb-2">
                         <span
-                          className={`px-2 py-1 rounded text-xs font-semibold ${method === "GET" ? "bg-blue-500/15 text-blue-300" : "bg-valhalla-gold/15 text-valhalla-gold"}`}
+                          className={`px-2 py-1 rounded text-xs font-semibold ${method === "GET" ? "bg-blue-500/15 text-blue-300" : "bg-copper/15 text-copper"}`}
                         >
                           {method}
                         </span>
@@ -963,7 +963,7 @@ export function LifecycleAdmin() {
                           {path}
                         </code>
                       </div>
-                      <p className="text-norse-silver">{description}</p>
+                      <p className="text-silver-steel">{description}</p>
                     </div>
                   ))}
                 </div>
@@ -980,7 +980,7 @@ export function LifecycleAdmin() {
         size="md"
       >
         <div className="space-y-4">
-          <p className="text-norse-silver">{pendingAction?.description}</p>
+          <p className="text-silver-steel">{pendingAction?.description}</p>
           <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3 text-sm text-red-200">
             Confirm this action only if the current database workload can
             tolerate the change.

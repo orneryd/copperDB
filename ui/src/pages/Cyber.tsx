@@ -10,7 +10,7 @@ import {
 } from "../utils/cyberSim";
 
 // Cyber-physical experimentation harness. Mirrors /demo's storage chain
-// (NornicDB acts as the oracle: a stateful query target that the tick loop
+// (copperDB acts as the oracle: a stateful query target that the tick loop
 // pokes for derived insight) but runs a free-running simulator on top of a
 // drone fleet.
 //
@@ -141,10 +141,10 @@ interface GraphLink {
 type CyberForceGraph = ForceGraph3DInstance<GraphNode, GraphLink>;
 
 const SQUAD_COLORS = [
-  "#a855f7", // purple
-  "#22d3ee", // cyan
-  "#facc15", // amber
-  "#f87171", // red
+  "#00B8C8", // verdigris
+  "#B87333", // copper
+  "#1F8E96", // teal
+  "#C96A19", // oxidized copper
 ];
 
 function rowsFromCypher(resp: CypherResponse): Record<string, unknown>[] {
@@ -173,8 +173,8 @@ function nowMs(): number {
 }
 
 function statusColor(status: string, squad: number): string {
-  if (status === "lost") return "#1f2937"; // grey
-  if (status === "degraded") return "#fb923c"; // orange
+  if (status === "lost") return "#4B5563"; // structural gray
+  if (status === "degraded") return "#C96A19"; // oxidized copper
   return SQUAD_COLORS[squad % SQUAD_COLORS.length];
 }
 
@@ -292,7 +292,7 @@ export function Cyber() {
     const fgRaw = new ForceGraph3D(el);
     const fg = fgRaw as unknown as CyberForceGraph;
 
-    fg.backgroundColor("#04060c")
+    fg.backgroundColor("#060B12")
       .showNavInfo(false)
       .width(el.clientWidth)
       .height(el.clientHeight)
@@ -410,7 +410,7 @@ export function Cyber() {
         });
       }
 
-      // Push deltas to NornicDB. The three write categories (drone state,
+      // Push deltas to copperDB. The three write categories (drone state,
       // dropped links, added links) are independent of each other this
       // tick — fire them in parallel so the per-tick wall-clock matches a
       // single round-trip rather than three. The executor's plan and
@@ -546,32 +546,32 @@ export function Cyber() {
   }, [phase, running]);
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden bg-[#04060c] text-norse-silver font-display">
+    <div className="relative w-screen h-screen overflow-hidden bg-[#060B12] text-silver-steel font-display">
       <div ref={containerRef} className="absolute inset-0" />
 
       {/* Title strip */}
       <div className="absolute top-4 left-4 z-10 pointer-events-none select-none">
         <div className="flex items-baseline gap-3">
-          <span className="text-2xl font-semibold tracking-wide text-white">
-            NornicDB
+          <span className="text-2xl font-semibold tracking-wide text-text-primary">
+            copperDB
           </span>
-          <span className="text-nornic-accent text-sm uppercase tracking-[0.3em]">
+          <span className="text-verdigris text-sm uppercase tracking-[0.3em]">
             Cyber-Physical Oracle
           </span>
         </div>
-        <div className="mt-1 text-xs text-norse-silver/70 max-w-md">
+        <div className="mt-1 text-xs text-silver-steel/70 max-w-md">
           {totalDrones} drones · {totalLinks} comms links · tick{" "}
           {tickCount.toString().padStart(4, "0")}
         </div>
       </div>
 
       {/* Oracle dashboard */}
-      <div className="absolute top-4 right-4 z-10 w-96 rounded-lg border border-purple-500/30 bg-norse-shadow/85 backdrop-blur px-4 py-3 shadow-[0_0_24px_rgba(168,85,247,0.18)] text-xs">
+      <div className="absolute top-4 right-4 z-10 w-96 rounded-lg border border-purple-500/30 bg-midnight-navy/85 backdrop-blur px-4 py-3 shadow-[0_0_24px_rgba(168,85,247,0.18)] text-xs">
         <div className="flex items-baseline justify-between">
           <span className="text-xs uppercase tracking-[0.25em] text-purple-300">
             Oracle Snapshot
           </span>
-          <span className="text-[10px] text-norse-silver/60">
+          <span className="text-[10px] text-silver-steel/60">
             {oracle ? `tick ${oracle.tick} · ${oracle.oracleMs.toFixed(1)} ms` : "warming up..."}
           </span>
         </div>
@@ -583,7 +583,7 @@ export function Cyber() {
               <Stat
                 label="degraded"
                 value={oracle.fleet.degraded}
-                color="#fb923c"
+                color="#C96A19"
               />
               <Stat label="lost" value={oracle.fleet.lost} color="#f87171" />
               <Stat
@@ -603,7 +603,7 @@ export function Cyber() {
                       <span className="text-purple-200/90 truncate">
                         {d.callsign}
                       </span>
-                      <span className="tabular-nums text-norse-silver/80">
+                      <span className="tabular-nums text-silver-steel/80">
                         {Math.round(d.battery)}% · {d.status}
                       </span>
                     </li>
@@ -622,7 +622,7 @@ export function Cyber() {
                       <span className="text-purple-200/90 truncate">
                         {d.callsign}
                       </span>
-                      <span className="tabular-nums text-norse-silver/80">
+                      <span className="tabular-nums text-silver-steel/80">
                         deg {d.degree}
                       </span>
                     </li>
@@ -635,21 +635,21 @@ export function Cyber() {
       </div>
 
       {/* Event log */}
-      <div className="absolute bottom-20 right-4 z-10 w-96 max-h-72 overflow-y-auto rounded-lg border border-norse-rune bg-norse-shadow/80 backdrop-blur px-4 py-3 text-xs">
+      <div className="absolute bottom-20 right-4 z-10 w-96 max-h-72 overflow-y-auto rounded-lg border border-midnight-graphite bg-midnight-navy/80 backdrop-blur px-4 py-3 text-xs">
         <div className="text-xs uppercase tracking-[0.25em] text-purple-300">
           Event log
         </div>
         {eventLog.length === 0 ? (
-          <div className="mt-2 text-norse-silver/60 italic">no events yet</div>
+          <div className="mt-2 text-silver-steel/60 italic">no events yet</div>
         ) : (
           <ul className="mt-2 space-y-0.5 font-mono">
             {eventLog.map((e, i) => (
               <li key={`${e.tick}-${e.droneId}-${i}`} className="flex gap-2">
-                <span className="text-norse-silver/50 tabular-nums">
+                <span className="text-silver-steel/50 tabular-nums">
                   {e.tick.toString().padStart(4, "0")}
                 </span>
                 <span className="text-purple-200/90">{e.kind}</span>
-                <span className="text-norse-silver/70 truncate">
+                <span className="text-silver-steel/70 truncate">
                   {e.droneId}
                 </span>
               </li>
@@ -659,18 +659,18 @@ export function Cyber() {
       </div>
 
       {/* Bottom status / controls */}
-      <div className="absolute bottom-4 left-4 right-4 z-10 flex items-center gap-4 rounded-lg border border-norse-rune bg-norse-shadow/80 backdrop-blur px-4 py-3">
+      <div className="absolute bottom-4 left-4 right-4 z-10 flex items-center gap-4 rounded-lg border border-midnight-graphite bg-midnight-navy/80 backdrop-blur px-4 py-3">
         <div
           className={`w-2.5 h-2.5 rounded-full ${
             phase === "running" && running
-              ? "bg-nornic-primary status-connected"
+              ? "bg-verdigris status-connected"
               : phase === "error"
                 ? "bg-red-500"
                 : "bg-frost-glacier animate-pulse"
           }`}
         />
         <div className="flex-1 min-w-0">
-          <div className="text-xs uppercase tracking-[0.2em] text-norse-silver/60">
+          <div className="text-xs uppercase tracking-[0.2em] text-silver-steel/60">
             {phaseLabel}
           </div>
           <div className="text-sm text-white truncate font-mono">
@@ -689,7 +689,7 @@ export function Cyber() {
 
       {errorMessage && (
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/70">
-          <div className="max-w-lg rounded-lg border border-red-500/40 bg-norse-shadow p-6">
+          <div className="max-w-lg rounded-lg border border-red-500/40 bg-midnight-navy p-6">
             <div className="text-red-400 text-sm uppercase tracking-[0.2em]">
               Cyber demo failed
             </div>
@@ -714,7 +714,7 @@ function Stat({
 }) {
   return (
     <div>
-      <div className="text-[9px] uppercase tracking-[0.2em] text-norse-silver/50">
+      <div className="text-[9px] uppercase tracking-[0.2em] text-silver-steel/50">
         {label}
       </div>
       <div className="text-base tabular-nums" style={{ color }}>
@@ -732,8 +732,8 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <div className="mt-3 pt-2 border-t border-norse-rune/60">
-      <div className="text-[10px] uppercase tracking-[0.2em] text-norse-silver/50 mb-1">
+    <div className="mt-3 pt-2 border-t border-midnight-graphite/60">
+      <div className="text-[10px] uppercase tracking-[0.2em] text-silver-steel/50 mb-1">
         {title}
       </div>
       {children}
@@ -743,7 +743,7 @@ function Section({
 
 function Empty({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-norse-silver/60 italic font-mono">{children}</div>
+    <div className="text-silver-steel/60 italic font-mono">{children}</div>
   );
 }
 

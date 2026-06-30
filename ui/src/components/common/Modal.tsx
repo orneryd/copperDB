@@ -54,7 +54,7 @@ export function Modal({
       />
       {/* Modal Content */}
       <div
-        className={`relative bg-norse-deep border border-norse-rune rounded-xl p-6 ${sizeClasses[size]} mx-4 shadow-2xl w-full ${className}`}
+        className={`relative bg-norse-deep border border-midnight-graphite rounded-xl p-6 ${sizeClasses[size]} mx-4 shadow-2xl w-full ${className}`}
         role="document"
       >
         {title && (
@@ -63,10 +63,10 @@ export function Modal({
             <button
               type="button"
               onClick={onClose}
-              className="p-1 hover:bg-norse-rune rounded transition-colors"
+              className="p-1 hover:bg-midnight-graphite rounded transition-colors"
               aria-label="Close"
             >
-              <X className="w-5 h-5 text-norse-silver" />
+              <X className="w-5 h-5 text-silver-steel" />
             </button>
           </div>
         )}

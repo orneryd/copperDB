@@ -40,10 +40,10 @@ export function NodeCard({
       <div
         className={`w-full text-left p-3 rounded-lg border transition-colors ${
           isActive
-            ? "bg-nornic-primary/20 border-nornic-primary"
+            ? "bg-verdigris/20 border-verdigris"
             : isSelected
-            ? "bg-nornic-primary/10 border-nornic-primary/50"
-            : "bg-norse-stone border-norse-rune hover:border-norse-fog"
+            ? "bg-verdigris/10 border-verdigris/50"
+            : "bg-midnight-graphite border-midnight-graphite hover:border-norse-fog"
         }`}
       >
         <div className="flex items-start gap-2">
@@ -67,17 +67,17 @@ export function NodeCard({
                 {result.node.labels.map((label) => (
                   <span
                     key={label}
-                    className="px-2 py-0.5 text-xs bg-frost-ice/20 text-frost-ice rounded flex-shrink-0"
+                    className="px-2 py-0.5 text-xs bg-verdigris/20 text-verdigris rounded flex-shrink-0"
                   >
                     {label}
                   </span>
                 ))}
               </div>
-              <span className="text-xs text-valhalla-gold flex-shrink-0">
+              <span className="text-xs text-copper flex-shrink-0">
                 Score: {result.score.toFixed(2)}
               </span>
             </div>
-            <p className="text-sm text-norse-silver break-words overflow-wrap-anywhere min-w-0">
+            <p className="text-sm text-silver-steel break-words overflow-wrap-anywhere min-w-0">
               {getNodePreview(result.node.properties)}
             </p>
           </button>
@@ -88,7 +88,7 @@ export function NodeCard({
       {isExpanded && expandedSimilar && (
         <div className="ml-4 mt-2 mb-3 border-l-2 border-frost-ice/30 pl-3 animate-in slide-in-from-top-2 duration-200">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-xs font-medium text-frost-ice flex items-center gap-1">
+            <span className="text-xs font-medium text-verdigris flex items-center gap-1">
               <Sparkles className="w-3 h-3" />
               Similar Items ({expandedSimilar.results.length})
             </span>
@@ -96,7 +96,7 @@ export function NodeCard({
               <button
                 type="button"
                 onClick={onCollapseSimilar}
-                className="text-xs text-norse-fog hover:text-white transition-colors"
+                className="text-xs text-silver-structural hover:text-white transition-colors"
               >
                 Close
               </button>
@@ -104,12 +104,12 @@ export function NodeCard({
           </div>
 
           {expandedSimilar.loading ? (
-            <div className="flex items-center gap-2 text-norse-fog text-sm py-2">
+            <div className="flex items-center gap-2 text-silver-structural text-sm py-2">
               <Loader2 className="w-4 h-4 animate-spin" />
               Finding similar...
             </div>
           ) : expandedSimilar.results.length === 0 ? (
-            <p className="text-xs text-norse-fog py-2">No similar items found</p>
+            <p className="text-xs text-silver-structural py-2">No similar items found</p>
           ) : (
             <div className="space-y-1">
               {expandedSimilar.results.map((similar) => (
@@ -117,7 +117,7 @@ export function NodeCard({
                   type="button"
                   key={similar.node.id}
                   onClick={onSelect}
-                  className="w-full text-left p-2 rounded bg-norse-shadow/50 hover:bg-norse-shadow border border-transparent hover:border-frost-ice/20 transition-colors"
+                  className="w-full text-left p-2 rounded bg-midnight-navy/50 hover:bg-midnight-navy border border-transparent hover:border-frost-ice/20 transition-colors"
                 >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-1">
@@ -126,17 +126,17 @@ export function NodeCard({
                         .map((label) => (
                           <span
                             key={label}
-                            className="px-1.5 py-0.5 text-xs bg-frost-ice/10 text-frost-ice/80 rounded"
+                            className="px-1.5 py-0.5 text-xs bg-verdigris/10 text-verdigris/80 rounded"
                           >
                             {label}
                           </span>
                         ))}
                     </div>
-                    <span className="text-xs text-valhalla-gold/70">
+                    <span className="text-xs text-copper/70">
                       {similar.score.toFixed(2)}
                     </span>
                   </div>
-                  <p className="text-xs text-norse-silver/80 break-words overflow-wrap-anywhere mt-1">
+                  <p className="text-xs text-silver-steel/80 break-words overflow-wrap-anywhere mt-1">
                     {getNodePreview(similar.node.properties)}
                   </p>
                 </button>

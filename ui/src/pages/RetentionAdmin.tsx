@@ -437,7 +437,7 @@ export function RetentionAdmin() {
 
     if (ctx.column.name === "description") {
       return (
-        <div className="py-1 text-sm text-norse-silver whitespace-pre-wrap">
+        <div className="py-1 text-sm text-silver-steel whitespace-pre-wrap">
           {row.description || "—"}
         </div>
       );
@@ -453,7 +453,7 @@ export function RetentionAdmin() {
                 category: e.target.value as RetentionCategory,
               })
             }
-            className="w-full rounded border border-norse-rune bg-norse-stone px-2 py-1 text-sm text-white"
+            className="w-full rounded border border-midnight-graphite bg-midnight-graphite px-2 py-1 text-sm text-white"
           >
             {RETENTION_CATEGORIES.map((category) => (
               <option key={category.value} value={category.value}>
@@ -471,12 +471,12 @@ export function RetentionAdmin() {
           <button
             type="button"
             onClick={() => void updatePolicyInline(row, { active: !row.active })}
-            className={`px-2 py-1 rounded text-xs font-medium ${row.active ? "bg-green-500/20 text-green-300" : "bg-norse-stone text-norse-silver"}`}
+            className={`px-2 py-1 rounded text-xs font-medium ${row.active ? "bg-green-500/20 text-green-300" : "bg-midnight-graphite text-silver-steel"}`}
           >
             {row.active ? "Active" : "Inactive"}
           </button>
           {(row.compliance_frameworks ?? []).length > 0 ? (
-            <div className="text-xs text-norse-fog mt-2">
+            <div className="text-xs text-silver-structural mt-2">
               {(row.compliance_frameworks ?? []).join(", ")}
             </div>
           ) : null}
@@ -508,7 +508,7 @@ export function RetentionAdmin() {
     }
 
     if (ctx.column.name === "name" || ctx.column.name === "id") {
-      return <div className={`py-1 ${ctx.column.name === "name" ? "font-medium text-white" : "text-xs text-norse-fog"}`}>{String(ctx.value ?? "—")}</div>;
+      return <div className={`py-1 ${ctx.column.name === "name" ? "font-medium text-white" : "text-xs text-silver-structural"}`}>{String(ctx.value ?? "—")}</div>;
     }
 
     if (ctx.column.name === "retention" || ctx.column.name === "archive") {
@@ -704,7 +704,7 @@ export function RetentionAdmin() {
     return (
       <PageLayout>
         <div className="flex items-center justify-center flex-1">
-          <div className="w-12 h-12 border-4 border-nornic-primary border-t-transparent rounded-full animate-spin" />
+          <div className="w-12 h-12 border-4 border-verdigris border-t-transparent rounded-full animate-spin" />
         </div>
       </PageLayout>
     );
@@ -748,14 +748,14 @@ export function RetentionAdmin() {
           />
         )}
 
-        <section className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+        <section className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div className="space-y-2">
               <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                <Database className="w-5 h-5 text-nornic-accent" />
+                <Database className="w-5 h-5 text-verdigris" />
                 Retention control plane
               </h2>
-              <p className="text-sm text-norse-silver max-w-3xl">
+              <p className="text-sm text-silver-steel max-w-3xl">
                 Configure category-based retention the way operators expect from a Neo4j-style admin surface: policy catalog, legal holds, erasure queue, and manual sweep controls in one place.
               </p>
             </div>
@@ -788,13 +788,13 @@ export function RetentionAdmin() {
         </section>
 
         {loading ? (
-          <section className="bg-norse-shadow border border-norse-rune rounded-lg p-12 flex items-center justify-center">
-            <div className="w-10 h-10 border-4 border-nornic-primary border-t-transparent rounded-full animate-spin" />
+          <section className="bg-midnight-navy border border-midnight-graphite rounded-lg p-12 flex items-center justify-center">
+            <div className="w-10 h-10 border-4 border-verdigris border-t-transparent rounded-full animate-spin" />
           </section>
         ) : disabledMessage ? (
-          <section className="bg-norse-shadow border border-norse-rune rounded-lg p-8 space-y-4">
+          <section className="bg-midnight-navy border border-midnight-graphite rounded-lg p-8 space-y-4">
             <h2 className="text-lg font-semibold text-white">How to turn retention on</h2>
-            <div className="rounded-lg bg-norse-stone/50 border border-norse-rune p-4 text-sm text-norse-silver space-y-2">
+            <div className="rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4 text-sm text-silver-steel space-y-2">
               <p>Set <span className="text-white font-medium">compliance.retention_enabled</span> to <span className="text-white font-medium">true</span>.</p>
               <p>Optionally set <span className="text-white font-medium">retention.sweep_interval</span>, <span className="text-white font-medium">retention.default_policies</span>, and inline policy definitions.</p>
               <p>Once enabled, refresh this page to manage policies, legal holds, erasure requests, and manual sweeps.</p>
@@ -808,32 +808,32 @@ export function RetentionAdmin() {
                 <div className="text-2xl font-semibold">Enabled</div>
                 <div className="text-sm opacity-80 mt-2">Last refresh: {formatTimestamp(status?.timestamp)}</div>
               </div>
-              <div className="rounded-lg border border-norse-rune bg-norse-shadow p-4">
-                <div className="text-xs uppercase tracking-wide text-norse-silver mb-2">Policies</div>
+              <div className="rounded-lg border border-midnight-graphite bg-midnight-navy p-4">
+                <div className="text-xs uppercase tracking-wide text-silver-steel mb-2">Policies</div>
                 <div className="text-2xl font-semibold text-white">{status?.policy_count ?? 0}</div>
-                <div className="text-sm text-norse-silver mt-2">Active: {activePolicyCount}</div>
+                <div className="text-sm text-silver-steel mt-2">Active: {activePolicyCount}</div>
               </div>
-              <div className="rounded-lg border border-norse-rune bg-norse-shadow p-4">
-                <div className="text-xs uppercase tracking-wide text-norse-silver mb-2">Legal holds</div>
+              <div className="rounded-lg border border-midnight-graphite bg-midnight-navy p-4">
+                <div className="text-xs uppercase tracking-wide text-silver-steel mb-2">Legal holds</div>
                 <div className="text-2xl font-semibold text-white">{status?.hold_count ?? 0}</div>
-                <div className="text-sm text-norse-silver mt-2">Blocking erasure and sweep deletions</div>
+                <div className="text-sm text-silver-steel mt-2">Blocking erasure and sweep deletions</div>
               </div>
-              <div className="rounded-lg border border-norse-rune bg-norse-shadow p-4">
-                <div className="text-xs uppercase tracking-wide text-norse-silver mb-2">Erasure queue</div>
+              <div className="rounded-lg border border-midnight-graphite bg-midnight-navy p-4">
+                <div className="text-xs uppercase tracking-wide text-silver-steel mb-2">Erasure queue</div>
                 <div className="text-2xl font-semibold text-white">{status?.erasure_count ?? 0}</div>
-                <div className="text-sm text-norse-silver mt-2">GDPR subject requests in manager state</div>
+                <div className="text-sm text-silver-steel mt-2">GDPR subject requests in manager state</div>
               </div>
             </section>
 
             <section className="grid grid-cols-1 xl:grid-cols-[1.15fr_0.85fr] gap-6">
-              <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+              <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                      <Clock3 className="w-5 h-5 text-nornic-accent" />
+                      <Clock3 className="w-5 h-5 text-verdigris" />
                       Policy catalog
                     </h2>
-                    <p className="text-sm text-norse-silver mt-1">
+                    <p className="text-sm text-silver-steel mt-1">
                       Retention is configured per category with explicit duration, archive behavior, and activation state.
                     </p>
                   </div>
@@ -842,18 +842,18 @@ export function RetentionAdmin() {
                   </Button>
                 </div>
 
-                <div className="nornic-grid border border-norse-rune rounded-lg p-4">
+                <div className="copper-grid border border-midnight-graphite rounded-lg p-4">
                   <UiGrid options={policyGridOptions} cellRenderers={policyCellRenderers} />
                 </div>
               </div>
 
-              <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+              <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
                 <div>
                   <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                    <Shield className="w-5 h-5 text-nornic-accent" />
+                    <Shield className="w-5 h-5 text-verdigris" />
                     Category guide
                   </h2>
-                  <p className="text-sm text-norse-silver mt-1">
+                  <p className="text-sm text-silver-steel mt-1">
                     Categories are the control surface this UI exposes, which maps cleanly to the retention manager and matches the way operators reason about policy domains.
                   </p>
                 </div>
@@ -861,13 +861,13 @@ export function RetentionAdmin() {
                   {RETENTION_CATEGORIES.map((category) => (
                     <div
                       key={category.value}
-                      className="rounded-lg bg-norse-stone/50 border border-norse-rune p-4"
+                      className="rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4"
                     >
                       <div className="flex items-center justify-between gap-3">
                         <div className="font-medium text-white">{category.label}</div>
-                        <div className="text-xs text-norse-fog">{category.value}</div>
+                        <div className="text-xs text-silver-structural">{category.value}</div>
                       </div>
-                      <p className="text-sm text-norse-silver mt-2">{category.description}</p>
+                      <p className="text-sm text-silver-steel mt-2">{category.description}</p>
                     </div>
                   ))}
                 </div>
@@ -875,14 +875,14 @@ export function RetentionAdmin() {
             </section>
 
             <section className="grid grid-cols-1 xl:grid-cols-[1.05fr_0.95fr] gap-6">
-              <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+              <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                      <Shield className="w-5 h-5 text-nornic-accent" />
+                      <Shield className="w-5 h-5 text-verdigris" />
                       Legal holds
                     </h2>
-                    <p className="text-sm text-norse-silver mt-1">
+                    <p className="text-sm text-silver-steel mt-1">
                       Holds block deletion and erasure across the selected subject set or category set.
                     </p>
                   </div>
@@ -893,39 +893,39 @@ export function RetentionAdmin() {
 
                 <div className="space-y-3">
                   {holds.length === 0 ? (
-                    <div className="rounded-lg bg-norse-stone/50 border border-norse-rune p-4 text-sm text-norse-silver">
+                    <div className="rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4 text-sm text-silver-steel">
                       No active legal holds are registered.
                     </div>
                   ) : (
                     holds.map((hold) => (
                       <div
                         key={hold.id}
-                        className="rounded-lg bg-norse-stone/50 border border-norse-rune p-4"
+                        className="rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4"
                       >
                         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                           <div className="space-y-2">
                             <div className="flex items-center gap-2 flex-wrap">
                               <div className="font-medium text-white">{hold.id}</div>
                               <span
-                                className={`px-2 py-1 rounded text-xs font-medium ${hold.active ? "bg-red-500/20 text-red-300" : "bg-norse-stone text-norse-silver"}`}
+                                className={`px-2 py-1 rounded text-xs font-medium ${hold.active ? "bg-red-500/20 text-red-300" : "bg-midnight-graphite text-silver-steel"}`}
                               >
                                 {hold.active ? "Active" : "Inactive"}
                               </span>
                               {hold.matter ? (
-                                <span className="text-xs text-norse-fog">Matter: {hold.matter}</span>
+                                <span className="text-xs text-silver-structural">Matter: {hold.matter}</span>
                               ) : null}
                             </div>
-                            <p className="text-sm text-norse-silver">{hold.description}</p>
-                            <div className="text-xs text-norse-fog">
+                            <p className="text-sm text-silver-steel">{hold.description}</p>
+                            <div className="text-xs text-silver-structural">
                               Placed by {hold.placed_by} on {formatTimestamp(hold.placed_at)}
                             </div>
-                            <div className="text-xs text-norse-fog">
+                            <div className="text-xs text-silver-structural">
                               Subjects: {holdToSubjectSummary(hold)}
                             </div>
-                            <div className="text-xs text-norse-fog">
+                            <div className="text-xs text-silver-structural">
                               Categories: {holdToCategorySummary(hold)}
                             </div>
-                            <div className="text-xs text-norse-fog">
+                            <div className="text-xs text-silver-structural">
                               Expires: {hold.expires_at ? formatTimestamp(hold.expires_at) : "Indefinite"}
                             </div>
                           </div>
@@ -946,14 +946,14 @@ export function RetentionAdmin() {
                 </div>
               </div>
 
-              <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+              <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                      <AlertTriangle className="w-5 h-5 text-nornic-accent" />
+                      <AlertTriangle className="w-5 h-5 text-verdigris" />
                       Erasure queue
                     </h2>
-                    <p className="text-sm text-norse-silver mt-1">
+                    <p className="text-sm text-silver-steel mt-1">
                       Create and process GDPR-style erasure requests using the same retention state the server enforces.
                     </p>
                   </div>
@@ -964,14 +964,14 @@ export function RetentionAdmin() {
 
                 <div className="space-y-3 max-h-[38rem] overflow-y-auto pr-1">
                   {erasures.length === 0 ? (
-                    <div className="rounded-lg bg-norse-stone/50 border border-norse-rune p-4 text-sm text-norse-silver">
+                    <div className="rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4 text-sm text-silver-steel">
                       No erasure requests are queued.
                     </div>
                   ) : (
                     erasures.map((request) => (
                       <div
                         key={request.id}
-                        className="rounded-lg bg-norse-stone/50 border border-norse-rune p-4"
+                        className="rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4"
                       >
                         <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                           <div className="space-y-2">
@@ -981,11 +981,11 @@ export function RetentionAdmin() {
                                 {request.status}
                               </span>
                             </div>
-                            <div className="text-sm text-norse-silver">
+                            <div className="text-sm text-silver-steel">
                               Subject: <span className="text-white">{request.subject_id}</span>
                               {request.subject_email ? ` (${request.subject_email})` : ""}
                             </div>
-                            <div className="grid grid-cols-2 gap-3 text-xs text-norse-fog">
+                            <div className="grid grid-cols-2 gap-3 text-xs text-silver-structural">
                               <div>Requested: {formatTimestamp(request.requested_at)}</div>
                               <div>Deadline: {formatTimestamp(request.deadline)}</div>
                               <div>Found: {request.items_found}</div>
@@ -1022,13 +1022,13 @@ export function RetentionAdmin() {
               </div>
             </section>
 
-            <section className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+            <section className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
               <div>
                 <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                  <AlertTriangle className="w-5 h-5 text-nornic-accent" />
+                  <AlertTriangle className="w-5 h-5 text-verdigris" />
                   API surface used by this panel
                 </h2>
-                <p className="text-sm text-norse-silver mt-1">
+                <p className="text-sm text-silver-steel mt-1">
                   Operators can map every action here directly to the retention admin endpoints behind it.
                 </p>
               </div>
@@ -1050,17 +1050,17 @@ export function RetentionAdmin() {
                 ].map(([method, path, description]) => (
                   <div
                     key={path}
-                    className="rounded-lg bg-norse-stone/50 border border-norse-rune p-4"
+                    className="rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4"
                   >
                     <div className="flex flex-wrap items-center gap-2 mb-2">
                       <span
-                        className={`px-2 py-1 rounded text-xs font-semibold ${method === "GET" ? "bg-blue-500/15 text-blue-300" : "bg-valhalla-gold/15 text-valhalla-gold"}`}
+                        className={`px-2 py-1 rounded text-xs font-semibold ${method === "GET" ? "bg-blue-500/15 text-blue-300" : "bg-copper/15 text-copper"}`}
                       >
                         {method}
                       </span>
                       <code className="text-xs text-white break-all">{path}</code>
                     </div>
-                    <p className="text-norse-silver">{description}</p>
+                    <p className="text-silver-steel">{description}</p>
                   </div>
                 ))}
               </div>
@@ -1097,7 +1097,7 @@ export function RetentionAdmin() {
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label htmlFor="retention-policy-category" className="block text-sm font-medium text-norse-silver mb-2">
+              <label htmlFor="retention-policy-category" className="block text-sm font-medium text-silver-steel mb-2">
                 Category
               </label>
               <select
@@ -1109,7 +1109,7 @@ export function RetentionAdmin() {
                     category: event.target.value as RetentionCategory,
                   }))
                 }
-                className="w-full px-4 py-2 bg-norse-stone border border-norse-rune rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-nornic-primary"
+                className="w-full px-4 py-2 bg-midnight-graphite border border-midnight-graphite rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-nornic-primary"
               >
                 {RETENTION_CATEGORIES.map((category) => (
                   <option key={category.value} value={category.value}>
@@ -1130,18 +1130,18 @@ export function RetentionAdmin() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-            <label className="inline-flex items-center gap-2 text-norse-silver">
+            <label className="inline-flex items-center gap-2 text-silver-steel">
               <input
                 type="checkbox"
                 checked={policyForm.indefinite}
                 onChange={(event) =>
                   setPolicyForm((current) => ({ ...current, indefinite: event.target.checked }))
                 }
-                className="w-4 h-4 rounded border-norse-rune bg-norse-stone text-nornic-primary"
+                className="w-4 h-4 rounded border-midnight-graphite bg-midnight-graphite text-verdigris"
               />
               Indefinite retention
             </label>
-            <label className="inline-flex items-center gap-2 text-norse-silver">
+            <label className="inline-flex items-center gap-2 text-silver-steel">
               <input
                 type="checkbox"
                 checked={policyForm.archiveBeforeDelete}
@@ -1151,18 +1151,18 @@ export function RetentionAdmin() {
                     archiveBeforeDelete: event.target.checked,
                   }))
                 }
-                className="w-4 h-4 rounded border-norse-rune bg-norse-stone text-nornic-primary"
+                className="w-4 h-4 rounded border-midnight-graphite bg-midnight-graphite text-verdigris"
               />
               Archive before delete
             </label>
-            <label className="inline-flex items-center gap-2 text-norse-silver">
+            <label className="inline-flex items-center gap-2 text-silver-steel">
               <input
                 type="checkbox"
                 checked={policyForm.active}
                 onChange={(event) =>
                   setPolicyForm((current) => ({ ...current, active: event.target.checked }))
                 }
-                className="w-4 h-4 rounded border-norse-rune bg-norse-stone text-nornic-primary"
+                className="w-4 h-4 rounded border-midnight-graphite bg-midnight-graphite text-verdigris"
               />
               Policy active
             </label>
@@ -1174,7 +1174,7 @@ export function RetentionAdmin() {
               label="Archive path"
               value={policyForm.archivePath}
               onChange={(value) => setPolicyForm((current) => ({ ...current, archivePath: value }))}
-              placeholder="/var/lib/nornicdb/archive"
+              placeholder="/var/lib/copperDB/archive"
               disabled={!policyForm.archiveBeforeDelete}
             />
             <FormInput
@@ -1189,7 +1189,7 @@ export function RetentionAdmin() {
           </div>
 
           <div>
-            <label htmlFor="retention-policy-description" className="block text-sm font-medium text-norse-silver mb-2">
+            <label htmlFor="retention-policy-description" className="block text-sm font-medium text-silver-steel mb-2">
               Description
             </label>
             <textarea
@@ -1200,7 +1200,7 @@ export function RetentionAdmin() {
               }
               rows={4}
               placeholder="Explain why this category is retained and how operators should use it."
-              className="w-full px-4 py-3 bg-norse-stone border border-norse-rune rounded-lg text-white placeholder-norse-fog focus:outline-none focus:ring-2 focus:ring-nornic-primary"
+              className="w-full px-4 py-3 bg-midnight-graphite border border-midnight-graphite rounded-lg text-white placeholder-norse-fog focus:outline-none focus:ring-2 focus:ring-nornic-primary"
             />
           </div>
 
@@ -1248,7 +1248,7 @@ export function RetentionAdmin() {
               placeholder="legal-team"
             />
             <div>
-              <label htmlFor="retention-hold-expires" className="block text-sm font-medium text-norse-silver mb-2">
+              <label htmlFor="retention-hold-expires" className="block text-sm font-medium text-silver-steel mb-2">
                 Expires at
               </label>
               <input
@@ -1258,7 +1258,7 @@ export function RetentionAdmin() {
                 onChange={(event) =>
                   setHoldForm((current) => ({ ...current, expiresAt: event.target.value }))
                 }
-                className="w-full px-4 py-2 bg-norse-stone border border-norse-rune rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-nornic-primary"
+                className="w-full px-4 py-2 bg-midnight-graphite border border-midnight-graphite rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-nornic-primary"
               />
             </div>
           </div>
@@ -1270,12 +1270,12 @@ export function RetentionAdmin() {
             placeholder="user-123, acct-456"
           />
           <div>
-            <label className="block text-sm font-medium text-norse-silver mb-2">Categories in scope</label>
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 rounded-lg bg-norse-stone/50 border border-norse-rune p-4">
+            <label className="block text-sm font-medium text-silver-steel mb-2">Categories in scope</label>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4">
               {RETENTION_CATEGORIES.map((category) => {
                 const checked = holdForm.categories.includes(category.value);
                 return (
-                  <label key={category.value} className="inline-flex items-center gap-2 text-sm text-norse-silver">
+                  <label key={category.value} className="inline-flex items-center gap-2 text-sm text-silver-steel">
                     <input
                       type="checkbox"
                       checked={checked}
@@ -1287,17 +1287,17 @@ export function RetentionAdmin() {
                             : current.categories.filter((value) => value !== category.value),
                         }))
                       }
-                      className="w-4 h-4 rounded border-norse-rune bg-norse-stone text-nornic-primary"
+                      className="w-4 h-4 rounded border-midnight-graphite bg-midnight-graphite text-verdigris"
                     />
                     {category.value}
                   </label>
                 );
               })}
             </div>
-            <p className="mt-2 text-xs text-norse-fog">Leave this empty to cover all categories.</p>
+            <p className="mt-2 text-xs text-silver-structural">Leave this empty to cover all categories.</p>
           </div>
           <div>
-            <label htmlFor="retention-hold-description" className="block text-sm font-medium text-norse-silver mb-2">
+            <label htmlFor="retention-hold-description" className="block text-sm font-medium text-silver-steel mb-2">
               Description
             </label>
             <textarea
@@ -1308,15 +1308,15 @@ export function RetentionAdmin() {
               }
               rows={4}
               placeholder="Describe the legal or regulatory reason this data must not be deleted."
-              className="w-full px-4 py-3 bg-norse-stone border border-norse-rune rounded-lg text-white placeholder-norse-fog focus:outline-none focus:ring-2 focus:ring-nornic-primary"
+              className="w-full px-4 py-3 bg-midnight-graphite border border-midnight-graphite rounded-lg text-white placeholder-norse-fog focus:outline-none focus:ring-2 focus:ring-nornic-primary"
             />
           </div>
-          <label className="inline-flex items-center gap-2 text-sm text-norse-silver">
+          <label className="inline-flex items-center gap-2 text-sm text-silver-steel">
             <input
               type="checkbox"
               checked={holdForm.active}
               onChange={(event) => setHoldForm((current) => ({ ...current, active: event.target.checked }))}
-              className="w-4 h-4 rounded border-norse-rune bg-norse-stone text-nornic-primary"
+              className="w-4 h-4 rounded border-midnight-graphite bg-midnight-graphite text-verdigris"
             />
             Hold active
           </label>
@@ -1371,7 +1371,7 @@ export function RetentionAdmin() {
         size="md"
       >
         <div className="space-y-4">
-          <p className="text-norse-silver">{confirmActionDescription}</p>
+          <p className="text-silver-steel">{confirmActionDescription}</p>
           <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3 text-sm text-red-200">
             Confirm this action only if the current policy and hold state reflects the intended compliance posture.
           </div>

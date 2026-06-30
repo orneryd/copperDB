@@ -109,23 +109,23 @@ export function QueryPanel({
             <button
               type="button"
               onClick={() => setShowHistory(!showHistory)}
-              className="p-1.5 rounded hover:bg-norse-rune transition-colors"
+              className="p-1.5 rounded hover:bg-midnight-graphite transition-colors"
               title="Query History"
             >
-              <History className="w-4 h-4 text-norse-silver" />
+              <History className="w-4 h-4 text-silver-steel" />
             </button>
             <button
               type="button"
               onClick={() => setAutocompleteEnabled(!autocompleteEnabled)}
               className={`p-1.5 rounded transition-colors ${
                 autocompleteEnabled
-                  ? "bg-nornic-primary/20 hover:bg-nornic-primary/30"
-                  : "hover:bg-norse-rune"
+                  ? "bg-verdigris/20 hover:bg-verdigris/30"
+                  : "hover:bg-midnight-graphite"
               }`}
               title={autocompleteEnabled ? "Disable AI Autocomplete" : "Enable AI Autocomplete"}
             >
               <svg
-                className="w-4 h-4 text-norse-silver"
+                className="w-4 h-4 text-silver-steel"
                 fill="none"
                 stroke="currentColor"
                 viewBox="0 0 24 24"
@@ -148,7 +148,7 @@ export function QueryPanel({
         </div>
 
         {showHistory && queryHistory.length > 0 && (
-          <div className="bg-norse-stone border border-norse-rune rounded-lg p-2 max-h-40 overflow-y-auto">
+          <div className="bg-midnight-graphite border border-midnight-graphite rounded-lg p-2 max-h-40 overflow-y-auto">
             {queryHistory.map((q) => (
               <button
                 key={q}
@@ -157,7 +157,7 @@ export function QueryPanel({
                   setCypherQuery(q);
                   setShowHistory(false);
                 }}
-                className="w-full text-left px-2 py-1 text-sm text-norse-silver hover:bg-norse-rune rounded truncate"
+                className="w-full text-left px-2 py-1 text-sm text-silver-steel hover:bg-midnight-graphite rounded truncate"
               >
                 {q}
               </button>
@@ -168,12 +168,12 @@ export function QueryPanel({
         <button
           type="submit"
           disabled={queryLoading}
-          className="flex items-center justify-center gap-2 px-4 py-2 bg-nornic-primary text-white rounded-lg hover:bg-nornic-secondary disabled:opacity-50 transition-colors"
+          className="flex items-center justify-center gap-2 px-4 py-2 bg-verdigris text-white rounded-lg hover:bg-verdigris-teal disabled:opacity-50 transition-colors"
         >
           <Play className="w-4 h-4" />
           {queryLoading ? "Executing..." : "Run Query"}
         </button>
-        <label className="flex items-center gap-2 text-xs text-norse-silver select-none">
+        <label className="flex items-center gap-2 text-xs text-silver-steel select-none">
           <input
             type="checkbox"
             checked={continueOnError}
@@ -219,10 +219,10 @@ export function QueryPanel({
           <div className="flex-1 overflow-auto p-2 space-y-3">
             {cypherResults.length > 0 ? (
               cypherResults.map((entry, idx) => (
-                <div key={`${idx}:${entry.statement.slice(0, 32)}`} className="border border-norse-rune rounded-lg overflow-hidden bg-norse-stone/30">
-                  <div className="px-3 py-2 border-b border-norse-rune bg-norse-shadow/50">
+                <div key={`${idx}:${entry.statement.slice(0, 32)}`} className="border border-midnight-graphite rounded-lg overflow-hidden bg-midnight-graphite/30">
+                  <div className="px-3 py-2 border-b border-midnight-graphite bg-midnight-navy/50">
                     <div className="flex items-center justify-between gap-3">
-                      <p className="text-xs font-mono text-norse-silver truncate">
+                      <p className="text-xs font-mono text-silver-steel truncate">
                         #{idx + 1}: {entry.statement}
                       </p>
                       <div className="flex items-center gap-2 text-xs">
@@ -233,12 +233,12 @@ export function QueryPanel({
                             ? "bg-red-500/20 text-red-300"
                             : entry.status === "running"
                             ? "bg-amber-500/20 text-amber-300"
-                            : "bg-norse-rune text-norse-silver"
+                            : "bg-midnight-graphite text-silver-steel"
                         }`}>
                           {entry.status}
                         </span>
                         {entry.durationMs != null && (
-                          <span className="text-norse-silver">{entry.durationMs} ms</span>
+                          <span className="text-silver-steel">{entry.durationMs} ms</span>
                         )}
                       </div>
                     </div>
@@ -254,11 +254,11 @@ export function QueryPanel({
                     const entryResult = entry.result;
                     if (!entryResult?.results?.[0]) {
                       return entry.status === "running" || entry.status === "pending" ? (
-                        <div className="p-3 text-sm text-norse-silver font-mono">
+                        <div className="p-3 text-sm text-silver-steel font-mono">
                           {entry.status === "running" ? "Running..." : "Queued..."}
                         </div>
                       ) : (
-                        <div className="p-3 text-sm text-norse-silver font-mono">No result rows</div>
+                        <div className="p-3 text-sm text-silver-steel font-mono">No result rows</div>
                       );
                     }
                     return (

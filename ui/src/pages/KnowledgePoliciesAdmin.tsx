@@ -56,7 +56,7 @@ function EnabledBadge({ enabled }: { enabled: boolean }) {
       className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${
         enabled
           ? "text-green-300 border-green-500/30 bg-green-500/10"
-          : "text-norse-silver border-norse-rune bg-norse-stone/40"
+          : "text-silver-steel border-midnight-graphite bg-midnight-graphite/40"
       }`}
     >
       {enabled ? "Enabled" : "Disabled"}
@@ -69,8 +69,8 @@ function BoolBadge({ value, trueLabel = "Yes", falseLabel = "No" }: { value: boo
     <span
       className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${
         value
-          ? "text-valhalla-gold border-valhalla-gold/30 bg-valhalla-gold/10"
-          : "text-norse-silver border-norse-rune bg-norse-stone/40"
+          ? "text-copper border-copper/30 bg-copper/10"
+          : "text-silver-steel border-midnight-graphite bg-midnight-graphite/40"
       }`}
     >
       {value ? trueLabel : falseLabel}
@@ -80,10 +80,10 @@ function BoolBadge({ value, trueLabel = "Yes", falseLabel = "No" }: { value: boo
 
 function TargetCell({ labels, edgeType, isWildcard }: { labels?: string[]; edgeType?: string; isWildcard: boolean }) {
   if (isWildcard) {
-    return <span className="text-norse-fog italic">wildcard</span>;
+    return <span className="text-silver-structural italic">wildcard</span>;
   }
   if (edgeType) {
-    return <span className="text-nornic-accent font-mono text-xs">:{edgeType}</span>;
+    return <span className="text-verdigris font-mono text-xs">:{edgeType}</span>;
   }
   if (labels && labels.length > 0) {
     return (
@@ -92,7 +92,7 @@ function TargetCell({ labels, edgeType, isWildcard }: { labels?: string[]; edgeT
       </span>
     );
   }
-  return <span className="text-norse-fog">—</span>;
+  return <span className="text-silver-structural">—</span>;
 }
 
 export function KnowledgePoliciesAdmin() {
@@ -227,7 +227,7 @@ export function KnowledgePoliciesAdmin() {
     return (
       <PageLayout>
         <div className="flex items-center justify-center flex-1">
-          <div className="w-12 h-12 border-4 border-nornic-primary border-t-transparent rounded-full animate-spin" />
+          <div className="w-12 h-12 border-4 border-verdigris border-t-transparent rounded-full animate-spin" />
         </div>
       </PageLayout>
     );
@@ -264,21 +264,21 @@ export function KnowledgePoliciesAdmin() {
         )}
 
         {/* Database selector */}
-        <section className="bg-norse-shadow border border-norse-rune rounded-lg p-6">
+        <section className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div className="space-y-2">
               <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                <Shield className="w-5 h-5 text-nornic-accent" />
+                <Shield className="w-5 h-5 text-verdigris" />
                 Knowledge Policy Control Plane
               </h2>
-              <p className="text-sm text-norse-silver max-w-3xl">
+              <p className="text-sm text-silver-steel max-w-3xl">
                 Inspect decay profiles, promotion policies, score resolution, and deindex queue status for the knowledge-layer scoring subsystem.
               </p>
             </div>
             <div className="w-full lg:w-72">
               <label
                 htmlFor="kp-db"
-                className="block text-sm font-medium text-norse-silver mb-2"
+                className="block text-sm font-medium text-silver-steel mb-2"
               >
                 Target database
               </label>
@@ -286,7 +286,7 @@ export function KnowledgePoliciesAdmin() {
                 id="kp-db"
                 value={selectedDb}
                 onChange={(e) => setSelectedDb(e.target.value)}
-                className="w-full px-4 py-2 bg-norse-stone border border-norse-rune rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-nornic-primary"
+                className="w-full px-4 py-2 bg-midnight-graphite border border-midnight-graphite rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-nornic-primary"
               >
                 {databases.map((db) => (
                   <option key={db.name} value={db.name}>
@@ -299,7 +299,7 @@ export function KnowledgePoliciesAdmin() {
         </section>
 
         {/* Tab nav */}
-        <div className="flex gap-1 border-b border-norse-rune">
+        <div className="flex gap-1 border-b border-midnight-graphite">
           {TABS.map((tab) => (
             <button
               type="button"
@@ -307,8 +307,8 @@ export function KnowledgePoliciesAdmin() {
               onClick={() => handleTabChange(tab.id)}
               className={`px-4 py-2 text-sm font-medium rounded-t-lg transition-colors ${
                 activeTab === tab.id
-                  ? "bg-norse-shadow border border-b-norse-shadow border-norse-rune text-white"
-                  : "text-norse-silver hover:text-white hover:bg-norse-stone/40"
+                  ? "bg-midnight-navy border border-b-norse-shadow border-midnight-graphite text-white"
+                  : "text-silver-steel hover:text-white hover:bg-midnight-graphite/40"
               }`}
             >
               {tab.label}
@@ -317,14 +317,14 @@ export function KnowledgePoliciesAdmin() {
         </div>
 
         {!selectedDb ? (
-          <section className="bg-norse-shadow border border-norse-rune rounded-lg p-12 text-center">
-            <Database className="w-12 h-12 text-norse-silver mx-auto mb-3" />
+          <section className="bg-midnight-navy border border-midnight-graphite rounded-lg p-12 text-center">
+            <Database className="w-12 h-12 text-silver-steel mx-auto mb-3" />
             <h2 className="text-lg font-semibold text-white mb-2">No database available</h2>
-            <p className="text-norse-silver">Create or open a standard database to inspect knowledge policies.</p>
+            <p className="text-silver-steel">Create or open a standard database to inspect knowledge policies.</p>
           </section>
         ) : loading ? (
-          <section className="bg-norse-shadow border border-norse-rune rounded-lg p-12 flex items-center justify-center">
-            <div className="w-10 h-10 border-4 border-nornic-primary border-t-transparent rounded-full animate-spin" />
+          <section className="bg-midnight-navy border border-midnight-graphite rounded-lg p-12 flex items-center justify-center">
+            <div className="w-10 h-10 border-4 border-verdigris border-t-transparent rounded-full animate-spin" />
           </section>
         ) : (
           <>
@@ -337,7 +337,7 @@ export function KnowledgePoliciesAdmin() {
                     className={`rounded-lg border p-4 ${
                       profiles?.decay_enabled
                         ? "text-green-300 border-green-500/30 bg-green-500/10"
-                        : "text-norse-silver border-norse-rune bg-norse-shadow"
+                        : "text-silver-steel border-midnight-graphite bg-midnight-navy"
                     }`}
                   >
                     <div className="text-xs uppercase tracking-wide mb-2 opacity-80">Decay scoring</div>
@@ -352,23 +352,23 @@ export function KnowledgePoliciesAdmin() {
                   </div>
 
                   {/* Decay profiles count */}
-                  <div className="rounded-lg border border-norse-rune bg-norse-shadow p-4">
-                    <div className="text-xs uppercase tracking-wide text-norse-silver mb-2">Decay profiles</div>
+                  <div className="rounded-lg border border-midnight-graphite bg-midnight-navy p-4">
+                    <div className="text-xs uppercase tracking-wide text-silver-steel mb-2">Decay profiles</div>
                     <div className="text-2xl font-semibold text-white">
                       {profiles?.bundles?.length ?? 0}
                     </div>
-                    <div className="text-sm text-norse-silver mt-2">
+                    <div className="text-sm text-silver-steel mt-2">
                       {profiles?.bindings?.length ?? 0} binding{(profiles?.bindings?.length ?? 0) !== 1 ? "s" : ""}
                     </div>
                   </div>
 
                   {/* Promotion policies count */}
-                  <div className="rounded-lg border border-norse-rune bg-norse-shadow p-4">
-                    <div className="text-xs uppercase tracking-wide text-norse-silver mb-2">Promotion policies</div>
+                  <div className="rounded-lg border border-midnight-graphite bg-midnight-navy p-4">
+                    <div className="text-xs uppercase tracking-wide text-silver-steel mb-2">Promotion policies</div>
                     <div className="text-2xl font-semibold text-white">
                       {policies?.promotion_policies?.length ?? 0}
                     </div>
-                    <div className="text-sm text-norse-silver mt-2">
+                    <div className="text-sm text-silver-steel mt-2">
                       {policies?.promotion_profiles?.length ?? 0} profile{(policies?.promotion_profiles?.length ?? 0) !== 1 ? "s" : ""}
                     </div>
                   </div>
@@ -378,7 +378,7 @@ export function KnowledgePoliciesAdmin() {
                     className={`rounded-lg border p-4 ${
                       (deindexStatus?.pending_count ?? 0) > 0
                         ? "text-yellow-300 border-yellow-500/30 bg-yellow-500/10"
-                        : "text-norse-silver border-norse-rune bg-norse-shadow"
+                        : "text-silver-steel border-midnight-graphite bg-midnight-navy"
                     }`}
                   >
                     <div className="text-xs uppercase tracking-wide mb-2 opacity-80">Pending deindex</div>
@@ -397,28 +397,28 @@ export function KnowledgePoliciesAdmin() {
 
                 {/* Quick summary tables */}
                 <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-                  <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+                  <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
                     <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                      <Sliders className="w-5 h-5 text-nornic-accent" />
+                      <Sliders className="w-5 h-5 text-verdigris" />
                       Decay profile bundles
                     </h2>
                     {(profiles?.bundles ?? []).length === 0 ? (
-                      <p className="text-norse-silver text-sm">No decay profiles defined.</p>
+                      <p className="text-silver-steel text-sm">No decay profiles defined.</p>
                     ) : (
-                      <div className="overflow-x-auto border border-norse-rune rounded-lg">
+                      <div className="overflow-x-auto border border-midnight-graphite rounded-lg">
                         <table className="w-full text-sm">
-                          <thead className="bg-norse-stone/60">
+                          <thead className="bg-midnight-graphite/60">
                             <tr>
-                              <th className="px-3 py-2 text-left text-norse-silver font-medium">Name</th>
-                              <th className="px-3 py-2 text-left text-norse-silver font-medium">Scope</th>
-                              <th className="px-3 py-2 text-left text-norse-silver font-medium">Status</th>
+                              <th className="px-3 py-2 text-left text-silver-steel font-medium">Name</th>
+                              <th className="px-3 py-2 text-left text-silver-steel font-medium">Scope</th>
+                              <th className="px-3 py-2 text-left text-silver-steel font-medium">Status</th>
                             </tr>
                           </thead>
                           <tbody>
                             {(profiles?.bundles ?? []).map((b) => (
-                              <tr key={b.Name} className="border-t border-norse-rune/50">
+                              <tr key={b.Name} className="border-t border-midnight-graphite/50">
                                 <td className="px-3 py-2 text-white font-medium">{b.Name}</td>
-                                <td className="px-3 py-2 text-norse-silver">{b.Scope || "—"}</td>
+                                <td className="px-3 py-2 text-silver-steel">{b.Scope || "—"}</td>
                                 <td className="px-3 py-2"><EnabledBadge enabled={b.Enabled} /></td>
                               </tr>
                             ))}
@@ -428,26 +428,26 @@ export function KnowledgePoliciesAdmin() {
                     )}
                   </div>
 
-                  <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+                  <div className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
                     <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                      <ShieldCheck className="w-5 h-5 text-nornic-accent" />
+                      <ShieldCheck className="w-5 h-5 text-verdigris" />
                       Promotion policies
                     </h2>
                     {(policies?.promotion_policies ?? []).length === 0 ? (
-                      <p className="text-norse-silver text-sm">No promotion policies defined.</p>
+                      <p className="text-silver-steel text-sm">No promotion policies defined.</p>
                     ) : (
-                      <div className="overflow-x-auto border border-norse-rune rounded-lg">
+                      <div className="overflow-x-auto border border-midnight-graphite rounded-lg">
                         <table className="w-full text-sm">
-                          <thead className="bg-norse-stone/60">
+                          <thead className="bg-midnight-graphite/60">
                             <tr>
-                              <th className="px-3 py-2 text-left text-norse-silver font-medium">Name</th>
-                              <th className="px-3 py-2 text-left text-norse-silver font-medium">Target</th>
-                              <th className="px-3 py-2 text-left text-norse-silver font-medium">Status</th>
+                              <th className="px-3 py-2 text-left text-silver-steel font-medium">Name</th>
+                              <th className="px-3 py-2 text-left text-silver-steel font-medium">Target</th>
+                              <th className="px-3 py-2 text-left text-silver-steel font-medium">Status</th>
                             </tr>
                           </thead>
                           <tbody>
                             {(policies?.promotion_policies ?? []).map((p) => (
-                              <tr key={p.Name} className="border-t border-norse-rune/50">
+                              <tr key={p.Name} className="border-t border-midnight-graphite/50">
                                 <td className="px-3 py-2 text-white font-medium">{p.Name}</td>
                                 <td className="px-3 py-2">
                                   <TargetCell labels={p.TargetLabels} edgeType={p.TargetEdgeType} isWildcard={p.IsWildcard} />
@@ -467,43 +467,43 @@ export function KnowledgePoliciesAdmin() {
             {/* ── DECAY PROFILES TAB ── */}
             {activeTab === "decay-profiles" && (
               <div className="space-y-6">
-                <section className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+                <section className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
                   <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                    <Sliders className="w-5 h-5 text-nornic-accent" />
+                    <Sliders className="w-5 h-5 text-verdigris" />
                     Decay profile bundles
                   </h2>
-                  <p className="text-sm text-norse-silver">
+                  <p className="text-sm text-silver-steel">
                     Each bundle defines a scoring curve (function, half-life, floor, threshold) applied to matched node or edge types.
                   </p>
-                  <div className="overflow-x-auto border border-norse-rune rounded-lg">
+                  <div className="overflow-x-auto border border-midnight-graphite rounded-lg">
                     <table className="w-full text-sm">
-                      <thead className="bg-norse-stone/60">
+                      <thead className="bg-midnight-graphite/60">
                         <tr>
-                          <th className="px-4 py-3 text-left text-norse-silver font-medium">Name</th>
-                          <th className="px-4 py-3 text-left text-norse-silver font-medium">Function</th>
-                          <th className="px-4 py-3 text-right text-norse-silver font-medium">Half-Life</th>
-                          <th className="px-4 py-3 text-right text-norse-silver font-medium">Threshold</th>
-                          <th className="px-4 py-3 text-left text-norse-silver font-medium">Scope</th>
-                          <th className="px-4 py-3 text-left text-norse-silver font-medium">Score From</th>
-                          <th className="px-4 py-3 text-left text-norse-silver font-medium">Status</th>
+                          <th className="px-4 py-3 text-left text-silver-steel font-medium">Name</th>
+                          <th className="px-4 py-3 text-left text-silver-steel font-medium">Function</th>
+                          <th className="px-4 py-3 text-right text-silver-steel font-medium">Half-Life</th>
+                          <th className="px-4 py-3 text-right text-silver-steel font-medium">Threshold</th>
+                          <th className="px-4 py-3 text-left text-silver-steel font-medium">Scope</th>
+                          <th className="px-4 py-3 text-left text-silver-steel font-medium">Score From</th>
+                          <th className="px-4 py-3 text-left text-silver-steel font-medium">Status</th>
                         </tr>
                       </thead>
                       <tbody>
                         {(profiles?.bundles ?? []).length === 0 ? (
                           <tr>
-                            <td colSpan={7} className="px-4 py-6 text-center text-norse-silver">
+                            <td colSpan={7} className="px-4 py-6 text-center text-silver-steel">
                               No decay profile bundles defined.
                             </td>
                           </tr>
                         ) : (
                           (profiles?.bundles ?? []).map((b: DecayProfileBundle) => (
-                            <tr key={b.Name} className="border-t border-norse-rune/50">
+                            <tr key={b.Name} className="border-t border-midnight-graphite/50">
                               <td className="px-4 py-3 text-white font-medium">{b.Name}</td>
-                              <td className="px-4 py-3 text-norse-silver font-mono text-xs">{b.Function || "—"}</td>
+                              <td className="px-4 py-3 text-silver-steel font-mono text-xs">{b.Function || "—"}</td>
                               <td className="px-4 py-3 text-right text-white">{formatHalfLife(b.HalfLifeSeconds)}</td>
                               <td className="px-4 py-3 text-right text-white">{b.VisibilityThreshold?.toFixed(2) ?? "—"}</td>
-                              <td className="px-4 py-3 text-norse-silver">{b.Scope || "—"}</td>
-                              <td className="px-4 py-3 text-norse-silver font-mono text-xs">
+                              <td className="px-4 py-3 text-silver-steel">{b.Scope || "—"}</td>
+                              <td className="px-4 py-3 text-silver-steel font-mono text-xs">
                                 {b.ScoreFromProperty ? `${b.ScoreFrom}.${b.ScoreFromProperty}` : (b.ScoreFrom || "—")}
                               </td>
                               <td className="px-4 py-3"><EnabledBadge enabled={b.Enabled} /></td>
@@ -515,42 +515,42 @@ export function KnowledgePoliciesAdmin() {
                   </div>
                 </section>
 
-                <section className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+                <section className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
                   <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                    <Activity className="w-5 h-5 text-nornic-accent" />
+                    <Activity className="w-5 h-5 text-verdigris" />
                     Decay profile bindings
                   </h2>
-                  <p className="text-sm text-norse-silver">
+                  <p className="text-sm text-silver-steel">
                     Bindings map node labels or edge types to a decay profile bundle. Order determines resolution priority (lower order = higher priority).
                   </p>
-                  <div className="overflow-x-auto border border-norse-rune rounded-lg">
+                  <div className="overflow-x-auto border border-midnight-graphite rounded-lg">
                     <table className="w-full text-sm">
-                      <thead className="bg-norse-stone/60">
+                      <thead className="bg-midnight-graphite/60">
                         <tr>
-                          <th className="px-4 py-3 text-left text-norse-silver font-medium">Name</th>
-                          <th className="px-4 py-3 text-left text-norse-silver font-medium">Target</th>
-                          <th className="px-4 py-3 text-left text-norse-silver font-medium">Profile Ref</th>
-                          <th className="px-4 py-3 text-right text-norse-silver font-medium">Order</th>
-                          <th className="px-4 py-3 text-left text-norse-silver font-medium">No Decay</th>
-                          <th className="px-4 py-3 text-left text-norse-silver font-medium">Edge</th>
+                          <th className="px-4 py-3 text-left text-silver-steel font-medium">Name</th>
+                          <th className="px-4 py-3 text-left text-silver-steel font-medium">Target</th>
+                          <th className="px-4 py-3 text-left text-silver-steel font-medium">Profile Ref</th>
+                          <th className="px-4 py-3 text-right text-silver-steel font-medium">Order</th>
+                          <th className="px-4 py-3 text-left text-silver-steel font-medium">No Decay</th>
+                          <th className="px-4 py-3 text-left text-silver-steel font-medium">Edge</th>
                         </tr>
                       </thead>
                       <tbody>
                         {(profiles?.bindings ?? []).length === 0 ? (
                           <tr>
-                            <td colSpan={6} className="px-4 py-6 text-center text-norse-silver">
+                            <td colSpan={6} className="px-4 py-6 text-center text-silver-steel">
                               No decay profile bindings defined.
                             </td>
                           </tr>
                         ) : (
                           (profiles?.bindings ?? []).map((b: DecayProfileBinding, i: number) => (
-                            <tr key={`${b.Name}-${i}`} className="border-t border-norse-rune/50">
+                            <tr key={`${b.Name}-${i}`} className="border-t border-midnight-graphite/50">
                               <td className="px-4 py-3 text-white font-medium">{b.Name}</td>
                               <td className="px-4 py-3">
                                 <TargetCell labels={b.TargetLabels} edgeType={b.TargetEdgeType} isWildcard={b.IsWildcard} />
                               </td>
-                              <td className="px-4 py-3 text-norse-silver font-mono text-xs">
-                                {b.ProfileRef || <span className="italic text-norse-fog">—</span>}
+                              <td className="px-4 py-3 text-silver-steel font-mono text-xs">
+                                {b.ProfileRef || <span className="italic text-silver-structural">—</span>}
                               </td>
                               <td className="px-4 py-3 text-right text-white">{b.Order}</td>
                               <td className="px-4 py-3">
@@ -572,34 +572,34 @@ export function KnowledgePoliciesAdmin() {
             {/* ── PROMOTION POLICIES TAB ── */}
             {activeTab === "promotion-policies" && (
               <div className="space-y-6">
-                <section className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+                <section className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
                   <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                    <ShieldCheck className="w-5 h-5 text-nornic-accent" />
+                    <ShieldCheck className="w-5 h-5 text-verdigris" />
                     Promotion policies
                   </h2>
-                  <p className="text-sm text-norse-silver">
+                  <p className="text-sm text-silver-steel">
                     Promotion policies identify node or edge types that are eligible for score boosting via a promotion profile.
                   </p>
-                  <div className="overflow-x-auto border border-norse-rune rounded-lg">
+                  <div className="overflow-x-auto border border-midnight-graphite rounded-lg">
                     <table className="w-full text-sm">
-                      <thead className="bg-norse-stone/60">
+                      <thead className="bg-midnight-graphite/60">
                         <tr>
-                          <th className="px-4 py-3 text-left text-norse-silver font-medium">Name</th>
-                          <th className="px-4 py-3 text-left text-norse-silver font-medium">Target</th>
-                          <th className="px-4 py-3 text-left text-norse-silver font-medium">Edge</th>
-                          <th className="px-4 py-3 text-left text-norse-silver font-medium">Status</th>
+                          <th className="px-4 py-3 text-left text-silver-steel font-medium">Name</th>
+                          <th className="px-4 py-3 text-left text-silver-steel font-medium">Target</th>
+                          <th className="px-4 py-3 text-left text-silver-steel font-medium">Edge</th>
+                          <th className="px-4 py-3 text-left text-silver-steel font-medium">Status</th>
                         </tr>
                       </thead>
                       <tbody>
                         {(policies?.promotion_policies ?? []).length === 0 ? (
                           <tr>
-                            <td colSpan={4} className="px-4 py-6 text-center text-norse-silver">
+                            <td colSpan={4} className="px-4 py-6 text-center text-silver-steel">
                               No promotion policies defined.
                             </td>
                           </tr>
                         ) : (
                           (policies?.promotion_policies ?? []).map((p: PromotionPolicyDef) => (
-                            <tr key={p.Name} className="border-t border-norse-rune/50">
+                            <tr key={p.Name} className="border-t border-midnight-graphite/50">
                               <td className="px-4 py-3 text-white font-medium">{p.Name}</td>
                               <td className="px-4 py-3">
                                 <TargetCell labels={p.TargetLabels} edgeType={p.TargetEdgeType} isWildcard={p.IsWildcard} />
@@ -616,38 +616,38 @@ export function KnowledgePoliciesAdmin() {
                   </div>
                 </section>
 
-                <section className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+                <section className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
                   <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                    <Activity className="w-5 h-5 text-nornic-accent" />
+                    <Activity className="w-5 h-5 text-verdigris" />
                     Promotion profiles
                   </h2>
-                  <p className="text-sm text-norse-silver">
+                  <p className="text-sm text-silver-steel">
                     Promotion profiles define the multiplier, floor, and cap applied when a node or edge is promoted.
                   </p>
-                  <div className="overflow-x-auto border border-norse-rune rounded-lg">
+                  <div className="overflow-x-auto border border-midnight-graphite rounded-lg">
                     <table className="w-full text-sm">
-                      <thead className="bg-norse-stone/60">
+                      <thead className="bg-midnight-graphite/60">
                         <tr>
-                          <th className="px-4 py-3 text-left text-norse-silver font-medium">Name</th>
-                          <th className="px-4 py-3 text-left text-norse-silver font-medium">Scope</th>
-                          <th className="px-4 py-3 text-right text-norse-silver font-medium">Multiplier</th>
-                          <th className="px-4 py-3 text-right text-norse-silver font-medium">Score Floor</th>
-                          <th className="px-4 py-3 text-right text-norse-silver font-medium">Score Cap</th>
-                          <th className="px-4 py-3 text-left text-norse-silver font-medium">Status</th>
+                          <th className="px-4 py-3 text-left text-silver-steel font-medium">Name</th>
+                          <th className="px-4 py-3 text-left text-silver-steel font-medium">Scope</th>
+                          <th className="px-4 py-3 text-right text-silver-steel font-medium">Multiplier</th>
+                          <th className="px-4 py-3 text-right text-silver-steel font-medium">Score Floor</th>
+                          <th className="px-4 py-3 text-right text-silver-steel font-medium">Score Cap</th>
+                          <th className="px-4 py-3 text-left text-silver-steel font-medium">Status</th>
                         </tr>
                       </thead>
                       <tbody>
                         {(policies?.promotion_profiles ?? []).length === 0 ? (
                           <tr>
-                            <td colSpan={6} className="px-4 py-6 text-center text-norse-silver">
+                            <td colSpan={6} className="px-4 py-6 text-center text-silver-steel">
                               No promotion profiles defined.
                             </td>
                           </tr>
                         ) : (
                           (policies?.promotion_profiles ?? []).map((p: PromotionProfileDef) => (
-                            <tr key={p.Name} className="border-t border-norse-rune/50">
+                            <tr key={p.Name} className="border-t border-midnight-graphite/50">
                               <td className="px-4 py-3 text-white font-medium">{p.Name}</td>
-                              <td className="px-4 py-3 text-norse-silver">{p.Scope || "—"}</td>
+                              <td className="px-4 py-3 text-silver-steel">{p.Scope || "—"}</td>
                               <td className="px-4 py-3 text-right text-white">{p.Multiplier?.toFixed(2) ?? "—"}</td>
                               <td className="px-4 py-3 text-right text-white">{p.ScoreFloor?.toFixed(2) ?? "—"}</td>
                               <td className="px-4 py-3 text-right text-white">{p.ScoreCap?.toFixed(2) ?? "—"}</td>
@@ -665,12 +665,12 @@ export function KnowledgePoliciesAdmin() {
             {/* ── RESOLVE TAB ── */}
             {activeTab === "resolve" && (
               <div className="space-y-6">
-                <section className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+                <section className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
                   <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                    <Search className="w-5 h-5 text-nornic-accent" />
+                    <Search className="w-5 h-5 text-verdigris" />
                     Resolve scoring policy
                   </h2>
-                  <p className="text-sm text-norse-silver">
+                  <p className="text-sm text-silver-steel">
                     Resolve the effective decay profile and promotion policy that would be applied to an entity. Provide an entity ID, a comma-separated list of labels, or an edge type.
                   </p>
 
@@ -723,34 +723,34 @@ export function KnowledgePoliciesAdmin() {
                 </section>
 
                 {resolveResult && (
-                  <section className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-5">
+                  <section className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-5">
                     <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                      <ShieldCheck className="w-5 h-5 text-nornic-accent" />
+                      <ShieldCheck className="w-5 h-5 text-verdigris" />
                       Resolution result
                     </h2>
 
                     {/* Explanation — prominent */}
-                    <div className="rounded-lg border border-nornic-accent/30 bg-nornic-accent/5 p-4">
-                      <div className="text-xs uppercase tracking-wide text-nornic-accent mb-2">Explanation</div>
+                    <div className="rounded-lg border border-nornic-accent/30 bg-verdigris/5 p-4">
+                      <div className="text-xs uppercase tracking-wide text-verdigris mb-2">Explanation</div>
                       <p className="text-white text-sm leading-relaxed">{resolveResult.Explanation || "No explanation provided."}</p>
                     </div>
 
                     {/* Score summary */}
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                      <div className="rounded-lg bg-norse-stone/50 border border-norse-rune p-4">
-                        <div className="text-xs text-norse-silver mb-1">Base Score</div>
+                      <div className="rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4">
+                        <div className="text-xs text-silver-steel mb-1">Base Score</div>
                         <div className="text-2xl font-semibold text-white">{resolveResult.BaseScore?.toFixed(3) ?? "—"}</div>
                       </div>
-                      <div className="rounded-lg bg-norse-stone/50 border border-norse-rune p-4">
-                        <div className="text-xs text-norse-silver mb-1">Final Score</div>
+                      <div className="rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4">
+                        <div className="text-xs text-silver-steel mb-1">Final Score</div>
                         <div className="text-2xl font-semibold text-white">{resolveResult.FinalScore?.toFixed(3) ?? "—"}</div>
                       </div>
-                      <div className="rounded-lg bg-norse-stone/50 border border-norse-rune p-4">
-                        <div className="text-xs text-norse-silver mb-1">Eff. Rate</div>
+                      <div className="rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4">
+                        <div className="text-xs text-silver-steel mb-1">Eff. Rate</div>
                         <div className="text-2xl font-semibold text-white">{resolveResult.EffectiveRate?.toFixed(4) ?? "—"}</div>
                       </div>
-                      <div className="rounded-lg bg-norse-stone/50 border border-norse-rune p-4">
-                        <div className="text-xs text-norse-silver mb-1">Eff. Threshold</div>
+                      <div className="rounded-lg bg-midnight-graphite/50 border border-midnight-graphite p-4">
+                        <div className="text-xs text-silver-steel mb-1">Eff. Threshold</div>
                         <div className="text-2xl font-semibold text-white">{resolveResult.EffectiveThreshold?.toFixed(3) ?? "—"}</div>
                       </div>
                     </div>
@@ -758,50 +758,50 @@ export function KnowledgePoliciesAdmin() {
                     {/* Detail grid */}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
                       <div className="space-y-2">
-                        <div className="flex justify-between border-b border-norse-rune/40 pb-1">
-                          <span className="text-norse-silver">Target ID</span>
+                        <div className="flex justify-between border-b border-midnight-graphite/40 pb-1">
+                          <span className="text-silver-steel">Target ID</span>
                           <span className="text-white font-mono text-xs break-all text-right max-w-[60%]">{resolveResult.TargetID || "—"}</span>
                         </div>
-                        <div className="flex justify-between border-b border-norse-rune/40 pb-1">
-                          <span className="text-norse-silver">Target Scope</span>
+                        <div className="flex justify-between border-b border-midnight-graphite/40 pb-1">
+                          <span className="text-silver-steel">Target Scope</span>
                           <span className="text-white">{resolveResult.TargetScope || "—"}</span>
                         </div>
-                        <div className="flex justify-between border-b border-norse-rune/40 pb-1">
-                          <span className="text-norse-silver">Decay Profile</span>
+                        <div className="flex justify-between border-b border-midnight-graphite/40 pb-1">
+                          <span className="text-silver-steel">Decay Profile</span>
                           <span className="text-white font-mono text-xs">{resolveResult.ResolvedDecayProfileID || "—"}</span>
                         </div>
-                        <div className="flex justify-between border-b border-norse-rune/40 pb-1">
-                          <span className="text-norse-silver">Score From</span>
+                        <div className="flex justify-between border-b border-midnight-graphite/40 pb-1">
+                          <span className="text-silver-steel">Score From</span>
                           <span className="text-white font-mono text-xs">{resolveResult.ResolvedScoreFrom || "—"}</span>
                         </div>
-                        <div className="flex justify-between border-b border-norse-rune/40 pb-1">
-                          <span className="text-norse-silver">No Decay</span>
+                        <div className="flex justify-between border-b border-midnight-graphite/40 pb-1">
+                          <span className="text-silver-steel">No Decay</span>
                           <BoolBadge value={resolveResult.NoDecay} trueLabel="Yes" falseLabel="No" />
                         </div>
-                        <div className="flex justify-between border-b border-norse-rune/40 pb-1">
-                          <span className="text-norse-silver">Suppression Eligible</span>
+                        <div className="flex justify-between border-b border-midnight-graphite/40 pb-1">
+                          <span className="text-silver-steel">Suppression Eligible</span>
                           <BoolBadge value={resolveResult.SuppressionEligible} trueLabel="Yes" falseLabel="No" />
                         </div>
                       </div>
                       <div className="space-y-2">
-                        <div className="flex justify-between border-b border-norse-rune/40 pb-1">
-                          <span className="text-norse-silver">Promotion Policy</span>
+                        <div className="flex justify-between border-b border-midnight-graphite/40 pb-1">
+                          <span className="text-silver-steel">Promotion Policy</span>
                           <span className="text-white">{resolveResult.AppliedPromotionPolicyName || "—"}</span>
                         </div>
-                        <div className="flex justify-between border-b border-norse-rune/40 pb-1">
-                          <span className="text-norse-silver">Promotion Profile</span>
+                        <div className="flex justify-between border-b border-midnight-graphite/40 pb-1">
+                          <span className="text-silver-steel">Promotion Profile</span>
                           <span className="text-white">{resolveResult.AppliedPromotionProfileName || "—"}</span>
                         </div>
-                        <div className="flex justify-between border-b border-norse-rune/40 pb-1">
-                          <span className="text-norse-silver">Eff. Multiplier</span>
+                        <div className="flex justify-between border-b border-midnight-graphite/40 pb-1">
+                          <span className="text-silver-steel">Eff. Multiplier</span>
                           <span className="text-white">{resolveResult.EffectiveMultiplier?.toFixed(3) ?? "—"}</span>
                         </div>
                         {(resolveResult.AppliedDecayProfileNames ?? []).length > 0 && (
-                          <div className="border-b border-norse-rune/40 pb-1">
-                            <div className="text-norse-silver mb-1">Applied Decay Profiles</div>
+                          <div className="border-b border-midnight-graphite/40 pb-1">
+                            <div className="text-silver-steel mb-1">Applied Decay Profiles</div>
                             <div className="flex flex-wrap gap-1">
                               {resolveResult.AppliedDecayProfileNames.map((name) => (
-                                <span key={name} className="px-2 py-0.5 rounded bg-nornic-accent/10 text-nornic-accent text-xs font-mono border border-nornic-accent/20">
+                                <span key={name} className="px-2 py-0.5 rounded bg-verdigris/10 text-verdigris text-xs font-mono border border-nornic-accent/20">
                                   {name}
                                 </span>
                               ))}
@@ -810,11 +810,11 @@ export function KnowledgePoliciesAdmin() {
                         )}
                         {(resolveResult.ResolutionSourceChain ?? []).length > 0 && (
                           <div>
-                            <div className="text-norse-silver mb-1">Resolution chain</div>
+                            <div className="text-silver-steel mb-1">Resolution chain</div>
                             <div className="space-y-1">
                               {resolveResult.ResolutionSourceChain.map((step, i) => (
-                                <div key={i} className="text-xs text-norse-fog font-mono flex items-center gap-1">
-                                  <span className="text-nornic-accent">{i + 1}.</span>
+                                <div key={i} className="text-xs text-silver-structural font-mono flex items-center gap-1">
+                                  <span className="text-verdigris">{i + 1}.</span>
                                   {step}
                                 </div>
                               ))}
@@ -831,12 +831,12 @@ export function KnowledgePoliciesAdmin() {
             {/* ── DEINDEX STATUS TAB ── */}
             {activeTab === "deindex-status" && (
               <div className="space-y-6">
-                <section className="bg-norse-shadow border border-norse-rune rounded-lg p-6 space-y-4">
+                <section className="bg-midnight-navy border border-midnight-graphite rounded-lg p-6 space-y-4">
                   <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                    <Trash2 className="w-5 h-5 text-nornic-accent" />
+                    <Trash2 className="w-5 h-5 text-verdigris" />
                     Deindex queue status
                   </h2>
-                  <p className="text-sm text-norse-silver">
+                  <p className="text-sm text-silver-steel">
                     Items that have fallen below the visibility threshold are queued for deindexing from the search index and secondary structures.
                   </p>
 
@@ -861,21 +861,21 @@ export function KnowledgePoliciesAdmin() {
                         </div>
                       </div>
 
-                      <div className="overflow-x-auto border border-norse-rune rounded-lg">
+                      <div className="overflow-x-auto border border-midnight-graphite rounded-lg">
                         <table className="w-full text-sm">
-                          <thead className="bg-norse-stone/60">
+                          <thead className="bg-midnight-graphite/60">
                             <tr>
-                              <th className="px-4 py-3 text-left text-norse-silver font-medium">Work Item ID</th>
-                              <th className="px-4 py-3 text-left text-norse-silver font-medium">Target ID</th>
-                              <th className="px-4 py-3 text-left text-norse-silver font-medium">Scope</th>
-                              <th className="px-4 py-3 text-left text-norse-silver font-medium">Status</th>
-                              <th className="px-4 py-3 text-right text-norse-silver font-medium">Enqueued</th>
+                              <th className="px-4 py-3 text-left text-silver-steel font-medium">Work Item ID</th>
+                              <th className="px-4 py-3 text-left text-silver-steel font-medium">Target ID</th>
+                              <th className="px-4 py-3 text-left text-silver-steel font-medium">Scope</th>
+                              <th className="px-4 py-3 text-left text-silver-steel font-medium">Status</th>
+                              <th className="px-4 py-3 text-right text-silver-steel font-medium">Enqueued</th>
                             </tr>
                           </thead>
                           <tbody>
                             {(deindexStatus?.items ?? []).length === 0 ? (
                               <tr>
-                                <td colSpan={5} className="px-4 py-6 text-center text-norse-silver">
+                                <td colSpan={5} className="px-4 py-6 text-center text-silver-steel">
                                   {(deindexStatus?.pending_count ?? 0) === 0
                                     ? "No items pending deindex."
                                     : "Items are pending but details are not available."}
@@ -883,16 +883,16 @@ export function KnowledgePoliciesAdmin() {
                               </tr>
                             ) : (
                               (deindexStatus?.items ?? []).map((item: DeindexWorkItem) => (
-                                <tr key={item.workItemId} className="border-t border-norse-rune/50">
+                                <tr key={item.workItemId} className="border-t border-midnight-graphite/50">
                                   <td className="px-4 py-3 text-white font-mono text-xs">{item.workItemId}</td>
-                                  <td className="px-4 py-3 text-norse-silver font-mono text-xs">{item.targetId}</td>
-                                  <td className="px-4 py-3 text-norse-silver">{item.targetScope || "—"}</td>
+                                  <td className="px-4 py-3 text-silver-steel font-mono text-xs">{item.targetId}</td>
+                                  <td className="px-4 py-3 text-silver-steel">{item.targetScope || "—"}</td>
                                   <td className="px-4 py-3">
-                                    <span className="px-2 py-0.5 rounded text-xs font-medium border border-norse-rune bg-norse-stone/40 text-norse-silver">
+                                    <span className="px-2 py-0.5 rounded text-xs font-medium border border-midnight-graphite bg-midnight-graphite/40 text-silver-steel">
                                       {item.status}
                                     </span>
                                   </td>
-                                  <td className="px-4 py-3 text-right text-norse-fog text-xs">
+                                  <td className="px-4 py-3 text-right text-silver-structural text-xs">
                                     {item.enqueuedAt
                                       ? new Date(item.enqueuedAt).toLocaleString()
                                       : "—"}

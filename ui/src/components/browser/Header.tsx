@@ -61,10 +61,10 @@ export function Header({
   };
 
   return (
-    <header className="bg-norse-shadow border-b border-norse-rune px-4 py-3">
+    <header className="bg-midnight-navy border-b border-midnight-graphite px-4 py-3">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          {/* NornicDB Logo - Interwoven threads with gold nexus */}
+          {/* copperDB Logo - Interwoven copper threads with verdigris nexus */}
           <svg
             viewBox="0 0 200 180"
             width="44"
@@ -77,7 +77,7 @@ export function Header({
             <path
               d="M 40 140 Q 30 100 50 70 Q 70 40 100 35 Q 130 30 145 55 Q 155 75 140 90"
               fill="none"
-              stroke="#4a9eff"
+              stroke="#00B8C8"
               strokeWidth="12"
               strokeLinecap="round"
               opacity="0.9"
@@ -85,33 +85,33 @@ export function Header({
             <path
               d="M 100 25 Q 100 50 85 75 Q 70 100 85 120 Q 100 140 100 165"
               fill="none"
-              stroke="#4a9eff"
+              stroke="#00B8C8"
               strokeWidth="12"
               strokeLinecap="round"
             />
             <path
               d="M 160 140 Q 170 100 150 70 Q 130 40 100 35 Q 70 30 55 55 Q 45 75 60 90"
               fill="none"
-              stroke="#4a9eff"
+              stroke="#00B8C8"
               strokeWidth="12"
               strokeLinecap="round"
               opacity="0.9"
             />
-            {/* Central nexus - solid gold colors without gradient for simplicity */}
-            <circle cx="100" cy="85" r="12" fill="#d4af37" />
-            <circle cx="100" cy="85" r="8" fill="#141824" />
-            <circle cx="100" cy="85" r="5" fill="#d4af37" />
+            {/* Central nexus */}
+            <circle cx="100" cy="85" r="12" fill="#B87333" />
+            <circle cx="100" cy="85" r="8" fill="#0C1622" />
+            <circle cx="100" cy="85" r="5" fill="#B87333" />
             {/* Destiny nodes */}
-            <circle cx="55" cy="65" r="5" fill="#d4af37" opacity="0.8" />
-            <circle cx="145" cy="65" r="5" fill="#d4af37" opacity="0.8" />
-            <circle cx="100" cy="140" r="5" fill="#d4af37" opacity="0.8" />
+            <circle cx="55" cy="65" r="5" fill="#B87333" opacity="0.8" />
+            <circle cx="145" cy="65" r="5" fill="#B87333" opacity="0.8" />
+            <circle cx="100" cy="140" r="5" fill="#B87333" opacity="0.8" />
             {/* Connecting lines */}
             <line
               x1="60"
               y1="67"
               x2="93"
               y2="82"
-              stroke="#d4af37"
+              stroke="#B87333"
               strokeWidth="1.5"
               opacity="0.4"
             />
@@ -120,7 +120,7 @@ export function Header({
               y1="67"
               x2="107"
               y2="82"
-              stroke="#d4af37"
+              stroke="#B87333"
               strokeWidth="1.5"
               opacity="0.4"
             />
@@ -129,21 +129,21 @@ export function Header({
               y1="135"
               x2="100"
               y2="92"
-              stroke="#d4af37"
+              stroke="#B87333"
               strokeWidth="1.5"
               opacity="0.4"
             />
           </svg>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="text-lg font-semibold text-white">NornicDB</h1>
+              <h1 className="text-lg font-semibold text-text-primary">copperDB</h1>
               {stats?.server?.version ? (
-                <span className="rounded-full border border-valhalla-gold/30 bg-valhalla-gold/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em] text-valhalla-gold">
+                <span className="rounded-full border border-copper/30 bg-copper/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.18em] text-copper">
                   v{stats.server.version}
                 </span>
               ) : null}
             </div>
-            <p className="text-xs text-norse-silver">
+            <p className="text-xs text-silver-steel">
               The Graph Database That Learns
             </p>
           </div>
@@ -154,20 +154,20 @@ export function Header({
           {stats?.database && (
             <>
               <div className="flex items-center gap-2 text-sm">
-                <Network className="w-4 h-4 text-norse-silver" />
-                <span className="text-norse-silver">
+                <Network className="w-4 h-4 text-silver-steel" />
+                <span className="text-silver-steel">
                   {stats.database.nodes?.toLocaleString() ?? "?"} nodes
                 </span>
               </div>
               <div className="flex items-center gap-2 text-sm">
-                <HardDrive className="w-4 h-4 text-norse-silver" />
-                <span className="text-norse-silver">
+                <HardDrive className="w-4 h-4 text-silver-steel" />
+                <span className="text-silver-steel">
                   {stats.database.edges?.toLocaleString() ?? "?"} edges
                 </span>
               </div>
               <div className="flex items-center gap-2 text-sm">
-                <Clock className="w-4 h-4 text-norse-silver" />
-                <span className="text-norse-silver">
+                <Clock className="w-4 h-4 text-silver-steel" />
+                <span className="text-silver-steel">
                   {formatUptime(stats.server?.uptime_seconds ?? 0)}
                 </span>
               </div>
@@ -189,7 +189,7 @@ export function Header({
             className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
               embedData.stats?.running
                 ? "bg-amber-500/20 text-amber-400 border border-amber-500/30"
-                : "bg-norse-shadow hover:bg-norse-rune text-norse-silver hover:text-white border border-norse-rune"
+                : "bg-midnight-navy hover:bg-midnight-graphite text-silver-steel hover:text-text-primary border border-midnight-graphite"
             }`}
             title={`Total embeddings: ${embedData.totalEmbeddings}${
               embedData.stats
@@ -205,10 +205,10 @@ export function Header({
             <span>
               {embedData.stats?.running ? "Embedding..." : "Embeddings"}
             </span>
-            <span className="text-xs text-valhalla-gold">
+            <span className="text-xs text-copper">
               ({embedData.totalEmbeddings.toLocaleString()})
             </span>
-            <span className="text-xs text-norse-silver">
+            <span className="text-xs text-silver-steel">
               {queueCompletePct.toFixed(1)}% queue
             </span>
           </button>
@@ -216,7 +216,7 @@ export function Header({
           <button
             type="button"
             onClick={onAIChatClick}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all bg-valhalla-gold/20 hover:bg-valhalla-gold/30 text-valhalla-gold border border-valhalla-gold/30"
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all bg-copper/20 hover:bg-copper/30 text-copper border border-copper/30"
             title="Open AI Assistant"
           >
             <MessageCircle className="w-4 h-4" />
@@ -226,7 +226,7 @@ export function Header({
           <button
             type="button"
             onClick={() => navigate("/databases")}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all bg-norse-shadow hover:bg-norse-rune text-norse-silver hover:text-white border border-norse-rune"
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all bg-midnight-navy hover:bg-midnight-graphite text-silver-steel hover:text-text-primary border border-midnight-graphite"
             title="Manage Databases"
           >
             <Database className="w-4 h-4" />
@@ -236,7 +236,7 @@ export function Header({
           <button
             type="button"
             onClick={onSecurityClick}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all bg-norse-shadow hover:bg-norse-rune text-norse-silver hover:text-white border border-norse-rune"
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all bg-midnight-navy hover:bg-midnight-graphite text-silver-steel hover:text-text-primary border border-midnight-graphite"
             title="Security & API Tokens"
           >
             <Shield className="w-4 h-4" />
@@ -246,18 +246,18 @@ export function Header({
           <div
             className={`flex items-center gap-2 px-3 py-1 rounded-full ${
               connected
-                ? "bg-nornic-primary/20 status-connected"
+                ? "bg-verdigris/20 status-connected"
                 : "bg-red-500/20"
             }`}
           >
             <Activity
               className={`w-4 h-4 ${
-                connected ? "text-nornic-primary" : "text-red-400"
+                connected ? "text-verdigris" : "text-red-400"
               }`}
             />
             <span
               className={`text-sm ${
-                connected ? "text-nornic-primary" : "text-red-400"
+                connected ? "text-verdigris" : "text-red-400"
               }`}
             >
               {connected ? "Connected" : "Disconnected"}
@@ -267,7 +267,7 @@ export function Header({
       </div>
       {/* Embed Message Toast */}
       {embedMessage && (
-        <div className="absolute top-16 right-4 bg-norse-shadow border border-norse-rune rounded-lg px-4 py-2 text-sm text-norse-silver shadow-lg">
+        <div className="absolute top-16 right-4 bg-midnight-navy border border-midnight-graphite rounded-lg px-4 py-2 text-sm text-silver-steel shadow-lg">
           {embedMessage}
         </div>
       )}

@@ -20,10 +20,10 @@ export function extractNodeFromResult(
 ): ExtractedNode | null {
   if (!cell || typeof cell !== "object") return null;
 
-  // Get ID - Neo4j uses elementId (e.g., "4:nornicdb:123"), also check _nodeId and id
+  // Get ID - Neo4j uses elementId (e.g., "4:copperDB:123"), also check _nodeId and id
   let id = "";
   if (typeof cell.elementId === "string") {
-    // Extract actual ID from elementId format "4:nornicdb:actualId"
+    // Extract actual ID from elementId format "4:copperDB:actualId"
     const elementId = cell.elementId;
     const parts = elementId.split(":");
     id = parts.length >= 3 ? parts.slice(2).join(":") : elementId;
