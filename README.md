@@ -30,7 +30,7 @@ copperDB is an **experimental graph database** built in Rust. It speaks Neo4j's 
 
 It's the Rust evolution of [NornicDB](https://github.com/orneryd/NornicDB), rebuilt from the storage engine up for performance and safety.
 
-> **copperDB is experimental.** APIs may change, features are evolving, and production deployments should validate against their workload. That said — it passes 540+ deterministic tests, serves Neo4j Browser and Bloom, and is actively developed.
+> **copperDB is experimental.** APIs may change, features are evolving, and production deployments should validate against their workload. That said — it passes 540+ tests, serves Neo4j Browser and Bloom, and is actively developed.
 
 ---
 
