@@ -5,9 +5,7 @@
 <h1 align="center">copperDB</h1>
 
 <p align="center">
-  <strong>The Graph Database That Learns</strong><br/>
   Neo4j-compatible &bull; GPU-accelerated &bull; Memory that evolves<br/>
-  <em>Achieving Psygnosis for AI</em>
 </p>
 
 <p align="center">
