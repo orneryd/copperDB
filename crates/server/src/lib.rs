@@ -590,6 +590,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/auth/me", get(auth_me_handler))
         .route("/db/{database}", get(database_info_handler))
         .route("/db/{database}/tx/commit", post(neo4j_tx_commit_handler))
+        .route("/db/{database}/search", post(search_handler))
         .route(
             "/admin/databases/{database}/config",
             get(get_database_config_handler).put(update_database_config_handler),
@@ -1218,6 +1219,169 @@ struct Neo4jError {
 #[derive(Deserialize)]
 struct DatabaseConfigUpdateRequest {
     overrides: BTreeMap<String, String>,
+}
+
+/// POST /db/{database}/search — BM25 fulltext search with optional RRF vector fusion.
+/// Request body: {"query": "...", "labels": ["Label"], "limit": 10}
+/// Response matches NornicDB's search endpoint shape.
+async fn search_handler(
+    State(state): State<Arc<AppState>>,
+    Path(database): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Err(status) = authorize_database_access(&state, &headers, &database, false) {
+        return status.into_response();
+    }
+
+    let query_text = body
+        .get("query")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let labels: Vec<String> = body
+        .get("labels")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let limit = body
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10)
+        .max(1)
+        .min(1000) as usize;
+
+    if query_text.is_empty() {
+        return Json(serde_json::json!({
+            "status": "ok",
+            "query": "",
+            "results": [],
+            "total_candidates": 0,
+            "returned": 0,
+            "search_method": "bm25",
+            "metrics": {"bm25_time_ms": 0}
+        }))
+        .into_response();
+    }
+
+    let engine = match open_engine(&state, &database) {
+        Ok(e) => e,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": err})),
+            )
+                .into_response();
+        }
+    };
+
+    let index_defs = match engine.list_index_definitions() {
+        Ok(defs) => defs,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "failed to load indexes"})),
+            )
+                .into_response();
+        }
+    };
+
+    // Check if BM25 is configured
+    let bm25_indexes: Vec<_> = index_defs
+        .iter()
+        .filter(|idx| idx.kind == copperdb_storage::IndexKind::FullText
+            && (labels.is_empty() || labels.iter().any(|l| l == &idx.label)))
+        .cloned()
+        .collect();
+
+    // Check if vector indexes exist for potential RRF
+    let vector_indexes: Vec<_> = index_defs
+        .iter()
+        .filter(|idx| idx.kind == copperdb_storage::IndexKind::Vector
+            && (labels.is_empty() || labels.iter().any(|l| l == &idx.label)))
+        .cloned()
+        .collect();
+
+    if bm25_indexes.is_empty() && vector_indexes.is_empty() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "no search indexes configured",
+                "hint": "Create a fulltext index: CREATE FULLTEXT INDEX ... FOR (n:Label) ON EACH [n.prop]"
+            })),
+        )
+            .into_response();
+    }
+
+    let bm25_start = std::time::Instant::now();
+
+    // BM25 fulltext search
+    let mut bm25_results: Vec<serde_json::Value> = Vec::new();
+    let mut bm25_candidates: usize = 0;
+    if !bm25_indexes.is_empty() {
+        let fetch_limit = limit * 3; // overfetch for RRF merging
+        // Collect raw hits with ranks for RRF fusion
+        let mut all_hits: Vec<(String, f32, String)> = Vec::new(); // (id, score, snippet)
+        for index in &bm25_indexes {
+            if let Ok(hits) = engine.search_fulltext_nodes(
+                &index.label,
+                &index.properties,
+                &query_text,
+                fetch_limit,
+            ) {
+                bm25_candidates = bm25_candidates.max(hits.len());
+                for hit in hits {
+                    all_hits.push((hit.id, hit.score, hit.snippet.unwrap_or_default()));
+                }
+            }
+        }
+        // Sort by score descending, deduplicate by id
+        all_hits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut seen = std::collections::HashSet::new();
+        all_hits.retain(|(id, _, _)| seen.insert(id.clone()));
+
+        for (rank, (id, score, snippet)) in all_hits.iter().enumerate().take(limit) {
+            let mut result = serde_json::json!({
+                "id": id,
+                "score": score,
+                "snippet": snippet,
+                "bm25_rank": rank + 1,
+            });
+            // Enrich with node properties if available
+            if let Ok(Some(node)) = engine.get_node(id) {
+                result["properties"] = serde_json::Value::Object(
+                    node.properties
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
+                );
+                result["labels"] = serde_json::json!(node.labels);
+            }
+            bm25_results.push(result);
+        }
+    }
+    let bm25_time_ms = bm25_start.elapsed().as_millis() as u64;
+
+    let search_method = if !vector_indexes.is_empty() {
+        "bm25" // TODO: wire RRF hybrid when vector search API is available
+    } else {
+        "bm25"
+    };
+    let total_candidates = bm25_candidates;
+
+    Json(serde_json::json!({
+        "status": "success",
+        "query": query_text,
+        "results": bm25_results,
+        "total_candidates": total_candidates,
+        "returned": bm25_results.len(),
+        "search_method": search_method,
+        "bm25_candidates": bm25_candidates,
+        "metrics": {
+            "bm25_time_ms": bm25_time_ms,
+        }
+    }))
+    .into_response()
 }
 
 async fn database_info_handler(

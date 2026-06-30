@@ -2223,29 +2223,71 @@ impl StorageEngine {
         properties: &[String],
         query: &str,
         limit: usize,
-    ) -> Result<Vec<(NodeRecord, usize)>, StorageError> {
+    ) -> Result<Vec<(NodeRecord, f64)>, StorageError> {
         let tokens = tokenize_fulltext(query);
         if tokens.is_empty() || properties.is_empty() {
             return Ok(Vec::new());
         }
 
-        let mut scores: HashMap<String, usize> = HashMap::new();
-        for property in properties {
-            for token in &tokens {
-                let prefix = node_fulltext_token_prefix(label, property, token);
-                for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
+        // Count total documents in this label for IDF
+        let total_docs = self.node_count_by_label_in_namespace("", label).unwrap_or(1).max(1) as f64;
+
+        // Collect per-token document frequencies and document scores
+        let mut doc_scores: HashMap<String, f64> = HashMap::new();
+        let mut doc_lengths: HashMap<String, usize> = HashMap::new();
+
+        for token in &tokens {
+            let mut df: HashMap<String, usize> = HashMap::new();
+            // Collect per-document term frequency across all properties
+            for property in properties {
+                let token_prefix = node_fulltext_token_prefix(label, property, token);
+                for entry in self.indexes.scan_prefix(token_prefix.as_bytes()) {
                     let (key, _) = entry?;
                     let key_str =
                         std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
                     if let Some(node_id) = key_str.rsplit('/').next() {
-                        *scores.entry(node_id.to_string()).or_default() += 1;
+                        *df.entry(node_id.to_string()).or_default() += 1;
                     }
                 }
             }
+
+            let n_docs_with_term = df.len().max(1) as f64;
+            // BM25 IDF: ln(1 + (N - df + 0.5) / (df + 0.5))  -- V2 formula
+            let idf = (1.0 + (total_docs - n_docs_with_term + 0.5) / (n_docs_with_term + 0.5)).ln().max(0.0);
+
+            for (node_id, tf) in df {
+                let tf = tf as f64;
+                // Accumulate raw TF*IDF for now; length normalization applied below
+                *doc_scores.entry(node_id.clone()).or_default() += idf * (tf * (BM25_K1 + 1.0));
+                // Also track document length for normalization denominator
+                *doc_lengths.entry(node_id).or_default() += tf as usize;
+            }
         }
 
-        let mut ranked: Vec<(String, usize)> = scores.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        // Compute average document length across matched documents
+        let avg_dl = if doc_lengths.is_empty() {
+            1.0
+        } else {
+            doc_lengths.values().sum::<usize>() as f64 / doc_lengths.len() as f64
+        };
+
+        // Apply BM25 length normalization: score / (tf_sum + k1*(1-b + b*docLen/avg))
+        let mut ranked: Vec<(String, f64)> = doc_scores
+            .into_iter()
+            .map(|(node_id, raw_score)| {
+                let doc_len = *doc_lengths.get(&node_id).unwrap_or(&1) as f64;
+                let tf_sum = doc_len; // sum of TFs across all query terms for this doc
+                let denominator = tf_sum + BM25_K1 * (1.0 - BM25_B + BM25_B * doc_len / avg_dl);
+                let final_score = raw_score / denominator;
+                (node_id, final_score)
+            })
+            .collect();
+
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
 
         let mut nodes = Vec::new();
         for (node_id, score) in ranked.into_iter().take(limit) {
@@ -2254,6 +2296,72 @@ impl StorageEngine {
             }
         }
         Ok(nodes)
+    }
+
+    /// Return high-IDF documents for HNSW seeding (matches NornicDB's `LexicalSeedDocIDs`).
+    /// Returns up to `max_results` node IDs that have the most distinctive (high-IDF) terms.
+    pub fn lexical_seed_doc_ids(
+        &self,
+        label: &str,
+        properties: &[String],
+        max_terms: usize,
+        per_term: usize,
+    ) -> Result<Vec<String>, StorageError> {
+        if properties.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let total_docs = self.node_count_by_label_in_namespace("", label).unwrap_or(1).max(1) as f64;
+
+        // Collect term → (node_id → tf) across all properties
+        let mut term_docs: HashMap<String, HashMap<String, usize>> = HashMap::new();
+        for property in properties {
+            let prefix = format!("idx:f:{}:{}:", label, property);
+            for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
+                let (key, _) = entry?;
+                let key_str =
+                    std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+                // Key format: idx:f:label:property:token/node_id
+                if let Some(rest) = key_str.strip_prefix(&prefix) {
+                    if let Some((token, node_id)) = rest.split_once('/') {
+                        let token = token.to_lowercase();
+                        if token.len() >= 2 && !is_stop_word(&token) {
+                            *term_docs
+                                .entry(token)
+                                .or_default()
+                                .entry(node_id.to_string())
+                                .or_default() += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Compute IDF for each term and select top max_terms by IDF
+        let mut scored_terms: Vec<(String, f64, HashMap<String, usize>)> = term_docs
+            .into_iter()
+            .map(|(term, doc_tfs)| {
+                let df = doc_tfs.len().max(1) as f64;
+                let idf = (1.0 + (total_docs - df + 0.5) / (df + 0.5)).ln().max(0.0);
+                (term, idf, doc_tfs)
+            })
+            .filter(|(_, idf, _)| *idf > 0.0)
+            .collect();
+        scored_terms.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Take top max_terms terms, then top per_term documents per term (by TF)
+        let mut seed_ids = std::collections::HashSet::new();
+        let mut result = Vec::new();
+        for (_term, _idf, doc_tfs) in scored_terms.into_iter().take(max_terms) {
+            let mut docs: Vec<(String, usize)> = doc_tfs.into_iter().collect();
+            docs.sort_by(|a, b| b.1.cmp(&a.1));
+            for (node_id, _tf) in docs.into_iter().take(per_term) {
+                if seed_ids.insert(node_id.clone()) {
+                    result.push(node_id);
+                }
+            }
+        }
+        Ok(result)
     }
 
     pub fn get_nodes_by_properties(
@@ -4233,9 +4341,27 @@ fn escape_index_component(value: &str) -> String {
 
 fn tokenize_fulltext(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
-        .filter(|word| !word.is_empty())
+        .filter(|word| !word.is_empty() && word.len() >= 2)
         .map(|word| word.to_lowercase())
+        .filter(|word| !is_stop_word(word))
         .collect()
+}
+
+/// BM25 constants matching NornicDB's V2 engine.
+const BM25_K1: f64 = 1.2;
+const BM25_B: f64 = 0.75;
+
+/// English stop words matching NornicDB's `basicStopWords`.
+fn is_stop_word(word: &str) -> bool {
+    matches!(
+        word,
+        "a" | "an" | "and" | "are" | "as" | "at"
+            | "be" | "but" | "by" | "for" | "if" | "in"
+            | "into" | "is" | "it" | "no" | "not" | "of"
+            | "on" | "or" | "such" | "that" | "the"
+            | "their" | "then" | "there" | "these" | "they"
+            | "this" | "to" | "was" | "will" | "with"
+    )
 }
 
 // ── Index key collection for deindex tombstone writes ───────────────────────

@@ -1473,7 +1473,7 @@ impl EvalEngine {
             .map(|limit| options.skip.saturating_add(limit))
             .unwrap_or(usize::MAX);
 
-        let mut merged: HashMap<String, (NodeRecord, usize, usize)> = HashMap::new();
+        let mut merged: HashMap<String, (NodeRecord, f64, usize)> = HashMap::new();
         let mut ordinal = 0usize;
         for index in indexes {
             for (node, score) in self.storage.search_fulltext_nodes_by_properties(
@@ -1494,11 +1494,12 @@ impl EvalEngine {
             }
         }
 
-        let mut ranked: Vec<(NodeRecord, usize, usize)> = merged.into_values().collect();
+    let mut ranked: Vec<(NodeRecord, f64, usize)> = merged.into_values().collect();
         ranked.sort_by(
             |(left_node, left_score, left_ordinal), (right_node, right_score, right_ordinal)| {
                 right_score
-                    .cmp(left_score)
+                    .partial_cmp(left_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
                     .then(left_ordinal.cmp(right_ordinal))
                     .then(left_node.id.cmp(&right_node.id))
             },

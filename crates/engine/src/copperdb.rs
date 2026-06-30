@@ -30,6 +30,29 @@ impl CopperDb {
         self.ensure_ranked_search_query_enabled(query)
     }
 
+    /// Return all currently configured index definitions.
+    pub fn list_index_definitions(&self) -> Result<Vec<copperdb_storage::IndexDefinition>, CopperDbError> {
+        Ok(self.storage.load_index_definitions()?)
+    }
+
+    /// Return high-IDF document IDs for HNSW lexical seeding (matches NornicDB's LexicalSeedDocIDs).
+    pub fn lexical_seed_doc_ids(
+        &self,
+        label: &str,
+        properties: &[String],
+        max_terms: usize,
+        per_term: usize,
+    ) -> Result<Vec<String>, CopperDbError> {
+        Ok(self
+            .storage
+            .lexical_seed_doc_ids(label, properties, max_terms, per_term)?)
+    }
+
+    /// Look up a node by ID.
+    pub fn get_node(&self, id: &str) -> Result<Option<copperdb_storage::NodeRecord>, CopperDbError> {
+        Ok(self.storage.get_node_record(id)?)
+    }
+
     pub fn search_fulltext_nodes(
         &self,
         label: &str,

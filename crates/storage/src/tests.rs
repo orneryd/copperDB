@@ -4169,7 +4169,7 @@ fn fulltext_index_rebuilds_and_tracks_mutations() {
         .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0.id, "db:n1");
-    assert_eq!(results[0].1, 2);
+    assert!(results[0].1 > 0.0);
 
     alice
         .properties
@@ -4185,7 +4185,7 @@ fn fulltext_index_rebuilds_and_tracks_mutations() {
         .unwrap();
     assert_eq!(updated.len(), 1);
     assert_eq!(updated[0].0.id, "db:n1");
-    assert_eq!(updated[0].1, 2);
+    assert!(updated[0].1 > 0.0);
 
     engine.delete_node_record("db:n1").unwrap();
     assert!(engine

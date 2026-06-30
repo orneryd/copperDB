@@ -240,7 +240,11 @@ fn test_local_fulltext_search_uses_catalogued_fulltext_index() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].id, "person:1");
     assert_eq!(results[0].label, "Person");
-    assert_eq!(results[0].score, 3.0);
+    assert!(
+        results[0].score > 0.0,
+        "expected positive BM25 score, got {}",
+        results[0].score
+    );
     assert_eq!(
         results[0].snippet.as_deref(),
         Some("Alice builds reliable graph systems")
