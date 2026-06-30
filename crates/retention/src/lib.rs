@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -255,6 +256,8 @@ pub struct Manager {
     holds: HashMap<String, LegalHold>,
     erasures: HashMap<String, ErasureRequest>,
     storage_path: Option<PathBuf>,
+    /// Shared storage engine — when set, avoids opening a new storage instance.
+    storage: Option<Arc<StorageEngine>>,
 }
 
 impl Manager {
@@ -269,19 +272,39 @@ impl Manager {
             storage_path: Some(storage_path),
             ..Self::default()
         };
+        manager.load_from_storage(&storage)?;
+        // Don't store the storage Arc — open() is for standalone use
+        // (e.g. tests). Use ensure_loaded() for shared-storage mode.
+        Ok(manager)
+    }
+
+    /// Lazy-load retention data from a shared storage engine (avoids opening
+    /// a new storage instance). Idempotent — subsequent calls are no-ops if
+    /// data was already loaded.
+    pub fn ensure_loaded(&mut self, storage: Arc<StorageEngine>) -> Result<(), RetentionError> {
+        // Already loaded — skip.
+        if !self.policies.is_empty() || !self.holds.is_empty() || !self.erasures.is_empty() {
+            return Ok(());
+        }
+        self.load_from_storage(&storage)?;
+        self.storage = Some(storage);
+        Ok(())
+    }
+
+    fn load_from_storage(&mut self, storage: &StorageEngine) -> Result<(), RetentionError> {
         for node in storage.get_nodes_by_label(POLICY_LABEL)? {
             let policy: Policy = payload_from_node(&node)?;
-            manager.policies.insert(policy.id.clone(), policy);
+            self.policies.insert(policy.id.clone(), policy);
         }
         for node in storage.get_nodes_by_label(HOLD_LABEL)? {
             let hold: LegalHold = payload_from_node(&node)?;
-            manager.holds.insert(hold.id.clone(), hold);
+            self.holds.insert(hold.id.clone(), hold);
         }
         for node in storage.get_nodes_by_label(ERASURE_LABEL)? {
             let erasure: ErasureRequest = payload_from_node(&node)?;
-            manager.erasures.insert(erasure.id.clone(), erasure);
+            self.erasures.insert(erasure.id.clone(), erasure);
         }
-        Ok(manager)
+        Ok(())
     }
 
     // ── Policy CRUD ──────────────────────────────────────────────────────────
@@ -411,13 +434,20 @@ impl Manager {
         &self,
         config: RetentionSweepConfig,
     ) -> Result<RetentionSweepReport, RetentionError> {
-        let Some(path) = &self.storage_path else {
+        // Prefer shared storage, fall back to opening from path.
+        let storage: Arc<StorageEngine>;
+        let owned_storage;
+        if let Some(shared) = &self.storage {
+            storage = Arc::clone(shared);
+        } else if let Some(path) = &self.storage_path {
+            owned_storage = StorageEngine::open(path)?;
+            storage = Arc::new(owned_storage);
+        } else {
             return Ok(RetentionSweepReport {
                 dry_run: config.dry_run,
                 ..Default::default()
             });
         };
-        let storage = StorageEngine::open(path)?;
         let mut report = RetentionSweepReport {
             dry_run: config.dry_run,
             ..Default::default()
@@ -454,6 +484,22 @@ impl Manager {
         id: &str,
         value: &T,
     ) -> Result<(), RetentionError> {
+        if let Some(storage) = &self.storage {
+            let mut properties = BTreeMap::new();
+            properties.insert("id".into(), serde_json::Value::String(id.into()));
+            properties.insert(PAYLOAD_PROPERTY.into(), serde_json::to_value(value)?);
+            storage.put_node_record(&NodeRecord {
+                id: retention_node_id(label, id),
+                labels: vec![label.into()],
+                properties,
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: now_unix_ms(),
+                updated_at_unix_ms: now_unix_ms(),
+            })?;
+            return Ok(());
+        }
         let Some(path) = &self.storage_path else {
             return Ok(());
         };
@@ -475,6 +521,10 @@ impl Manager {
     }
 
     fn delete_record(&self, label: &str, id: &str) -> Result<(), RetentionError> {
+        if let Some(storage) = &self.storage {
+            storage.delete_node_record(&retention_node_id(label, id))?;
+            return Ok(());
+        }
         let Some(path) = &self.storage_path else {
             return Ok(());
         };

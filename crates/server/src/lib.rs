@@ -538,14 +538,10 @@ impl Default for AppState {
                 .unwrap_or_else(|_| DatabaseManager::new()),
         );
         let _ = db_manager.create("copperdb", "./data/copperdb");
-        let retention = db_manager
-            .get("copperdb")
-            .and_then(|database| RetentionManager::open(database.storage_path).ok())
-            .unwrap_or_default();
         Self {
             db_name: "copperdb".into(),
             runtime_config: Arc::new(RuntimeConfig::default()),
-            retention: Arc::new(RwLock::new(retention)),
+            retention: Arc::new(RwLock::new(RetentionManager::default())),
             static_dir: None,
             base_path: "/".into(),
             headless: false,
@@ -1966,6 +1962,11 @@ fn open_engine(state: &AppState, database: &str) -> Result<Arc<GraphEngine>, Str
         ..Default::default()
     };
     let engine = Arc::new(GraphEngine::open(config).map_err(|error| error.to_string())?);
+    // Lazy-load retention data from the shared storage (avoids a second StorageEngine::open).
+    if database == "copperdb" {
+        let storage = Arc::clone(engine.storage_engine());
+        let _ = state.retention.write().ensure_loaded(storage);
+    }
     let mut cache = state.engine_cache.write();
     cache.insert(database.to_string(), Arc::clone(&engine));
     Ok(engine)

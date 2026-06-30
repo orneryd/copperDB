@@ -270,7 +270,7 @@ impl Component for GrpcComponent {
 #[tokio::main]
 async fn main() -> Result<()> {
     let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("copperdb=info,info"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("copperdb=info,fjall=warn,info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)

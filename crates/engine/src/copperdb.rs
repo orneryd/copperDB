@@ -53,6 +53,12 @@ impl CopperDb {
         Ok(self.storage.get_node_record(id)?)
     }
 
+    /// Access the underlying storage engine (for subsystems like RetentionManager
+    /// that need to share the same storage instance).
+    pub fn storage_engine(&self) -> &Arc<copperdb_storage::StorageEngine> {
+        &self.storage
+    }
+
     pub fn search_fulltext_nodes(
         &self,
         label: &str,
