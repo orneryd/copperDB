@@ -1,6 +1,6 @@
 [package]
 name = "copperdb-embed"
-description = "Text embedding generation: OpenAI API and local GGUF model support"
+description = "Text embedding generation: OpenAI API, local GGUF, and LRU caching"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -15,7 +15,13 @@ serde_json.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 tracing.workspace = true
-libloading.workspace = true
 parking_lot.workspace = true
 copperdb-util = { workspace = true }
+copperdb-localllm = { workspace = true }
+crossbeam-channel = "0.5"
 async-trait.workspace = true
+
+[features]
+default = []
+metal = ["copperdb-localllm/metal"]
+cuda = ["copperdb-localllm/cuda"]

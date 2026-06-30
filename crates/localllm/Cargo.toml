@@ -1,18 +1,18 @@
 [package]
 name = "copperdb-localllm"
-description = "Local LLM inference: GGUF model loading via llama.cpp FFI"
+description = "Local LLM inference: GGUF model loading via llama.cpp"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+cuda = ["llama-cpp-2/cuda"]
+metal = ["llama-cpp-2/metal"]
+
 [dependencies]
 thiserror.workspace = true
-anyhow.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-tokio.workspace = true
 tracing.workspace = true
-libloading.workspace = true
-copperdb-util = { workspace = true }
+llama-cpp-2 = "0.1"

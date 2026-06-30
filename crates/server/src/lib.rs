@@ -48,6 +48,8 @@ use copperdb_security::{
     RequestTarget, RequestViolation, SecurityConfig, SecurityMiddleware, SecurityRequest,
 };
 use copperdb_storage::StorageEngine;
+
+mod ui_assets;
 use copperdb_topology::{
     ConsistencyLevel, FabricDatabase, FabricGlobalId, LogicalTransactionId, PlacementKey,
 };
@@ -760,18 +762,26 @@ fn static_root(state: &AppState) -> Option<PathBuf> {
 }
 
 /// Returns true when the UI can actually be served (index.html exists).
-/// Mirrors NornicDB's `uiHandler != nil` guard — when the UI handler
-/// failed to initialize, discovery is served to all requesters.
+/// Checks static_dir first, then embedded assets (matching NornicDB's embed.FS).
 fn ui_available(state: &AppState) -> bool {
-    static_root(state)
-        .map(|root| root.join("index.html").exists())
-        .unwrap_or(false)
+    if let Some(root) = static_root(state) {
+        if root.join("index.html").exists() {
+            return true;
+        }
+    }
+    ui_assets::embedded_ui_available()
 }
 
 fn read_static_file(state: &AppState, relative_path: &str) -> Option<Vec<u8>> {
-    let root = static_root(state)?;
-    let path = root.join(relative_path.trim_start_matches('/'));
-    std::fs::read(path).ok()
+    // Static dir override takes precedence (dev mode / custom UI)
+    if let Some(root) = static_root(state) {
+        let path = root.join(relative_path.trim_start_matches('/'));
+        if let Ok(bytes) = std::fs::read(&path) {
+            return Some(bytes);
+        }
+    }
+    // Fall back to embedded assets (production binary)
+    ui_assets::get_embedded(relative_path)
 }
 
 fn rewrite_index_html(state: &AppState, html: String) -> String {

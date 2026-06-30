@@ -50,9 +50,8 @@ build: build-ui build-binary
 	@printf '%s\n' '  export COPPERDB_HTTP_PORT=$(HTTP_PORT)'
 	@printf '%s\n' '  export COPPERDB_BOLT_PORT=$(BOLT_PORT)'
 	@printf '%s\n' '  export COPPERDB_BASE_PATH=$(BASE_PATH)'
-	@printf '%s\n' '  export COPPERDB_STATIC_DIR=$(UI_DIST)'
 	@printf '%s\n' 'Run:'
-	@printf '%s\n' '  cargo run -p copperdb -- --address $(ADDRESS) --http-port $(HTTP_PORT) --bolt-port $(BOLT_PORT) --db-name $(DB_NAME) --base-path $(BASE_PATH) --static-dir $(UI_DIST)'
+	@printf '%s\n' '  cargo run -p copperdb -- --address $(ADDRESS) --http-port $(HTTP_PORT) --bolt-port $(BOLT_PORT) --db-name $(DB_NAME) --base-path $(BASE_PATH)'
 	@printf '\n'
 	@printf '%s\n' 'Connect:'
 	@printf '%s\n' '  Browser:  http://127.0.0.1:$(HTTP_PORT)$(BASE_PATH)'
@@ -67,7 +66,7 @@ test:
 	@cargo test --workspace
 
 run:
-	@RUST_LOG=$(RUST_LOG) COPPERDB_ADDRESS=$(ADDRESS) COPPERDB_HTTP_PORT=$(HTTP_PORT) COPPERDB_BOLT_PORT=$(BOLT_PORT) COPPERDB_BASE_PATH=$(BASE_PATH) COPPERDB_STATIC_DIR=$(UI_DIST) cargo run -p copperdb -- --address $(ADDRESS) --http-port $(HTTP_PORT) --bolt-port $(BOLT_PORT) --db-name $(DB_NAME) --base-path $(BASE_PATH) --static-dir $(UI_DIST)
+	@RUST_LOG=$(RUST_LOG) COPPERDB_ADDRESS=$(ADDRESS) COPPERDB_HTTP_PORT=$(HTTP_PORT) COPPERDB_BOLT_PORT=$(BOLT_PORT) COPPERDB_BASE_PATH=$(BASE_PATH) cargo run -p copperdb -- --address $(ADDRESS) --http-port $(HTTP_PORT) --bolt-port $(BOLT_PORT) --db-name $(DB_NAME) --base-path $(BASE_PATH)
 
 fmt:
 	@cargo fmt --all

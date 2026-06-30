@@ -3,5 +3,6 @@
 Cargo.lock
 crates/**/data/**/*
 data/**/*
+models/**/*
 .DS_Store
 test_output.txt

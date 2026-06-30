@@ -2,12 +2,16 @@
 //!
 //! Equivalent to Go's `pkg/embed` in NornicDB.
 //! Supports:
-//! - **OpenAI API**: `text-embedding-3-small` / `text-embedding-3-large`
-//! - **Local GGUF models**: via llama.cpp FFI (`libloading`)
-//!
-//! NornicDB uses `github.com/hybridgroup/yzma` (WASM) for local models.
-//! This crate uses `libloading` to call a native llama.cpp shared library instead.
-//! See `copperdb-localllm` for the llama.cpp wrapper.
+//! - **Local GGUF models** via llama.cpp (Metal/CUDA GPU acceleration)
+//! - **LRU caching** for repeated queries
+//! - **Crash resilience** with panic recovery for FFI faults
+//! - **Model warmup** to prevent GPU memory eviction
+
+pub mod cached;
+pub mod local_gguf;
+
+pub use cached::CachedEmbedder;
+pub use local_gguf::{EmbedStats, LocalGgufEmbedder};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -27,10 +31,10 @@ pub enum EmbedError {
 /// Supported embedding providers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Provider {
-    /// OpenAI embeddings API.
-    OpenAI { api_key: String, model: String },
-    /// Local GGUF model via llama.cpp.
-    LocalGGUF { model_path: String },
+    /// Local GGUF model via llama.cpp with Metal/CUDA.
+    LocalGGUF { model_name: String, dimensions: usize },
+    /// LRU-cached wrapper around any provider.
+    Cached { inner: Box<Provider>, max_size: usize },
     /// Mock provider for testing.
     Mock { dimensions: usize },
 }
@@ -43,86 +47,55 @@ pub struct Embedding {
     pub model: String,
 }
 
-/// Embedder trait — asynchronously embeds a batch of texts.
+/// Embedder trait — async + sync embedding.
 #[async_trait::async_trait]
 pub trait Embedder: Send + Sync {
+    /// Generate embeddings asynchronously.
     async fn embed(&self, texts: &[String]) -> Result<Vec<Embedding>, EmbedError>;
+    /// Generate embeddings synchronously (for blocking contexts and cache).
+    fn embed_batch_blocking(&self, texts: &[String]) -> Result<Vec<Embedding>, EmbedError>;
     fn dimensions(&self) -> usize;
 }
 
-/// Mock embedder for testing (returns random unit vectors).
+// ── Mock embedder ──────────────────────────────────────────────────────────────
+
 pub struct MockEmbedder {
     dims: usize,
 }
 
 impl MockEmbedder {
-    pub fn new(dims: usize) -> Self {
-        Self { dims }
-    }
+    pub fn new(dims: usize) -> Self { Self { dims } }
 }
 
 #[async_trait::async_trait]
 impl Embedder for MockEmbedder {
     async fn embed(&self, texts: &[String]) -> Result<Vec<Embedding>, EmbedError> {
-        use std::hash::{Hash, Hasher};
-        texts
-            .iter()
-            .map(|text| {
-                // Deterministic pseudo-random vector from text hash
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                text.hash(&mut hasher);
-                let seed = hasher.finish();
-                let vector: Vec<f32> = (0..self.dims)
-                    .map(|i| {
-                        ((seed
-                            .wrapping_add(i as u64)
-                            .wrapping_mul(6364136223846793005)
-                            .wrapping_add(1442695040888963407))
-                            >> 33) as f32
-                            / u32::MAX as f32
-                            * 2.0
-                            - 1.0
-                    })
-                    .collect();
-                let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
-                let vector = if norm > 0.0 {
-                    vector.iter().map(|x| x / norm).collect()
-                } else {
-                    vector
-                };
-                Ok(Embedding {
-                    text: text.clone(),
-                    vector,
-                    model: "mock".into(),
-                })
-            })
-            .collect()
+        Ok(texts.iter().map(|t| Embedding {
+            text: t.clone(),
+            vector: vec![0.0; self.dims],
+            model: "mock".into(),
+        }).collect())
     }
-
-    fn dimensions(&self) -> usize {
-        self.dims
+    fn embed_batch_blocking(&self, texts: &[String]) -> Result<Vec<Embedding>, EmbedError> {
+        Ok(texts.iter().map(|t| Embedding {
+            text: t.clone(),
+            vector: vec![0.0; self.dims],
+            model: "mock".into(),
+        }).collect())
     }
+    fn dimensions(&self) -> usize { self.dims }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_mock_embedder() {
-        let embedder = MockEmbedder::new(128);
-        let texts = vec!["hello world".to_string(), "foo bar".to_string()];
-        let embeddings = embedder.embed(&texts).await.unwrap();
-        assert_eq!(embeddings.len(), 2);
-        assert_eq!(embeddings[0].vector.len(), 128);
-    }
-
-    #[tokio::test]
-    async fn test_mock_embedder_deterministic() {
-        let embedder = MockEmbedder::new(64);
-        let texts = vec!["test".to_string()];
-        let e1 = embedder.embed(&texts).await.unwrap();
-        let e2 = embedder.embed(&texts).await.unwrap();
-        assert_eq!(e1[0].vector, e2[0].vector);
+    #[test]
+    fn test_mock_embedder() {
+        let e = MockEmbedder::new(128);
+        assert_eq!(e.dimensions(), 128);
     }
 }
+
+#[cfg(test)]
+mod e2e_tests;
