@@ -11,16 +11,15 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use copperdb_localllm::{GgufConfig, LocalModel};
-use super::{Embedder, EmbedError, Embedding};
+use crate::EmbedError;
 
 /// Local GGUF embedder matching NornicDB's `LocalGGUFEmbedder`.
 pub struct LocalGgufEmbedder {
     model: Arc<LocalModel>,
     model_name: String,
-    model_path: PathBuf,
 
     // Crash resilience
     closed: AtomicBool,
@@ -73,7 +72,6 @@ impl LocalGgufEmbedder {
         let embedder = Self {
             model: Arc::new(model),
             model_name: model_name.to_string(),
-            model_path,
             closed: AtomicBool::new(false),
             stop_warmup: Mutex::new(None),
             embed_count: AtomicU64::new(0),
@@ -126,9 +124,9 @@ impl LocalGgufEmbedder {
     pub fn backend(&self) -> &str {
         #[cfg(target_os = "macos")]
         { "metal" }
-        #[cfg(all(target_os = "linux", feature = "cuda"))]
+        #[cfg(target_os = "linux")]
         { "cuda" }
-        #[cfg(not(any(target_os = "macos", all(target_os = "linux", feature = "cuda"))))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         { "cpu" }
     }
 

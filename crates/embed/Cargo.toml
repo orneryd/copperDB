@@ -20,8 +20,3 @@ copperdb-util = { workspace = true }
 copperdb-localllm = { workspace = true }
 crossbeam-channel = "0.5"
 async-trait.workspace = true
-
-[features]
-default = []
-metal = ["copperdb-localllm/metal"]
-cuda = ["copperdb-localllm/cuda"]

@@ -13,18 +13,32 @@ UI_DIR := ui
 UI_DIST := $(UI_DIR)/dist
 VITE_BASE_PATH ?= $(BASE_PATH)
 
-.PHONY: help build build-ui build-binary test run clean fmt check
+.PHONY: help build build-ui build-binary test run fmt check clean build-llama build-llama-cuda ensure-llama
+
+LLAMA_VERSION := $(shell tr -d '[:space:]' < lib/llama/VERSION 2>/dev/null || echo b9835)
+LLAMA_STAMP := lib/llama/.version-$(LLAMA_VERSION)
 
 help:
 	@printf '%s\n' 'copperDB developer commands:'
-	@printf '%s\n' '  make build  - build the UI and native binary, then print the run command'
-	@printf '%s\n' '  make build-ui - build the browser assets into ui/dist'
-	@printf '%s\n' '  make build-binary - build the copperdb binary'
-	@printf '%s\n' '  make test   - run the workspace test suite'
-	@printf '%s\n' '  make run    - start the copperdb HTTP and Bolt servers'
-	@printf '%s\n' '  make fmt    - format the workspace'
-	@printf '%s\n' '  make check  - cargo check the workspace'
-	@printf '%s\n' '  make clean  - remove build artifacts'
+	@printf '%s\n' '  make build          - build the UI and native binary, then print the run command'
+	@printf '%s\n' '  make build-ui       - build the browser assets into ui/dist'
+	@printf '%s\n' '  make build-binary   - build the copperdb binary'
+	@printf '%s\n' '  make build-llama    - build llama.cpp shared library (CPU)'
+	@printf '%s\n' '  make build-llama-cuda - build llama.cpp shared library (CUDA)'
+	@printf '%s\n' '  make ensure-llama   - ensure llama library exists (auto-build if missing)'
+	@printf '%s\n' '  make test           - run the workspace test suite'
+	@printf '%s\n' '  make run            - start the copperdb HTTP and Bolt servers'
+	@printf '%s\n' '  make fmt            - format the workspace'
+	@printf '%s\n' '  make check          - cargo check the workspace'
+	@printf '%s\n' '  make clean          - remove build artifacts'
+	@printf '%s\n' '  make build-all      - build llama + UI + binary (full stack)'
+	@printf '%s\n' '  make build-all-cuda - build llama (CUDA) + UI + binary (full stack GPU)'
+
+build-all: ensure-llama build-ui build-binary
+	@printf '\n%s\n' 'Full stack (CPU) build complete.'
+
+build-all-cuda: build-llama-cuda build-ui build-binary
+	@printf '\n%s\n' 'Full stack (CUDA) build complete.'
 
 build-ui:
 	@printf '%s\n' 'Building UI assets...'
@@ -76,3 +90,30 @@ check:
 
 clean:
 	@cargo clean
+
+# ── llama.cpp build (matches NornicDB's build-llama targets) ──────────────────
+
+ensure-llama:
+	@if [ -f "$(LLAMA_STAMP)" ]; then \
+		printf 'llama.cpp %s already built.\n' "$(LLAMA_VERSION)"; \
+	elif [ "$$(uname -s)" = "Linux" ] || [ "$$(uname -s)" = "Darwin" ]; then \
+		$(MAKE) build-llama; \
+	else \
+		printf 'Windows: run .\\scripts\\build-llama.ps1 to build llama.cpp\n'; \
+	fi
+
+build-llama:
+	@printf '%s\n' 'Building llama.cpp $(LLAMA_VERSION) (CPU)...'
+	@if [ "$$(uname -s)" = "Linux" ] || [ "$$(uname -s)" = "Darwin" ]; then \
+		bash scripts/build-llama.sh; \
+	else \
+		powershell -ExecutionPolicy Bypass -File scripts/build-llama.ps1; \
+	fi
+
+build-llama-cuda:
+	@printf '%s\n' 'Building llama.cpp $(LLAMA_VERSION) (CUDA)...'
+	@if [ "$$(uname -s)" = "Linux" ] || [ "$$(uname -s)" = "Darwin" ]; then \
+		bash scripts/build-llama.sh --cuda; \
+	else \
+		powershell -ExecutionPolicy Bypass -File scripts/build-llama.ps1 -WithCuda; \
+	fi

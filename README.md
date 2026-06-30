@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/orneryd/copperDB/refs/heads/main/logo.svg?token=GHSAT0AAAAAADPBWNJL2SJOMSSMOCF52RIY2OYATBA" alt="copperDB Logo" width="200"/>
+  <img src="https://raw.githubusercontent.com/orneryd/copperDB/refs/heads/main/logo.svg" alt="copperDB Logo" width="200"/>
 </p>
 
 <h1 align="center">copperDB</h1>
