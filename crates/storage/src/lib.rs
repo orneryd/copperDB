@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -192,6 +193,7 @@ const META_LAYOUT_MANIFEST_KEY: &[u8] = b"layout_manifest";
 const META_ENCRYPTION_MANIFEST_KEY: &[u8] = b"encryption_manifest";
 const META_MVCC_STATE_KEY: &[u8] = b"mvcc_state";
 const META_WAL_APPLIED_SEQUENCE_KEY: &[u8] = b"wal_applied_sequence";
+const STORAGE_WAL_FILENAME: &str = "copperdb.wal.rmp";
 const META_TOPOLOGY_PEER_PREFIX: &[u8] = b"topology_peer/";
 const META_TOPOLOGY_PROFILE_PREFIX: &[u8] = b"topology_profile/";
 const META_TOPOLOGY_PLACEMENT_PREFIX: &[u8] = b"topology_placement/";
@@ -219,6 +221,13 @@ const IDX_EDGE_END_PREFIX: &str = "edge_end";
 const IDX_NODE_PROPERTY_PREFIX: &str = "node_property";
 const IDX_NODE_FULLTEXT_PREFIX: &str = "node_fulltext";
 pub(crate) const IDX_EDGE_PROPERTY_PREFIX: &str = "edge_property";
+
+fn wal_applied_sequence_from_meta(meta: &Keyspace) -> Result<u64, StorageError> {
+    match meta.fjall_get(META_WAL_APPLIED_SEQUENCE_KEY)? {
+        Some(raw) => Ok(rmp_serde::from_slice(raw.as_slice())?),
+        None => Ok(0),
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -348,9 +357,22 @@ pub struct WALSegment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WALSyncMode {
+    NoSync,
+    Immediate,
+}
+
+impl Default for WALSyncMode {
+    fn default() -> Self {
+        Self::NoSync
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WALConfig {
     pub enabled: bool,
     pub max_entries_per_segment: usize,
+    pub sync_mode: WALSyncMode,
 }
 
 impl Default for WALConfig {
@@ -358,6 +380,7 @@ impl Default for WALConfig {
         Self {
             enabled: true,
             max_entries_per_segment: 1024,
+            sync_mode: WALSyncMode::NoSync,
         }
     }
 }
@@ -369,6 +392,21 @@ pub struct WALStats {
     pub degraded: bool,
     pub compacted_through: u64,
     pub next_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WALIntegrityStatus {
+    Healthy {
+        applied_sequence: u64,
+        latest_sequence: u64,
+    },
+    ChecksumCorrupt {
+        applied_sequence: u64,
+        corrupted_sequence: u64,
+    },
+    Malformed {
+        applied_sequence: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -584,6 +622,10 @@ impl WAL {
         self.compacted_through.load(Ordering::SeqCst)
     }
 
+    pub fn sync_mode(&self) -> WALSyncMode {
+        self.config.sync_mode.clone()
+    }
+
     pub fn compact_up_to(&self, last_included_seq: u64) -> Result<usize, StorageError> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(StorageError::WalClosed);
@@ -639,6 +681,13 @@ impl WAL {
         Ok(())
     }
 
+    fn first_invalid_entry_sequence(&self) -> Option<u64> {
+        self.entries.lock().iter().find_map(|entry| {
+            (entry.checksum != wal_checksum(&entry.op, &entry.key, &entry.payload))
+                .then_some(entry.seq)
+        })
+    }
+
     fn persist_entries(&self, entries: &[WALEntry]) -> Result<(), StorageError> {
         if !self.config.enabled {
             return Ok(());
@@ -655,8 +704,20 @@ impl WAL {
             compacted_through: self.compacted_through(),
             entries: entries.to_vec(),
         };
-        fs::write(&tmp_path, rmp_serde::to_vec(&state)?)?;
+        let mut tmp_file = fs::File::create(&tmp_path)?;
+        tmp_file.write_all(&rmp_serde::to_vec(&state)?)?;
+        if self.config.sync_mode == WALSyncMode::Immediate {
+            tmp_file.sync_all()?;
+        }
+        drop(tmp_file);
         fs::rename(tmp_path, path)?;
+        if self.config.sync_mode == WALSyncMode::Immediate {
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)?
+                .sync_all()?;
+        }
         Ok(())
     }
 
@@ -1354,10 +1415,22 @@ impl StorageEngine {
 
     /// Open (or create) a storage engine at the given path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
+        Self::open_with_wal_config(path, WALConfig::default())
+    }
+
+    /// Open storage with an explicit WAL durability policy.
+    pub fn open_with_wal_config(
+        path: impl AsRef<Path>,
+        wal_config: WALConfig,
+    ) -> Result<Self, StorageError> {
         let path = path.as_ref();
         fs::create_dir_all(path).map_err(StorageError::Io)?;
         let db = Database::open(fjall::Config::new(path)).map_err(StorageError::Fjall)?;
-        Self::open_with_db(db, None, WAL::open(path.join("wal.rmp"), WALConfig::default())?)
+        Self::open_with_db(
+            db,
+            None,
+            WAL::open(path.join(STORAGE_WAL_FILENAME), wal_config)?,
+        )
     }
 
     /// Discard a corrupt WAL only when Fjall has already applied every entry.
@@ -1368,15 +1441,42 @@ impl StorageEngine {
         let path = path.as_ref();
         let db = Database::open(fjall::Config::new(path)).map_err(StorageError::Fjall)?;
         let meta = db.keyspace("meta", KeyspaceCreateOptions::default)?;
-        let applied_sequence = match meta.fjall_get(META_WAL_APPLIED_SEQUENCE_KEY)? {
-            Some(raw) => rmp_serde::from_slice(raw.as_slice())?,
-            None => 0,
-        };
-        let wal = WAL::open_unverified(path.join("wal.rmp"), WALConfig::default())?;
+        let applied_sequence = wal_applied_sequence_from_meta(&meta)?;
+        let wal = WAL::open_unverified(path.join(STORAGE_WAL_FILENAME), WALConfig::default())?;
         if wal.stats().next_seq > applied_sequence {
             return Err(StorageError::WalRepairWouldLoseUnappliedEntries { applied_sequence });
         }
         wal.compact_up_to(applied_sequence)
+    }
+
+    /// Inspect WAL integrity without opening storage or modifying its files.
+    ///
+    /// Normal storage open remains fail-closed on corruption. This allows an
+    /// operator to distinguish malformed bytes from a checksum failure before
+    /// choosing an explicit repair action.
+    pub fn inspect_wal(path: impl AsRef<Path>) -> Result<WALIntegrityStatus, StorageError> {
+        let path = path.as_ref();
+        let db = Database::open(fjall::Config::new(path)).map_err(StorageError::Fjall)?;
+        let meta = db.keyspace("meta", KeyspaceCreateOptions::default)?;
+        let applied_sequence = wal_applied_sequence_from_meta(&meta)?;
+        let wal = match WAL::open_unverified(path.join(STORAGE_WAL_FILENAME), WALConfig::default()) {
+            Ok(wal) => wal,
+            Err(StorageError::WalMissingOrInvalidTrailer) => {
+                return Ok(WALIntegrityStatus::Malformed { applied_sequence });
+            }
+            Err(error) => return Err(error),
+        };
+        let latest_sequence = wal.stats().next_seq;
+        match wal.first_invalid_entry_sequence() {
+            Some(corrupted_sequence) => Ok(WALIntegrityStatus::ChecksumCorrupt {
+                applied_sequence,
+                corrupted_sequence,
+            }),
+            None => Ok(WALIntegrityStatus::Healthy {
+                applied_sequence,
+                latest_sequence,
+            }),
+        }
     }
 
     /// Open a storage engine without replaying current records into the MVCC
@@ -1389,7 +1489,7 @@ impl StorageEngine {
         Self::open_with_db_options(
             db,
             None,
-            WAL::open(path.join("wal.rmp"), WALConfig::default())?,
+            WAL::open(path.join(STORAGE_WAL_FILENAME), WALConfig::default())?,
             false,
         )
     }
@@ -1407,7 +1507,7 @@ impl StorageEngine {
         Self::open_with_db(
             db,
             Some(encryption),
-            WAL::open(path.join("wal.rmp"), WALConfig::default())?,
+            WAL::open(path.join(STORAGE_WAL_FILENAME), WALConfig::default())?,
         )
     }
 
@@ -1647,8 +1747,19 @@ impl StorageEngine {
         }
     }
 
+    /// Compact only WAL frames already made durable in Fjall.
+    ///
+    /// Frames after the applied marker remain available for startup recovery.
+    pub fn compact_applied_wal(&self) -> Result<usize, StorageError> {
+        self.wal.compact_up_to(self.wal_applied_sequence()?)
+    }
+
     pub fn wal_stats(&self) -> WALStats {
         self.wal.stats()
+    }
+
+    pub fn wal_sync_mode(&self) -> WALSyncMode {
+        self.wal.sync_mode()
     }
 
     pub fn encryption_manifest(&self) -> Result<Option<StorageEncryptionManifest>, StorageError> {
@@ -5203,6 +5314,9 @@ impl<'a> BatchWriter<'a> {
             );
         }
         batch.commit()?;
+        if self.engine.wal.sync_mode() == WALSyncMode::Immediate {
+            self.engine.db.persist(fjall::PersistMode::SyncAll)?;
+        }
 
         let node_changes = nodes.into_iter().collect::<Vec<_>>();
         let edge_changes = edges.into_iter().collect::<Vec<_>>();

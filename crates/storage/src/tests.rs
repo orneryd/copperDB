@@ -83,6 +83,41 @@ fn creates_and_reads_layout_manifest_v0() {
 }
 
 #[test]
+fn storage_wal_sync_modes_are_explicit_and_immediate_commits_persist() {
+    let default_dir = tempfile::tempdir().unwrap();
+    let default_engine = StorageEngine::open(default_dir.path()).unwrap();
+    assert_eq!(default_engine.wal_sync_mode(), WALSyncMode::NoSync);
+
+    let test_dir = tempfile::tempdir().unwrap();
+    let node = sample_node("immediate", &["Node"]);
+    let immediate_engine = StorageEngine::open_with_wal_config(
+        test_dir.path(),
+        WALConfig {
+            enabled: true,
+            max_entries_per_segment: 1024,
+            sync_mode: WALSyncMode::Immediate,
+        },
+    )
+    .unwrap();
+    assert_eq!(immediate_engine.wal_sync_mode(), WALSyncMode::Immediate);
+    immediate_engine.put_node_record(&node).unwrap();
+    assert_eq!(immediate_engine.wal_applied_sequence().unwrap(), 1);
+    drop(immediate_engine);
+
+    let reopened = StorageEngine::open_with_wal_config(
+        test_dir.path(),
+        WALConfig {
+            enabled: true,
+            max_entries_per_segment: 1024,
+            sync_mode: WALSyncMode::Immediate,
+        },
+    )
+    .unwrap();
+    assert_eq!(reopened.get_node_record(&node.id).unwrap(), Some(node));
+    assert_eq!(reopened.wal_sync_mode(), WALSyncMode::Immediate);
+}
+
+#[test]
 fn rejects_non_v0_layout_manifest() {
     let test_dir = std::env::temp_dir().join(format!(
         "copperdb-storage-layout-version-rejection-test-{}",
@@ -1400,7 +1435,11 @@ fn storage_transaction_persists_wal_frame_and_applied_marker_across_reopen() {
     assert_eq!(reopened.wal_stats().next_seq, applied_sequence);
     assert_eq!(reopened.wal_applied_sequence().unwrap(), applied_sequence);
 
-    let wal = WAL::open(test_dir.path().join("wal.rmp"), WALConfig::default()).unwrap();
+    let wal = WAL::open(
+        test_dir.path().join(STORAGE_WAL_FILENAME),
+        WALConfig::default(),
+    )
+    .unwrap();
     let frames = wal.replay_transactions_after(0).unwrap();
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].0, applied_sequence);
@@ -1468,7 +1507,11 @@ fn storage_open_replays_unapplied_wal_transaction_frame_once() {
     StorageEngine::open(test_dir.path()).unwrap();
 
     let node = sample_node("recovered", &["Node"]);
-    let wal = WAL::open(test_dir.path().join("wal.rmp"), WALConfig::default()).unwrap();
+    let wal = WAL::open(
+        test_dir.path().join(STORAGE_WAL_FILENAME),
+        WALConfig::default(),
+    )
+    .unwrap();
     let sequence = wal
         .append_transaction(
             "recovery-test",
@@ -1495,6 +1538,40 @@ fn storage_open_replays_unapplied_wal_transaction_frame_once() {
 }
 
 #[test]
+fn storage_compacts_only_applied_wal_frames_and_recovers_the_remainder() {
+    let test_dir = tempfile::tempdir().unwrap();
+    let durable = sample_node("durable", &["Node"]);
+    let recovered = sample_node("recovered", &["Node"]);
+    let engine = StorageEngine::open(test_dir.path()).unwrap();
+    engine.put_node_record(&durable).unwrap();
+    assert_eq!(engine.wal_applied_sequence().unwrap(), 1);
+
+    let sequence = engine
+        .wal
+        .append_transaction(
+            "unapplied",
+            vec![WALTransactionRecord {
+                op: "put_node".to_string(),
+                key: recovered.id.clone(),
+                payload: rmp_serde::to_vec(&recovered).unwrap(),
+            }],
+        )
+        .unwrap()
+        .seq;
+    assert_eq!(sequence, 2);
+    assert_eq!(engine.compact_applied_wal().unwrap(), 1);
+    assert_eq!(engine.wal_stats().entries, 1);
+    drop(engine);
+
+    let reopened = StorageEngine::open(test_dir.path()).unwrap();
+    assert_eq!(reopened.get_node_record(&durable.id).unwrap(), Some(durable));
+    assert_eq!(reopened.get_node_record(&recovered.id).unwrap(), Some(recovered));
+    assert_eq!(reopened.wal_applied_sequence().unwrap(), sequence);
+    assert_eq!(reopened.wal_stats().entries, 1);
+    assert_eq!(reopened.wal_stats().compacted_through, 1);
+}
+
+#[test]
 fn storage_open_discards_interrupted_wal_replacement_file() {
     let test_dir = tempfile::tempdir().unwrap();
     let node = sample_node("durable", &["Node"]);
@@ -1505,7 +1582,7 @@ fn storage_open_discards_interrupted_wal_replacement_file() {
         transaction.commit().unwrap();
     }
 
-    let staged_wal = test_dir.path().join("wal.tmp");
+    let staged_wal = test_dir.path().join("copperdb.wal.tmp");
     fs::write(&staged_wal, b"interrupted replacement").unwrap();
 
     let reopened = StorageEngine::open(test_dir.path()).unwrap();
@@ -1524,7 +1601,7 @@ fn storage_repairs_corrupt_wal_only_after_all_frames_are_applied() {
         engine.put_node_record(&node).unwrap();
     }
 
-    let wal_path = test_dir.path().join("wal.rmp");
+    let wal_path = test_dir.path().join(STORAGE_WAL_FILENAME);
     let wal = WAL::open(&wal_path, WALConfig::default()).unwrap();
     {
         let mut entries = wal.entries.lock();
@@ -1553,7 +1630,7 @@ fn storage_refuses_wal_repair_when_a_corrupt_frame_is_unapplied() {
     let test_dir = tempfile::tempdir().unwrap();
     StorageEngine::open(test_dir.path()).unwrap();
 
-    let wal_path = test_dir.path().join("wal.rmp");
+    let wal_path = test_dir.path().join(STORAGE_WAL_FILENAME);
     let wal = WAL::open(&wal_path, WALConfig::default()).unwrap();
     wal.append_transaction(
         "unapplied",
@@ -1581,6 +1658,62 @@ fn storage_refuses_wal_repair_when_a_corrupt_frame_is_unapplied() {
     assert!(matches!(
         StorageEngine::open(test_dir.path()),
         Err(StorageError::WalChecksumVerificationFailed)
+    ));
+}
+
+#[test]
+fn storage_inspects_healthy_checksum_corrupt_and_malformed_wals_without_repairing() {
+    let healthy_dir = tempfile::tempdir().unwrap();
+    let healthy = StorageEngine::open(healthy_dir.path()).unwrap();
+    healthy.put_node_record(&sample_node("healthy", &["Node"])).unwrap();
+    drop(healthy);
+    assert_eq!(
+        StorageEngine::inspect_wal(healthy_dir.path()).unwrap(),
+        WALIntegrityStatus::Healthy {
+            applied_sequence: 1,
+            latest_sequence: 1,
+        }
+    );
+
+    let corrupt_dir = tempfile::tempdir().unwrap();
+    {
+        let engine = StorageEngine::open(corrupt_dir.path()).unwrap();
+        engine.put_node_record(&sample_node("corrupt", &["Node"])).unwrap();
+    }
+    let corrupt_path = corrupt_dir.path().join(STORAGE_WAL_FILENAME);
+    let corrupt_wal = WAL::open(&corrupt_path, WALConfig::default()).unwrap();
+    {
+        let mut entries = corrupt_wal.entries.lock();
+        entries[0].checksum ^= u32::MAX;
+        corrupt_wal.persist_entries(&entries).unwrap();
+    }
+    drop(corrupt_wal);
+    assert_eq!(
+        StorageEngine::inspect_wal(corrupt_dir.path()).unwrap(),
+        WALIntegrityStatus::ChecksumCorrupt {
+            applied_sequence: 1,
+            corrupted_sequence: 1,
+        }
+    );
+    assert!(matches!(
+        StorageEngine::open(corrupt_dir.path()),
+        Err(StorageError::WalChecksumVerificationFailed)
+    ));
+
+    let malformed_dir = tempfile::tempdir().unwrap();
+    StorageEngine::open(malformed_dir.path()).unwrap();
+    fs::write(
+        malformed_dir.path().join(STORAGE_WAL_FILENAME),
+        b"not-messagepack",
+    )
+    .unwrap();
+    assert_eq!(
+        StorageEngine::inspect_wal(malformed_dir.path()).unwrap(),
+        WALIntegrityStatus::Malformed { applied_sequence: 0 }
+    );
+    assert!(matches!(
+        StorageEngine::open(malformed_dir.path()),
+        Err(StorageError::WalMissingOrInvalidTrailer)
     ));
 }
 
@@ -4187,6 +4320,7 @@ fn wal_batch_replay_and_checksum_error_paths_work() {
     let wal = WAL::new(WALConfig {
         enabled: true,
         max_entries_per_segment: 2,
+        sync_mode: WALSyncMode::NoSync,
     });
     let (start, end) = wal
         .append_batch(vec![
@@ -4216,6 +4350,7 @@ fn wal_persists_entries_and_reopens_next_sequence() {
     let config = WALConfig {
         enabled: true,
         max_entries_per_segment: 2,
+        sync_mode: WALSyncMode::NoSync,
     };
 
     let wal = WAL::open(&wal_path, config.clone()).unwrap();
@@ -4285,6 +4420,7 @@ fn wal_compaction_truncates_replay_and_preserves_sequence_across_reopen() {
     let config = WALConfig {
         enabled: true,
         max_entries_per_segment: 2,
+        sync_mode: WALSyncMode::NoSync,
     };
 
     let wal = WAL::open(&wal_path, config.clone()).unwrap();
