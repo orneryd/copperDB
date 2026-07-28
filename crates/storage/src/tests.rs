@@ -90,7 +90,9 @@ fn rejects_non_v0_layout_manifest() {
     ));
     fs::create_dir_all(&test_dir).unwrap();
     let db = fjall::Database::open(fjall::Config::new(&test_dir)).unwrap();
-    let meta = db.keyspace("meta", fjall::KeyspaceCreateOptions::default).unwrap();
+    let meta = db
+        .keyspace("meta", fjall::KeyspaceCreateOptions::default)
+        .unwrap();
 
     let bad_manifest = StorageLayoutManifest {
         version: 1,
@@ -189,7 +191,9 @@ fn encrypted_storage_round_trips_records_and_rejects_plain_open() {
     drop(engine);
 
     let raw_db = fjall::Database::open(fjall::Config::new(&test_dir)).unwrap();
-    let raw_nodes = raw_db.keyspace("nodes", fjall::KeyspaceCreateOptions::default).unwrap();
+    let raw_nodes = raw_db
+        .keyspace("nodes", fjall::KeyspaceCreateOptions::default)
+        .unwrap();
     let stored = raw_nodes.get("db1:n1").unwrap().unwrap();
     assert_ne!(
         stored.as_ref(),
@@ -1288,6 +1292,79 @@ fn storage_engine_rebuild_mvcc_repairs_raw_storage_drift_and_blocks_active_reade
         .get_nodes_by_label_visible_at(&repaired_snapshot, "Person")
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn mvcc_history_survives_storage_reopen() {
+    let test_dir = tempfile::tempdir().unwrap();
+    let original = sample_node("n1", &["Person"]);
+    let replacement = sample_node("n1", &["Device"]);
+
+    let snapshot = {
+        let engine = StorageEngine::open(test_dir.path()).unwrap();
+        engine.put_node_record(&original).unwrap();
+        let snapshot = engine.begin_mvcc_snapshot();
+        engine.put_node_record(&replacement).unwrap();
+        snapshot
+    };
+
+    let reopened = StorageEngine::open(test_dir.path()).unwrap();
+    assert_eq!(
+        reopened
+            .get_node_record_visible_at(&snapshot, "n1")
+            .unwrap(),
+        Some(original)
+    );
+    assert_eq!(reopened.get_node_record("n1").unwrap(), Some(replacement));
+}
+
+#[test]
+fn storage_transaction_keeps_writes_private_until_commit() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let original = sample_node("n1", &["Person"]);
+    let replacement = sample_node("n1", &["Device"]);
+    engine.put_node_record(&original).unwrap();
+
+    let mut transaction = engine.begin_transaction();
+    transaction.put_node_record(replacement.clone());
+    assert_eq!(
+        transaction.get_node_record("n1").unwrap(),
+        Some(replacement.clone())
+    );
+    assert_eq!(engine.get_node_record("n1").unwrap(), Some(original));
+    transaction.commit().unwrap();
+
+    assert_eq!(engine.get_node_record("n1").unwrap(), Some(replacement));
+
+    let mut rolled_back = engine.begin_transaction();
+    rolled_back.delete_node_record("n1");
+    assert!(rolled_back.get_node_record("n1").unwrap().is_none());
+    rolled_back.rollback();
+
+    assert!(engine.get_node_record("n1").unwrap().is_some());
+}
+
+#[test]
+fn storage_transaction_rejects_a_write_newer_than_its_snapshot() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    engine
+        .put_node_record(&sample_node("n1", &["Person"]))
+        .unwrap();
+
+    let mut transaction = engine.begin_transaction();
+    transaction.put_node_record(sample_node("n1", &["Device"]));
+    engine
+        .put_node_record(&sample_node("n1", &["Server"]))
+        .unwrap();
+
+    assert!(matches!(
+        transaction.commit(),
+        Err(StorageError::TransactionConflict { logical_key, .. }) if logical_key == "node:n1"
+    ));
+    assert_eq!(
+        engine.get_node_record("n1").unwrap(),
+        Some(sample_node("n1", &["Server"]))
+    );
 }
 
 #[test]
@@ -5545,6 +5622,80 @@ fn batch_write_mixed_nodes_and_edges() {
     assert!(engine.get_node_record("tgt").unwrap().is_some());
     assert!(engine.get_edge_record("e1").unwrap().is_some());
     assert_eq!(engine.get_edges_by_type("LINK").unwrap().len(), 1);
+}
+
+#[test]
+fn batch_write_assigns_one_mvcc_version_to_all_records() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let before = engine.begin_mvcc_snapshot().read_ts;
+    engine
+        .batch_write(|batch| {
+            batch.put_node_record(&sample_node("n1", &["Person"]));
+            batch.put_edge_record(&sample_edge("e1", "KNOWS", "n1", "n1"));
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+
+    let after = engine.begin_mvcc_snapshot().read_ts;
+    assert_eq!(after, before + 1);
+}
+
+#[test]
+fn batch_write_updates_and_deletes_records_with_their_indexes() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let original = NodeRecord {
+        id: "source".to_string(),
+        labels: vec!["Old".to_string()],
+        properties: BTreeMap::new(),
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: vec![],
+        embed_meta: NodeEmbeddingMetadata::default(),
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 1,
+    };
+    let target = NodeRecord {
+        id: "target".to_string(),
+        labels: vec!["Target".to_string()],
+        properties: BTreeMap::new(),
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: vec![],
+        embed_meta: NodeEmbeddingMetadata::default(),
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 1,
+    };
+    let edge = EdgeRecord {
+        id: "edge".to_string(),
+        edge_type: "LINK".to_string(),
+        start_node: "source".to_string(),
+        end_node: "target".to_string(),
+        properties: BTreeMap::new(),
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 1,
+    };
+    engine.put_node_record(&original).unwrap();
+    engine.put_node_record(&target).unwrap();
+    engine.put_edge_record(&edge).unwrap();
+
+    let replacement = NodeRecord {
+        labels: vec!["New".to_string()],
+        updated_at_unix_ms: 2,
+        ..original
+    };
+    engine
+        .batch_write(|batch| {
+            batch.put_node_record(&replacement);
+            batch.delete_edge_record("edge");
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+
+    assert!(engine.get_nodes_by_label("Old").unwrap().is_empty());
+    assert_eq!(engine.get_nodes_by_label("New").unwrap().len(), 1);
+    assert!(engine.get_edge_record("edge").unwrap().is_none());
+    assert!(engine
+        .get_adjacent_edges("source", EdgeAdjacencyDirection::Outgoing, None)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

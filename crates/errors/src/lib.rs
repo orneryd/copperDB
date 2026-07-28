@@ -97,6 +97,7 @@ pub fn is_merge_commit_time_unique_conflict(err: &(dyn std::error::Error + 'stat
 
 fn map_storage_error(err: &StorageError) -> Option<TransientTransactionCode> {
     match err {
+        StorageError::TransactionConflict { .. } => Some(TransientTransactionCode::Outdated),
         StorageError::UniqueConstraintViolation { .. } => None,
         _ => None,
     }
@@ -135,6 +136,20 @@ mod tests {
         assert_eq!(
             TransientTransactionCode::Outdated.as_neo4j_code(),
             TRANSIENT_OUTDATED
+        );
+    }
+
+    #[test]
+    fn maps_storage_snapshot_conflicts_as_outdated() {
+        let err = StorageError::TransactionConflict {
+            logical_key: "edge:e1".to_string(),
+            snapshot_version: 4,
+            current_version: 5,
+        };
+
+        assert_eq!(
+            map_transient_transaction_error(&err),
+            Some(TransientTransactionCode::Outdated)
         );
     }
 

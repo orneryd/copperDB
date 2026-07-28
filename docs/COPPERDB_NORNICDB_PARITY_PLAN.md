@@ -87,6 +87,7 @@ The first work must close verified audit findings. New feature expansion should 
    - Replace global write-lock and full-map cleanup behavior with sharded or key-scoped synchronization. Prove unrelated unique keys progress concurrently and conflicts remain serialized.
 
 8. **Finish durable transaction semantics, MVCC history, and WAL integration.**
+   - Progress: `StorageEngine::batch_write` now commits primary records and maintained derived state through one cross-keyspace Fjall batch, with MVCC mirrors and callbacks applied only after storage commit. Transaction-local writes, persistent history, and WAL authority remain open.
    - Define whether historical versions survive restart and make the implementation match that contract.
    - Ensure structured storage mutations participate in one atomic transaction/WAL boundary.
    - Complete snapshot anomaly, namespace pinning, WAL repair, corruption reporting, snapshot install, and lifecycle orchestration tests.

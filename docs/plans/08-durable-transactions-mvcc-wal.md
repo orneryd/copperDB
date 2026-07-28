@@ -1,6 +1,6 @@
 # 08: Durable Transactions, MVCC History, And WAL
 
-Status: planned. Priority: P1. Owners: `storage`, `txsession`, `engine`, `eval`, `bolt`.
+Status: in progress. Priority: P1. Owners: `storage`, `txsession`, `engine`, `eval`, `bolt`.
 
 ## Objective
 
@@ -8,7 +8,7 @@ Create one atomic, durable transaction boundary covering primary records, indexe
 
 ## Current Evidence
 
-`MvccStore` is primarily in memory and rebuilds from current records on open. `WAL` is a standalone primitive rather than the authority for all structured mutations. `BatchWriter::commit` invokes public mutators sequentially and is not atomic. `txsession::Transaction::commit_at` changes state without applying typed graph operations.
+`MvccStore` persists its logical heads, archived versions, and index candidates in metadata and restores them on open; a legacy database without that metadata receives a one-time current-state bootstrap. `WAL` is a standalone primitive rather than the authority for all structured mutations. `BatchWriter::commit` now stages primary records, indexes, counters, embedding metadata, and schema-derived state in one Fjall database batch; it publishes in-memory MVCC changes and callbacks only after the batch succeeds. `txsession::Transaction::commit_at` still changes state without applying typed graph operations.
 
 ## Contract Decisions
 
@@ -24,9 +24,9 @@ Add `StorageTransaction` with namespace pin, begin snapshot, typed operations, r
 
 ## Phases
 
-1. Replace fake batch atomicity with one typed fjall batch and failure injection.
-2. Persist MVCC heads/archives and prove visible-at reads across reopen.
-3. Connect txsession, eval, engine, and Bolt to typed transactions and read-your-writes.
+1. Complete: replace fake batch atomicity with one Fjall database batch and one logical MVCC version. Existing closure-failure, mixed node/edge, index-removal, and shared-version regression coverage proves no staged mutation is published before the single commit. Storage I/O failure injection remains part of the later durable/WAL work.
+2. In progress: persist MVCC heads/archives and prove visible-at reads across reopen. The persisted state currently follows structured primary-record commits rather than participating in their same Fjall batch; fold it into the typed transaction/WAL boundary before calling this durable commit semantics.
+3. In progress: `StorageTransaction` now pins an MVCC snapshot, provides node/edge read-your-writes through a private overlay, commits through the atomic batch writer, discards rollback writes, and rejects post-snapshot key updates with a typed conflict. Connect txsession, eval, engine, and Bolt to this typed transaction instead of their current direct storage execution path.
 4. Define WAL frame/version/sync modes, replay markers, torn-tail handling, corruption diagnostics, and repair.
 5. Add snapshot install/compaction, reader-aware pruning scheduler, namespace controls, and lifecycle status.
 

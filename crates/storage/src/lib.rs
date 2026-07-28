@@ -42,7 +42,11 @@ trait KeyspaceExt {
     fn fjall_get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError>;
 
     /// Insert and return the previous value.
-    fn fjall_insert(&self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError>;
+    fn fjall_insert(
+        &self,
+        key: impl AsRef<[u8]>,
+        value: impl AsRef<[u8]>,
+    ) -> Result<Option<Vec<u8>>, StorageError>;
 
     /// Remove and return the previous value.
     fn fjall_remove(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError>;
@@ -61,56 +65,63 @@ impl KeyspaceExt for Keyspace {
         &'a self,
         prefix: &'a [u8],
     ) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StorageError>> + 'a> {
-        Box::new(
-            self.prefix(prefix)
-                .map(|guard| {
-                    guard
-                        .into_inner()
-                        .map(|(k, v)| (k.to_vec(), v.to_vec()))
-                        .map_err(StorageError::Fjall)
-                })
-        )
+        Box::new(self.prefix(prefix).map(|guard| {
+            guard
+                .into_inner()
+                .map(|(k, v)| (k.to_vec(), v.to_vec()))
+                .map_err(StorageError::Fjall)
+        }))
     }
 
     fn fjall_iter<'a>(
         &'a self,
     ) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StorageError>> + 'a> {
-        Box::new(
-            self.iter()
-                .map(|guard| {
-                    guard
-                        .into_inner()
-                        .map(|(k, v)| (k.to_vec(), v.to_vec()))
-                        .map_err(StorageError::Fjall)
-                })
-        )
+        Box::new(self.iter().map(|guard| {
+            guard
+                .into_inner()
+                .map(|(k, v)| (k.to_vec(), v.to_vec()))
+                .map_err(StorageError::Fjall)
+        }))
     }
 
     fn fjall_get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self.get(key.as_ref()).map_err(StorageError::Fjall)?.map(|v| v.to_vec()))
+        Ok(self
+            .get(key.as_ref())
+            .map_err(StorageError::Fjall)?
+            .map(|v| v.to_vec()))
     }
 
-    fn fjall_insert(&self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError> {
+    fn fjall_insert(
+        &self,
+        key: impl AsRef<[u8]>,
+        value: impl AsRef<[u8]>,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
         let k = key.as_ref();
-        let old = self.get(k).map_err(StorageError::Fjall)?.map(|v| v.to_vec());
-        self.insert(k, value.as_ref()).map_err(StorageError::Fjall)?;
+        let old = self
+            .get(k)
+            .map_err(StorageError::Fjall)?
+            .map(|v| v.to_vec());
+        self.insert(k, value.as_ref())
+            .map_err(StorageError::Fjall)?;
         Ok(old)
     }
 
     fn fjall_remove(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError> {
         let k = key.as_ref();
-        let old = self.get(k).map_err(StorageError::Fjall)?.map(|v| v.to_vec());
+        let old = self
+            .get(k)
+            .map_err(StorageError::Fjall)?
+            .map(|v| v.to_vec());
         self.remove(k).map_err(StorageError::Fjall)?;
         Ok(old)
     }
 
-    fn fjall_apply_batch(
-        &self,
-        batch: &[(Vec<u8>, Option<Vec<u8>>)],
-    ) -> Result<(), StorageError> {
+    fn fjall_apply_batch(&self, batch: &[(Vec<u8>, Option<Vec<u8>>)]) -> Result<(), StorageError> {
         for (key, value) in batch {
             match value {
-                Some(v) => self.insert(key.as_slice(), v.as_slice()).map_err(StorageError::Fjall)?,
+                Some(v) => self
+                    .insert(key.as_slice(), v.as_slice())
+                    .map_err(StorageError::Fjall)?,
                 None => self.remove(key.as_slice()).map_err(StorageError::Fjall)?,
             }
         }
@@ -122,23 +133,14 @@ impl KeyspaceExt for Keyspace {
         range: R,
     ) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StorageError>> + 'a> {
         // Convert Vec<u8> bounds to &[u8] bounds
-        let start = std::ops::Bound::map(
-            range.start_bound(),
-            |v: &Vec<u8>| v.as_slice(),
-        );
-        let end = std::ops::Bound::map(
-            range.end_bound(),
-            |v: &Vec<u8>| v.as_slice(),
-        );
-        Box::new(
-            self.range::<&[u8], _>((start, end))
-                .map(|guard| {
-                    guard
-                        .into_inner()
-                        .map(|(k, v)| (k.to_vec(), v.to_vec()))
-                        .map_err(StorageError::Fjall)
-                })
-        )
+        let start = std::ops::Bound::map(range.start_bound(), |v: &Vec<u8>| v.as_slice());
+        let end = std::ops::Bound::map(range.end_bound(), |v: &Vec<u8>| v.as_slice());
+        Box::new(self.range::<&[u8], _>((start, end)).map(|guard| {
+            guard
+                .into_inner()
+                .map(|(k, v)| (k.to_vec(), v.to_vec()))
+                .map_err(StorageError::Fjall)
+        }))
     }
 }
 
@@ -155,6 +157,7 @@ pub use crate::mvcc::{
     MvccHead, MvccLifecycleDebtKey, MvccLifecycleStatus, MvccLogicalHead, MvccPruneOptions,
     MvccSnapshot, MvccSnapshotLease, MvccStore, MvccVersion, NamespacedMvccStore,
 };
+use crate::mvcc::{MvccRecordMutation, PersistedMvccStore};
 pub use crate::namespaced::NamespacedStorageEngine;
 use crate::storage_edge_property_index::{
     is_relationship_property_index, relationship_property_index_key_for_edge,
@@ -187,6 +190,7 @@ pub fn ensure_database_prefix(database: &str, id: &str) -> String {
 pub const STORAGE_LAYOUT_VERSION: u8 = 0;
 const META_LAYOUT_MANIFEST_KEY: &[u8] = b"layout_manifest";
 const META_ENCRYPTION_MANIFEST_KEY: &[u8] = b"encryption_manifest";
+const META_MVCC_STATE_KEY: &[u8] = b"mvcc_state";
 const META_TOPOLOGY_PEER_PREFIX: &[u8] = b"topology_peer/";
 const META_TOPOLOGY_PROFILE_PREFIX: &[u8] = b"topology_profile/";
 const META_TOPOLOGY_PLACEMENT_PREFIX: &[u8] = b"topology_placement/";
@@ -245,6 +249,12 @@ pub enum StorageError {
     MvccHeadTruncated(usize),
     #[error("mvcc head missing floor: {0} bytes")]
     MvccHeadMissingFloor(usize),
+    #[error("transaction conflict on {logical_key}: version {current_version} is newer than snapshot {snapshot_version}")]
+    TransactionConflict {
+        logical_key: String,
+        snapshot_version: u64,
+        current_version: u64,
+    },
     #[error("wal: closed")]
     WalClosed,
     #[error("async engine: closed")]
@@ -1183,6 +1193,18 @@ pub struct StorageEngine {
     on_edge_deleted_cb: RwLock<Option<EdgeDeleteCallback>>,
 }
 
+/// A storage-owned transaction with snapshot reads and a private write overlay.
+///
+/// Changes remain invisible until [`StorageTransaction::commit`] applies them
+/// through the engine's atomic batch writer. Dropping or rolling back a
+/// transaction discards its staged changes.
+pub struct StorageTransaction<'a> {
+    engine: &'a StorageEngine,
+    snapshot: MvccSnapshotLease,
+    node_writes: BTreeMap<String, Option<NodeRecord>>,
+    edge_writes: BTreeMap<String, Option<EdgeRecord>>,
+}
+
 impl fmt::Debug for StorageEngine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StorageEngine")
@@ -1302,11 +1324,14 @@ impl StorageEngine {
         };
         engine.ensure_layout_manifest()?;
         engine.ensure_encryption_manifest()?;
-        engine.bootstrap_mvcc_from_current_state()?;
+        engine.restore_or_bootstrap_mvcc()?;
         Ok(engine)
     }
 
-    fn open_with_db(db: Database, encryption: Option<StorageEncryption>) -> Result<Self, StorageError> {
+    fn open_with_db(
+        db: Database,
+        encryption: Option<StorageEncryption>,
+    ) -> Result<Self, StorageError> {
         Self::open_with_db_options(db, encryption, true)
     }
 
@@ -1338,7 +1363,7 @@ impl StorageEngine {
         engine.ensure_layout_manifest()?;
         engine.ensure_encryption_manifest()?;
         if bootstrap_mvcc {
-            engine.bootstrap_mvcc_from_current_state()?;
+            engine.restore_or_bootstrap_mvcc()?;
         }
         Ok(engine)
     }
@@ -1353,6 +1378,28 @@ impl StorageEngine {
         Ok(())
     }
 
+    fn restore_or_bootstrap_mvcc(&self) -> Result<(), StorageError> {
+        match self.meta.fjall_get(META_MVCC_STATE_KEY)? {
+            Some(raw) => {
+                let state: PersistedMvccStore = rmp_serde::from_slice(raw.as_slice())?;
+                self.mvcc.restore_persisted_state(state);
+                Ok(())
+            }
+            None => {
+                self.bootstrap_mvcc_from_current_state()?;
+                self.persist_mvcc_state()
+            }
+        }
+    }
+
+    fn persist_mvcc_state(&self) -> Result<(), StorageError> {
+        self.meta.fjall_insert(
+            META_MVCC_STATE_KEY,
+            rmp_serde::to_vec(&self.mvcc.persisted_state())?,
+        )?;
+        Ok(())
+    }
+
     pub fn rebuild_mvcc_from_current_state(&self) -> Result<(), StorageError> {
         let active_readers = self.mvcc.active_reader_count();
         if active_readers != 0 {
@@ -1360,7 +1407,8 @@ impl StorageEngine {
         }
 
         self.mvcc.reset_for_rebuild();
-        self.bootstrap_mvcc_from_current_state()
+        self.bootstrap_mvcc_from_current_state()?;
+        self.persist_mvcc_state()
     }
 
     fn ensure_layout_manifest(&self) -> Result<(), StorageError> {
@@ -1562,6 +1610,7 @@ impl StorageEngine {
         self.apply_node_stats_delta(node, 1)?;
         self.update_pending_embedding_index(node)?;
         self.mvcc.put_node_record(node)?;
+        self.persist_mvcc_state()?;
 
         if old.is_some() {
             self.notify_node_updated(node);
@@ -1618,6 +1667,7 @@ impl StorageEngine {
             self.apply_node_stats_delta(node, 1)?;
             self.update_pending_embedding_index(node)?;
             self.mvcc.put_node_record(node)?;
+            self.persist_mvcc_state()?;
 
             if old.is_some() {
                 self.notify_node_updated(node);
@@ -1645,6 +1695,7 @@ impl StorageEngine {
             self.mark_node_embedded(id)?;
             self.nodes.fjall_remove(id.as_bytes())?;
             self.mvcc.delete_node_record(id)?;
+            self.persist_mvcc_state()?;
             self.notify_node_deleted(id);
         }
         Ok(())
@@ -1692,6 +1743,16 @@ impl StorageEngine {
         f(&mut writer)?;
         writer.commit()?;
         Ok(())
+    }
+
+    /// Begin a storage transaction at the current MVCC snapshot.
+    pub fn begin_transaction(&self) -> StorageTransaction<'_> {
+        StorageTransaction {
+            engine: self,
+            snapshot: self.begin_registered_mvcc_snapshot(),
+            node_writes: BTreeMap::new(),
+            edge_writes: BTreeMap::new(),
+        }
     }
 
     // ── Event notification ─────────────────────────────────────────────────
@@ -2073,7 +2134,8 @@ impl StorageEngine {
 
     fn update_pending_embedding_index(&self, node: &NodeRecord) -> Result<(), StorageError> {
         if node.needs_embedding() {
-            self.meta.fjall_insert(pending_embedding_key(&node.id), [])?;
+            self.meta
+                .fjall_insert(pending_embedding_key(&node.id), [])?;
         } else {
             self.meta.fjall_remove(pending_embedding_key(&node.id))?;
         }
@@ -2230,7 +2292,10 @@ impl StorageEngine {
         }
 
         // Count total documents in this label for IDF
-        let total_docs = self.node_count_by_label_in_namespace("", label).unwrap_or(1).max(1) as f64;
+        let total_docs = self
+            .node_count_by_label_in_namespace("", label)
+            .unwrap_or(1)
+            .max(1) as f64;
 
         // Collect per-token document frequencies and document scores
         let mut doc_scores: HashMap<String, f64> = HashMap::new();
@@ -2253,7 +2318,9 @@ impl StorageEngine {
 
             let n_docs_with_term = df.len().max(1) as f64;
             // BM25 IDF: ln(1 + (N - df + 0.5) / (df + 0.5))  -- V2 formula
-            let idf = (1.0 + (total_docs - n_docs_with_term + 0.5) / (n_docs_with_term + 0.5)).ln().max(0.0);
+            let idf = (1.0 + (total_docs - n_docs_with_term + 0.5) / (n_docs_with_term + 0.5))
+                .ln()
+                .max(0.0);
 
             for (node_id, tf) in df {
                 let tf = tf as f64;
@@ -2311,7 +2378,10 @@ impl StorageEngine {
             return Ok(Vec::new());
         }
 
-        let total_docs = self.node_count_by_label_in_namespace("", label).unwrap_or(1).max(1) as f64;
+        let total_docs = self
+            .node_count_by_label_in_namespace("", label)
+            .unwrap_or(1)
+            .max(1) as f64;
 
         // Collect term → (node_id → tf) across all properties
         let mut term_docs: HashMap<String, HashMap<String, usize>> = HashMap::new();
@@ -2401,6 +2471,7 @@ impl StorageEngine {
         self.index_edge(edge)?;
         self.apply_edge_stats_delta(edge, 1)?;
         self.mvcc.put_edge_record(edge)?;
+        self.persist_mvcc_state()?;
 
         if old.is_some() {
             self.notify_edge_updated(edge);
@@ -2467,6 +2538,7 @@ impl StorageEngine {
                     .or_default() += 1;
             }
             self.mvcc.put_edge_record(edge)?;
+            self.persist_mvcc_state()?;
 
             if old.is_some() {
                 self.notify_edge_updated(edge);
@@ -2525,8 +2597,10 @@ impl StorageEngine {
 
             pending += 1;
             if pending >= FLUSH_EVERY {
-                self.edges.fjall_apply_batch(&std::mem::take(&mut edges_batch))?;
-                self.indexes.fjall_apply_batch(&std::mem::take(&mut indexes_batch))?;
+                self.edges
+                    .fjall_apply_batch(&std::mem::take(&mut edges_batch))?;
+                self.indexes
+                    .fjall_apply_batch(&std::mem::take(&mut indexes_batch))?;
                 pending = 0;
             }
         }
@@ -2557,6 +2631,7 @@ impl StorageEngine {
             self.apply_edge_stats_delta(&existing, -1)?;
             self.edges.fjall_remove(id.as_bytes())?;
             self.mvcc.delete_edge_record(id)?;
+            self.persist_mvcc_state()?;
             self.notify_edge_deleted(id);
         }
         Ok(())
@@ -2999,7 +3074,8 @@ impl StorageEngine {
 
     pub fn persist_constraint(&self, constraint: &Constraint) -> Result<(), StorageError> {
         let key = [META_SCHEMA_CONSTRAINT_PREFIX, constraint.name.as_bytes()].concat();
-        self.meta.fjall_insert(key, rmp_serde::to_vec(constraint)?)?;
+        self.meta
+            .fjall_insert(key, rmp_serde::to_vec(constraint)?)?;
         Ok(())
     }
 
@@ -3009,7 +3085,8 @@ impl StorageEngine {
         constraint: &Constraint,
     ) -> Result<(), StorageError> {
         let key = namespace_schema_constraint_key(namespace, &constraint.name);
-        self.meta.fjall_insert(key, rmp_serde::to_vec(constraint)?)?;
+        self.meta
+            .fjall_insert(key, rmp_serde::to_vec(constraint)?)?;
         Ok(())
     }
 
@@ -3237,7 +3314,8 @@ impl StorageEngine {
 
         let mut persisted = binding.clone();
         persisted.target_labels.sort();
-        self.meta.fjall_insert(key, rmp_serde::to_vec(&persisted)?)?;
+        self.meta
+            .fjall_insert(key, rmp_serde::to_vec(&persisted)?)?;
         Ok(())
     }
 
@@ -3563,7 +3641,9 @@ impl StorageEngine {
 
     /// Flush all pending writes to disk.
     pub fn flush(&self) -> Result<(), StorageError> {
-        self.db.persist(fjall::PersistMode::SyncAll).map_err(StorageError::Fjall)?;
+        self.db
+            .persist(fjall::PersistMode::SyncAll)
+            .map_err(StorageError::Fjall)?;
         Ok(())
     }
 
@@ -3576,7 +3656,10 @@ impl StorageEngine {
 
     /// Return the on-disk size in bytes.
     pub fn size_on_disk(&self) -> u64 {
-        self.db.disk_space().map_err(StorageError::Fjall).unwrap_or(0)
+        self.db
+            .disk_space()
+            .map_err(StorageError::Fjall)
+            .unwrap_or(0)
     }
 
     fn index_node_labels(&self, node: &NodeRecord) -> Result<(), StorageError> {
@@ -3674,7 +3757,8 @@ impl StorageEngine {
                 batch.push((key.into_bytes(), Some(Vec::<u8>::new())));
                 pending += 1;
                 if pending >= 4096 {
-                    self.indexes.fjall_apply_batch(&std::mem::take(&mut batch))?;
+                    self.indexes
+                        .fjall_apply_batch(&std::mem::take(&mut batch))?;
                     pending = 0;
                 }
             }
@@ -3757,7 +3841,8 @@ impl StorageEngine {
             batch.push((key, None));
             pending += 1;
             if pending >= 4096 {
-                self.indexes.fjall_apply_batch(&std::mem::take(&mut batch))?;
+                self.indexes
+                    .fjall_apply_batch(&std::mem::take(&mut batch))?;
                 pending = 0;
                 cancel.check_cancelled()?;
             }
@@ -3792,7 +3877,8 @@ impl StorageEngine {
                 batch.push((key, None));
                 pending += 1;
                 if pending >= 4096 {
-                    self.indexes.fjall_apply_batch(&std::mem::take(&mut batch))?;
+                    self.indexes
+                        .fjall_apply_batch(&std::mem::take(&mut batch))?;
                     pending = 0;
                     cancel.check_cancelled()?;
                 }
@@ -3987,7 +4073,8 @@ impl StorageEngine {
         let mut streamed = 0;
         for entry in iter {
             cancel.check_cancelled()?;
-            let (key, value) = entry.map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
+            let (key, value) =
+                entry.map_err(|e| StorageError::Io(std::io::Error::other(e.to_string())))?;
             let key_str =
                 std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
             let raw = self.decode_record_bytes(value.as_ref())?;
@@ -4013,8 +4100,10 @@ impl StorageEngine {
     }
 
     fn delete_namespace_metadata(&self, namespace: &str) -> Result<(), StorageError> {
-        self.meta.fjall_remove(namespace_node_count_key(namespace))?;
-        self.meta.fjall_remove(namespace_edge_count_key(namespace))?;
+        self.meta
+            .fjall_remove(namespace_node_count_key(namespace))?;
+        self.meta
+            .fjall_remove(namespace_edge_count_key(namespace))?;
         self.delete_meta_prefix(&namespace_label_count_prefix(namespace))?;
         self.delete_meta_prefix(namespace_schema_constraint_prefix(namespace).as_bytes())?;
         self.delete_meta_prefix(namespace_schema_index_prefix(namespace).as_bytes())?;
@@ -4047,7 +4136,12 @@ impl Drop for FlushGuard {
     fn drop(&mut self) {
         // Flush fjall to disk. Failures are logged but do not panic — a flush
         // failure should not crash the server.
-        if let Err(e) = self.storage.db.persist(fjall::PersistMode::SyncAll).map_err(StorageError::Fjall) {
+        if let Err(e) = self
+            .storage
+            .db
+            .persist(fjall::PersistMode::SyncAll)
+            .map_err(StorageError::Fjall)
+        {
             tracing::warn!(error = %e, "fjall flush failed during FlushGuard drop");
         }
     }
@@ -4355,12 +4449,38 @@ const BM25_B: f64 = 0.75;
 fn is_stop_word(word: &str) -> bool {
     matches!(
         word,
-        "a" | "an" | "and" | "are" | "as" | "at"
-            | "be" | "but" | "by" | "for" | "if" | "in"
-            | "into" | "is" | "it" | "no" | "not" | "of"
-            | "on" | "or" | "such" | "that" | "the"
-            | "their" | "then" | "there" | "these" | "they"
-            | "this" | "to" | "was" | "will" | "with"
+        "a" | "an"
+            | "and"
+            | "are"
+            | "as"
+            | "at"
+            | "be"
+            | "but"
+            | "by"
+            | "for"
+            | "if"
+            | "in"
+            | "into"
+            | "is"
+            | "it"
+            | "no"
+            | "not"
+            | "of"
+            | "on"
+            | "or"
+            | "such"
+            | "that"
+            | "the"
+            | "their"
+            | "then"
+            | "there"
+            | "these"
+            | "they"
+            | "this"
+            | "to"
+            | "was"
+            | "will"
+            | "with"
     )
 }
 
@@ -4685,18 +4805,19 @@ fn compat_node_record_from_bytes(
 fn node_record_to_legacy_props(node: &NodeRecord) -> BTreeMap<String, serde_json::Value> {
     let mut props = node.properties.clone();
     props.insert(
-            "_id".to_string(),
-            serde_json::Value::String(node.id.clone()),
-        );
+        "_id".to_string(),
+        serde_json::Value::String(node.id.clone()),
+    );
     props.insert(
-            "_labels".to_string(),
-            serde_json::Value::Array(
+        "_labels".to_string(),
+        serde_json::Value::Array(
             node.labels
                 .iter()
                 .cloned()
                 .map(serde_json::Value::String)
-                .collect()),
-        );
+                .collect(),
+        ),
+    );
     props
 }
 
@@ -4755,6 +4876,82 @@ enum BatchOp {
     DeleteEdge(String),
 }
 
+macro_rules! stage_index_key {
+    ($batch:expr, $indexes:expr, $key:expr, $insert:expr) => {
+        if $insert {
+            $batch.insert(&$indexes, $key.into_bytes(), []);
+        } else {
+            $batch.remove(&$indexes, $key.into_bytes());
+        }
+    };
+}
+
+macro_rules! stage_node_indexes {
+    ($batch:expr, $indexes:expr, $node:expr, $property_indexes:expr, $fulltext_indexes:expr, $insert:expr) => {{
+        for label in &$node.labels {
+            stage_index_key!($batch, $indexes, label_index_key(label, &$node.id), $insert);
+        }
+        for index in &$property_indexes {
+            if index.entity_type == IndexEntityType::Node
+                && $node.labels.iter().any(|label| label == &index.label)
+            {
+                if let Some(key) = node_property_index_key_for_node(index, $node) {
+                    stage_index_key!($batch, $indexes, key, $insert);
+                }
+            }
+        }
+        for index in &$fulltext_indexes {
+            if index.entity_type != IndexEntityType::Node
+                || !$node.labels.iter().any(|label| label == &index.label)
+            {
+                continue;
+            }
+            for property in &index.properties {
+                if let Some(value) = $node.properties.get(property) {
+                    for token in fulltext_tokens_for_value(value) {
+                        stage_index_key!(
+                            $batch,
+                            $indexes,
+                            node_fulltext_index_key(&index.label, property, &token, &$node.id),
+                            $insert
+                        );
+                    }
+                }
+            }
+        }
+    }};
+}
+
+macro_rules! stage_edge_indexes {
+    ($batch:expr, $indexes:expr, $edge:expr, $property_indexes:expr, $insert:expr) => {{
+        stage_index_key!(
+            $batch,
+            $indexes,
+            edge_type_index_key(&$edge.edge_type, &$edge.id),
+            $insert
+        );
+        stage_index_key!(
+            $batch,
+            $indexes,
+            edge_start_index_key(&$edge.start_node, &$edge.edge_type, &$edge.id),
+            $insert
+        );
+        stage_index_key!(
+            $batch,
+            $indexes,
+            edge_end_index_key(&$edge.end_node, &$edge.edge_type, &$edge.id),
+            $insert
+        );
+        for index in &$property_indexes {
+            if index.label == $edge.edge_type {
+                if let Some(key) = relationship_property_index_key_for_edge(index, $edge) {
+                    stage_index_key!($batch, $indexes, key, $insert);
+                }
+            }
+        }
+    }};
+}
+
 /// Builder for atomic multi-operation writes within a namespace.
 ///
 /// Operations are buffered and committed atomically: either all succeed or
@@ -4762,6 +4959,95 @@ enum BatchOp {
 pub struct BatchWriter<'a> {
     engine: &'a StorageEngine,
     ops: Vec<BatchOp>,
+}
+
+impl<'a> StorageTransaction<'a> {
+    pub fn snapshot(&self) -> &MvccSnapshot {
+        self.snapshot.snapshot()
+    }
+
+    pub fn get_node_record(&self, id: &str) -> Result<Option<NodeRecord>, StorageError> {
+        match self.node_writes.get(id) {
+            Some(node) => Ok(node.clone()),
+            None => self
+                .engine
+                .get_node_record_visible_at(self.snapshot.snapshot(), id),
+        }
+    }
+
+    pub fn get_edge_record(&self, id: &str) -> Result<Option<EdgeRecord>, StorageError> {
+        match self.edge_writes.get(id) {
+            Some(edge) => Ok(edge.clone()),
+            None => self
+                .engine
+                .get_edge_record_visible_at(self.snapshot.snapshot(), id),
+        }
+    }
+
+    pub fn put_node_record(&mut self, node: NodeRecord) {
+        self.node_writes.insert(node.id.clone(), Some(node));
+    }
+
+    pub fn delete_node_record(&mut self, id: impl Into<String>) {
+        self.node_writes.insert(id.into(), None);
+    }
+
+    pub fn put_edge_record(&mut self, edge: EdgeRecord) {
+        self.edge_writes.insert(edge.id.clone(), Some(edge));
+    }
+
+    pub fn delete_edge_record(&mut self, id: impl Into<String>) {
+        self.edge_writes.insert(id.into(), None);
+    }
+
+    pub fn commit(self) -> Result<(), StorageError> {
+        self.ensure_no_write_conflicts()?;
+        self.engine.batch_write(|batch| {
+            for (id, node) in &self.node_writes {
+                match node {
+                    Some(node) => batch.put_node_record(node),
+                    None => batch.delete_node_record(id),
+                }
+            }
+            for (id, edge) in &self.edge_writes {
+                match edge {
+                    Some(edge) => batch.put_edge_record(edge),
+                    None => batch.delete_edge_record(id),
+                }
+            }
+            Ok::<_, StorageError>(())
+        })
+    }
+
+    pub fn rollback(self) {}
+
+    fn ensure_no_write_conflicts(&self) -> Result<(), StorageError> {
+        for id in self.node_writes.keys() {
+            self.ensure_key_is_unmodified_since_snapshot(&format!("node:{id}"))?;
+        }
+        for id in self.edge_writes.keys() {
+            self.ensure_key_is_unmodified_since_snapshot(&format!("edge:{id}"))?;
+        }
+        Ok(())
+    }
+
+    fn ensure_key_is_unmodified_since_snapshot(
+        &self,
+        logical_key: &str,
+    ) -> Result<(), StorageError> {
+        let Some(head) = self.engine.mvcc.current_head_for_key(logical_key) else {
+            return Ok(());
+        };
+        let snapshot_version = self.snapshot.snapshot().read_ts;
+        if head.head > snapshot_version {
+            return Err(StorageError::TransactionConflict {
+                logical_key: logical_key.to_string(),
+                snapshot_version,
+                current_version: head.head,
+            });
+        }
+        Ok(())
+    }
 }
 
 impl<'a> BatchWriter<'a> {
@@ -4782,16 +5068,176 @@ impl<'a> BatchWriter<'a> {
     }
 
     fn commit(&self) -> Result<(), StorageError> {
+        let node_property_indexes = self.engine.node_property_index_definitions()?;
+        let node_fulltext_indexes = self.engine.node_fulltext_index_definitions()?;
+        let edge_property_indexes = self.engine.relationship_property_index_definitions()?;
+        let mut nodes = HashMap::<String, (Option<NodeRecord>, Option<NodeRecord>)>::new();
+        let mut edges = HashMap::<String, (Option<EdgeRecord>, Option<EdgeRecord>)>::new();
+
         for op in &self.ops {
             match op {
-                BatchOp::PutNode(node) => self.engine.put_node_record(node)?,
-                BatchOp::PutEdge(edge) => self.engine.put_edge_record(edge)?,
+                BatchOp::PutNode(node) => {
+                    let entry = nodes
+                        .entry(node.id.clone())
+                        .or_insert((self.engine.get_node_record(&node.id)?, None));
+                    entry.1 = Some(node.clone());
+                }
                 BatchOp::DeleteNode(id) => {
-                    let _ = self.engine.delete_node_record(id);
+                    let entry = nodes
+                        .entry(id.clone())
+                        .or_insert((self.engine.get_node_record(id)?, None));
+                    entry.1 = None;
+                }
+                BatchOp::PutEdge(edge) => {
+                    let entry = edges
+                        .entry(edge.id.clone())
+                        .or_insert((self.engine.get_edge_record(&edge.id)?, None));
+                    entry.1 = Some(edge.clone());
                 }
                 BatchOp::DeleteEdge(id) => {
-                    let _ = self.engine.delete_edge_record(id);
+                    let entry = edges
+                        .entry(id.clone())
+                        .or_insert((self.engine.get_edge_record(id)?, None));
+                    entry.1 = None;
                 }
+            }
+        }
+
+        let mut batch = self.engine.db.batch();
+        let mut counter_deltas = HashMap::<Vec<u8>, i64>::new();
+        for (id, (old, new)) in &nodes {
+            if let Some(old) = old {
+                stage_node_indexes!(
+                    batch,
+                    self.engine.indexes,
+                    old,
+                    node_property_indexes,
+                    node_fulltext_indexes,
+                    false
+                );
+                stage_node_counter_deltas(&mut counter_deltas, old, -1);
+            }
+            match new {
+                Some(new) => {
+                    batch.insert(
+                        &self.engine.nodes,
+                        id.as_bytes(),
+                        self.engine.encode_record_bytes(rmp_serde::to_vec(new)?)?,
+                    );
+                    stage_node_indexes!(
+                        batch,
+                        self.engine.indexes,
+                        new,
+                        node_property_indexes,
+                        node_fulltext_indexes,
+                        true
+                    );
+                    stage_node_counter_deltas(&mut counter_deltas, new, 1);
+                    if new.needs_embedding() {
+                        batch.insert(&self.engine.meta, pending_embedding_key(id), []);
+                    } else {
+                        batch.remove(&self.engine.meta, pending_embedding_key(id));
+                    }
+                }
+                None => {
+                    batch.remove(&self.engine.nodes, id.as_bytes());
+                    batch.remove(&self.engine.meta, pending_embedding_key(id));
+                }
+            }
+        }
+        for (id, (old, new)) in &edges {
+            if let Some(old) = old {
+                stage_edge_indexes!(
+                    batch,
+                    self.engine.indexes,
+                    old,
+                    edge_property_indexes,
+                    false
+                );
+                stage_edge_counter_deltas(&mut counter_deltas, old, -1);
+            }
+            match new {
+                Some(new) => {
+                    batch.insert(
+                        &self.engine.edges,
+                        id.as_bytes(),
+                        self.engine.encode_record_bytes(rmp_serde::to_vec(new)?)?,
+                    );
+                    stage_edge_indexes!(
+                        batch,
+                        self.engine.indexes,
+                        new,
+                        edge_property_indexes,
+                        true
+                    );
+                    stage_edge_counter_deltas(&mut counter_deltas, new, 1);
+                }
+                None => batch.remove(&self.engine.edges, id.as_bytes()),
+            }
+        }
+        for (key, delta) in counter_deltas {
+            let current = self.engine.meta_counter(key.clone())?;
+            let updated = if delta >= 0 {
+                current.saturating_add(delta as u64)
+            } else {
+                current.saturating_sub(delta.unsigned_abs())
+            };
+            if updated == 0 {
+                batch.remove(&self.engine.meta, key);
+            } else {
+                batch.insert(&self.engine.meta, key, rmp_serde::to_vec(&updated)?);
+            }
+        }
+        batch.commit()?;
+
+        let node_changes = nodes.into_iter().collect::<Vec<_>>();
+        let edge_changes = edges.into_iter().collect::<Vec<_>>();
+        let mutations = node_changes
+            .iter()
+            .filter_map(|(id, (_, new))| match new {
+                Some(node) => Some(MvccRecordMutation::PutNode(node.clone())),
+                None if self
+                    .engine
+                    .mvcc
+                    .current_head_for_key(&format!("node:{id}"))
+                    .is_some() =>
+                {
+                    Some(MvccRecordMutation::DeleteNode(id.clone()))
+                }
+                None => None,
+            })
+            .chain(edge_changes.iter().filter_map(|(id, (_, new))| {
+                match new {
+                    Some(edge) => Some(MvccRecordMutation::PutEdge(edge.clone())),
+                    None if self
+                        .engine
+                        .mvcc
+                        .current_head_for_key(&format!("edge:{id}"))
+                        .is_some() =>
+                    {
+                        Some(MvccRecordMutation::DeleteEdge(id.clone()))
+                    }
+                    None => None,
+                }
+            }))
+            .collect::<Vec<_>>();
+        self.engine.mvcc.commit_record_batch(mutations)?;
+        self.engine.persist_mvcc_state()?;
+
+        for (id, (old, new)) in node_changes {
+            match (old, new) {
+                (None, Some(node)) => self.engine.notify_node_created(&node),
+                (Some(_), Some(node)) => self.engine.notify_node_updated(&node),
+                (Some(_), None) => self.engine.notify_node_deleted(&id),
+                (None, None) => {}
+            }
+        }
+        for (id, (old, new)) in edge_changes {
+            match (old, new) {
+                (None, Some(edge)) => self.engine.notify_edge_created(&edge),
+                (Some(_), Some(edge)) => self.engine.notify_edge_updated(&edge),
+                (Some(_), None) => self.engine.notify_edge_deleted(&id),
+                (None, None) => {}
             }
         }
         Ok(())
@@ -4803,6 +5249,28 @@ impl<'a> BatchWriter<'a> {
 
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
+    }
+}
+
+fn stage_node_counter_deltas(deltas: &mut HashMap<Vec<u8>, i64>, node: &NodeRecord, delta: i64) {
+    let Some(namespace) = namespace_from_str(&node.id) else {
+        return;
+    };
+    *deltas
+        .entry(namespace_node_count_key(namespace))
+        .or_default() += delta;
+    for label in node.labels.iter().collect::<BTreeSet<_>>() {
+        *deltas
+            .entry(namespace_label_count_key(namespace, label))
+            .or_default() += delta;
+    }
+}
+
+fn stage_edge_counter_deltas(deltas: &mut HashMap<Vec<u8>, i64>, edge: &EdgeRecord, delta: i64) {
+    if let Some(namespace) = namespace_from_str(&edge.id) {
+        *deltas
+            .entry(namespace_edge_count_key(namespace))
+            .or_default() += delta;
     }
 }
 

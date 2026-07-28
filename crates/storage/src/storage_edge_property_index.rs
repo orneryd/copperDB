@@ -203,7 +203,8 @@ impl StorageEngine {
                 batch.push((key.into_bytes(), Some(Vec::<u8>::new())));
                 pending += 1;
                 if pending >= 4096 {
-                    self.indexes.fjall_apply_batch(&std::mem::take(&mut batch))?;
+                    self.indexes
+                        .fjall_apply_batch(&std::mem::take(&mut batch))?;
                     pending = 0;
                     cancel.check_cancelled()?;
                 }

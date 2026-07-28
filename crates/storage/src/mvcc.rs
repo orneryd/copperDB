@@ -49,6 +49,14 @@ pub struct MvccHead {
     pub head: u64,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum MvccRecordMutation {
+    PutNode(NodeRecord),
+    DeleteNode(String),
+    PutEdge(EdgeRecord),
+    DeleteEdge(String),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MvccLifecycleStatus {
     pub enabled: bool,
@@ -82,13 +90,13 @@ pub struct MvccLogicalHead {
     pub tombstoned: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct MvccKeyState {
     head: Option<MvccLogicalStateHead>,
     archived: BTreeMap<u64, Option<Vec<u8>>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct MvccLogicalStateHead {
     floor: u64,
     head: u64,
@@ -265,6 +273,17 @@ pub struct MvccStore {
     lifecycle_paused: AtomicU64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PersistedMvccStore {
+    current_version: u64,
+    floor: u64,
+    values: BTreeMap<String, MvccKeyState>,
+    current_node_labels: BTreeMap<String, BTreeSet<String>>,
+    node_label_history: BTreeMap<String, BTreeSet<String>>,
+    current_edge_types: BTreeMap<String, BTreeSet<String>>,
+    edge_type_history: BTreeMap<String, BTreeSet<String>>,
+}
+
 impl Default for MvccStore {
     fn default() -> Self {
         Self {
@@ -285,6 +304,30 @@ impl Default for MvccStore {
 impl MvccStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn persisted_state(&self) -> PersistedMvccStore {
+        PersistedMvccStore {
+            current_version: self.current_version.load(Ordering::SeqCst),
+            floor: self.floor.load(Ordering::SeqCst),
+            values: self.values.read().clone(),
+            current_node_labels: self.current_node_labels.read().clone(),
+            node_label_history: self.node_label_history.read().clone(),
+            current_edge_types: self.current_edge_types.read().clone(),
+            edge_type_history: self.edge_type_history.read().clone(),
+        }
+    }
+
+    pub(crate) fn restore_persisted_state(&self, persisted: PersistedMvccStore) {
+        self.current_version
+            .store(persisted.current_version, Ordering::SeqCst);
+        self.floor.store(persisted.floor, Ordering::SeqCst);
+        *self.values.write() = persisted.values;
+        *self.current_node_labels.write() = persisted.current_node_labels;
+        *self.node_label_history.write() = persisted.node_label_history;
+        *self.current_edge_types.write() = persisted.current_edge_types;
+        *self.edge_type_history.write() = persisted.edge_type_history;
+        self.active_readers.lock().clear();
     }
 
     pub fn for_namespace(&self, namespace: impl Into<String>) -> NamespacedMvccStore<'_> {
@@ -321,6 +364,27 @@ impl MvccStore {
             guard.entry(key).or_default().append_version(version, value);
         }
         version
+    }
+
+    pub(crate) fn commit_record_batch<I>(&self, mutations: I) -> Result<u64, StorageError>
+    where
+        I: IntoIterator<Item = MvccRecordMutation>,
+    {
+        let mutations = mutations.into_iter().collect::<Vec<_>>();
+        if mutations.is_empty() {
+            return Ok(self.current_version.load(Ordering::SeqCst));
+        }
+
+        let version = self.current_version.fetch_add(1, Ordering::SeqCst) + 1;
+        for mutation in mutations {
+            match mutation {
+                MvccRecordMutation::PutNode(node) => self.put_node_record_at(&node, version)?,
+                MvccRecordMutation::DeleteNode(id) => self.delete_node_record_at(&id, version)?,
+                MvccRecordMutation::PutEdge(edge) => self.put_edge_record_at(&edge, version)?,
+                MvccRecordMutation::DeleteEdge(id) => self.delete_edge_record_at(&id, version)?,
+            }
+        }
+        Ok(version)
     }
 
     pub fn read(&self, snapshot: &MvccSnapshot, key: &str) -> Option<Vec<u8>> {
@@ -425,6 +489,11 @@ impl MvccStore {
 
     pub fn put_node_record(&self, node: &NodeRecord) -> Result<u64, StorageError> {
         let version = self.current_version.fetch_add(1, Ordering::SeqCst) + 1;
+        self.put_node_record_at(node, version)?;
+        Ok(version)
+    }
+
+    fn put_node_record_at(&self, node: &NodeRecord, version: u64) -> Result<(), StorageError> {
         let logical_key = node_logical_key(&node.id);
         let encoded = encode_node_record(node)?;
         let mut values = self.values.write();
@@ -454,7 +523,7 @@ impl MvccStore {
             .entry(logical_key)
             .or_default()
             .append_version(version, Some(encoded));
-        Ok(version)
+        Ok(())
     }
 
     pub fn get_node_record(&self, id: &str) -> Result<Option<NodeRecord>, StorageError> {
@@ -474,6 +543,11 @@ impl MvccStore {
 
     pub fn delete_node_record(&self, id: &str) -> Result<u64, StorageError> {
         let version = self.current_version.fetch_add(1, Ordering::SeqCst) + 1;
+        self.delete_node_record_at(id, version)?;
+        Ok(version)
+    }
+
+    fn delete_node_record_at(&self, id: &str, version: u64) -> Result<(), StorageError> {
         let logical_key = node_logical_key(id);
         let mut values = self.values.write();
         let previous = values
@@ -488,7 +562,7 @@ impl MvccStore {
             .entry(logical_key)
             .or_default()
             .append_version(version, None);
-        Ok(version)
+        Ok(())
     }
 
     pub fn get_nodes_by_label(&self, label: &str) -> Result<Vec<NodeRecord>, StorageError> {
@@ -535,6 +609,11 @@ impl MvccStore {
 
     pub fn put_edge_record(&self, edge: &EdgeRecord) -> Result<u64, StorageError> {
         let version = self.current_version.fetch_add(1, Ordering::SeqCst) + 1;
+        self.put_edge_record_at(edge, version)?;
+        Ok(version)
+    }
+
+    fn put_edge_record_at(&self, edge: &EdgeRecord, version: u64) -> Result<(), StorageError> {
         let logical_key = edge_logical_key(&edge.id);
         let encoded = encode_edge_record(edge)?;
         let mut values = self.values.write();
@@ -562,7 +641,7 @@ impl MvccStore {
             .entry(logical_key)
             .or_default()
             .append_version(version, Some(encoded));
-        Ok(version)
+        Ok(())
     }
 
     pub fn get_edge_record(&self, id: &str) -> Result<Option<EdgeRecord>, StorageError> {
@@ -582,6 +661,11 @@ impl MvccStore {
 
     pub fn delete_edge_record(&self, id: &str) -> Result<u64, StorageError> {
         let version = self.current_version.fetch_add(1, Ordering::SeqCst) + 1;
+        self.delete_edge_record_at(id, version)?;
+        Ok(version)
+    }
+
+    fn delete_edge_record_at(&self, id: &str, version: u64) -> Result<(), StorageError> {
         let logical_key = edge_logical_key(id);
         let mut values = self.values.write();
         let previous = values
@@ -596,7 +680,7 @@ impl MvccStore {
             .entry(logical_key)
             .or_default()
             .append_version(version, None);
-        Ok(version)
+        Ok(())
     }
 
     pub fn get_edges_by_type(&self, edge_type: &str) -> Result<Vec<EdgeRecord>, StorageError> {
