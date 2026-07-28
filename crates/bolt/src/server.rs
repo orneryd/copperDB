@@ -19,6 +19,7 @@ use tokio_tungstenite::accept_async;
 use tracing::{debug, info, warn};
 
 const BOLT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_BOLT_CURSORS: usize = 64;
 
 /// Result of executing a Cypher query through Bolt.
 #[derive(Debug, Clone)]
@@ -699,9 +700,17 @@ struct BoltSession {
     database: Option<String>,
     last_query_database: Option<String>,
     current_query: Option<String>,
-    last_result: Option<BoltQueryResult>,
-    result_index: usize,
+    cursors: HashMap<i64, BoltCursor>,
+    last_qid: Option<i64>,
+    next_qid: i64,
+    last_bookmark: Option<String>,
     transaction: Option<BoltTransaction>,
+}
+
+struct BoltCursor {
+    result: BoltQueryResult,
+    index: usize,
+    database: Option<String>,
 }
 
 impl BoltSession {
@@ -713,8 +722,10 @@ impl BoltSession {
             database: None,
             last_query_database: None,
             current_query: None,
-            last_result: None,
-            result_index: 0,
+            cursors: HashMap::new(),
+            last_qid: None,
+            next_qid: 0,
+            last_bookmark: None,
             transaction: None,
         }
     }
@@ -794,6 +805,43 @@ fn rollback_active_transaction(session: &mut BoltSession, executor: &dyn QueryEx
             warn!(%error, transaction_id = %transaction.id, "Bolt session cleanup rollback failed");
         }
     }
+}
+
+fn cursor_qid(session: &BoltSession, qid: i64) -> Option<i64> {
+    if qid == -1 {
+        session.last_qid
+    } else {
+        Some(qid)
+    }
+}
+
+fn cursor_limit(n: i64, remaining: usize) -> usize {
+    if n < 0 {
+        remaining
+    } else {
+        usize::try_from(n).unwrap_or(usize::MAX).min(remaining)
+    }
+}
+
+fn cursor_summary(session: &BoltSession, database: Option<&str>, has_more: bool) -> Vec<Vec<u8>> {
+    let mut metadata = HashMap::from([
+        ("type".into(), serde_json::json!("r")),
+        ("t_last".into(), serde_json::json!(0)),
+        (
+            "db".into(),
+            serde_json::json!(database
+                .or(session.last_query_database.as_deref())
+                .or(session.database.as_deref())
+                .unwrap_or("copperdb")),
+        ),
+    ]);
+    if has_more {
+        metadata.insert("has_more".into(), serde_json::json!(true));
+    }
+    if let Some(bookmark) = &session.last_bookmark {
+        metadata.insert("bookmark".into(), serde_json::json!(bookmark));
+    }
+    vec![dispatch::encode_message(&BoltMessage::Success { metadata })]
 }
 
 fn transaction_failure_response(code: &str, message: &str) -> Vec<Vec<u8>> {
@@ -951,9 +999,23 @@ async fn process_message(
             match execution_result {
                 Ok(result) => {
                     let columns = result.columns.clone();
-                    session.last_result = Some(result);
+                    if session.cursors.len() == MAX_BOLT_CURSORS {
+                        if let Some(oldest_qid) = session.cursors.keys().min().copied() {
+                            session.cursors.remove(&oldest_qid);
+                        }
+                    }
+                    let qid = session.next_qid;
+                    session.next_qid = session.next_qid.wrapping_add(1);
+                    session.cursors.insert(
+                        qid,
+                        BoltCursor {
+                            result,
+                            index: 0,
+                            database: database.clone(),
+                        },
+                    );
+                    session.last_qid = Some(qid);
                     session.last_query_database = database;
-                    session.result_index = 0;
                     let fields_json: Vec<serde_json::Value> = columns
                         .iter()
                         .map(|c| serde_json::Value::String(c.clone()))
@@ -962,6 +1024,7 @@ async fn process_message(
                     Ok(vec![dispatch::encode_message(&BoltMessage::Success {
                         metadata: HashMap::from([
                             ("fields".into(), serde_json::json!(fields_json)),
+                            ("qid".into(), serde_json::json!(qid)),
                             ("t_first".into(), serde_json::json!(0)),
                             ("result_available_after".into(), serde_json::json!(0)),
                         ]),
@@ -982,36 +1045,40 @@ async fn process_message(
                 }
             }
         }
-        BoltMessage::Pull { .. } | BoltMessage::Discard { .. } => {
-            let mut responses: Vec<Vec<u8>> = Vec::new();
-            if let Some(ref result) = session.last_result {
-                info!(rows = result.rows.len(), "bolt PULL → streaming records");
-                // Send one RECORD message per row (rows are position-based Vecs)
-                for row in &result.rows {
-                    responses.push(dispatch::encode_message(&BoltMessage::Record {
-                        data: row.clone(),
-                    }));
-                }
+        BoltMessage::Pull { n, qid } | BoltMessage::Discard { n, qid } => {
+            let Some(qid) = cursor_qid(session, qid) else {
+                return Ok(client_failure_response(
+                    "Neo.ClientError.Request.Invalid",
+                    "no Bolt result cursor is active",
+                ));
+            };
+            let pull = matches!(msg, BoltMessage::Pull { .. });
+            let Some(cursor) = session.cursors.get_mut(&qid) else {
+                return Ok(client_failure_response(
+                    "Neo.ClientError.Request.Invalid",
+                    "unknown Bolt result cursor",
+                ));
+            };
+            let end = cursor.index + cursor_limit(n, cursor.result.rows.len() - cursor.index);
+            let rows = if pull {
+                cursor.result.rows[cursor.index..end].to_vec()
             } else {
-                info!("bolt PULL → no prior result");
+                Vec::new()
+            };
+            cursor.index = end;
+            let has_more = cursor.index < cursor.result.rows.len();
+            let database = cursor.database.clone();
+            if !has_more {
+                session.cursors.remove(&qid);
+                if session.last_qid == Some(qid) {
+                    session.last_qid = session.cursors.keys().max().copied();
+                }
             }
-            // Always send summary SUCCESS (matching NornicDB format:
-            // no has_more when false, includes db and bookmark).
-            responses.push(dispatch::encode_message(&BoltMessage::Success {
-                metadata: HashMap::from([
-                    ("type".into(), serde_json::json!("r")),
-                    ("t_last".into(), serde_json::json!(0)),
-                    ("bookmark".into(), serde_json::json!("")),
-                    (
-                        "db".into(),
-                        serde_json::json!(session
-                            .last_query_database
-                            .as_deref()
-                            .or(session.database.as_deref())
-                            .unwrap_or("copperdb")),
-                    ),
-                ]),
-            }));
+            let mut responses: Vec<Vec<u8>> = rows
+                .into_iter()
+                .map(|row| dispatch::encode_message(&BoltMessage::Record { data: row }))
+                .collect();
+            responses.extend(cursor_summary(session, database.as_deref(), has_more));
             Ok(responses)
         }
         BoltMessage::Begin { extra } => {
@@ -1052,9 +1119,12 @@ async fn process_message(
                 ));
             };
             match executor.commit_transaction(&transaction) {
-                Ok(bookmark) => Ok(vec![dispatch::encode_message(&BoltMessage::Success {
-                    metadata: HashMap::from([("bookmark".into(), serde_json::json!(bookmark))]),
-                })]),
+                Ok(bookmark) => {
+                    session.last_bookmark = Some(bookmark.clone());
+                    Ok(vec![dispatch::encode_message(&BoltMessage::Success {
+                        metadata: HashMap::from([("bookmark".into(), serde_json::json!(bookmark))]),
+                    })])
+                }
                 Err(message) => Ok(transaction_failure_response(
                     "Neo.ClientError.Transaction.TransactionCommitFailed",
                     &message,
@@ -1085,6 +1155,8 @@ async fn process_message(
                 let _ = executor.rollback_transaction(&transaction);
             }
             session.current_query = None;
+            session.cursors.clear();
+            session.last_qid = None;
             Ok(vec![dispatch::encode_message(&BoltMessage::Success {
                 metadata: HashMap::new(),
             })])
@@ -1176,6 +1248,25 @@ mod tests {
 
     struct PrincipalRecordingExecutor {
         principal: Arc<Mutex<Option<BoltPrincipal>>>,
+    }
+
+    struct MultiRowExecutor;
+
+    impl QueryExecutor for MultiRowExecutor {
+        fn execute(
+            &self,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+        ) -> Result<BoltQueryResult, String> {
+            Ok(BoltQueryResult {
+                columns: vec!["value".into()],
+                rows: vec![
+                    vec![serde_json::json!(1)],
+                    vec![serde_json::json!(2)],
+                    vec![serde_json::json!(3)],
+                ],
+            })
+        }
     }
 
     impl QueryExecutor for PrincipalRecordingExecutor {
@@ -1628,6 +1719,92 @@ mod tests {
         );
         assert!(session.transaction.is_none());
         assert_eq!(*operations.lock().unwrap(), vec!["begin", "run", "rollback"]);
+    }
+
+    #[tokio::test]
+    async fn pull_and_discard_page_the_requested_result_cursor() {
+        let mut session = BoltSession::new(false);
+        let executor: Arc<dyn QueryExecutor> = Arc::new(MultiRowExecutor);
+
+        let run = process_message(&run_message(), &mut session, Arc::clone(&executor), None)
+            .await
+            .unwrap();
+        let (run_success, _) = crate::packstream::decode(&run[0]).unwrap();
+        let Value::Struct { fields, .. } = run_success else {
+            panic!("expected RUN success");
+        };
+        let [Value::Map(metadata)] = fields.as_slice() else {
+            panic!("expected RUN metadata");
+        };
+        assert!(metadata.iter().any(|(key, value)| {
+            key == "qid" && value == &Value::Integer(0)
+        }));
+
+        let pull = Value::Struct {
+            signature: 0x3F,
+            fields: vec![Value::Integer(1), Value::Integer(0)],
+        };
+        let pulled = process_message(&pull, &mut session, Arc::clone(&executor), None)
+            .await
+            .unwrap();
+        assert_eq!(pulled.len(), 2);
+        let (record, _) = crate::packstream::decode(&pulled[0]).unwrap();
+        assert!(matches!(record, Value::Struct { signature: 0x71, .. }));
+        let (summary, _) = crate::packstream::decode(&pulled[1]).unwrap();
+        let Value::Struct { fields, .. } = summary else {
+            panic!("expected PULL summary");
+        };
+        let [Value::Map(metadata)] = fields.as_slice() else {
+            panic!("expected PULL summary metadata");
+        };
+        assert!(metadata.iter().any(|(key, value)| {
+            key == "has_more" && value == &Value::Bool(true)
+        }));
+
+        let discard = Value::Struct {
+            signature: 0x2F,
+            fields: vec![Value::Integer(-1), Value::Integer(0)],
+        };
+        let discarded = process_message(&discard, &mut session, Arc::clone(&executor), None)
+            .await
+            .unwrap();
+        assert_eq!(discarded.len(), 1);
+        assert!(session.cursors.is_empty());
+
+        let invalid_pull = Value::Struct {
+            signature: 0x3F,
+            fields: vec![Value::Integer(1), Value::Integer(99)],
+        };
+        assert_eq!(
+            response_signature_with_executor(&invalid_pull, &mut session, executor, None).await,
+            0x7F
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_with_latest_qid_selects_the_newest_remaining_cursor() {
+        let mut session = BoltSession::new(false);
+        let executor: Arc<dyn QueryExecutor> = Arc::new(MultiRowExecutor);
+
+        process_message(&run_message(), &mut session, Arc::clone(&executor), None)
+            .await
+            .unwrap();
+        process_message(&run_message(), &mut session, Arc::clone(&executor), None)
+            .await
+            .unwrap();
+        assert_eq!(session.last_qid, Some(1));
+
+        let latest_pull = Value::Struct {
+            signature: 0x3F,
+            fields: vec![Value::Integer(-1), Value::Integer(-1)],
+        };
+        let responses = process_message(&latest_pull, &mut session, executor, None)
+            .await
+            .unwrap();
+        assert_eq!(responses.len(), 4);
+        assert!(session.cursors.contains_key(&0));
+        assert!(!session.cursors.contains_key(&1));
+        assert_eq!(session.last_qid, Some(0));
     }
 
     #[tokio::test]
