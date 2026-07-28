@@ -4503,6 +4503,273 @@ fn appstate_bolt_executor_traverses_staged_mixed_length_chains() {
 }
 
 #[test]
+fn appstate_bolt_executor_matches_staged_disconnected_patterns() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .expect("BEGIN should create a transaction context");
+
+    executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "CREATE (:TxDisconnected {id: 'a'})-[:LEFT]->(:TxDisconnected {id: 'b'}), (:TxDisconnected {id: 'c'})-[:RIGHT]->(:TxDisconnected {id: 'd'})",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("transactional CREATE should stage disconnected paths");
+    let inside = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "MATCH (a:TxDisconnected {id: 'a'})-[:LEFT]->(b:TxDisconnected {id: 'b'}), (c:TxDisconnected {id: 'c'})-[:RIGHT]->(d:TxDisconnected {id: 'd'}) RETURN a.id AS a, b.id AS b, c.id AS c, d.id AS d",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("transaction should match all staged disconnected segments");
+    assert_eq!(
+        inside.rows,
+        vec![vec![
+            serde_json::json!("a"),
+            serde_json::json!("b"),
+            serde_json::json!("c"),
+            serde_json::json!("d"),
+        ]]
+    );
+    let outside = executor
+        .execute_on_database(
+            Some("copperdb"),
+            "MATCH (:TxDisconnected)-[:LEFT]->(), (:TxDisconnected)-[:RIGHT]->() RETURN count(*) AS count",
+            &empty,
+        )
+        .expect("outside query should execute normally");
+    assert_eq!(outside.rows, vec![vec![serde_json::json!(0)]]);
+}
+
+#[test]
+fn appstate_bolt_executor_optionally_matches_staged_relationships() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .expect("BEGIN should create a transaction context");
+
+    executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "CREATE (:TxOptional {id: 'a'})",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("transactional CREATE should stage the optional-match source node");
+    let missing = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "MATCH (a:TxOptional {id: 'a'}) OPTIONAL MATCH (a)-[:KNOWS]->(b:TxOptional) RETURN a.id AS a, b.id AS b",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("optional match should preserve the staged source row");
+    assert_eq!(
+        missing.rows,
+        vec![vec![serde_json::json!("a"), serde_json::Value::Null]]
+    );
+
+    executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "MATCH (a:TxOptional {id: 'a'}) CREATE (a)-[:KNOWS]->(:TxOptional {id: 'b'})",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("transactional CREATE should stage the optional relationship");
+    let matched = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "MATCH (a:TxOptional {id: 'a'}) OPTIONAL MATCH (a)-[:KNOWS]->(b:TxOptional) RETURN a.id AS a, b.id AS b",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("optional match should find the staged relationship");
+    assert_eq!(
+        matched.rows,
+        vec![vec![serde_json::json!("a"), serde_json::json!("b")]]
+    );
+}
+
+#[test]
+fn appstate_bolt_executor_filters_staged_matches_with_where() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .expect("BEGIN should create a transaction context");
+
+    executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "CREATE (:TxWhere {id: 'a', score: 1}), (:TxWhere {id: 'b', score: 2})",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("transactional CREATE should stage filter candidates");
+    let inside = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "MATCH (n:TxWhere) WHERE n.score > 1 RETURN n.id AS id",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("WHERE should filter staged transaction rows");
+    assert_eq!(inside.rows, vec![vec![serde_json::json!("b")]]);
+    let outside = executor
+        .execute_on_database(
+            Some("copperdb"),
+            "MATCH (:TxWhere) RETURN count(*) AS count",
+            &empty,
+        )
+        .expect("outside query should execute normally");
+    assert_eq!(outside.rows, vec![vec![serde_json::json!(0)]]);
+}
+
+#[test]
+fn appstate_bolt_executor_pipelines_staged_rows_through_with() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .expect("BEGIN should create a transaction context");
+
+    executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "CREATE (:TxWith {id: 'a', score: 1})-[:NEXT]->(:TxWith {id: 'b', score: 2})",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("transactional CREATE should stage WITH pipeline data");
+    let inside = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "MATCH (a:TxWith {id: 'a'})-[:NEXT]->(b:TxWith) WITH a, b WHERE b.score > 1 MATCH (a)-[:NEXT]->(b) RETURN a.id AS a, b.id AS b",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("WITH should retain staged bindings for later transaction-local matching");
+    assert_eq!(
+        inside.rows,
+        vec![vec![serde_json::json!("a"), serde_json::json!("b")]]
+    );
+    let outside = executor
+        .execute_on_database(
+            Some("copperdb"),
+            "MATCH (:TxWith) RETURN count(*) AS count",
+            &empty,
+        )
+        .expect("outside query should execute normally");
+    assert_eq!(outside.rows, vec![vec![serde_json::json!(0)]]);
+}
+
+#[test]
+fn appstate_bolt_executor_unwinds_staged_transaction_rows() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .expect("BEGIN should create a transaction context");
+
+    let created = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "UNWIND ['a', 'b'] AS id CREATE (:TxUnwind {id: id}) RETURN id",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("UNWIND should create staged nodes for every list item");
+    assert_eq!(
+        created.rows,
+        vec![vec![serde_json::json!("a")], vec![serde_json::json!("b")]]
+    );
+    let inside = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "MATCH (n:TxUnwind) RETURN count(*) AS count",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("transaction should read nodes created through UNWIND");
+    assert_eq!(inside.rows, vec![vec![serde_json::json!(2)]]);
+    let outside = executor
+        .execute_on_database(
+            Some("copperdb"),
+            "MATCH (:TxUnwind) RETURN count(*) AS count",
+            &empty,
+        )
+        .expect("outside query should execute normally");
+    assert_eq!(outside.rows, vec![vec![serde_json::json!(0)]]);
+}
+
+#[test]
+fn appstate_bolt_executor_updates_staged_rows_with_foreach() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .expect("BEGIN should create a transaction context");
+
+    executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "CREATE (:TxForeach {id: 'a', score: 0})",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("transactional CREATE should stage the FOREACH target");
+    let inside = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "MATCH (n:TxForeach {id: 'a'}) FOREACH (increment IN [1, 2] | SET n.score = n.score + increment) RETURN n.score AS score",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("FOREACH should update the staged target through the transaction overlay");
+    assert_eq!(inside.rows, vec![vec![serde_json::json!(3)]]);
+    let outside = executor
+        .execute_on_database(
+            Some("copperdb"),
+            "MATCH (:TxForeach) RETURN count(*) AS count",
+            &empty,
+        )
+        .expect("outside query should execute normally");
+    assert_eq!(outside.rows, vec![vec![serde_json::json!(0)]]);
+}
+
+#[test]
 fn appstate_bolt_executor_stages_set_and_detach_delete_writes() {
     let temp_dir = tempfile::tempdir().unwrap();
     let state = demo_temp_appstate_with_catalog(&temp_dir);

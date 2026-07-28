@@ -316,6 +316,27 @@ pub struct WALEntry {
     pub checksum: u32,
 }
 
+/// A complete, versioned transaction payload stored in one WAL entry.
+///
+/// The frame keeps recovery from replaying a prefix of a multi-record graph
+/// mutation when storage starts owning WAL replay.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WALTransactionFrame {
+    pub version: u32,
+    pub transaction_id: String,
+    pub records: Vec<WALTransactionRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WALTransactionRecord {
+    pub op: String,
+    pub key: String,
+    pub payload: Vec<u8>,
+}
+
+const WAL_TRANSACTION_FRAME_VERSION: u32 = 1;
+const WAL_TRANSACTION_FRAME_OP: &str = "transaction";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WALSegment {
     pub segment_id: u64,
@@ -476,6 +497,40 @@ impl WAL {
         self.persist_entries(&entries)?;
         self.recompute_segments(entries.len());
         Ok((first, last))
+    }
+
+    /// Append one complete transaction as a single replay unit.
+    pub fn append_transaction(
+        &self,
+        transaction_id: impl Into<String>,
+        records: Vec<WALTransactionRecord>,
+    ) -> Result<WALEntry, StorageError> {
+        let frame = WALTransactionFrame {
+            version: WAL_TRANSACTION_FRAME_VERSION,
+            transaction_id: transaction_id.into(),
+            records,
+        };
+        let payload = rmp_serde::to_vec(&frame)?;
+        self.append(WAL_TRANSACTION_FRAME_OP, &frame.transaction_id, &payload)
+    }
+
+    /// Replay complete transaction frames after an applied sequence marker.
+    pub fn replay_transactions_after(
+        &self,
+        after_seq: u64,
+    ) -> Result<Vec<(u64, WALTransactionFrame)>, StorageError> {
+        self.replay_after(after_seq)?
+            .into_iter()
+            .filter(|entry| entry.op == WAL_TRANSACTION_FRAME_OP)
+            .map(|entry| {
+                let frame = rmp_serde::from_slice::<WALTransactionFrame>(&entry.payload)
+                    .map_err(|_| StorageError::WalMissingOrInvalidTrailer)?;
+                if frame.version != WAL_TRANSACTION_FRAME_VERSION {
+                    return Err(StorageError::WalMissingOrInvalidTrailer);
+                }
+                Ok((entry.seq, frame))
+            })
+            .collect()
     }
 
     pub fn replay_after(&self, after_seq: u64) -> Result<Vec<WALEntry>, StorageError> {
@@ -1182,6 +1237,7 @@ pub struct StorageEngine {
     edges: Keyspace,
     indexes: Keyspace,
     mvcc: MvccStore,
+    batch_commit_lock: Mutex<()>,
     encryption: Option<StorageEncryption>,
     temp_dir: Option<tempfile::TempDir>,
     // Event callbacks
@@ -1327,6 +1383,7 @@ impl StorageEngine {
             edges,
             indexes,
             mvcc: MvccStore::new(),
+            batch_commit_lock: Mutex::new(()),
             encryption: None,
             temp_dir: Some(temp_dir),
             on_node_created_cb: RwLock::new(None),
@@ -1365,6 +1422,7 @@ impl StorageEngine {
             edges,
             indexes,
             mvcc: MvccStore::new(),
+            batch_commit_lock: Mutex::new(()),
             encryption,
             temp_dir: None,
             on_node_created_cb: RwLock::new(None),
@@ -5221,6 +5279,7 @@ impl<'a> BatchWriter<'a> {
     }
 
     fn commit(&self) -> Result<(), StorageError> {
+        let _commit_guard = self.engine.batch_commit_lock.lock();
         let node_property_indexes = self.engine.node_property_index_definitions()?;
         let node_fulltext_indexes = self.engine.node_fulltext_index_definitions()?;
         let edge_property_indexes = self.engine.relationship_property_index_definitions()?;
@@ -5255,6 +5314,38 @@ impl<'a> BatchWriter<'a> {
                 }
             }
         }
+
+        let mutations = nodes
+            .iter()
+            .filter_map(|(id, (_, new))| match new {
+                Some(node) => Some(MvccRecordMutation::PutNode(node.clone())),
+                None if self
+                    .engine
+                    .mvcc
+                    .current_head_for_key(&format!("node:{id}"))
+                    .is_some() =>
+                {
+                    Some(MvccRecordMutation::DeleteNode(id.clone()))
+                }
+                None => None,
+            })
+            .chain(edges.iter().filter_map(|(id, (_, new))| match new {
+                Some(edge) => Some(MvccRecordMutation::PutEdge(edge.clone())),
+                None if self
+                    .engine
+                    .mvcc
+                    .current_head_for_key(&format!("edge:{id}"))
+                    .is_some() =>
+                {
+                    Some(MvccRecordMutation::DeleteEdge(id.clone()))
+                }
+                None => None,
+            }))
+            .collect::<Vec<_>>();
+        let (staged_mvcc_state, _) = self
+            .engine
+            .mvcc
+            .staged_record_batch_state(mutations.clone())?;
 
         let mut batch = self.engine.db.batch();
         let mut counter_deltas = HashMap::<Vec<u8>, i64>::new();
@@ -5341,41 +5432,16 @@ impl<'a> BatchWriter<'a> {
                 batch.insert(&self.engine.meta, key, rmp_serde::to_vec(&updated)?);
             }
         }
+        batch.insert(
+            &self.engine.meta,
+            META_MVCC_STATE_KEY,
+            rmp_serde::to_vec(&staged_mvcc_state)?,
+        );
         batch.commit()?;
 
         let node_changes = nodes.into_iter().collect::<Vec<_>>();
         let edge_changes = edges.into_iter().collect::<Vec<_>>();
-        let mutations = node_changes
-            .iter()
-            .filter_map(|(id, (_, new))| match new {
-                Some(node) => Some(MvccRecordMutation::PutNode(node.clone())),
-                None if self
-                    .engine
-                    .mvcc
-                    .current_head_for_key(&format!("node:{id}"))
-                    .is_some() =>
-                {
-                    Some(MvccRecordMutation::DeleteNode(id.clone()))
-                }
-                None => None,
-            })
-            .chain(edge_changes.iter().filter_map(|(id, (_, new))| {
-                match new {
-                    Some(edge) => Some(MvccRecordMutation::PutEdge(edge.clone())),
-                    None if self
-                        .engine
-                        .mvcc
-                        .current_head_for_key(&format!("edge:{id}"))
-                        .is_some() =>
-                    {
-                        Some(MvccRecordMutation::DeleteEdge(id.clone()))
-                    }
-                    None => None,
-                }
-            }))
-            .collect::<Vec<_>>();
-        self.engine.mvcc.commit_record_batch(mutations)?;
-        self.engine.persist_mvcc_state()?;
+        self.engine.mvcc.restore_persisted_state(staged_mvcc_state);
 
         for (id, (old, new)) in node_changes {
             match (old, new) {

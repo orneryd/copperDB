@@ -341,13 +341,15 @@ impl EvalEngine {
             match clause {
                 Clause::Create(create) => {
                     for row in &mut current_rows {
-                        self.execute_storage_transaction_create_pattern(
-                            transaction,
-                            row,
-                            &create.pattern,
-                            params,
-                            &mut stats,
-                        )?;
+                        for segment in create.pattern.split_segments() {
+                            self.execute_storage_transaction_create_pattern(
+                                transaction,
+                                row,
+                                &segment,
+                                params,
+                                &mut stats,
+                            )?;
+                        }
                     }
                 }
                 Clause::Match(match_clause) => {
@@ -357,6 +359,103 @@ impl EvalEngine {
                         &match_clause.pattern,
                         params,
                     )?;
+                }
+                Clause::OptionalMatch(match_clause) => {
+                    let mut optional_rows = Vec::new();
+                    for row in &current_rows {
+                        let matched = self.execute_storage_transaction_match_pattern(
+                            transaction,
+                            std::slice::from_ref(row),
+                            &match_clause.pattern,
+                            params,
+                        )?;
+                        if matched.is_empty() {
+                            let mut unmatched = row.clone();
+                            bind_optional_pattern_nulls(&mut unmatched, &match_clause.pattern);
+                            optional_rows.push(unmatched);
+                        } else {
+                            optional_rows.extend(matched);
+                        }
+                    }
+                    current_rows = optional_rows;
+                }
+                Clause::Where(where_clause) => {
+                    let mut filtered = Vec::new();
+                    for row in current_rows {
+                        if self.eval_where_predicate(&where_clause.expression, &row, params)? {
+                            filtered.push(row);
+                        }
+                    }
+                    current_rows = filtered;
+                }
+                Clause::With(with_clause) => {
+                    let has_aggregates =
+                        has_aggregation_items(&with_clause.items) && !current_rows.is_empty();
+                    let mut projected = if has_aggregates {
+                        apply_aggregation_to_rows(&current_rows, &with_clause.items, params)?
+                    } else {
+                        current_rows
+                            .iter()
+                            .map(|row| self.project_row(row, &with_clause.items, params))
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+                    if let Some(where_clause) = &with_clause.where_clause {
+                        let mut filtered = Vec::new();
+                        for row in projected {
+                            if eval_predicate(&where_clause.expression, &row, params)
+                                .map_err(|error| EvalError::FilterError(error.to_string()))?
+                            {
+                                filtered.push(row);
+                            }
+                        }
+                        projected = filtered;
+                    }
+                    if !with_clause.order_by.is_empty() {
+                        sort_rows_by_with_order(&mut projected, with_clause);
+                    }
+                    apply_with_window(&mut projected, with_clause, params);
+                    current_rows = projected;
+                }
+                Clause::Unwind(unwind) => {
+                    let mut expanded = Vec::new();
+                    for row in &current_rows {
+                        if let Value::Array(values) =
+                            self.evaluate_expression(&unwind.expression, row, params)?
+                        {
+                            for value in values {
+                                let mut expanded_row = row.clone();
+                                expanded_row.insert(unwind.variable.clone(), value);
+                                expanded.push(expanded_row);
+                            }
+                        }
+                    }
+                    current_rows = expanded;
+                }
+                Clause::Foreach(foreach) => {
+                    for row in &mut current_rows {
+                        if let Value::Array(values) =
+                            self.evaluate_expression(&foreach.list, row, params)?
+                        {
+                            for value in values {
+                                row.insert(foreach.variable.clone(), value);
+                                for update in &foreach.updates {
+                                    let Clause::Set(set_clause) = update else {
+                                        return Err(EvalError::ExecutionError(
+                                            "explicit transaction FOREACH currently supports SET updates only"
+                                                .to_string(),
+                                        ));
+                                    };
+                                    self.execute_storage_transaction_set_clause(
+                                        transaction,
+                                        std::slice::from_mut(row),
+                                        &set_clause.items,
+                                        params,
+                                        &mut stats,
+                                    )?;
+                                }
+                            }
+                        }
+                    }
                 }
                 Clause::Set(set_clause) => {
                     self.execute_storage_transaction_set_clause(
@@ -530,6 +629,20 @@ impl EvalEngine {
         pattern: &Pattern,
         params: &HashMap<String, Value>,
     ) -> Result<Vec<Row>, EvalError> {
+        let segments = pattern.split_segments();
+        if segments.len() > 1 {
+            let mut rows = base_rows.to_vec();
+            for segment in segments {
+                rows = self.execute_storage_transaction_match_pattern(
+                    transaction,
+                    &rows,
+                    &segment,
+                    params,
+                )?;
+            }
+            return Ok(rows);
+        }
+
         if pattern.edges.is_empty() {
             let mut current_rows = base_rows.to_vec();
             for node_pattern in &pattern.nodes {

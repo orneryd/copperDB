@@ -387,6 +387,20 @@ impl MvccStore {
         Ok(version)
     }
 
+    pub(crate) fn staged_record_batch_state<I>(
+        &self,
+        mutations: I,
+    ) -> Result<(PersistedMvccStore, u64), StorageError>
+    where
+        I: IntoIterator<Item = MvccRecordMutation>,
+    {
+        let staged = MvccStore::new();
+        staged.restore_persisted_state(self.persisted_state());
+        let version = staged.commit_record_batch(mutations)?;
+        let state = staged.persisted_state();
+        Ok((state, version))
+    }
+
     pub fn read(&self, snapshot: &MvccSnapshot, key: &str) -> Option<Vec<u8>> {
         let guard = self.values.read();
         guard

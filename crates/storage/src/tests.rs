@@ -1345,6 +1345,41 @@ fn storage_transaction_keeps_writes_private_until_commit() {
 }
 
 #[test]
+fn storage_transaction_persists_its_mvcc_boundary_across_reopen() {
+    let test_dir = tempfile::tempdir().unwrap();
+    let before_commit = {
+        let engine = StorageEngine::open(test_dir.path()).unwrap();
+        let snapshot = engine.begin_mvcc_snapshot();
+        let mut transaction = engine.begin_transaction();
+        transaction.put_node_record(sample_node("source", &["Node"]));
+        transaction.put_node_record(sample_node("target", &["Node"]));
+        transaction.put_edge_record(sample_edge("edge", "LINK", "source", "target"));
+        transaction.commit().unwrap();
+        snapshot
+    };
+
+    let reopened = StorageEngine::open(test_dir.path()).unwrap();
+    assert!(reopened
+        .get_node_record_visible_at(&before_commit, "source")
+        .unwrap()
+        .is_none());
+    assert!(reopened
+        .get_edge_record_visible_at(&before_commit, "edge")
+        .unwrap()
+        .is_none());
+
+    let after_commit = reopened.begin_mvcc_snapshot();
+    assert!(reopened
+        .get_node_record_visible_at(&after_commit, "source")
+        .unwrap()
+        .is_some());
+    assert!(reopened
+        .get_edge_record_visible_at(&after_commit, "edge")
+        .unwrap()
+        .is_some());
+}
+
+#[test]
 fn owned_storage_transaction_keeps_the_engine_alive_until_commit() {
     let engine = Arc::new(StorageEngine::open_temporary().unwrap());
     let mut transaction = engine.begin_owned_transaction();
@@ -3998,6 +4033,44 @@ fn wal_persists_entries_and_reopens_next_sequence() {
     assert_eq!(replay[2].op, "delete");
     let next = reopened.append("put", "node:3", b"c").unwrap();
     assert_eq!(next.seq, 4);
+}
+
+#[test]
+fn wal_persists_and_replays_complete_transaction_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let wal_path = dir.path().join("wal.rmp");
+    let transaction_id = "tx-1";
+
+    let seq = {
+        let wal = WAL::open(&wal_path, WALConfig::default()).unwrap();
+        wal.append_transaction(
+            transaction_id,
+            vec![
+                WALTransactionRecord {
+                    op: "put".to_string(),
+                    key: "node:source".to_string(),
+                    payload: b"source".to_vec(),
+                },
+                WALTransactionRecord {
+                    op: "put".to_string(),
+                    key: "edge:link".to_string(),
+                    payload: b"link".to_vec(),
+                },
+            ],
+        )
+        .unwrap()
+        .seq
+    };
+
+    let reopened = WAL::open(&wal_path, WALConfig::default()).unwrap();
+    let frames = reopened.replay_transactions_after(0).unwrap();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].0, seq);
+    assert_eq!(frames[0].1.transaction_id, transaction_id);
+    assert_eq!(frames[0].1.version, 1);
+    assert_eq!(frames[0].1.records.len(), 2);
+    assert_eq!(frames[0].1.records[1].key, "edge:link");
+    assert!(reopened.replay_transactions_after(seq).unwrap().is_empty());
 }
 
 #[test]
