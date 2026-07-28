@@ -1380,6 +1380,66 @@ fn storage_transaction_persists_its_mvcc_boundary_across_reopen() {
 }
 
 #[test]
+fn storage_transaction_persists_wal_frame_and_applied_marker_across_reopen() {
+    let test_dir = tempfile::tempdir().unwrap();
+    let applied_sequence = {
+        let engine = StorageEngine::open(test_dir.path()).unwrap();
+        let mut transaction = engine.begin_transaction();
+        transaction.put_node_record(sample_node("source", &["Node"]));
+        transaction.put_node_record(sample_node("target", &["Node"]));
+        transaction.put_edge_record(sample_edge("edge", "LINK", "source", "target"));
+        transaction.commit().unwrap();
+
+        assert_eq!(engine.wal_stats().entries, 1);
+        assert_eq!(engine.wal_applied_sequence().unwrap(), 1);
+        engine.wal_applied_sequence().unwrap()
+    };
+
+    let reopened = StorageEngine::open(test_dir.path()).unwrap();
+    assert_eq!(reopened.wal_stats().entries, 1);
+    assert_eq!(reopened.wal_stats().next_seq, applied_sequence);
+    assert_eq!(reopened.wal_applied_sequence().unwrap(), applied_sequence);
+
+    let wal = WAL::open(test_dir.path().join("wal.rmp"), WALConfig::default()).unwrap();
+    let frames = wal.replay_transactions_after(0).unwrap();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].0, applied_sequence);
+    assert_eq!(frames[0].1.records.len(), 3);
+}
+
+#[test]
+fn storage_open_replays_unapplied_wal_transaction_frame_once() {
+    let test_dir = tempfile::tempdir().unwrap();
+    StorageEngine::open(test_dir.path()).unwrap();
+
+    let node = sample_node("recovered", &["Node"]);
+    let wal = WAL::open(test_dir.path().join("wal.rmp"), WALConfig::default()).unwrap();
+    let sequence = wal
+        .append_transaction(
+            "recovery-test",
+            vec![WALTransactionRecord {
+                op: "put_node".to_string(),
+                key: node.id.clone(),
+                payload: rmp_serde::to_vec(&node).unwrap(),
+            }],
+        )
+        .unwrap()
+        .seq;
+    drop(wal);
+
+    let recovered = StorageEngine::open(test_dir.path()).unwrap();
+    assert_eq!(recovered.get_node_record(&node.id).unwrap(), Some(node.clone()));
+    assert_eq!(recovered.wal_applied_sequence().unwrap(), sequence);
+    assert_eq!(recovered.wal_stats().entries, 1);
+    drop(recovered);
+
+    let reopened = StorageEngine::open(test_dir.path()).unwrap();
+    assert_eq!(reopened.get_node_record(&node.id).unwrap(), Some(node));
+    assert_eq!(reopened.wal_applied_sequence().unwrap(), sequence);
+    assert_eq!(reopened.wal_stats().entries, 1);
+}
+
+#[test]
 fn owned_storage_transaction_keeps_the_engine_alive_until_commit() {
     let engine = Arc::new(StorageEngine::open_temporary().unwrap());
     let mut transaction = engine.begin_owned_transaction();

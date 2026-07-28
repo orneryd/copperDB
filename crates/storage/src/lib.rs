@@ -191,6 +191,7 @@ pub const STORAGE_LAYOUT_VERSION: u8 = 0;
 const META_LAYOUT_MANIFEST_KEY: &[u8] = b"layout_manifest";
 const META_ENCRYPTION_MANIFEST_KEY: &[u8] = b"encryption_manifest";
 const META_MVCC_STATE_KEY: &[u8] = b"mvcc_state";
+const META_WAL_APPLIED_SEQUENCE_KEY: &[u8] = b"wal_applied_sequence";
 const META_TOPOLOGY_PEER_PREFIX: &[u8] = b"topology_peer/";
 const META_TOPOLOGY_PROFILE_PREFIX: &[u8] = b"topology_profile/";
 const META_TOPOLOGY_PLACEMENT_PREFIX: &[u8] = b"topology_placement/";
@@ -1237,6 +1238,7 @@ pub struct StorageEngine {
     edges: Keyspace,
     indexes: Keyspace,
     mvcc: MvccStore,
+    wal: WAL,
     batch_commit_lock: Mutex<()>,
     encryption: Option<StorageEncryption>,
     temp_dir: Option<tempfile::TempDir>,
@@ -1342,7 +1344,7 @@ impl StorageEngine {
         let path = path.as_ref();
         fs::create_dir_all(path).map_err(StorageError::Io)?;
         let db = Database::open(fjall::Config::new(path)).map_err(StorageError::Fjall)?;
-        Self::open_with_db(db, None)
+        Self::open_with_db(db, None, WAL::open(path.join("wal.rmp"), WALConfig::default())?)
     }
 
     /// Open a storage engine without replaying current records into the MVCC
@@ -1352,7 +1354,12 @@ impl StorageEngine {
     pub fn open_metadata(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         let path = path.as_ref();
         let db = Database::open(fjall::Config::new(path)).map_err(StorageError::Fjall)?;
-        Self::open_with_db_options(db, None, false)
+        Self::open_with_db_options(
+            db,
+            None,
+            WAL::open(path.join("wal.rmp"), WALConfig::default())?,
+            false,
+        )
     }
 
     /// Open (or create) a storage engine whose graph records are encrypted using
@@ -1365,7 +1372,11 @@ impl StorageEngine {
         let path = path.as_ref();
         let db = Database::open(fjall::Config::new(path)).map_err(StorageError::Fjall)?;
         let encryption = StorageEncryption::new(provider, key_uri.into())?;
-        Self::open_with_db(db, Some(encryption))
+        Self::open_with_db(
+            db,
+            Some(encryption),
+            WAL::open(path.join("wal.rmp"), WALConfig::default())?,
+        )
     }
 
     /// Open an in-memory (temporary) storage engine for testing.
@@ -1383,6 +1394,7 @@ impl StorageEngine {
             edges,
             indexes,
             mvcc: MvccStore::new(),
+            wal: WAL::new(WALConfig::default()),
             batch_commit_lock: Mutex::new(()),
             encryption: None,
             temp_dir: Some(temp_dir),
@@ -1402,13 +1414,15 @@ impl StorageEngine {
     fn open_with_db(
         db: Database,
         encryption: Option<StorageEncryption>,
+        wal: WAL,
     ) -> Result<Self, StorageError> {
-        Self::open_with_db_options(db, encryption, true)
+        Self::open_with_db_options(db, encryption, wal, true)
     }
 
     fn open_with_db_options(
         db: Database,
         encryption: Option<StorageEncryption>,
+        wal: WAL,
         bootstrap_mvcc: bool,
     ) -> Result<Self, StorageError> {
         let meta = db.keyspace("meta", KeyspaceCreateOptions::default)?;
@@ -1422,6 +1436,7 @@ impl StorageEngine {
             edges,
             indexes,
             mvcc: MvccStore::new(),
+            wal,
             batch_commit_lock: Mutex::new(()),
             encryption,
             temp_dir: None,
@@ -1436,6 +1451,7 @@ impl StorageEngine {
         engine.ensure_encryption_manifest()?;
         if bootstrap_mvcc {
             engine.restore_or_bootstrap_mvcc()?;
+            engine.recover_wal_transactions()?;
         }
         Ok(engine)
     }
@@ -1469,6 +1485,31 @@ impl StorageEngine {
             META_MVCC_STATE_KEY,
             rmp_serde::to_vec(&self.mvcc.persisted_state())?,
         )?;
+        Ok(())
+    }
+
+    fn recover_wal_transactions(&self) -> Result<(), StorageError> {
+        let applied_sequence = self.wal_applied_sequence()?;
+        for (sequence, frame) in self.wal.replay_transactions_after(applied_sequence)? {
+            let mut writer = BatchWriter {
+                engine: self,
+                ops: Vec::with_capacity(frame.records.len()),
+            };
+            for record in frame.records {
+                match record.op.as_str() {
+                    "put_node" => writer.put_node_record(&rmp_serde::from_slice(&record.payload)?),
+                    "delete_node" if record.payload.is_empty() => {
+                        writer.delete_node_record(&record.key)
+                    }
+                    "put_edge" => writer.put_edge_record(&rmp_serde::from_slice(&record.payload)?),
+                    "delete_edge" if record.payload.is_empty() => {
+                        writer.delete_edge_record(&record.key)
+                    }
+                    _ => return Err(StorageError::WalMissingOrInvalidTrailer),
+                }
+            }
+            writer.commit_with_wal_sequence(Some(sequence))?;
+        }
         Ok(())
     }
 
@@ -1565,6 +1606,17 @@ impl StorageEngine {
 
     pub fn is_encrypted(&self) -> bool {
         self.encryption.is_some()
+    }
+
+    pub fn wal_applied_sequence(&self) -> Result<u64, StorageError> {
+        match self.meta.fjall_get(META_WAL_APPLIED_SEQUENCE_KEY)? {
+            Some(raw) => Ok(rmp_serde::from_slice(raw.as_slice())?),
+            None => Ok(0),
+        }
+    }
+
+    pub fn wal_stats(&self) -> WALStats {
+        self.wal.stats()
     }
 
     pub fn encryption_manifest(&self) -> Result<Option<StorageEncryptionManifest>, StorageError> {
@@ -5279,6 +5331,10 @@ impl<'a> BatchWriter<'a> {
     }
 
     fn commit(&self) -> Result<(), StorageError> {
+        self.commit_with_wal_sequence(None)
+    }
+
+    fn commit_with_wal_sequence(&self, replay_sequence: Option<u64>) -> Result<(), StorageError> {
         let _commit_guard = self.engine.batch_commit_lock.lock();
         let node_property_indexes = self.engine.node_property_index_definitions()?;
         let node_fulltext_indexes = self.engine.node_fulltext_index_definitions()?;
@@ -5346,6 +5402,46 @@ impl<'a> BatchWriter<'a> {
             .engine
             .mvcc
             .staged_record_batch_state(mutations.clone())?;
+        let mut wal_records = nodes
+            .iter()
+            .map(|(id, (_, new))| match new {
+                Some(node) => Ok(WALTransactionRecord {
+                    op: "put_node".to_string(),
+                    key: id.clone(),
+                    payload: rmp_serde::to_vec(node)?,
+                }),
+                None => Ok(WALTransactionRecord {
+                    op: "delete_node".to_string(),
+                    key: id.clone(),
+                    payload: Vec::new(),
+                }),
+            })
+            .chain(edges.iter().map(|(id, (_, new))| match new {
+                Some(edge) => Ok(WALTransactionRecord {
+                    op: "put_edge".to_string(),
+                    key: id.clone(),
+                    payload: rmp_serde::to_vec(edge)?,
+                }),
+                None => Ok(WALTransactionRecord {
+                    op: "delete_edge".to_string(),
+                    key: id.clone(),
+                    payload: Vec::new(),
+                }),
+            }))
+            .collect::<Result<Vec<_>, rmp_serde::encode::Error>>()?;
+        wal_records.sort_by(|left, right| left.op.cmp(&right.op).then(left.key.cmp(&right.key)));
+        let wal_sequence = match replay_sequence {
+            Some(sequence) => Some(sequence),
+            None => (!wal_records.is_empty())
+                .then(|| {
+                    self.engine.wal.append_transaction(
+                        format!("storage-{}", self.engine.wal.stats().next_seq + 1),
+                        wal_records,
+                    )
+                })
+                .transpose()?
+                .map(|entry| entry.seq),
+        };
 
         let mut batch = self.engine.db.batch();
         let mut counter_deltas = HashMap::<Vec<u8>, i64>::new();
@@ -5437,6 +5533,13 @@ impl<'a> BatchWriter<'a> {
             META_MVCC_STATE_KEY,
             rmp_serde::to_vec(&staged_mvcc_state)?,
         );
+        if let Some(wal_sequence) = wal_sequence {
+            batch.insert(
+                &self.engine.meta,
+                META_WAL_APPLIED_SEQUENCE_KEY,
+                rmp_serde::to_vec(&wal_sequence)?,
+            );
+        }
         batch.commit()?;
 
         let node_changes = nodes.into_iter().collect::<Vec<_>>();
