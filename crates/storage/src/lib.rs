@@ -268,6 +268,8 @@ pub enum StorageError {
     WalChecksumVerificationFailed,
     #[error("wal: missing or invalid trailer (incomplete write)")]
     WalMissingOrInvalidTrailer,
+    #[error("wal: repair would discard unapplied entries after sequence {applied_sequence}")]
+    WalRepairWouldLoseUnappliedEntries { applied_sequence: u64 },
     #[error("constraint \"{0}\" already exists")]
     ConstraintAlreadyExists(String),
     #[error("constraint \"{0}\" not found")]
@@ -403,6 +405,12 @@ impl WAL {
     }
 
     pub fn open(path: impl AsRef<Path>, config: WALConfig) -> Result<Self, StorageError> {
+        let wal = Self::open_unverified(path, config)?;
+        wal.verify_entries()?;
+        Ok(wal)
+    }
+
+    fn open_unverified(path: impl AsRef<Path>, config: WALConfig) -> Result<Self, StorageError> {
         let path = path.as_ref().to_path_buf();
         // A leftover replacement file was never made authoritative. Keep the
         // previous durable WAL rather than attempting to replay staged bytes.
@@ -438,7 +446,6 @@ impl WAL {
             entries: Mutex::new(entries),
             segments: Mutex::new(Vec::new()),
         };
-        wal.verify_entries()?;
         wal.recompute_segments(wal.entries.lock().len());
         Ok(wal)
     }
@@ -1351,6 +1358,25 @@ impl StorageEngine {
         fs::create_dir_all(path).map_err(StorageError::Io)?;
         let db = Database::open(fjall::Config::new(path)).map_err(StorageError::Fjall)?;
         Self::open_with_db(db, None, WAL::open(path.join("wal.rmp"), WALConfig::default())?)
+    }
+
+    /// Discard a corrupt WAL only when Fjall has already applied every entry.
+    ///
+    /// This deliberately refuses to truncate a suffix that could contain
+    /// durable transaction intent not yet reflected in the primary store.
+    pub fn repair_wal_if_fully_applied(path: impl AsRef<Path>) -> Result<usize, StorageError> {
+        let path = path.as_ref();
+        let db = Database::open(fjall::Config::new(path)).map_err(StorageError::Fjall)?;
+        let meta = db.keyspace("meta", KeyspaceCreateOptions::default)?;
+        let applied_sequence = match meta.fjall_get(META_WAL_APPLIED_SEQUENCE_KEY)? {
+            Some(raw) => rmp_serde::from_slice(raw.as_slice())?,
+            None => 0,
+        };
+        let wal = WAL::open_unverified(path.join("wal.rmp"), WALConfig::default())?;
+        if wal.stats().next_seq > applied_sequence {
+            return Err(StorageError::WalRepairWouldLoseUnappliedEntries { applied_sequence });
+        }
+        wal.compact_up_to(applied_sequence)
     }
 
     /// Open a storage engine without replaying current records into the MVCC

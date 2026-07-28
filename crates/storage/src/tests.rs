@@ -1516,6 +1516,75 @@ fn storage_open_discards_interrupted_wal_replacement_file() {
 }
 
 #[test]
+fn storage_repairs_corrupt_wal_only_after_all_frames_are_applied() {
+    let test_dir = tempfile::tempdir().unwrap();
+    let node = sample_node("durable", &["Node"]);
+    {
+        let engine = StorageEngine::open(test_dir.path()).unwrap();
+        engine.put_node_record(&node).unwrap();
+    }
+
+    let wal_path = test_dir.path().join("wal.rmp");
+    let wal = WAL::open(&wal_path, WALConfig::default()).unwrap();
+    {
+        let mut entries = wal.entries.lock();
+        entries[0].checksum ^= u32::MAX;
+        wal.persist_entries(&entries).unwrap();
+    }
+    drop(wal);
+
+    assert!(matches!(
+        StorageEngine::open(test_dir.path()),
+        Err(StorageError::WalChecksumVerificationFailed)
+    ));
+    assert_eq!(
+        StorageEngine::repair_wal_if_fully_applied(test_dir.path()).unwrap(),
+        1
+    );
+
+    let repaired = StorageEngine::open(test_dir.path()).unwrap();
+    assert_eq!(repaired.get_node_record(&node.id).unwrap(), Some(node));
+    assert_eq!(repaired.wal_stats().entries, 0);
+    assert_eq!(repaired.wal_applied_sequence().unwrap(), 1);
+}
+
+#[test]
+fn storage_refuses_wal_repair_when_a_corrupt_frame_is_unapplied() {
+    let test_dir = tempfile::tempdir().unwrap();
+    StorageEngine::open(test_dir.path()).unwrap();
+
+    let wal_path = test_dir.path().join("wal.rmp");
+    let wal = WAL::open(&wal_path, WALConfig::default()).unwrap();
+    wal.append_transaction(
+        "unapplied",
+        vec![WALTransactionRecord {
+            op: "put_node".to_string(),
+            key: "lost-if-repaired".to_string(),
+            payload: rmp_serde::to_vec(&sample_node("lost-if-repaired", &["Node"])).unwrap(),
+        }],
+    )
+    .unwrap();
+    {
+        let mut entries = wal.entries.lock();
+        entries[0].checksum ^= u32::MAX;
+        wal.persist_entries(&entries).unwrap();
+    }
+    drop(wal);
+
+    let err = StorageEngine::repair_wal_if_fully_applied(test_dir.path()).unwrap_err();
+    assert!(matches!(
+        err,
+        StorageError::WalRepairWouldLoseUnappliedEntries {
+            applied_sequence: 0
+        }
+    ));
+    assert!(matches!(
+        StorageEngine::open(test_dir.path()),
+        Err(StorageError::WalChecksumVerificationFailed)
+    ));
+}
+
+#[test]
 fn owned_storage_transaction_keeps_the_engine_alive_until_commit() {
     let engine = Arc::new(StorageEngine::open_temporary().unwrap());
     let mut transaction = engine.begin_owned_transaction();
