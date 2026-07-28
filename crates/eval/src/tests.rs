@@ -2149,7 +2149,7 @@
                     updated_at_unix_ms: 0,
                 });
             }
-            storage.put_new_edge_records_batch(&edges).unwrap();
+            storage.put_edge_records_batch(&edges).unwrap();
             let cypher = "MATCH (start:Star {starId: $startId}), (end:Star {starId: $endId}) MATCH p = shortestPath((start)-[:HYPERLANE*]-(end)) RETURN [n IN nodes(p) | n.starId] AS pathIds, length(p) AS hops LIMIT 1";
             let query = parser.parse(cypher).unwrap();
             let pattern = detect_query_pattern(cypher);
@@ -2202,7 +2202,7 @@
                 });
             }
             phase!("seed-400-edges-batch", iter_timings, {
-                storage.put_new_edge_records_batch(&edges).unwrap();
+                storage.put_edge_records_batch(&edges).unwrap();
             });
             let cypher = "MATCH (start:Star {starId: $startId}), (end:Star {starId: $endId}) MATCH p = shortestPath((start)-[:HYPERLANE*]-(end)) RETURN [n IN nodes(p) | n.starId] AS pathIds, length(p) AS hops LIMIT 1";
             let query = parser.parse(cypher).unwrap();
@@ -2285,7 +2285,7 @@
                     updated_at_unix_ms: 0,
                 });
             }
-            storage.put_new_edge_records_batch(&edges).unwrap();
+            storage.put_edge_records_batch(&edges).unwrap();
 
             // ── Parse ───────────────────────────────────────────────
             let t0 = std::time::Instant::now();
@@ -2393,7 +2393,7 @@
                 }
             }
             let edge_count = edges.len();
-            storage.put_new_edge_records_batch(&edges).unwrap();
+            storage.put_edge_records_batch(&edges).unwrap();
 
             // ── Adjacency map build ────────────────────────────────
             let resolver = engine.knowledge_policy_resolver().unwrap();
@@ -2634,7 +2634,7 @@
 
         // Full batch API
         let t1 = std::time::Instant::now();
-        storage.put_new_edge_records_batch(&edges).unwrap();
+        storage.put_edge_records_batch(&edges).unwrap();
         let batch_time = t1.elapsed();
 
         eprintln!(

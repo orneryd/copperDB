@@ -1429,6 +1429,40 @@ fn structured_batch_writes_use_one_wal_frame_and_missing_delete_is_a_noop() {
 }
 
 #[test]
+fn bulk_edge_writes_are_mvcc_visible_and_wal_durable() {
+    let test_dir = tempfile::tempdir().unwrap();
+    let snapshot = {
+        let engine = StorageEngine::open(test_dir.path()).unwrap();
+        let before = engine.begin_mvcc_snapshot();
+        let edges = vec![
+            sample_edge("edge-1", "LINK", "source", "target"),
+            sample_edge("edge-2", "LINK", "target", "source"),
+        ];
+
+        engine.put_edge_records_batch(&edges).unwrap();
+        assert_eq!(engine.wal_stats().entries, 1);
+        assert_eq!(engine.wal_applied_sequence().unwrap(), 1);
+        assert_eq!(engine.begin_mvcc_snapshot().read_ts, before.read_ts + 1);
+        assert!(engine
+            .get_edge_record_visible_at(&before, "edge-1")
+            .unwrap()
+            .is_none());
+        engine.begin_mvcc_snapshot()
+    };
+
+    let reopened = StorageEngine::open(test_dir.path()).unwrap();
+    assert_eq!(reopened.wal_stats().entries, 1);
+    assert_eq!(reopened.wal_applied_sequence().unwrap(), 1);
+    assert_eq!(
+        reopened
+            .get_edges_by_type_visible_at(&snapshot, "LINK")
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
 fn storage_open_replays_unapplied_wal_transaction_frame_once() {
     let test_dir = tempfile::tempdir().unwrap();
     StorageEngine::open(test_dir.path()).unwrap();

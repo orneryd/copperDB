@@ -2540,68 +2540,6 @@ impl StorageEngine {
         })
     }
 
-    /// Batch-insert edges, skipping the old-edge lookup. Use when all edges are
-    /// known to be new (e.g. initial data load). Uses fjall::Batch internally
-    /// for maximum throughput (mirrors Badger's WriteBatch in NornicDB).
-    ///
-    /// Skips MVCC tracking — only safe when no concurrent readers exist.
-    pub fn put_new_edge_records_batch(&self, edges: &[EdgeRecord]) -> Result<(), StorageError> {
-        let relationship_property_indexes = self.relationship_property_index_definitions()?;
-        let mut namespace_edge_deltas: HashMap<String, i64> = HashMap::new();
-
-        let mut edges_batch = Batch::new();
-        let mut indexes_batch = Batch::new();
-        let mut pending: usize = 0;
-        const FLUSH_EVERY: usize = 4096;
-
-        for edge in edges {
-            edges_batch.push((edge.id.as_bytes().to_vec(), Some(rmp_serde::to_vec(edge)?)));
-            indexes_batch.push((
-                edge_type_index_key(&edge.edge_type, &edge.id).into_bytes(),
-                Some(Vec::<u8>::new()),
-            ));
-            indexes_batch.push((
-                edge_start_index_key(&edge.start_node, &edge.edge_type, &edge.id).into_bytes(),
-                Some(Vec::<u8>::new()),
-            ));
-            indexes_batch.push((
-                edge_end_index_key(&edge.end_node, &edge.edge_type, &edge.id).into_bytes(),
-                Some(Vec::<u8>::new()),
-            ));
-            for index in &relationship_property_indexes {
-                if index.label == edge.edge_type {
-                    if let Some(key) = relationship_property_index_key_for_edge(index, edge) {
-                        indexes_batch.push((key.into_bytes(), Some(Vec::<u8>::new())));
-                    }
-                }
-            }
-            if let Some(namespace) = namespace_from_str(&edge.id) {
-                *namespace_edge_deltas
-                    .entry(namespace.to_string())
-                    .or_default() += 1;
-            }
-
-            pending += 1;
-            if pending >= FLUSH_EVERY {
-                self.edges
-                    .fjall_apply_batch(&std::mem::take(&mut edges_batch))?;
-                self.indexes
-                    .fjall_apply_batch(&std::mem::take(&mut indexes_batch))?;
-                pending = 0;
-            }
-        }
-        if pending > 0 {
-            self.edges.fjall_apply_batch(&edges_batch)?;
-            self.indexes.fjall_apply_batch(&indexes_batch)?;
-        }
-        for (namespace, delta) in namespace_edge_deltas {
-            if delta != 0 {
-                self.adjust_meta_counter(namespace_edge_count_key(&namespace), delta)?;
-            }
-        }
-        Ok(())
-    }
-
     pub fn get_edge_record(&self, id: &str) -> Result<Option<EdgeRecord>, StorageError> {
         match self.edges.fjall_get(id.as_bytes())? {
             Some(v) => Ok(Some(rmp_serde::from_slice(
@@ -3888,22 +3826,6 @@ impl StorageEngine {
             Some(raw) => Ok(rmp_serde::from_slice(raw.as_ref())?),
             None => Ok(0),
         }
-    }
-
-    fn adjust_meta_counter(&self, key: Vec<u8>, delta: i64) -> Result<(), StorageError> {
-        let current = self.meta_counter(key.clone())?;
-        let updated = if delta >= 0 {
-            current.saturating_add(delta as u64)
-        } else {
-            current.saturating_sub(delta.unsigned_abs())
-        };
-
-        if updated == 0 {
-            self.meta.fjall_remove(key)?;
-        } else {
-            self.meta.fjall_insert(key, rmp_serde::to_vec(&updated)?)?;
-        }
-        Ok(())
     }
 
     fn ids_with_prefix(&self, tree: &Tree, prefix: &str) -> Result<Vec<String>, StorageError> {
