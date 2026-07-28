@@ -599,6 +599,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(get_effective_database_config_handler),
         )
         .route(
+            "/admin/databases/{database}/wal",
+            get(inspect_wal_handler).post(repair_wal_handler),
+        )
+        .route(
             "/admin/fabric/databases",
             get(list_fabric_databases).post(register_fabric_database),
         )
@@ -2153,6 +2157,99 @@ fn open_engine(state: &AppState, database: &str) -> Result<Arc<GraphEngine>, Str
     let mut cache = state.engine_cache.write();
     cache.insert(database.to_string(), Arc::clone(&engine));
     Ok(engine)
+}
+
+fn offline_database_storage_path(state: &AppState, database: &str) -> Result<String, StatusCode> {
+    let database = state.db_manager.get(database).ok_or(StatusCode::NOT_FOUND)?;
+    if state.engine_cache.read().contains_key(&database.name) {
+        return Err(StatusCode::CONFLICT);
+    }
+    Ok(database.storage_path)
+}
+
+fn wal_integrity_response(status: copperdb_storage::WALIntegrityStatus) -> serde_json::Value {
+    match status {
+        copperdb_storage::WALIntegrityStatus::Healthy {
+            applied_sequence,
+            latest_sequence,
+        } => serde_json::json!({
+            "status": "healthy",
+            "applied_sequence": applied_sequence,
+            "latest_sequence": latest_sequence,
+        }),
+        copperdb_storage::WALIntegrityStatus::ChecksumCorrupt {
+            applied_sequence,
+            corrupted_sequence,
+        } => serde_json::json!({
+            "status": "checksum_corrupt",
+            "applied_sequence": applied_sequence,
+            "corrupted_sequence": corrupted_sequence,
+        }),
+        copperdb_storage::WALIntegrityStatus::Malformed { applied_sequence } => {
+            serde_json::json!({
+                "status": "malformed",
+                "applied_sequence": applied_sequence,
+            })
+        }
+    }
+}
+
+async fn inspect_wal_handler(
+    State(state): State<Arc<AppState>>,
+    Path(database): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &database, true) {
+        return status.into_response();
+    }
+    let path = match offline_database_storage_path(&state, &database) {
+        Ok(path) => path,
+        Err(status) => return status.into_response(),
+    };
+    match StorageEngine::inspect_wal(path) {
+        Ok(status) => Json(wal_integrity_response(status)).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn repair_wal_handler(
+    State(state): State<Arc<AppState>>,
+    Path(database): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &database, true) {
+        return status.into_response();
+    }
+    let path = match offline_database_storage_path(&state, &database) {
+        Ok(path) => path,
+        Err(status) => return status.into_response(),
+    };
+    match StorageEngine::repair_wal_if_fully_applied(path) {
+        Ok(removed_entries) => Json(serde_json::json!({
+            "status": "repaired",
+            "removed_entries": removed_entries,
+        }))
+        .into_response(),
+        Err(copperdb_storage::StorageError::WalRepairWouldLoseUnappliedEntries {
+            applied_sequence,
+        }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "repair would discard unapplied WAL entries",
+                "applied_sequence": applied_sequence,
+            })),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 async fn list_fabric_databases(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {

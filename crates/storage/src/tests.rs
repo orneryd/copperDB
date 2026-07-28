@@ -118,6 +118,52 @@ fn storage_wal_sync_modes_are_explicit_and_immediate_commits_persist() {
 }
 
 #[test]
+fn storage_batch_wal_sync_coalesces_durability_barriers() {
+    let test_dir = tempfile::tempdir().unwrap();
+    let engine = StorageEngine::open_with_wal_config(
+        test_dir.path(),
+        WALConfig {
+            enabled: true,
+            max_entries_per_segment: 1024,
+            sync_mode: WALSyncMode::Batch { interval_ms: 25 },
+        },
+    )
+    .unwrap();
+    engine.put_node_record(&sample_node("first", &["Node"])).unwrap();
+    let syncs_before_interval = engine.wal_stats().syncs;
+
+    std::thread::sleep(Duration::from_millis(30));
+    engine
+        .put_node_record(&sample_node("second", &["Node"]))
+        .unwrap();
+    assert_eq!(engine.wal_stats().syncs, syncs_before_interval + 1);
+
+    engine.put_node_record(&sample_node("third", &["Node"])).unwrap();
+    assert_eq!(engine.wal_stats().syncs, syncs_before_interval + 1);
+}
+
+#[test]
+fn storage_batch_wal_sync_can_complete_without_a_follow_up_write() {
+    let test_dir = tempfile::tempdir().unwrap();
+    let engine = StorageEngine::open_with_wal_config(
+        test_dir.path(),
+        WALConfig {
+            enabled: true,
+            max_entries_per_segment: 1024,
+            sync_mode: WALSyncMode::Batch { interval_ms: 25 },
+        },
+    )
+    .unwrap();
+    engine.put_node_record(&sample_node("durable", &["Node"])).unwrap();
+    let syncs_before_interval = engine.wal_stats().syncs;
+
+    std::thread::sleep(Duration::from_millis(30));
+    assert!(engine.sync_wal_if_due().unwrap());
+    assert_eq!(engine.wal_stats().syncs, syncs_before_interval + 1);
+    assert!(!engine.sync_wal_if_due().unwrap());
+}
+
+#[test]
 fn rejects_non_v0_layout_manifest() {
     let test_dir = std::env::temp_dir().join(format!(
         "copperdb-storage-layout-version-rejection-test-{}",

@@ -1619,6 +1619,7 @@ fn maybe_auto_flush(
     let _ = shared.try_flush_pending(engine);
     // Drain any pending deindex work after each flush tick
     let _ = engine.drain_deindex_work();
+    let _ = engine.sync_wal_if_due();
 }
 
 fn handle_request(

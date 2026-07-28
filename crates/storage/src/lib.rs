@@ -359,6 +359,7 @@ pub struct WALSegment {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum WALSyncMode {
     NoSync,
+    Batch { interval_ms: u64 },
     Immediate,
 }
 
@@ -392,6 +393,7 @@ pub struct WALStats {
     pub degraded: bool,
     pub compacted_through: u64,
     pub next_seq: u64,
+    pub syncs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -426,6 +428,8 @@ pub struct WAL {
     degraded: AtomicBool,
     entries: Mutex<Vec<WALEntry>>,
     segments: Mutex<Vec<WALSegment>>,
+    last_sync_at: Mutex<std::time::Instant>,
+    syncs: AtomicU64,
 }
 
 impl WAL {
@@ -439,6 +443,8 @@ impl WAL {
             degraded: AtomicBool::new(false),
             entries: Mutex::new(Vec::new()),
             segments: Mutex::new(Vec::new()),
+            last_sync_at: Mutex::new(std::time::Instant::now()),
+            syncs: AtomicU64::new(0),
         }
     }
 
@@ -483,6 +489,8 @@ impl WAL {
             degraded: AtomicBool::new(false),
             entries: Mutex::new(entries),
             segments: Mutex::new(Vec::new()),
+            last_sync_at: Mutex::new(std::time::Instant::now()),
+            syncs: AtomicU64::new(0),
         };
         wal.recompute_segments(wal.entries.lock().len());
         Ok(wal)
@@ -626,6 +634,37 @@ impl WAL {
         self.config.sync_mode.clone()
     }
 
+    fn batch_sync_due(&self) -> bool {
+        match self.config.sync_mode {
+            WALSyncMode::Batch { interval_ms } => {
+                self.last_sync_at.lock().elapsed()
+                    >= std::time::Duration::from_millis(interval_ms)
+            }
+            WALSyncMode::NoSync | WALSyncMode::Immediate => false,
+        }
+    }
+
+    fn sync_persistent_file(&self) -> Result<(), StorageError> {
+        if !self.config.enabled {
+            return Ok(());
+        }
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?
+            .sync_all()?;
+        *self.last_sync_at.lock() = std::time::Instant::now();
+        self.syncs.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn record_batch_sync_complete(&self) {
+        *self.last_sync_at.lock() = std::time::Instant::now();
+    }
+
     pub fn compact_up_to(&self, last_included_seq: u64) -> Result<usize, StorageError> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(StorageError::WalClosed);
@@ -666,6 +705,7 @@ impl WAL {
             degraded: self.is_degraded(),
             compacted_through: self.compacted_through(),
             next_seq: self.next_seq.load(Ordering::SeqCst),
+            syncs: self.syncs.load(Ordering::SeqCst),
         }
     }
 
@@ -712,11 +752,7 @@ impl WAL {
         drop(tmp_file);
         fs::rename(tmp_path, path)?;
         if self.config.sync_mode == WALSyncMode::Immediate {
-            fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(path)?
-                .sync_all()?;
+            self.sync_persistent_file()?;
         }
         Ok(())
     }
@@ -1770,6 +1806,17 @@ impl StorageEngine {
 
     pub fn wal_sync_mode(&self) -> WALSyncMode {
         self.wal.sync_mode()
+    }
+
+    /// Complete a due batch-mode durability barrier without requiring a new write.
+    pub fn sync_wal_if_due(&self) -> Result<bool, StorageError> {
+        if !self.wal.batch_sync_due() {
+            return Ok(false);
+        }
+        self.wal.sync_persistent_file()?;
+        self.db.persist(fjall::PersistMode::SyncAll)?;
+        self.wal.record_batch_sync_complete();
+        Ok(true)
     }
 
     pub fn encryption_manifest(&self) -> Result<Option<StorageEncryptionManifest>, StorageError> {
@@ -5326,6 +5373,8 @@ impl<'a> BatchWriter<'a> {
         batch.commit()?;
         if self.engine.wal.sync_mode() == WALSyncMode::Immediate {
             self.engine.db.persist(fjall::PersistMode::SyncAll)?;
+        } else if self.engine.wal.batch_sync_due() {
+            self.engine.sync_wal_if_due()?;
         }
 
         let node_changes = nodes.into_iter().collect::<Vec<_>>();

@@ -29,6 +29,44 @@ fn open_engine_maps_storage_sync_writes_to_immediate_wal_durability() {
 }
 
 #[test]
+fn offline_wal_maintenance_refuses_cached_engines_and_formats_integrity_status() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage_path = temp_dir
+        .path()
+        .join("copper")
+        .to_string_lossy()
+        .into_owned();
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager.create("copper", storage_path.clone()).unwrap();
+    let state = AppState {
+        db_name: "copper".into(),
+        db_manager,
+        ..Default::default()
+    };
+
+    assert_eq!(
+        offline_database_storage_path(&state, "copper").unwrap(),
+        storage_path
+    );
+    open_engine(&state, "copper").unwrap();
+    assert_eq!(
+        offline_database_storage_path(&state, "copper").unwrap_err(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        wal_integrity_response(copperdb_storage::WALIntegrityStatus::ChecksumCorrupt {
+            applied_sequence: 3,
+            corrupted_sequence: 4,
+        }),
+        serde_json::json!({
+            "status": "checksum_corrupt",
+            "applied_sequence": 3,
+            "corrupted_sequence": 4,
+        })
+    );
+}
+
+#[test]
 fn test_health_response_serialization() {
     let hr = HealthResponse {
         status: "ok".into(),
