@@ -406,6 +406,43 @@ impl CopperDb {
         self.storage.begin_owned_transaction()
     }
 
+    /// Execute a Cypher statement against an explicit transaction's private
+    /// storage overlay while retaining engine-level authorization and auditing.
+    pub fn execute_in_storage_transaction_as_with_context(
+        &self,
+        request_context: &RequestContext,
+        transaction: &mut StorageTransaction<'_>,
+        cypher: &str,
+        params: HashMap<String, Value>,
+        roles: &[String],
+    ) -> Result<QueryResult, CopperDbError> {
+        let start = Instant::now();
+        let parsed = Parser::new().parse(cypher)?;
+        self.enforce_compliance(&parsed, roles)?;
+        let eval_result = self.eval.execute_in_storage_transaction_with_context(
+            request_context,
+            transaction,
+            &parsed,
+            &params,
+        )?;
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        self.record_query_audit(
+            cypher,
+            query_action(&parsed.query_type),
+            true,
+            None,
+            None,
+            elapsed_ms,
+        )?;
+        let mut stats = ResultStats::from(eval_result.stats);
+        stats.execution_time_ms = elapsed_ms;
+        Ok(QueryResult {
+            columns: eval_result.columns,
+            rows: eval_result.rows,
+            stats,
+        })
+    }
+
     pub fn transaction_read_fence(
         &self,
         transaction_id: &uuid::Uuid,

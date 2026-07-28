@@ -23,6 +23,7 @@ use copperdb_storage::{
     DecayProfileSchema, EdgeAdjacencyDirection, EdgeRecord, KnowledgePolicyAccessMetadata,
     NodeRecord, PromotionOnAccessMutationKindSchema, PromotionOnAccessMutationSchema,
     PromotionPolicySchema, PromotionProfileSchema, PromotionWhenClauseSchema, StorageEngine,
+    StorageTransaction,
 };
 use copperdb_util::{RequestCancelled, RequestContext};
 use serde_json::Value;

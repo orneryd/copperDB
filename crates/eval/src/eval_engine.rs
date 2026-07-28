@@ -321,6 +321,121 @@ impl EvalEngine {
         })
     }
 
+    /// Execute the core explicit-transaction graph surface against a private
+    /// storage overlay. Other clauses deliberately fail rather than bypassing
+    /// the overlay through the normal storage-backed evaluator.
+    pub fn execute_in_storage_transaction_with_context(
+        &self,
+        request_context: &RequestContext,
+        transaction: &mut StorageTransaction<'_>,
+        query: &Query,
+        params: &HashMap<String, Value>,
+    ) -> Result<EvalResult, EvalError> {
+        let mut current_rows = vec![Row::new()];
+        let mut stats = QueryStats::default();
+        let mut columns = Vec::new();
+        let mut result_rows = Vec::new();
+
+        for clause in &query.clauses {
+            request_context.check_active()?;
+            match clause {
+                Clause::Create(create) if create.pattern.edges.is_empty() => {
+                    for row in &mut current_rows {
+                        for node_pattern in &create.pattern.nodes {
+                            let label = node_pattern
+                                .labels
+                                .first()
+                                .cloned()
+                                .unwrap_or_else(|| "Node".to_string());
+                            let id = format!("{label}:{}", Uuid::new_v4());
+                            let mut properties =
+                                evaluate_pattern_properties(&node_pattern.properties, row, params)?;
+                            properties.insert("_id".to_string(), Value::String(id));
+                            properties.insert(
+                                "_labels".to_string(),
+                                Value::Array(
+                                    node_pattern
+                                        .labels
+                                        .iter()
+                                        .cloned()
+                                        .map(Value::String)
+                                        .collect(),
+                                ),
+                            );
+                            let mut node = node_record_from_props(&properties)?;
+                            let now = now_unix_ms();
+                            node.created_at_unix_ms = now;
+                            node.updated_at_unix_ms = now;
+                            transaction.put_node_record(node);
+                            stats.nodes_created += 1;
+                            stats.properties_set += node_pattern.properties.len();
+                            if let Some(variable) = &node_pattern.variable {
+                                row.insert(
+                                    variable.clone(),
+                                    Value::Object(properties.into_iter().collect()),
+                                );
+                            }
+                        }
+                    }
+                }
+                Clause::Match(match_clause) if match_clause.pattern.edges.is_empty() => {
+                    for node_pattern in &match_clause.pattern.nodes {
+                        let mut matched_rows = Vec::new();
+                        for row in &current_rows {
+                            let expected =
+                                evaluate_pattern_properties(&node_pattern.properties, row, params)?;
+                            for node in transaction.all_node_records()? {
+                                let properties = node_record_to_props(&node);
+                                if !node_matches_pattern(
+                                    &properties,
+                                    &node_pattern.labels,
+                                    &expected,
+                                ) {
+                                    continue;
+                                }
+                                let mut matched = row.clone();
+                                if let Some(variable) = &node_pattern.variable {
+                                    matched.insert(
+                                        variable.clone(),
+                                        Value::Object(properties.into_iter().collect()),
+                                    );
+                                }
+                                matched_rows.push(matched);
+                            }
+                        }
+                        current_rows = matched_rows;
+                    }
+                }
+                Clause::Return(return_clause) => {
+                    columns = return_clause.items.iter().map(column_name).collect();
+                    let aggregation = has_aggregation_items(&return_clause.items);
+                    result_rows = if current_rows.is_empty() && aggregation {
+                        vec![aggregate_identity_row(&return_clause.items, params)?]
+                    } else if aggregation {
+                        apply_aggregation_to_rows(&current_rows, &return_clause.items, params)?
+                    } else {
+                        current_rows
+                            .iter()
+                            .map(|row| self.project_row(row, &return_clause.items, params))
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+                }
+                _ => {
+                    return Err(EvalError::ExecutionError(
+                        "explicit transactions currently support node-only CREATE, MATCH, and RETURN"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(EvalResult {
+            columns,
+            rows: result_rows,
+            stats,
+        })
+    }
+
     fn with_request_context<T>(
         &self,
         request_context: &RequestContext,

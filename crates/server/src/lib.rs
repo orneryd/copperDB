@@ -1871,13 +1871,29 @@ impl QueryExecutor for AppStateBoltExecutor {
             return Err("Bolt transaction is no longer active".into());
         }
         drop(active);
-        self.execute_as_on_database_with_context(
-            &transaction.database,
-            query,
-            params,
-            request_context,
-            principal,
-        )
+        let roles = match principal {
+            Some(principal) => principal.roles.clone(),
+            None if !self.state.auth.security_enabled => vec!["admin".into()],
+            None => return Err("authentication required".into()),
+        };
+        let mut storage_transactions = self.storage_transactions.lock();
+        let storage_transaction = storage_transactions
+            .get_mut(&transaction_id)
+            .ok_or_else(|| "Bolt storage transaction is no longer active".to_owned())?;
+        let result = engine
+            .execute_in_storage_transaction_as_with_context(
+                &request_context,
+                storage_transaction,
+                query,
+                params.clone(),
+                &roles,
+            )
+            .map_err(|error| error.to_string())?;
+        let result = convert_engine_result(result);
+        Ok(BoltQueryResult {
+            columns: result.columns,
+            rows: result.data.into_iter().map(|row| row.row).collect(),
+        })
     }
 }
 

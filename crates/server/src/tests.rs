@@ -4243,6 +4243,81 @@ fn appstate_bolt_executor_discards_storage_context_on_rollback() {
 }
 
 #[test]
+fn appstate_bolt_executor_keeps_run_writes_private_until_commit() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .expect("BEGIN should create a transaction context");
+
+    let created = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "CREATE (n:TxProbe {value: 7}) RETURN n.value AS value",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("transactional CREATE should use the private overlay");
+    assert_eq!(created.columns, vec!["value"]);
+    assert_eq!(created.rows, vec![vec![serde_json::json!(7)]]);
+
+    let in_transaction = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "MATCH (n:TxProbe {value: 7}) RETURN count(n) AS count",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("transaction should read its staged write");
+    assert_eq!(in_transaction.rows, vec![vec![serde_json::json!(1)]]);
+
+    let outside = executor
+        .execute_on_database(
+            Some("copperdb"),
+            "MATCH (n:TxProbe {value: 7}) RETURN count(n) AS count",
+            &empty,
+        )
+        .expect("outside query should execute normally");
+    assert_eq!(outside.rows, vec![vec![serde_json::json!(0)]]);
+
+    executor.commit_transaction(&transaction).unwrap();
+    let committed = executor
+        .execute_on_database(
+            Some("copperdb"),
+            "MATCH (n:TxProbe {value: 7}) RETURN count(n) AS count",
+            &empty,
+        )
+        .expect("committed write should become visible");
+    assert_eq!(committed.rows, vec![vec![serde_json::json!(1)]]);
+
+    let rollback = executor
+        .begin_transaction("copperdb", &empty, None)
+        .expect("BEGIN should create a transaction context");
+    executor
+        .execute_in_transaction_with_context(
+            &rollback,
+            "CREATE (n:TxProbe {value: 8}) RETURN n.value AS value",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("transactional CREATE should stage a rollback candidate");
+    executor.rollback_transaction(&rollback).unwrap();
+    let rolled_back = executor
+        .execute_on_database(
+            Some("copperdb"),
+            "MATCH (n:TxProbe {value: 8}) RETURN count(n) AS count",
+            &empty,
+        )
+        .expect("outside query should execute normally");
+    assert_eq!(rolled_back.rows, vec![vec![serde_json::json!(0)]]);
+}
+
+#[test]
 fn appstate_bolt_executor_seeds_demo_sized_star_batch() {
     let temp_dir = tempfile::tempdir().unwrap();
     let state = demo_temp_appstate_with_catalog(&temp_dir);

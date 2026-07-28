@@ -69,6 +69,7 @@ use copperdb_search::{
 };
 use copperdb_storage::{
     IndexEntityType, IndexKind, KnowledgePolicyAccessMetadata, NodeRecord, StorageEngine,
+    StorageTransaction,
 };
 use copperdb_topology::{
     ConsistencyLevel, DistributedReadPlan, DistributedSearchPlan, DistributedWriteMode,
