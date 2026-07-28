@@ -706,6 +706,14 @@ fn related_node_id<'a>(
     }
 }
 
+fn storage_adjacency_direction(direction: &EdgeDirection) -> EdgeAdjacencyDirection {
+    match direction {
+        EdgeDirection::Outgoing => EdgeAdjacencyDirection::Outgoing,
+        EdgeDirection::Incoming => EdgeAdjacencyDirection::Incoming,
+        EdgeDirection::Both => EdgeAdjacencyDirection::Both,
+    }
+}
+
 fn bind_optional_pattern_nulls(row: &mut Row, pattern: &Pattern) {
     for node in &pattern.nodes {
         if let Some(var) = &node.variable {

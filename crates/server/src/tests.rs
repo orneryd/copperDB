@@ -4415,6 +4415,94 @@ fn appstate_bolt_executor_traverses_staged_fixed_length_chains() {
 }
 
 #[test]
+fn appstate_bolt_executor_traverses_staged_variable_length_chains() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .expect("BEGIN should create a transaction context");
+
+    executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "CREATE (:TxVariableChain {id: 'a'})-[:NEXT]->(:TxVariableChain {id: 'b'})-[:NEXT]->(:TxVariableChain {id: 'c'})-[:NEXT]->(:TxVariableChain {id: 'd'})",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("transactional CREATE should stage a variable-length chain");
+    let inside = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "MATCH (:TxVariableChain {id: 'a'})-[r:NEXT*1..3]->(end:TxVariableChain {id: 'd'}) RETURN size(r) AS hops, end.id AS id",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("transaction should traverse its staged variable-length chain");
+    assert_eq!(
+        inside.rows,
+        vec![vec![serde_json::json!(3), serde_json::json!("d")]]
+    );
+    let outside = executor
+        .execute_on_database(
+            Some("copperdb"),
+            "MATCH (:TxVariableChain {id: 'a'})-[:NEXT*1..3]->(:TxVariableChain {id: 'd'}) RETURN count(*) AS count",
+            &empty,
+        )
+        .expect("outside query should execute normally");
+    assert_eq!(outside.rows, vec![vec![serde_json::json!(0)]]);
+}
+
+#[test]
+fn appstate_bolt_executor_traverses_staged_mixed_length_chains() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .expect("BEGIN should create a transaction context");
+
+    executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "CREATE (:TxMixedChain {id: 'a'})-[:FIRST]->(:TxMixedChain {id: 'b'})-[:NEXT]->(:TxMixedChain {id: 'c'})-[:NEXT]->(:TxMixedChain {id: 'd'})",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("transactional CREATE should stage a mixed-length chain");
+    let inside = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "MATCH (:TxMixedChain {id: 'a'})-[:FIRST]->(mid:TxMixedChain)-[r:NEXT*1..2]->(end:TxMixedChain {id: 'd'}) RETURN mid.id AS mid, size(r) AS hops, end.id AS end",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("transaction should traverse fixed and variable staged edges together");
+    assert_eq!(
+        inside.rows,
+        vec![vec![
+            serde_json::json!("b"),
+            serde_json::json!(2),
+            serde_json::json!("d"),
+        ]]
+    );
+    let outside = executor
+        .execute_on_database(
+            Some("copperdb"),
+            "MATCH (:TxMixedChain {id: 'a'})-[:FIRST]->(:TxMixedChain)-[:NEXT*1..2]->(:TxMixedChain {id: 'd'}) RETURN count(*) AS count",
+            &empty,
+        )
+        .expect("outside query should execute normally");
+    assert_eq!(outside.rows, vec![vec![serde_json::json!(0)]]);
+}
+
+#[test]
 fn appstate_bolt_executor_stages_set_and_detach_delete_writes() {
     let temp_dir = tempfile::tempdir().unwrap();
     let state = demo_temp_appstate_with_catalog(&temp_dir);
@@ -4598,6 +4686,63 @@ fn appstate_bolt_executor_stages_node_merge_writes_until_commit() {
         )
         .expect("rollback should discard the staged merge");
     assert_eq!(rolled_back.rows, vec![vec![serde_json::json!(0)]]);
+}
+
+#[test]
+fn appstate_bolt_executor_stages_relationship_merge_writes_until_commit() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    executor
+        .execute_on_database(
+            Some("copperdb"),
+            "CREATE (:TxRelMerge {id: 'a'}), (:TxRelMerge {id: 'b'})",
+            &empty,
+        )
+        .expect("merge endpoints should be created");
+
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .expect("BEGIN should create a transaction context");
+    let created = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "MATCH (a:TxRelMerge {id: 'a'}), (b:TxRelMerge {id: 'b'}) MERGE (a)-[r:LINKS]->(b) ON CREATE SET r.value = 1 RETURN r.value AS value",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("transactional relationship MERGE should stage edge creation");
+    assert_eq!(created.rows, vec![vec![serde_json::json!(1)]]);
+    let matched = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "MATCH (a:TxRelMerge {id: 'a'}), (b:TxRelMerge {id: 'b'}) MERGE (a)-[r:LINKS]->(b) ON MATCH SET r.value = 2 RETURN r.value AS value",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("repeated relationship MERGE should match the staged edge");
+    assert_eq!(matched.rows, vec![vec![serde_json::json!(2)]]);
+    let outside = executor
+        .execute_on_database(
+            Some("copperdb"),
+            "MATCH (:TxRelMerge {id: 'a'})-[:LINKS]->(:TxRelMerge {id: 'b'}) RETURN count(*) AS count",
+            &empty,
+        )
+        .expect("outside query should execute normally");
+    assert_eq!(outside.rows, vec![vec![serde_json::json!(0)]]);
+
+    executor.commit_transaction(&transaction).unwrap();
+    let committed = executor
+        .execute_on_database(
+            Some("copperdb"),
+            "MATCH ()-[r:LINKS]->() RETURN r.value AS value",
+            &empty,
+        )
+        .expect("committed relationship merge should become visible");
+    assert_eq!(committed.rows, vec![vec![serde_json::json!(2)]]);
 }
 
 #[test]

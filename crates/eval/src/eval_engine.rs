@@ -411,7 +411,7 @@ impl EvalEngine {
                 }
                 _ => {
                     return Err(EvalError::ExecutionError(
-                        "explicit transactions currently support CREATE, node MERGE, fixed one-hop MATCH, SET, REMOVE, DELETE, and RETURN"
+                        "explicit transactions currently support CREATE, MERGE, fixed-length MATCH, SET, REMOVE, DELETE, and RETURN"
                             .to_string(),
                     ));
                 }
@@ -564,13 +564,13 @@ impl EvalEngine {
             return Ok(current_rows);
         }
 
-        if pattern.edges.iter().any(|edge| {
-            edge.min_hops.is_some() || edge.max_hops.is_some()
-        }) {
-            return Err(EvalError::ExecutionError(
-                "explicit transactions currently support fixed-length relationship MATCH patterns"
-                    .to_string(),
-            ));
+        if pattern.edges.iter().any(|edge| edge.min_hops.is_some() || edge.max_hops.is_some()) {
+            return self.execute_storage_transaction_variable_length_match_pattern(
+                transaction,
+                base_rows,
+                pattern,
+                params,
+            );
         }
 
         let start_pattern = &pattern.nodes[0];
@@ -662,6 +662,204 @@ impl EvalEngine {
             }
         }
         Ok(result)
+    }
+
+    fn execute_storage_transaction_variable_length_match_pattern(
+        &self,
+        transaction: &StorageTransaction<'_>,
+        base_rows: &[Row],
+        pattern: &Pattern,
+        params: &HashMap<String, Value>,
+    ) -> Result<Vec<Row>, EvalError> {
+        let start_pattern = &pattern.nodes[0];
+        let mut result = Vec::new();
+
+        for base_row in base_rows {
+            let expected_start =
+                evaluate_pattern_properties(&start_pattern.properties, base_row, params)?;
+            for start in transaction.all_node_records()? {
+                let start_properties = node_record_to_props(&start);
+                if !node_matches_pattern(&start_properties, &start_pattern.labels, &expected_start)
+                    || !bound_node_matches_row(
+                        base_row,
+                        start_pattern.variable.as_deref(),
+                        &start_properties,
+                    )
+                {
+                    continue;
+                }
+                let mut initial_row = base_row.clone();
+                if let Some(variable) = &start_pattern.variable {
+                    initial_row.insert(
+                        variable.clone(),
+                        Value::Object(start_properties.into_iter().collect()),
+                    );
+                }
+                let mut frontier = vec![(initial_row, start.id)];
+                for (edge_index, edge_pattern) in pattern.edges.iter().enumerate() {
+                    let end_pattern = &pattern.nodes[edge_index + 1];
+                    let mut next_frontier = Vec::new();
+                    for (row, node_id) in frontier {
+                        if edge_pattern.min_hops.is_some() || edge_pattern.max_hops.is_some() {
+                            next_frontier.extend(self.storage_transaction_variable_edge_matches(
+                                transaction,
+                                row,
+                                node_id,
+                                edge_pattern,
+                                end_pattern,
+                                params,
+                            )?);
+                        } else {
+                            next_frontier.extend(self.storage_transaction_fixed_edge_matches(
+                                transaction,
+                                row,
+                                node_id,
+                                edge_pattern,
+                                end_pattern,
+                                params,
+                            )?);
+                        }
+                    }
+                    frontier = next_frontier;
+                }
+                result.extend(frontier.into_iter().map(|(row, _)| row));
+            }
+        }
+        Ok(result)
+    }
+
+    fn storage_transaction_fixed_edge_matches(
+        &self,
+        transaction: &StorageTransaction<'_>,
+        row: Row,
+        node_id: String,
+        edge_pattern: &EdgePattern,
+        end_pattern: &NodePattern,
+        params: &HashMap<String, Value>,
+    ) -> Result<Vec<(Row, String)>, EvalError> {
+        let expected_edge = evaluate_pattern_properties(&edge_pattern.properties, &row, params)?;
+        let expected_end = evaluate_pattern_properties(&end_pattern.properties, &row, params)?;
+        let direction = storage_adjacency_direction(&edge_pattern.direction);
+        let mut matches = Vec::new();
+        for edge in transaction.get_adjacent_edges(
+            &node_id,
+            direction,
+            edge_pattern.rel_type.as_deref(),
+        )? {
+            if !edge_matches_pattern(&edge, &expected_edge)
+                || !bound_edge_matches_row(&row, edge_pattern.variable.as_deref(), &edge)
+            {
+                continue;
+            }
+            let Some(end_id) = related_node_id(&node_id, &edge, &edge_pattern.direction) else {
+                continue;
+            };
+            let Some(end) = transaction.get_node_record(end_id)? else {
+                continue;
+            };
+            let end_properties = node_record_to_props(&end);
+            if !node_matches_pattern(&end_properties, &end_pattern.labels, &expected_end)
+                || !bound_node_matches_row(&row, end_pattern.variable.as_deref(), &end_properties)
+            {
+                continue;
+            }
+            let mut matched = row.clone();
+            if let Some(variable) = &edge_pattern.variable {
+                matched.insert(variable.clone(), edge_record_to_value(&edge)?);
+            }
+            if let Some(variable) = &end_pattern.variable {
+                matched.insert(
+                    variable.clone(),
+                    Value::Object(end_properties.into_iter().collect()),
+                );
+            }
+            matches.push((matched, end.id));
+        }
+        Ok(matches)
+    }
+
+    fn storage_transaction_variable_edge_matches(
+        &self,
+        transaction: &StorageTransaction<'_>,
+        row: Row,
+        node_id: String,
+        edge_pattern: &EdgePattern,
+        end_pattern: &NodePattern,
+        params: &HashMap<String, Value>,
+    ) -> Result<Vec<(Row, String)>, EvalError> {
+        let min_hops = edge_pattern.min_hops.unwrap_or(1);
+        let max_hops = edge_pattern
+            .max_hops
+            .unwrap_or(VAR_LENGTH_UNBOUNDED_MAX_HOPS)
+            .max(min_hops);
+        let expected_edge = evaluate_pattern_properties(&edge_pattern.properties, &row, params)?;
+        let expected_end = evaluate_pattern_properties(&end_pattern.properties, &row, params)?;
+        let direction = storage_adjacency_direction(&edge_pattern.direction);
+        let mut frontier = std::collections::VecDeque::from([(
+            node_id.clone(),
+            0_u32,
+            Vec::<EdgeRecord>::new(),
+        )]);
+        let mut visited = HashMap::from([(node_id, 0_u32)]);
+        let mut matches = Vec::new();
+
+        while let Some((current_id, depth, path_edges)) = frontier.pop_front() {
+            Self::check_current_request_context()?;
+            if depth >= min_hops {
+                if let Some(end) = transaction.get_node_record(&current_id)? {
+                    let end_properties = node_record_to_props(&end);
+                    if node_matches_pattern(&end_properties, &end_pattern.labels, &expected_end)
+                        && bound_node_matches_row(&row, end_pattern.variable.as_deref(), &end_properties)
+                    {
+                        let mut matched = row.clone();
+                        if let Some(variable) = &edge_pattern.variable {
+                            matched.insert(
+                                variable.clone(),
+                                Value::Array(
+                                    path_edges
+                                        .iter()
+                                        .map(edge_record_to_value)
+                                        .collect::<Result<Vec<_>, _>>()?,
+                                ),
+                            );
+                        }
+                        if let Some(variable) = &end_pattern.variable {
+                            matched.insert(
+                                variable.clone(),
+                                Value::Object(end_properties.into_iter().collect()),
+                            );
+                        }
+                        matches.push((matched, end.id));
+                    }
+                }
+            }
+            if depth >= max_hops {
+                continue;
+            }
+            for edge in transaction.get_adjacent_edges(
+                &current_id,
+                direction.clone(),
+                edge_pattern.rel_type.as_deref(),
+            )? {
+                if !edge_matches_pattern(&edge, &expected_edge) {
+                    continue;
+                }
+                let Some(next_id) =
+                    related_node_id(&current_id, &edge, &edge_pattern.direction).map(str::to_string)
+                else {
+                    continue;
+                };
+                let next_depth = depth + 1;
+                if visited.get(&next_id).is_some_and(|seen| *seen < next_depth) {
+                    continue;
+                }
+                visited.insert(next_id.clone(), next_depth);
+                let mut next_edges = path_edges.clone();
+                next_edges.push(edge);
+                frontier.push_back((next_id, next_depth, next_edges));
+            }
+        }
+        Ok(matches)
     }
 
     fn execute_storage_transaction_set_clause(
@@ -875,7 +1073,33 @@ impl EvalEngine {
         params: &HashMap<String, Value>,
         stats: &mut QueryStats,
     ) -> Result<Vec<Row>, EvalError> {
-        if merge.pattern.nodes.len() != 1 || !merge.pattern.edges.is_empty() {
+        if merge.pattern.edges.is_empty() {
+            return self.execute_storage_transaction_node_merge_clause(
+                transaction,
+                base_rows,
+                merge,
+                params,
+                stats,
+            );
+        }
+        self.execute_storage_transaction_relationship_merge_clause(
+            transaction,
+            base_rows,
+            merge,
+            params,
+            stats,
+        )
+    }
+
+    fn execute_storage_transaction_node_merge_clause(
+        &self,
+        transaction: &mut StorageTransaction<'_>,
+        base_rows: &[Row],
+        merge: &copperdb_cypher::MergeClause,
+        params: &HashMap<String, Value>,
+        stats: &mut QueryStats,
+    ) -> Result<Vec<Row>, EvalError> {
+        if merge.pattern.nodes.len() != 1 {
             return Err(EvalError::ExecutionError(
                 "explicit transactions currently support node-only MERGE patterns".to_string(),
             ));
@@ -938,6 +1162,110 @@ impl EvalEngine {
                 }
                 (row, &merge.on_create)
             };
+            self.execute_storage_transaction_set_clause(
+                transaction,
+                std::slice::from_mut(&mut row),
+                set_items,
+                params,
+                stats,
+            )?;
+            rows.push(row);
+        }
+        Ok(rows)
+    }
+
+    fn execute_storage_transaction_relationship_merge_clause(
+        &self,
+        transaction: &mut StorageTransaction<'_>,
+        base_rows: &[Row],
+        merge: &copperdb_cypher::MergeClause,
+        params: &HashMap<String, Value>,
+        stats: &mut QueryStats,
+    ) -> Result<Vec<Row>, EvalError> {
+        if merge.pattern.nodes.len() != 2
+            || merge.pattern.edges.len() != 1
+            || merge.pattern.edges[0].min_hops.is_some()
+            || merge.pattern.edges[0].max_hops.is_some()
+            || merge.pattern.edges[0].direction != EdgeDirection::Outgoing
+        {
+            return Err(EvalError::ExecutionError(
+                "explicit transactions currently support a single outgoing relationship MERGE"
+                    .to_string(),
+            ));
+        }
+
+        let start_pattern = &merge.pattern.nodes[0];
+        let edge_pattern = &merge.pattern.edges[0];
+        let end_pattern = &merge.pattern.nodes[1];
+        let start_variable = start_pattern.variable.as_ref().ok_or_else(|| {
+            EvalError::ExecutionError(
+                "transactional relationship MERGE requires a bound start node variable".to_string(),
+            )
+        })?;
+        let end_variable = end_pattern.variable.as_ref().ok_or_else(|| {
+            EvalError::ExecutionError(
+                "transactional relationship MERGE requires a bound end node variable".to_string(),
+            )
+        })?;
+        let edge_type = edge_pattern
+            .rel_type
+            .clone()
+            .unwrap_or_else(|| "REL".to_string());
+        let mut rows = Vec::with_capacity(base_rows.len());
+
+        for base_row in base_rows {
+            let start_properties = bound_row_object_props(base_row, start_variable).ok_or_else(|| {
+                EvalError::ExecutionError(
+                    "transactional relationship MERGE start node is not bound".to_string(),
+                )
+            })?;
+            let end_properties = bound_row_object_props(base_row, end_variable).ok_or_else(|| {
+                EvalError::ExecutionError(
+                    "transactional relationship MERGE end node is not bound".to_string(),
+                )
+            })?;
+            let start_id = node_id(&start_properties).ok_or_else(|| {
+                EvalError::ExecutionError(
+                    "transactional relationship MERGE start node is missing _id".to_string(),
+                )
+            })?;
+            let end_id = node_id(&end_properties).ok_or_else(|| {
+                EvalError::ExecutionError(
+                    "transactional relationship MERGE end node is missing _id".to_string(),
+                )
+            })?;
+            let expected = evaluate_pattern_properties(&edge_pattern.properties, base_row, params)?;
+            let existing = transaction
+                .get_adjacent_edges(
+                    start_id,
+                    EdgeAdjacencyDirection::Outgoing,
+                    Some(&edge_type),
+                )?
+                .into_iter()
+                .find(|edge| edge.end_node == end_id && edge_matches_pattern(edge, &expected));
+
+            let (edge, set_items) = if let Some(edge) = existing {
+                (edge, &merge.on_match)
+            } else {
+                let now = now_unix_ms();
+                let edge = EdgeRecord {
+                    id: format!("{edge_type}:{}", Uuid::new_v4()),
+                    start_node: start_id.to_string(),
+                    end_node: end_id.to_string(),
+                    edge_type: edge_type.clone(),
+                    properties: expected.into_iter().collect(),
+                    created_at_unix_ms: now,
+                    updated_at_unix_ms: now,
+                };
+                transaction.put_edge_record(edge.clone());
+                stats.relationships_created += 1;
+                stats.properties_set += edge_pattern.properties.len();
+                (edge, &merge.on_create)
+            };
+            let mut row = base_row.clone();
+            if let Some(variable) = &edge_pattern.variable {
+                row.insert(variable.clone(), edge_record_to_value(&edge)?);
+            }
             self.execute_storage_transaction_set_clause(
                 transaction,
                 std::slice::from_mut(&mut row),
