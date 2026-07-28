@@ -42,6 +42,27 @@ fn test_begin_transaction_exposes_effective_read_fence() {
 }
 
 #[test]
+fn test_begin_storage_transaction_uses_owned_storage_context() {
+    let db = CopperDb::open_temporary().unwrap();
+    let mut transaction = db.begin_storage_transaction();
+    transaction.put_node_record(NodeRecord {
+        id: "n1".to_string(),
+        labels: vec!["Person".to_string()],
+        properties: Default::default(),
+        named_embeddings: Default::default(),
+        chunk_embeddings: Vec::new(),
+        embed_meta: Default::default(),
+        created_at_unix_ms: 1,
+        updated_at_unix_ms: 1,
+    });
+
+    assert!(transaction.get_node_record("n1").unwrap().is_some());
+    assert!(db.storage().get_node_record("n1").unwrap().is_none());
+    transaction.commit().unwrap();
+    assert!(db.storage().get_node_record("n1").unwrap().is_some());
+}
+
+#[test]
 fn test_create_and_match() {
     let db = CopperDb::open_temporary().unwrap();
 

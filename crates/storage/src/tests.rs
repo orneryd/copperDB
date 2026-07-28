@@ -1345,6 +1345,94 @@ fn storage_transaction_keeps_writes_private_until_commit() {
 }
 
 #[test]
+fn owned_storage_transaction_keeps_the_engine_alive_until_commit() {
+    let engine = Arc::new(StorageEngine::open_temporary().unwrap());
+    let mut transaction = engine.begin_owned_transaction();
+    transaction.put_node_record(sample_node("n1", &["Person"]));
+    drop(engine);
+
+    assert!(transaction.get_node_record("n1").unwrap().is_some());
+    transaction.commit().unwrap();
+}
+
+#[test]
+fn storage_transaction_merges_writes_into_label_and_type_scans() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    engine
+        .put_node_record(&sample_node("old", &["Person"]))
+        .unwrap();
+    engine
+        .put_edge_record(&sample_edge("old-edge", "KNOWS", "old", "old"))
+        .unwrap();
+
+    let mut transaction = engine.begin_transaction();
+    transaction.put_node_record(sample_node("new", &["Person"]));
+    transaction.put_node_record(sample_node("old", &["Device"]));
+    transaction.put_edge_record(sample_edge("new-edge", "KNOWS", "new", "new"));
+    transaction.put_edge_record(sample_edge("old-edge", "SEES", "old", "old"));
+
+    assert_eq!(
+        transaction
+            .get_nodes_by_label("Person")
+            .unwrap()
+            .into_iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>(),
+        vec!["new".to_string()]
+    );
+    assert_eq!(
+        transaction
+            .get_edges_by_type("KNOWS")
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec!["new-edge".to_string()]
+    );
+    transaction.rollback();
+}
+
+#[test]
+fn storage_transaction_merges_writes_into_full_and_adjacency_scans() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    engine
+        .put_node_record(&sample_node("source", &["Node"]))
+        .unwrap();
+    engine
+        .put_node_record(&sample_node("target", &["Node"]))
+        .unwrap();
+    engine
+        .put_edge_record(&sample_edge("old", "LINK", "source", "target"))
+        .unwrap();
+
+    let mut transaction = engine.begin_transaction();
+    transaction.delete_node_record("target");
+    transaction.delete_edge_record("old");
+    transaction.put_node_record(sample_node("replacement", &["Node"]));
+    transaction.put_edge_record(sample_edge("new", "LINK", "source", "replacement"));
+
+    assert_eq!(
+        transaction
+            .all_node_records()
+            .unwrap()
+            .into_iter()
+            .map(|node| node.id)
+            .collect::<Vec<_>>(),
+        vec!["replacement".to_string(), "source".to_string()]
+    );
+    assert_eq!(
+        transaction
+            .get_adjacent_edges("source", EdgeAdjacencyDirection::Outgoing, Some("LINK"))
+            .unwrap()
+            .into_iter()
+            .map(|edge| edge.id)
+            .collect::<Vec<_>>(),
+        vec!["new".to_string()]
+    );
+    transaction.rollback();
+}
+
+#[test]
 fn storage_transaction_rejects_a_write_newer_than_its_snapshot() {
     let engine = StorageEngine::open_temporary().unwrap();
     engine

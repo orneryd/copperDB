@@ -4212,6 +4212,37 @@ fn appstate_bolt_executor_routes_system_and_named_database_queries() {
 }
 
 #[test]
+fn appstate_bolt_executor_retains_storage_context_until_commit() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let transaction = executor
+        .begin_transaction("copperdb", &HashMap::new(), None)
+        .unwrap();
+    let transaction_id = uuid::Uuid::parse_str(&transaction.id).unwrap();
+
+    assert!(executor
+        .storage_transactions
+        .lock()
+        .contains_key(&transaction_id));
+    executor.commit_transaction(&transaction).unwrap();
+    assert!(executor.storage_transactions.lock().is_empty());
+}
+
+#[test]
+fn appstate_bolt_executor_discards_storage_context_on_rollback() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let transaction = executor
+        .begin_transaction("copperdb", &HashMap::new(), None)
+        .unwrap();
+
+    executor.rollback_transaction(&transaction).unwrap();
+    assert!(executor.storage_transactions.lock().is_empty());
+}
+
+#[test]
 fn appstate_bolt_executor_seeds_demo_sized_star_batch() {
     let temp_dir = tempfile::tempdir().unwrap();
     let state = demo_temp_appstate_with_catalog(&temp_dir);

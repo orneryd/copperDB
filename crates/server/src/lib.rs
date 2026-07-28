@@ -49,7 +49,7 @@ use copperdb_search::{
 use copperdb_security::{
     RequestTarget, RequestViolation, SecurityConfig, SecurityMiddleware, SecurityRequest,
 };
-use copperdb_storage::StorageEngine;
+use copperdb_storage::{StorageEngine, StorageTransaction};
 
 mod ui_assets;
 use copperdb_topology::{
@@ -57,7 +57,7 @@ use copperdb_topology::{
 };
 use copperdb_txsession::{BookmarkMode, SessionConfig, TransactionMode};
 use copperdb_util::RequestContext;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -1241,7 +1241,11 @@ async fn search_handler(
     let labels: Vec<String> = body
         .get("labels")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let limit = body
         .get("limit")
@@ -1288,16 +1292,20 @@ async fn search_handler(
     // Check if BM25 is configured
     let bm25_indexes: Vec<_> = index_defs
         .iter()
-        .filter(|idx| idx.kind == copperdb_storage::IndexKind::FullText
-            && (labels.is_empty() || labels.iter().any(|l| l == &idx.label)))
+        .filter(|idx| {
+            idx.kind == copperdb_storage::IndexKind::FullText
+                && (labels.is_empty() || labels.iter().any(|l| l == &idx.label))
+        })
         .cloned()
         .collect();
 
     // Check if vector indexes exist for potential RRF
     let vector_indexes: Vec<_> = index_defs
         .iter()
-        .filter(|idx| idx.kind == copperdb_storage::IndexKind::Vector
-            && (labels.is_empty() || labels.iter().any(|l| l == &idx.label)))
+        .filter(|idx| {
+            idx.kind == copperdb_storage::IndexKind::Vector
+                && (labels.is_empty() || labels.iter().any(|l| l == &idx.label))
+        })
         .cloned()
         .collect();
 
@@ -1319,7 +1327,7 @@ async fn search_handler(
     let mut bm25_candidates: usize = 0;
     if !bm25_indexes.is_empty() {
         let fetch_limit = limit * 3; // overfetch for RRF merging
-        // Collect raw hits with ranks for RRF fusion
+                                     // Collect raw hits with ranks for RRF fusion
         let mut all_hits: Vec<(String, f32, String)> = Vec::new(); // (id, score, snippet)
         for index in &bm25_indexes {
             if let Ok(hits) = engine.search_fulltext_nodes(
@@ -1664,11 +1672,15 @@ fn execute_statement(
 #[derive(Clone)]
 pub struct AppStateBoltExecutor {
     state: Arc<AppState>,
+    storage_transactions: Arc<Mutex<HashMap<uuid::Uuid, StorageTransaction<'static>>>>,
 }
 
 impl AppStateBoltExecutor {
     pub fn new(state: Arc<AppState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            storage_transactions: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 }
 
@@ -1796,6 +1808,9 @@ impl QueryExecutor for AppStateBoltExecutor {
         let transaction_id = engine
             .begin_transaction(&config)
             .map_err(|error| error.to_string())?;
+        self.storage_transactions
+            .lock()
+            .insert(transaction_id, engine.begin_storage_transaction());
         Ok(BoltTransaction {
             id: transaction_id.to_string(),
             database: database.to_owned(),
@@ -1805,7 +1820,17 @@ impl QueryExecutor for AppStateBoltExecutor {
     fn commit_transaction(&self, transaction: &BoltTransaction) -> Result<String, String> {
         let transaction_id = uuid::Uuid::parse_str(&transaction.id)
             .map_err(|_| "invalid Bolt transaction identifier".to_owned())?;
-        open_engine(&self.state, &transaction.database)?
+        let engine = open_engine(&self.state, &transaction.database)?;
+        let mut storage_transactions = self.storage_transactions.lock();
+        let storage_transaction = storage_transactions
+            .get_mut(&transaction_id)
+            .ok_or_else(|| "Bolt storage transaction is no longer active".to_owned())?;
+        storage_transaction
+            .commit()
+            .map_err(|error| error.to_string())?;
+        storage_transactions.remove(&transaction_id);
+        drop(storage_transactions);
+        engine
             .tx_manager()
             .commit_with_bookmark(transaction_id)
             .map_err(|error| error.to_string())
@@ -1814,6 +1839,12 @@ impl QueryExecutor for AppStateBoltExecutor {
     fn rollback_transaction(&self, transaction: &BoltTransaction) -> Result<(), String> {
         let transaction_id = uuid::Uuid::parse_str(&transaction.id)
             .map_err(|_| "invalid Bolt transaction identifier".to_owned())?;
+        self.storage_transactions
+            .lock()
+            .get_mut(&transaction_id)
+            .ok_or_else(|| "Bolt storage transaction is no longer active".to_owned())?
+            .rollback();
+        self.storage_transactions.lock().remove(&transaction_id);
         open_engine(&self.state, &transaction.database)?
             .tx_manager()
             .rollback(transaction_id)
@@ -1835,7 +1866,8 @@ impl QueryExecutor for AppStateBoltExecutor {
             .tx_manager()
             .get(&transaction_id)
             .ok_or_else(|| "Bolt transaction is no longer active".to_owned())?;
-        if active.database.as_deref() != Some(transaction.database.as_str()) || !active.is_active() {
+        if active.database.as_deref() != Some(transaction.database.as_str()) || !active.is_active()
+        {
             return Err("Bolt transaction is no longer active".into());
         }
         drop(active);
@@ -3023,7 +3055,7 @@ async fn mcp_handler(
         }
     };
     let engine = match open_engine(&state, &state.db_name) {
-        Ok(engine) => engine,  // already Arc<GraphEngine>
+        Ok(engine) => engine, // already Arc<GraphEngine>
         Err(e) => {
             return Json(serde_json::json!({
                 "jsonrpc": "2.0",

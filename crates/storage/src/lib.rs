@@ -1199,10 +1199,24 @@ pub struct StorageEngine {
 /// through the engine's atomic batch writer. Dropping or rolling back a
 /// transaction discards its staged changes.
 pub struct StorageTransaction<'a> {
-    engine: &'a StorageEngine,
+    engine: StorageTransactionEngine<'a>,
     snapshot: MvccSnapshotLease,
     node_writes: BTreeMap<String, Option<NodeRecord>>,
     edge_writes: BTreeMap<String, Option<EdgeRecord>>,
+}
+
+enum StorageTransactionEngine<'a> {
+    Borrowed(&'a StorageEngine),
+    Owned(Arc<StorageEngine>),
+}
+
+impl StorageTransactionEngine<'_> {
+    fn as_ref(&self) -> &StorageEngine {
+        match self {
+            Self::Borrowed(engine) => engine,
+            Self::Owned(engine) => engine.as_ref(),
+        }
+    }
 }
 
 impl fmt::Debug for StorageEngine {
@@ -1748,7 +1762,18 @@ impl StorageEngine {
     /// Begin a storage transaction at the current MVCC snapshot.
     pub fn begin_transaction(&self) -> StorageTransaction<'_> {
         StorageTransaction {
-            engine: self,
+            engine: StorageTransactionEngine::Borrowed(self),
+            snapshot: self.begin_registered_mvcc_snapshot(),
+            node_writes: BTreeMap::new(),
+            edge_writes: BTreeMap::new(),
+        }
+    }
+
+    /// Begin a transaction that owns the storage handle and may outlive the
+    /// request frame that created it.
+    pub fn begin_owned_transaction(self: &Arc<Self>) -> StorageTransaction<'static> {
+        StorageTransaction {
+            engine: StorageTransactionEngine::Owned(Arc::clone(self)),
             snapshot: self.begin_registered_mvcc_snapshot(),
             node_writes: BTreeMap::new(),
             edge_writes: BTreeMap::new(),
@@ -2675,6 +2700,20 @@ impl StorageEngine {
         edge_type: &str,
     ) -> Result<Vec<EdgeRecord>, StorageError> {
         self.mvcc.get_edges_by_type_visible_at(snapshot, edge_type)
+    }
+
+    pub fn all_node_records_visible_at(
+        &self,
+        snapshot: &MvccSnapshot,
+    ) -> Result<Vec<NodeRecord>, StorageError> {
+        self.mvcc.all_node_records_visible_at(snapshot)
+    }
+
+    pub fn all_edge_records_visible_at(
+        &self,
+        snapshot: &MvccSnapshot,
+    ) -> Result<Vec<EdgeRecord>, StorageError> {
+        self.mvcc.all_edge_records_visible_at(snapshot)
     }
 
     pub fn lifecycle_status(&self) -> MvccLifecycleStatus {
@@ -4962,6 +5001,10 @@ pub struct BatchWriter<'a> {
 }
 
 impl<'a> StorageTransaction<'a> {
+    fn engine(&self) -> &StorageEngine {
+        self.engine.as_ref()
+    }
+
     pub fn snapshot(&self) -> &MvccSnapshot {
         self.snapshot.snapshot()
     }
@@ -4970,7 +5013,7 @@ impl<'a> StorageTransaction<'a> {
         match self.node_writes.get(id) {
             Some(node) => Ok(node.clone()),
             None => self
-                .engine
+                .engine()
                 .get_node_record_visible_at(self.snapshot.snapshot(), id),
         }
     }
@@ -4979,9 +5022,113 @@ impl<'a> StorageTransaction<'a> {
         match self.edge_writes.get(id) {
             Some(edge) => Ok(edge.clone()),
             None => self
-                .engine
+                .engine()
                 .get_edge_record_visible_at(self.snapshot.snapshot(), id),
         }
+    }
+
+    pub fn get_nodes_by_label(&self, label: &str) -> Result<Vec<NodeRecord>, StorageError> {
+        let mut nodes = self
+            .engine()
+            .get_nodes_by_label_visible_at(self.snapshot.snapshot(), label)?
+            .into_iter()
+            .map(|node| (node.id.clone(), node))
+            .collect::<BTreeMap<_, _>>();
+        for (id, write) in &self.node_writes {
+            match write {
+                Some(node) if node.labels.iter().any(|node_label| node_label == label) => {
+                    nodes.insert(id.clone(), node.clone());
+                }
+                Some(_) | None => {
+                    nodes.remove(id);
+                }
+            }
+        }
+        Ok(nodes.into_values().collect())
+    }
+
+    pub fn get_edges_by_type(&self, edge_type: &str) -> Result<Vec<EdgeRecord>, StorageError> {
+        let mut edges = self
+            .engine()
+            .get_edges_by_type_visible_at(self.snapshot.snapshot(), edge_type)?
+            .into_iter()
+            .map(|edge| (edge.id.clone(), edge))
+            .collect::<BTreeMap<_, _>>();
+        for (id, write) in &self.edge_writes {
+            match write {
+                Some(edge) if edge.edge_type == edge_type => {
+                    edges.insert(id.clone(), edge.clone());
+                }
+                Some(_) | None => {
+                    edges.remove(id);
+                }
+            }
+        }
+        Ok(edges.into_values().collect())
+    }
+
+    pub fn all_node_records(&self) -> Result<Vec<NodeRecord>, StorageError> {
+        let mut nodes = self
+            .engine()
+            .all_node_records_visible_at(self.snapshot.snapshot())?
+            .into_iter()
+            .map(|node| (node.id.clone(), node))
+            .collect::<BTreeMap<_, _>>();
+        for (id, write) in &self.node_writes {
+            match write {
+                Some(node) => {
+                    nodes.insert(id.clone(), node.clone());
+                }
+                None => {
+                    nodes.remove(id);
+                }
+            }
+        }
+        Ok(nodes.into_values().collect())
+    }
+
+    pub fn all_edge_records(&self) -> Result<Vec<EdgeRecord>, StorageError> {
+        let mut edges = self
+            .engine()
+            .all_edge_records_visible_at(self.snapshot.snapshot())?
+            .into_iter()
+            .map(|edge| (edge.id.clone(), edge))
+            .collect::<BTreeMap<_, _>>();
+        for (id, write) in &self.edge_writes {
+            match write {
+                Some(edge) => {
+                    edges.insert(id.clone(), edge.clone());
+                }
+                None => {
+                    edges.remove(id);
+                }
+            }
+        }
+        Ok(edges.into_values().collect())
+    }
+
+    pub fn get_adjacent_edges(
+        &self,
+        node_id: &str,
+        direction: EdgeAdjacencyDirection,
+        edge_type: Option<&str>,
+    ) -> Result<Vec<EdgeRecord>, StorageError> {
+        let mut edges = self
+            .all_edge_records()?
+            .into_iter()
+            .filter(|edge| {
+                let direction_matches = match direction {
+                    EdgeAdjacencyDirection::Outgoing => edge.start_node == node_id,
+                    EdgeAdjacencyDirection::Incoming => edge.end_node == node_id,
+                    EdgeAdjacencyDirection::Both => {
+                        edge.start_node == node_id || edge.end_node == node_id
+                    }
+                };
+                direction_matches && edge_type.is_none_or(|expected| edge.edge_type == expected)
+            })
+            .collect::<Vec<_>>();
+        edges.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(edges)
     }
 
     pub fn put_node_record(&mut self, node: NodeRecord) {
@@ -5000,9 +5147,9 @@ impl<'a> StorageTransaction<'a> {
         self.edge_writes.insert(id.into(), None);
     }
 
-    pub fn commit(self) -> Result<(), StorageError> {
+    pub fn commit(&mut self) -> Result<(), StorageError> {
         self.ensure_no_write_conflicts()?;
-        self.engine.batch_write(|batch| {
+        self.engine().batch_write(|batch| {
             for (id, node) in &self.node_writes {
                 match node {
                     Some(node) => batch.put_node_record(node),
@@ -5016,10 +5163,16 @@ impl<'a> StorageTransaction<'a> {
                 }
             }
             Ok::<_, StorageError>(())
-        })
+        })?;
+        self.node_writes.clear();
+        self.edge_writes.clear();
+        Ok(())
     }
 
-    pub fn rollback(self) {}
+    pub fn rollback(&mut self) {
+        self.node_writes.clear();
+        self.edge_writes.clear();
+    }
 
     fn ensure_no_write_conflicts(&self) -> Result<(), StorageError> {
         for id in self.node_writes.keys() {
@@ -5035,7 +5188,7 @@ impl<'a> StorageTransaction<'a> {
         &self,
         logical_key: &str,
     ) -> Result<(), StorageError> {
-        let Some(head) = self.engine.mvcc.current_head_for_key(logical_key) else {
+        let Some(head) = self.engine().mvcc.current_head_for_key(logical_key) else {
             return Ok(());
         };
         let snapshot_version = self.snapshot.snapshot().read_ts;

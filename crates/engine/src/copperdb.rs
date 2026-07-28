@@ -31,7 +31,9 @@ impl CopperDb {
     }
 
     /// Return all currently configured index definitions.
-    pub fn list_index_definitions(&self) -> Result<Vec<copperdb_storage::IndexDefinition>, CopperDbError> {
+    pub fn list_index_definitions(
+        &self,
+    ) -> Result<Vec<copperdb_storage::IndexDefinition>, CopperDbError> {
         Ok(self.storage.load_index_definitions()?)
     }
 
@@ -49,7 +51,10 @@ impl CopperDb {
     }
 
     /// Look up a node by ID.
-    pub fn get_node(&self, id: &str) -> Result<Option<copperdb_storage::NodeRecord>, CopperDbError> {
+    pub fn get_node(
+        &self,
+        id: &str,
+    ) -> Result<Option<copperdb_storage::NodeRecord>, CopperDbError> {
         Ok(self.storage.get_node_record(id)?)
     }
 
@@ -394,6 +399,11 @@ impl CopperDb {
 
     pub fn begin_transaction(&self, config: &SessionConfig) -> Result<uuid::Uuid, CopperDbError> {
         self.tx_manager.begin(config).map_err(Into::into)
+    }
+
+    /// Begin an owned storage transaction that can span protocol requests.
+    pub fn begin_storage_transaction(&self) -> copperdb_storage::StorageTransaction<'static> {
+        self.storage.begin_owned_transaction()
     }
 
     pub fn transaction_read_fence(

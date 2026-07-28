@@ -607,6 +607,26 @@ impl MvccStore {
         Ok(nodes)
     }
 
+    pub fn all_node_records_visible_at(
+        &self,
+        snapshot: &MvccSnapshot,
+    ) -> Result<Vec<NodeRecord>, StorageError> {
+        let ids = self
+            .values
+            .read()
+            .keys()
+            .filter_map(|key| key.strip_prefix("node:").map(str::to_string))
+            .collect::<Vec<_>>();
+        let mut nodes = Vec::new();
+        for id in ids {
+            if let Some(node) = self.get_node_record_visible_at(snapshot, &id)? {
+                nodes.push(node);
+            }
+        }
+        nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(nodes)
+    }
+
     pub fn put_edge_record(&self, edge: &EdgeRecord) -> Result<u64, StorageError> {
         let version = self.current_version.fetch_add(1, Ordering::SeqCst) + 1;
         self.put_edge_record_at(edge, version)?;
@@ -722,6 +742,26 @@ impl MvccStore {
         }
         edges.sort_by(|left, right| left.id.cmp(&right.id));
         edges.dedup_by(|left, right| left.id == right.id);
+        Ok(edges)
+    }
+
+    pub fn all_edge_records_visible_at(
+        &self,
+        snapshot: &MvccSnapshot,
+    ) -> Result<Vec<EdgeRecord>, StorageError> {
+        let ids = self
+            .values
+            .read()
+            .keys()
+            .filter_map(|key| key.strip_prefix("edge:").map(str::to_string))
+            .collect::<Vec<_>>();
+        let mut edges = Vec::new();
+        for id in ids {
+            if let Some(edge) = self.get_edge_record_visible_at(snapshot, &id)? {
+                edges.push(edge);
+            }
+        }
+        edges.sort_by(|left, right| left.id.cmp(&right.id));
         Ok(edges)
     }
 
