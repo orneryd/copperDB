@@ -14,12 +14,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use uuid::Uuid;
 
 // ── fjall→Fjall compatibility layer ──────────────────────────────────────────
 
@@ -189,11 +190,13 @@ pub fn ensure_database_prefix(database: &str, id: &str) -> String {
 }
 
 pub const STORAGE_LAYOUT_VERSION: u8 = 0;
+pub const STORAGE_SNAPSHOT_FORMAT_VERSION: u8 = 1;
 const META_LAYOUT_MANIFEST_KEY: &[u8] = b"layout_manifest";
 const META_ENCRYPTION_MANIFEST_KEY: &[u8] = b"encryption_manifest";
 const META_MVCC_STATE_KEY: &[u8] = b"mvcc_state";
 const META_WAL_APPLIED_SEQUENCE_KEY: &[u8] = b"wal_applied_sequence";
 const STORAGE_WAL_FILENAME: &str = "copperdb.wal.rmp";
+const STORAGE_WAL_SNAPSHOT_FILENAME: &str = "copperdb.wal.snap";
 const META_TOPOLOGY_PEER_PREFIX: &[u8] = b"topology_peer/";
 const META_TOPOLOGY_PROFILE_PREFIX: &[u8] = b"topology_profile/";
 const META_TOPOLOGY_PLACEMENT_PREFIX: &[u8] = b"topology_placement/";
@@ -222,6 +225,29 @@ const IDX_NODE_PROPERTY_PREFIX: &str = "node_property";
 const IDX_NODE_FULLTEXT_PREFIX: &str = "node_fulltext";
 pub(crate) const IDX_EDGE_PROPERTY_PREFIX: &str = "edge_property";
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StorageSnapshotKeyspace {
+    Meta,
+    Nodes,
+    Edges,
+    Indexes,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StorageSnapshotEntry {
+    pub keyspace: StorageSnapshotKeyspace,
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StorageSnapshot {
+    pub format_version: u8,
+    pub storage_layout_version: u8,
+    pub encrypted: bool,
+    pub entries: Vec<StorageSnapshotEntry>,
+}
+
 fn wal_applied_sequence_from_meta(meta: &Keyspace) -> Result<u64, StorageError> {
     match meta.fjall_get(META_WAL_APPLIED_SEQUENCE_KEY)? {
         Some(raw) => Ok(rmp_serde::from_slice(raw.as_slice())?),
@@ -241,6 +267,16 @@ pub enum StorageError {
     Deserialization(#[from] rmp_serde::decode::Error),
     #[error("unsupported storage layout version: expected {expected}, got {actual}")]
     UnsupportedLayoutVersion { expected: u8, actual: u8 },
+    #[error("unsupported storage snapshot format version: expected {expected}, got {actual}")]
+    UnsupportedSnapshotFormatVersion { expected: u8, actual: u8 },
+    #[error("storage snapshot layout version mismatch: expected {expected}, got {actual}")]
+    SnapshotLayoutVersionMismatch { expected: u8, actual: u8 },
+    #[error("storage snapshot encryption does not match the restore target")]
+    SnapshotEncryptionMismatch,
+    #[error("storage snapshot restore target must be an empty directory: {0}")]
+    SnapshotRestoreTargetNotEmpty(String),
+    #[error("storage snapshot contains duplicate key in {keyspace:?}")]
+    SnapshotDuplicateKey { keyspace: StorageSnapshotKeyspace },
     #[error("key not found: {0}")]
     NotFound(String),
     #[error("prefix cannot be empty")]
@@ -863,7 +899,7 @@ impl WAL {
 }
 
 /// A WAL snapshot checkpoint for recovery acceleration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WALSnapshot {
     pub compacted_through: u64,
     pub created_at_unix_ms: i64,
@@ -1469,6 +1505,173 @@ impl StorageEngine {
         )
     }
 
+    /// Export all CopperDB-owned keyspaces as a portable logical image.
+    ///
+    /// The image deliberately excludes the sidecar WAL. A restored image starts
+    /// a new WAL sequence, so its applied marker is normalized during import.
+    pub fn write_snapshot<W: Write>(&self, mut writer: W) -> Result<(), StorageError> {
+        let _commit_guard = self.batch_commit_lock.lock();
+        self.db.persist(fjall::PersistMode::SyncAll)?;
+        let mut entries = Vec::new();
+        for (keyspace, source) in [
+            (StorageSnapshotKeyspace::Meta, &self.meta),
+            (StorageSnapshotKeyspace::Nodes, &self.nodes),
+            (StorageSnapshotKeyspace::Edges, &self.edges),
+            (StorageSnapshotKeyspace::Indexes, &self.indexes),
+        ] {
+            for entry in source.fjall_iter() {
+                let (key, value) = entry?;
+                entries.push(StorageSnapshotEntry {
+                    keyspace,
+                    key,
+                    value,
+                });
+            }
+        }
+        entries.sort_by(|left, right| {
+            left.keyspace
+                .cmp(&right.keyspace)
+                .then_with(|| left.key.cmp(&right.key))
+        });
+        writer.write_all(&rmp_serde::to_vec(&StorageSnapshot {
+            format_version: STORAGE_SNAPSHOT_FORMAT_VERSION,
+            storage_layout_version: STORAGE_LAYOUT_VERSION,
+            encrypted: self.is_encrypted(),
+            entries,
+        })?)?;
+        writer.flush()?;
+        Ok(())
+    }
+
+    /// Restore a portable logical image into a new, empty plaintext database.
+    pub fn restore_snapshot<R: Read>(
+        path: impl AsRef<Path>,
+        mut reader: R,
+    ) -> Result<(), StorageError> {
+        let snapshot = Self::read_storage_snapshot(&mut reader)?;
+        if snapshot.encrypted {
+            return Err(StorageError::SnapshotEncryptionMismatch);
+        }
+        let path = path.as_ref();
+        Self::ensure_empty_snapshot_restore_target(path)?;
+        let engine = Self::open(path)?;
+        Self::install_storage_snapshot_entries(&engine, snapshot)?;
+        drop(engine);
+        let _validated = Self::open(path)?;
+        Ok(())
+    }
+
+    /// Replace an offline plaintext database through a validated sibling
+    /// staging directory. If promotion fails, the original target is restored.
+    pub fn restore_snapshot_replacing<R: Read>(
+        path: impl AsRef<Path>,
+        mut reader: R,
+    ) -> Result<(), StorageError> {
+        let mut image = Vec::new();
+        reader.read_to_end(&mut image)?;
+        let target = path.as_ref();
+        let parent = target.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let name = target.file_name().and_then(|name| name.to_str()).unwrap_or("storage");
+        let staging = parent.join(format!(".{name}.snapshot-staging-{}", Uuid::new_v4()));
+        let backup = parent.join(format!(".{name}.snapshot-backup-{}", Uuid::new_v4()));
+
+        Self::restore_snapshot(&staging, std::io::Cursor::new(image))?;
+        if target.exists() {
+            fs::rename(target, &backup)?;
+        }
+        if let Err(error) = fs::rename(&staging, target) {
+            if backup.exists() {
+                let _ = fs::rename(&backup, target);
+            }
+            let _ = fs::remove_dir_all(&staging);
+            return Err(StorageError::Io(error));
+        }
+        if backup.exists() {
+            fs::remove_dir_all(backup)?;
+        }
+        Ok(())
+    }
+
+    /// Restore a portable encrypted image into a new, empty database using its
+    /// original encryption provider and key URI.
+    pub fn restore_encrypted_snapshot<R: Read>(
+        path: impl AsRef<Path>,
+        mut reader: R,
+        provider: Arc<dyn KeyProvider>,
+        key_uri: impl Into<String>,
+    ) -> Result<(), StorageError> {
+        let snapshot = Self::read_storage_snapshot(&mut reader)?;
+        if !snapshot.encrypted {
+            return Err(StorageError::SnapshotEncryptionMismatch);
+        }
+        let path = path.as_ref();
+        Self::ensure_empty_snapshot_restore_target(path)?;
+        let key_uri = key_uri.into();
+        let engine = Self::open_encrypted(path, Arc::clone(&provider), key_uri.clone())?;
+        Self::install_storage_snapshot_entries(&engine, snapshot)?;
+        drop(engine);
+        let _validated = Self::open_encrypted(path, provider, key_uri)?;
+        Ok(())
+    }
+
+
+fn read_storage_snapshot<R: Read>(reader: &mut R) -> Result<StorageSnapshot, StorageError> {
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes)?;
+    let snapshot: StorageSnapshot = rmp_serde::from_slice(&bytes)?;
+    if snapshot.format_version != STORAGE_SNAPSHOT_FORMAT_VERSION {
+        return Err(StorageError::UnsupportedSnapshotFormatVersion {
+            expected: STORAGE_SNAPSHOT_FORMAT_VERSION,
+            actual: snapshot.format_version,
+        });
+    }
+    if snapshot.storage_layout_version != STORAGE_LAYOUT_VERSION {
+        return Err(StorageError::SnapshotLayoutVersionMismatch {
+            expected: STORAGE_LAYOUT_VERSION,
+            actual: snapshot.storage_layout_version,
+        });
+    }
+    let mut seen = BTreeSet::new();
+    for entry in &snapshot.entries {
+        if !seen.insert((entry.keyspace, entry.key.clone())) {
+            return Err(StorageError::SnapshotDuplicateKey {
+                keyspace: entry.keyspace,
+            });
+        }
+    }
+    Ok(snapshot)
+}
+
+fn ensure_empty_snapshot_restore_target(path: &Path) -> Result<(), StorageError> {
+    if path.exists() && fs::read_dir(path)?.next().is_some() {
+        return Err(StorageError::SnapshotRestoreTargetNotEmpty(
+            path.display().to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn install_storage_snapshot_entries(
+    engine: &StorageEngine,
+    snapshot: StorageSnapshot,
+) -> Result<(), StorageError> {
+    for entry in snapshot.entries {
+        let target = match entry.keyspace {
+            StorageSnapshotKeyspace::Meta => &engine.meta,
+            StorageSnapshotKeyspace::Nodes => &engine.nodes,
+            StorageSnapshotKeyspace::Edges => &engine.edges,
+            StorageSnapshotKeyspace::Indexes => &engine.indexes,
+        };
+        target.fjall_insert(entry.key, entry.value)?;
+    }
+    engine.meta.fjall_insert(
+        META_WAL_APPLIED_SEQUENCE_KEY,
+        rmp_serde::to_vec(&0_u64)?,
+    )?;
+    engine.db.persist(fjall::PersistMode::SyncAll)?;
+    Ok(())
+}
     /// Discard a corrupt WAL only when Fjall has already applied every entry.
     ///
     /// This deliberately refuses to truncate a suffix that could contain
@@ -1798,6 +2001,43 @@ impl StorageEngine {
     /// Frames after the applied marker remain available for startup recovery.
     pub fn compact_applied_wal(&self) -> Result<usize, StorageError> {
         self.wal.compact_up_to(self.wal_applied_sequence()?)
+    }
+
+    /// Persist a checkpoint at Fjall's applied WAL marker, then compact only
+    /// the frames already represented by the durable primary store.
+    pub fn checkpoint_wal(&self) -> Result<(WALSnapshot, usize), StorageError> {
+        let _commit_guard = self.batch_commit_lock.lock();
+        let snapshot = WALSnapshot {
+            compacted_through: self.wal_applied_sequence()?,
+            created_at_unix_ms: now_unix_ms(),
+        };
+        let path = self
+            .wal
+            .path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(|directory| directory.join(STORAGE_WAL_SNAPSHOT_FILENAME));
+        if let Some(path) = path {
+            save_wal_snapshot(&snapshot, &path)?;
+        }
+        let removed = self.wal.compact_up_to(snapshot.compacted_through)?;
+        Ok((snapshot, removed))
+    }
+
+    pub fn wal_checkpoint(&self) -> Result<Option<WALSnapshot>, StorageError> {
+        let Some(path) = self
+            .wal
+            .path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(|directory| directory.join(STORAGE_WAL_SNAPSHOT_FILENAME))
+        else {
+            return Ok(None);
+        };
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(load_wal_snapshot(&path)?))
     }
 
     pub fn wal_stats(&self) -> WALStats {
@@ -2814,6 +3054,15 @@ impl StorageEngine {
 
     pub fn prune_mvcc_versions(&self, opts: MvccPruneOptions) -> usize {
         self.mvcc.prune_mvcc_versions(opts)
+    }
+
+    pub(crate) fn prune_mvcc_versions_in_namespace(
+        &self,
+        namespace_prefix: &str,
+        opts: MvccPruneOptions,
+    ) -> usize {
+        self.mvcc
+            .prune_mvcc_versions_in_namespace(namespace_prefix, opts)
     }
 
     pub fn pause_lifecycle(&self) {

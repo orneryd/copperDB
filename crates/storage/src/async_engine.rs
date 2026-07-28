@@ -1555,6 +1555,7 @@ fn worker_loop(
 ) {
     let tick_interval = auto_flush_tick_interval(config);
     let mut next_auto_flush = Instant::now() + tick_interval;
+    let mut last_lifecycle_prune = Instant::now();
     loop {
         let timeout = next_auto_flush.saturating_duration_since(Instant::now());
         match worker_rx.recv_timeout(timeout) {
@@ -1562,6 +1563,7 @@ fn worker_loop(
                 if handle_request(&engine, &shared, request) {
                     break;
                 }
+                maybe_run_lifecycle_prune(&engine, &mut last_lifecycle_prune);
                 if Instant::now() >= next_auto_flush {
                     maybe_auto_flush(&engine, &shared, config);
                     next_auto_flush = Instant::now() + tick_interval;
@@ -1569,6 +1571,7 @@ fn worker_loop(
             }
             Err(RecvTimeoutError::Timeout) => {
                 maybe_auto_flush(&engine, &shared, config);
+                maybe_run_lifecycle_prune(&engine, &mut last_lifecycle_prune);
                 next_auto_flush = Instant::now() + tick_interval;
             }
             Err(RecvTimeoutError::Disconnected) => {
@@ -1577,6 +1580,19 @@ fn worker_loop(
             }
         }
     }
+}
+
+fn maybe_run_lifecycle_prune(engine: &StorageEngine, last_prune: &mut Instant) {
+    let status = engine.lifecycle_status();
+    if status.paused || status.schedule_interval_ms == 0 {
+        *last_prune = Instant::now();
+        return;
+    }
+    if last_prune.elapsed() < Duration::from_millis(status.schedule_interval_ms) {
+        return;
+    }
+    engine.trigger_prune_now(0);
+    *last_prune = Instant::now();
 }
 
 fn auto_flush_tick_interval(config: AsyncStorageConfig) -> Duration {

@@ -465,6 +465,42 @@ impl MvccStore {
         removed_versions
     }
 
+    pub fn prune_mvcc_versions_in_namespace(
+        &self,
+        namespace_prefix: &str,
+        opts: MvccPruneOptions,
+    ) -> usize {
+        let max_versions = opts.max_versions_per_key.unwrap_or(1).max(1);
+        let oldest_active_reader = self.oldest_active_reader();
+
+        let mut removed_versions = 0usize;
+        let mut pruned_node_ids = Vec::new();
+        let mut pruned_edge_ids = Vec::new();
+        let mut guard = self.values.write();
+        for (logical_key, state) in guard.iter_mut() {
+            let Some((kind, id)) = logical_key.split_once(':') else {
+                continue;
+            };
+            if !id.starts_with(namespace_prefix) {
+                continue;
+            }
+            let removed = state.prune_to_max_versions(max_versions, oldest_active_reader);
+            if removed == 0 {
+                continue;
+            }
+            removed_versions += removed;
+            match kind {
+                "node" => pruned_node_ids.push(id.to_string()),
+                "edge" => pruned_edge_ids.push(id.to_string()),
+                _ => {}
+            }
+        }
+        drop(guard);
+
+        self.compact_history_candidates(&pruned_node_ids, &pruned_edge_ids);
+        removed_versions
+    }
+
     pub fn trigger_prune_now(&self, retain_last_n_versions: u64) -> usize {
         // Safety guard: when active snapshot readers pin old versions,
         // only advance the floor to the oldest reader's anchor — never

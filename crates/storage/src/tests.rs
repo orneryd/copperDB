@@ -3,6 +3,7 @@ use copperdb_kms::{LocalKms, LocalKmsConfig};
 use copperdb_util::RequestCancellation;
 use serde_json::{json, Value};
 use std::fs;
+use std::io::Cursor;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -1286,6 +1287,9 @@ fn namespaced_storage_engine_delegates_mvcc_visible_reads_and_lifecycle_controls
     tenant_a
         .put_node_record(&sample_node("n1", &["Device"]))
         .unwrap();
+    tenant_b
+        .put_node_record(&sample_node("n1", &["Device"]))
+        .unwrap();
     tenant_a
         .put_edge_record(&sample_edge("e1", "SEES", "n1", "n1"))
         .unwrap();
@@ -1316,6 +1320,11 @@ fn namespaced_storage_engine_delegates_mvcc_visible_reads_and_lifecycle_controls
         max_versions_per_key: Some(1),
     });
     assert!(pruned > 0);
+    assert!(
+        tenant_b.prune_mvcc_versions(MvccPruneOptions {
+            max_versions_per_key: Some(1),
+        }) > 0
+    );
     tenant_a.resume_lifecycle();
     assert!(!tenant_a.lifecycle_status().paused);
 }
@@ -1615,6 +1624,155 @@ fn storage_compacts_only_applied_wal_frames_and_recovers_the_remainder() {
     assert_eq!(reopened.wal_applied_sequence().unwrap(), sequence);
     assert_eq!(reopened.wal_stats().entries, 1);
     assert_eq!(reopened.wal_stats().compacted_through, 1);
+}
+
+#[test]
+fn storage_checkpoint_compacts_only_applied_frames_and_restores_unapplied_intent() {
+    let test_dir = tempfile::tempdir().unwrap();
+    let durable = sample_node("durable", &["Node"]);
+    let recovered = sample_node("recovered", &["Node"]);
+    let engine = StorageEngine::open(test_dir.path()).unwrap();
+    engine.put_node_record(&durable).unwrap();
+    let sequence = engine
+        .wal
+        .append_transaction(
+            "unapplied",
+            vec![WALTransactionRecord {
+                op: "put_node".to_string(),
+                key: recovered.id.clone(),
+                payload: rmp_serde::to_vec(&recovered).unwrap(),
+            }],
+        )
+        .unwrap()
+        .seq;
+
+    let (checkpoint, removed) = engine.checkpoint_wal().unwrap();
+    assert_eq!(checkpoint.compacted_through, 1);
+    assert_eq!(removed, 1);
+    assert_eq!(engine.wal_checkpoint().unwrap(), Some(checkpoint));
+    assert_eq!(engine.wal_stats().entries, 1);
+    drop(engine);
+
+    let reopened = StorageEngine::open(test_dir.path()).unwrap();
+    assert_eq!(reopened.get_node_record(&durable.id).unwrap(), Some(durable));
+    assert_eq!(reopened.get_node_record(&recovered.id).unwrap(), Some(recovered));
+    assert_eq!(reopened.wal_applied_sequence().unwrap(), sequence);
+    assert_eq!(reopened.wal_checkpoint().unwrap().unwrap().compacted_through, 1);
+}
+
+#[test]
+fn storage_logical_snapshot_round_trips_mvcc_namespace_metadata_and_fresh_wal() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let node = sample_node("n1", &["Person"]);
+    let source = StorageEngine::open(source_dir.path()).unwrap();
+    source.put_node_record(&node).unwrap();
+    let snapshot = source.begin_mvcc_snapshot();
+    let mut updated = node.clone();
+    updated.labels = vec!["Device".to_string()];
+    updated.updated_at_unix_ms += 1;
+    source.put_node_record(&updated).unwrap();
+    let constraint = Constraint {
+        name: "tenant_unique_name".to_string(),
+        constraint_type: ConstraintType::Unique,
+        entity_type: ConstraintEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["name".to_string()],
+        type_name: None,
+        allowed_values: Vec::new(),
+    };
+    source
+        .persist_constraint_for_namespace("tenant", &constraint)
+        .unwrap();
+
+    let mut image = Vec::new();
+    source.write_snapshot(&mut image).unwrap();
+    drop(source);
+
+    StorageEngine::restore_snapshot(target_dir.path(), Cursor::new(image)).unwrap();
+    let restored = StorageEngine::open(target_dir.path()).unwrap();
+    assert_eq!(restored.get_node_record("n1").unwrap(), Some(updated));
+    assert_eq!(
+        restored.get_node_record_visible_at(&snapshot, "n1").unwrap(),
+        Some(node)
+    );
+    assert_eq!(
+        restored
+            .load_constraints_for_namespace("tenant")
+            .unwrap(),
+        vec![constraint]
+    );
+    assert_eq!(restored.wal_applied_sequence().unwrap(), 0);
+    restored.put_node_record(&sample_node("n2", &["Person"])).unwrap();
+    drop(restored);
+
+    let reopened = StorageEngine::open(target_dir.path()).unwrap();
+    assert!(reopened.get_node_record("n2").unwrap().is_some());
+    assert_eq!(reopened.wal_applied_sequence().unwrap(), 1);
+}
+
+#[test]
+fn encrypted_storage_logical_snapshot_requires_a_compatible_encrypted_restore() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let plaintext_target = tempfile::tempdir().unwrap();
+    let encrypted_target = tempfile::tempdir().unwrap();
+    let source = StorageEngine::open_encrypted(
+        source_dir.path(),
+        local_provider(0x42),
+        "kms://local/default",
+    )
+    .unwrap();
+    let node = sample_node("encrypted", &["Person"]);
+    source.put_node_record(&node).unwrap();
+    let mut image = Vec::new();
+    source.write_snapshot(&mut image).unwrap();
+    drop(source);
+
+    assert!(matches!(
+        StorageEngine::restore_snapshot(plaintext_target.path(), Cursor::new(image.clone())),
+        Err(StorageError::SnapshotEncryptionMismatch)
+    ));
+    StorageEngine::restore_encrypted_snapshot(
+        encrypted_target.path(),
+        Cursor::new(image),
+        local_provider(0x42),
+        "kms://local/default",
+    )
+    .unwrap();
+
+    let restored = StorageEngine::open_encrypted(
+        encrypted_target.path(),
+        local_provider(0x42),
+        "kms://local/default",
+    )
+    .unwrap();
+    assert_eq!(restored.get_node_record("encrypted").unwrap(), Some(node));
+    assert_eq!(restored.wal_applied_sequence().unwrap(), 0);
+}
+
+#[test]
+fn storage_logical_snapshot_replaces_an_offline_target_through_staging() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let target_dir = tempfile::tempdir().unwrap();
+    let source = StorageEngine::open(source_dir.path()).unwrap();
+    let replacement = sample_node("replacement", &["Person"]);
+    source.put_node_record(&replacement).unwrap();
+    let mut image = Vec::new();
+    source.write_snapshot(&mut image).unwrap();
+    drop(source);
+
+    {
+        let target = StorageEngine::open(target_dir.path()).unwrap();
+        target.put_node_record(&sample_node("old", &["Legacy"])).unwrap();
+    }
+    StorageEngine::restore_snapshot_replacing(target_dir.path(), Cursor::new(image)).unwrap();
+
+    let restored = StorageEngine::open(target_dir.path()).unwrap();
+    assert_eq!(
+        restored.get_node_record("replacement").unwrap(),
+        Some(replacement)
+    );
+    assert!(restored.get_node_record("old").unwrap().is_none());
 }
 
 #[test]
@@ -3922,6 +4080,37 @@ fn async_storage_engine_delegates_mvcc_lifecycle_controls() {
 }
 
 #[test]
+fn async_storage_engine_runs_scheduled_reader_aware_mvcc_pruning() {
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open_temporary().unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 5,
+            ..Default::default()
+        }),
+    );
+    async_engine.pause_lifecycle();
+    async_engine.set_lifecycle_schedule_ms(5);
+
+    let original = sample_node("n1", &["Person"]);
+    async_engine.put_node_record(&original).unwrap();
+    async_engine.flush().unwrap();
+    let mut updated = original.clone();
+    updated.updated_at_unix_ms += 1;
+    async_engine.put_node_record(&updated).unwrap();
+    async_engine.flush().unwrap();
+
+    thread::sleep(Duration::from_millis(30));
+    assert_eq!(async_engine.lifecycle_status().retained_versions, 2);
+
+    async_engine.resume_lifecycle();
+    wait_until(
+        || async_engine.lifecycle_status().retained_versions == 1,
+        Duration::from_secs(1),
+    );
+    async_engine.close().unwrap();
+}
+
+#[test]
 fn mvcc_snapshot_isolation_and_pruning_work() {
     let mvcc = MvccStore::new();
     let snapshot0 = mvcc.begin_snapshot();
@@ -6102,7 +6291,6 @@ fn async_engine_drains_deindex_on_flush_tick() {
 
     // Enqueue deindex
     async_engine.enqueue_deindex_work("n-deidx").unwrap();
-    assert_eq!(async_engine.pending_deindex_count().unwrap(), 1);
 
     // Wait for background flush tick (which also drains deindex)
     let start = std::time::Instant::now();

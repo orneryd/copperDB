@@ -339,7 +339,8 @@ impl<'a> NamespacedStorageEngine<'a> {
     }
 
     pub fn prune_mvcc_versions(&self, opts: MvccPruneOptions) -> usize {
-        self.inner.prune_mvcc_versions(opts)
+        self.inner
+            .prune_mvcc_versions_in_namespace(&self.prefix, opts)
     }
 
     pub fn pause_lifecycle(&self) {

@@ -603,6 +603,30 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(inspect_wal_handler).post(repair_wal_handler),
         )
         .route(
+            "/admin/databases/{database}/mvcc/status",
+            get(mvcc_lifecycle_status_handler),
+        )
+        .route(
+            "/admin/databases/{database}/mvcc/debt",
+            get(mvcc_lifecycle_debt_handler),
+        )
+        .route(
+            "/admin/databases/{database}/mvcc/prune",
+            post(trigger_mvcc_prune_handler),
+        )
+        .route(
+            "/admin/databases/{database}/mvcc/pause",
+            post(pause_mvcc_lifecycle_handler),
+        )
+        .route(
+            "/admin/databases/{database}/mvcc/resume",
+            post(resume_mvcc_lifecycle_handler),
+        )
+        .route(
+            "/admin/databases/{database}/mvcc/schedule",
+            post(set_mvcc_lifecycle_schedule_handler),
+        )
+        .route(
             "/admin/fabric/databases",
             get(list_fabric_databases).post(register_fabric_database),
         )
@@ -2191,6 +2215,158 @@ fn wal_integrity_response(status: copperdb_storage::WALIntegrityStatus) -> serde
                 "applied_sequence": applied_sequence,
             })
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct MvccDebtQuery {
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct MvccScheduleRequest {
+    interval: String,
+}
+
+fn mvcc_lifecycle_response(database: &str, engine: &GraphEngine) -> serde_json::Value {
+    let status = engine.storage().lifecycle_status();
+    serde_json::json!({
+        "database": database,
+        "enabled": status.enabled,
+        "running": !status.paused,
+        "paused": status.paused,
+        "automatic": status.schedule_interval_ms > 0,
+        "cycle_interval": format!("{}ms", status.schedule_interval_ms),
+        "mvcc_active_snapshot_readers": status.active_reader_count,
+        "mvcc_compaction_debt_keys": status.prune_debt,
+        "mvcc_prunable_bytes_total": status.prune_debt,
+        "mvcc_floor_lag_versions": status.head.saturating_sub(status.floor),
+        "head": status.head,
+        "floor": status.floor,
+        "oldest_active_reader": status.oldest_active_reader,
+        "retained_versions": status.retained_versions,
+        "suggested_prune_floor": status.suggested_prune_floor,
+    })
+}
+
+fn parse_mvcc_schedule_ms(interval: &str) -> Option<u64> {
+    let interval = interval.trim();
+    if let Some(value) = interval.strip_suffix("ms") {
+        return value.trim().parse().ok();
+    }
+    if let Some(value) = interval.strip_suffix('s') {
+        return value.trim().parse::<u64>().ok()?.checked_mul(1_000);
+    }
+    if let Some(value) = interval.strip_suffix('m') {
+        return value.trim().parse::<u64>().ok()?.checked_mul(60_000);
+    }
+    interval.parse().ok()
+}
+
+async fn mvcc_lifecycle_status_handler(
+    State(state): State<Arc<AppState>>,
+    Path(database): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &database, false) {
+        return status.into_response();
+    }
+    match open_engine(&state, &database) {
+        Ok(engine) => Json(mvcc_lifecycle_response(&database, &engine)).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn mvcc_lifecycle_debt_handler(
+    State(state): State<Arc<AppState>>,
+    Path(database): Path<String>,
+    Query(query): Query<MvccDebtQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &database, false) {
+        return status.into_response();
+    }
+    match open_engine(&state, &database) {
+        Ok(engine) => Json(serde_json::json!({
+            "database": database,
+            "limit": query.limit.unwrap_or(20),
+            "keys": engine.storage().top_lifecycle_debt_keys(query.limit.unwrap_or(20)),
+        }))
+        .into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn trigger_mvcc_prune_handler(
+    State(state): State<Arc<AppState>>,
+    Path(database): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &database, true) {
+        return status.into_response();
+    }
+    match open_engine(&state, &database) {
+        Ok(engine) => {
+            engine.storage().trigger_prune_now(0);
+            Json(serde_json::json!({"status": "ok", "database": database})).into_response()
+        }
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn pause_mvcc_lifecycle_handler(
+    State(state): State<Arc<AppState>>,
+    Path(database): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &database, true) {
+        return status.into_response();
+    }
+    match open_engine(&state, &database) {
+        Ok(engine) => {
+            engine.storage().pause_lifecycle();
+            Json(serde_json::json!({"status": "ok", "database": database})).into_response()
+        }
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn resume_mvcc_lifecycle_handler(
+    State(state): State<Arc<AppState>>,
+    Path(database): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &database, true) {
+        return status.into_response();
+    }
+    match open_engine(&state, &database) {
+        Ok(engine) => {
+            engine.storage().resume_lifecycle();
+            Json(serde_json::json!({"status": "ok", "database": database})).into_response()
+        }
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn set_mvcc_lifecycle_schedule_handler(
+    State(state): State<Arc<AppState>>,
+    Path(database): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<MvccScheduleRequest>,
+) -> Response {
+    if let Err(status) = authorize_database_access(&state, &headers, &database, true) {
+        return status.into_response();
+    }
+    let Some(interval_ms) = parse_mvcc_schedule_ms(&request.interval) else {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid interval"})))
+            .into_response();
+    };
+    match open_engine(&state, &database) {
+        Ok(engine) => {
+            engine.storage().set_lifecycle_schedule_ms(interval_ms);
+            Json(mvcc_lifecycle_response(&database, &engine)).into_response()
+        }
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
 

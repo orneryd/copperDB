@@ -67,6 +67,51 @@ fn offline_wal_maintenance_refuses_cached_engines_and_formats_integrity_status()
 }
 
 #[test]
+fn mvcc_lifecycle_status_uses_live_storage_state_and_parses_ui_intervals() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage_path = temp_dir
+        .path()
+        .join("copper")
+        .to_string_lossy()
+        .into_owned();
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager.create("copper", storage_path).unwrap();
+    let state = AppState {
+        db_name: "copper".into(),
+        db_manager,
+        ..Default::default()
+    };
+    let engine = open_engine(&state, "copper").unwrap();
+    engine.storage().pause_lifecycle();
+    engine.storage().set_lifecycle_schedule_ms(2_000);
+
+    assert_eq!(parse_mvcc_schedule_ms("250ms"), Some(250));
+    assert_eq!(parse_mvcc_schedule_ms("2s"), Some(2_000));
+    assert_eq!(parse_mvcc_schedule_ms("3m"), Some(180_000));
+    assert_eq!(parse_mvcc_schedule_ms("invalid"), None);
+    assert_eq!(
+        mvcc_lifecycle_response("copper", &engine),
+        serde_json::json!({
+            "database": "copper",
+            "enabled": true,
+            "running": false,
+            "paused": true,
+            "automatic": true,
+            "cycle_interval": "2000ms",
+            "mvcc_active_snapshot_readers": 0,
+            "mvcc_compaction_debt_keys": 0,
+            "mvcc_prunable_bytes_total": 0,
+            "mvcc_floor_lag_versions": 0,
+            "head": 0,
+            "floor": 0,
+            "oldest_active_reader": serde_json::Value::Null,
+            "retained_versions": 0,
+            "suggested_prune_floor": 0,
+        })
+    );
+}
+
+#[test]
 fn test_health_response_serialization() {
     let hr = HealthResponse {
         status: "ok".into(),
