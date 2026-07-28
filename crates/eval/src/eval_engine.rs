@@ -339,71 +339,60 @@ impl EvalEngine {
         for clause in &query.clauses {
             request_context.check_active()?;
             match clause {
-                Clause::Create(create) if create.pattern.edges.is_empty() => {
+                Clause::Create(create) => {
                     for row in &mut current_rows {
-                        for node_pattern in &create.pattern.nodes {
-                            let label = node_pattern
-                                .labels
-                                .first()
-                                .cloned()
-                                .unwrap_or_else(|| "Node".to_string());
-                            let id = format!("{label}:{}", Uuid::new_v4());
-                            let mut properties =
-                                evaluate_pattern_properties(&node_pattern.properties, row, params)?;
-                            properties.insert("_id".to_string(), Value::String(id));
-                            properties.insert(
-                                "_labels".to_string(),
-                                Value::Array(
-                                    node_pattern
-                                        .labels
-                                        .iter()
-                                        .cloned()
-                                        .map(Value::String)
-                                        .collect(),
-                                ),
-                            );
-                            let mut node = node_record_from_props(&properties)?;
-                            let now = now_unix_ms();
-                            node.created_at_unix_ms = now;
-                            node.updated_at_unix_ms = now;
-                            transaction.put_node_record(node);
-                            stats.nodes_created += 1;
-                            stats.properties_set += node_pattern.properties.len();
-                            if let Some(variable) = &node_pattern.variable {
-                                row.insert(
-                                    variable.clone(),
-                                    Value::Object(properties.into_iter().collect()),
-                                );
-                            }
-                        }
+                        self.execute_storage_transaction_create_pattern(
+                            transaction,
+                            row,
+                            &create.pattern,
+                            params,
+                            &mut stats,
+                        )?;
                     }
                 }
-                Clause::Match(match_clause) if match_clause.pattern.edges.is_empty() => {
-                    for node_pattern in &match_clause.pattern.nodes {
-                        let mut matched_rows = Vec::new();
-                        for row in &current_rows {
-                            let expected =
-                                evaluate_pattern_properties(&node_pattern.properties, row, params)?;
-                            for node in transaction.all_node_records()? {
-                                let properties = node_record_to_props(&node);
-                                if !node_matches_pattern(
-                                    &properties,
-                                    &node_pattern.labels,
-                                    &expected,
-                                ) {
-                                    continue;
-                                }
-                                let mut matched = row.clone();
-                                if let Some(variable) = &node_pattern.variable {
-                                    matched.insert(
-                                        variable.clone(),
-                                        Value::Object(properties.into_iter().collect()),
-                                    );
-                                }
-                                matched_rows.push(matched);
-                            }
+                Clause::Match(match_clause) => {
+                    current_rows = self.execute_storage_transaction_match_pattern(
+                        transaction,
+                        &current_rows,
+                        &match_clause.pattern,
+                        params,
+                    )?;
+                }
+                Clause::Set(set_clause) => {
+                    self.execute_storage_transaction_set_clause(
+                        transaction,
+                        &mut current_rows,
+                        &set_clause.items,
+                        params,
+                        &mut stats,
+                    )?;
+                }
+                Clause::Remove(remove_clause) => {
+                    self.execute_storage_transaction_remove_clause(
+                        transaction,
+                        &mut current_rows,
+                        &remove_clause.items,
+                    )?;
+                }
+                Clause::Merge(merge_clause) => {
+                    current_rows = self.execute_storage_transaction_merge_clause(
+                        transaction,
+                        &current_rows,
+                        merge_clause,
+                        params,
+                        &mut stats,
+                    )?;
+                }
+                Clause::Delete(delete_clause) => {
+                    for row in &current_rows {
+                        for variable in &delete_clause.variables {
+                            self.delete_storage_transaction_bound_value(
+                                transaction,
+                                row.get(variable),
+                                delete_clause.detach,
+                                &mut stats,
+                            )?;
                         }
-                        current_rows = matched_rows;
                     }
                 }
                 Clause::Return(return_clause) => {
@@ -422,7 +411,7 @@ impl EvalEngine {
                 }
                 _ => {
                     return Err(EvalError::ExecutionError(
-                        "explicit transactions currently support node-only CREATE, MATCH, and RETURN"
+                        "explicit transactions currently support CREATE, node MERGE, fixed one-hop MATCH, SET, REMOVE, DELETE, and RETURN"
                             .to_string(),
                     ));
                 }
@@ -434,6 +423,568 @@ impl EvalEngine {
             rows: result_rows,
             stats,
         })
+    }
+
+    fn execute_storage_transaction_create_pattern(
+        &self,
+        transaction: &mut StorageTransaction<'_>,
+        row: &mut Row,
+        pattern: &Pattern,
+        params: &HashMap<String, Value>,
+        stats: &mut QueryStats,
+    ) -> Result<(), EvalError> {
+        if pattern.edges.len() + 1 != pattern.nodes.len() {
+            return Err(EvalError::ExecutionError(
+                "explicit transaction CREATE pattern is structurally invalid".to_string(),
+            ));
+        }
+
+        let mut node_ids = Vec::with_capacity(pattern.nodes.len());
+        for node_pattern in &pattern.nodes {
+            if let Some(variable) = &node_pattern.variable {
+                if let Some(properties) = bound_row_object_props(row, variable) {
+                    let expected =
+                        evaluate_pattern_properties(&node_pattern.properties, row, params)?;
+                    if !node_matches_pattern(&properties, &node_pattern.labels, &expected) {
+                        return Err(EvalError::ExecutionError(format!(
+                            "transaction CREATE variable '{variable}' does not match the requested node pattern"
+                        )));
+                    }
+                    let id = node_id(&properties).ok_or_else(|| {
+                        EvalError::ExecutionError(format!(
+                            "transaction CREATE variable '{variable}' is missing _id"
+                        ))
+                    })?;
+                    node_ids.push(id.to_string());
+                    continue;
+                }
+            }
+
+            let label = node_pattern
+                .labels
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Node".to_string());
+            let id = format!("{label}:{}", Uuid::new_v4());
+            let mut properties =
+                evaluate_pattern_properties(&node_pattern.properties, row, params)?;
+            properties.insert("_id".to_string(), Value::String(id.clone()));
+            properties.insert(
+                "_labels".to_string(),
+                Value::Array(
+                    node_pattern
+                        .labels
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            );
+            let mut node = node_record_from_props(&properties)?;
+            let now = now_unix_ms();
+            node.created_at_unix_ms = now;
+            node.updated_at_unix_ms = now;
+            transaction.put_node_record(node);
+            stats.nodes_created += 1;
+            stats.properties_set += node_pattern.properties.len();
+            if let Some(variable) = &node_pattern.variable {
+                row.insert(
+                    variable.clone(),
+                    Value::Object(properties.into_iter().collect()),
+                );
+            }
+            node_ids.push(id);
+        }
+
+        for (edge_index, edge_pattern) in pattern.edges.iter().enumerate() {
+            let edge_type = edge_pattern
+                .rel_type
+                .clone()
+                .unwrap_or_else(|| "REL".to_string());
+            let properties = evaluate_pattern_properties(&edge_pattern.properties, row, params)?;
+            let now = now_unix_ms();
+            let edge = EdgeRecord {
+                id: format!("{edge_type}:{}", Uuid::new_v4()),
+                start_node: node_ids[edge_index].clone(),
+                end_node: node_ids[edge_index + 1].clone(),
+                edge_type,
+                properties: properties.clone().into_iter().collect(),
+                created_at_unix_ms: now,
+                updated_at_unix_ms: now,
+            };
+            if let Some(variable) = &edge_pattern.variable {
+                row.insert(variable.clone(), edge_record_to_value(&edge)?);
+            }
+            transaction.put_edge_record(edge);
+            stats.relationships_created += 1;
+            stats.properties_set += edge_pattern.properties.len();
+        }
+
+        Ok(())
+    }
+
+    fn execute_storage_transaction_match_pattern(
+        &self,
+        transaction: &StorageTransaction<'_>,
+        base_rows: &[Row],
+        pattern: &Pattern,
+        params: &HashMap<String, Value>,
+    ) -> Result<Vec<Row>, EvalError> {
+        if pattern.edges.is_empty() {
+            let mut current_rows = base_rows.to_vec();
+            for node_pattern in &pattern.nodes {
+                let mut matched_rows = Vec::new();
+                for row in &current_rows {
+                    let expected =
+                        evaluate_pattern_properties(&node_pattern.properties, row, params)?;
+                    for node in transaction.all_node_records()? {
+                        let properties = node_record_to_props(&node);
+                        if !node_matches_pattern(&properties, &node_pattern.labels, &expected) {
+                            continue;
+                        }
+                        if !bound_node_matches_row(
+                            row,
+                            node_pattern.variable.as_deref(),
+                            &properties,
+                        ) {
+                            continue;
+                        }
+                        let mut matched = row.clone();
+                        if let Some(variable) = &node_pattern.variable {
+                            matched.insert(
+                                variable.clone(),
+                                Value::Object(properties.into_iter().collect()),
+                            );
+                        }
+                        matched_rows.push(matched);
+                    }
+                }
+                current_rows = matched_rows;
+            }
+            return Ok(current_rows);
+        }
+
+        if pattern.edges.iter().any(|edge| {
+            edge.min_hops.is_some() || edge.max_hops.is_some()
+        }) {
+            return Err(EvalError::ExecutionError(
+                "explicit transactions currently support fixed-length relationship MATCH patterns"
+                    .to_string(),
+            ));
+        }
+
+        let start_pattern = &pattern.nodes[0];
+        let mut result = Vec::new();
+        for base_row in base_rows {
+            let expected_start =
+                evaluate_pattern_properties(&start_pattern.properties, base_row, params)?;
+            for start in transaction.all_node_records()? {
+                let start_properties = node_record_to_props(&start);
+                if !node_matches_pattern(&start_properties, &start_pattern.labels, &expected_start)
+                    || !bound_node_matches_row(
+                        base_row,
+                        start_pattern.variable.as_deref(),
+                        &start_properties,
+                    )
+                {
+                    continue;
+                }
+                let mut initial_row = base_row.clone();
+                if let Some(variable) = &start_pattern.variable {
+                    initial_row.insert(
+                        variable.clone(),
+                        Value::Object(start_properties.into_iter().collect()),
+                    );
+                }
+                let mut frontier = vec![(initial_row, start.id)];
+                for (edge_index, edge_pattern) in pattern.edges.iter().enumerate() {
+                    let end_pattern = &pattern.nodes[edge_index + 1];
+                    let mut next_frontier = Vec::new();
+                    for (row, node_id) in frontier {
+                        let expected_edge =
+                            evaluate_pattern_properties(&edge_pattern.properties, &row, params)?;
+                        let expected_end =
+                            evaluate_pattern_properties(&end_pattern.properties, &row, params)?;
+                        for edge in transaction.get_adjacent_edges(
+                            &node_id,
+                            match edge_pattern.direction {
+                                EdgeDirection::Outgoing => EdgeAdjacencyDirection::Outgoing,
+                                EdgeDirection::Incoming => EdgeAdjacencyDirection::Incoming,
+                                EdgeDirection::Both => EdgeAdjacencyDirection::Both,
+                            },
+                            edge_pattern.rel_type.as_deref(),
+                        )? {
+                            if !edge_matches_pattern(&edge, &expected_edge)
+                                || !bound_edge_matches_row(
+                                    &row,
+                                    edge_pattern.variable.as_deref(),
+                                    &edge,
+                                )
+                            {
+                                continue;
+                            }
+                            let Some(end_id) =
+                                related_node_id(&node_id, &edge, &edge_pattern.direction)
+                            else {
+                                continue;
+                            };
+                            let Some(end) = transaction.get_node_record(end_id)? else {
+                                continue;
+                            };
+                            let end_properties = node_record_to_props(&end);
+                            if !node_matches_pattern(
+                                &end_properties,
+                                &end_pattern.labels,
+                                &expected_end,
+                            ) || !bound_node_matches_row(
+                                &row,
+                                end_pattern.variable.as_deref(),
+                                &end_properties,
+                            ) {
+                                continue;
+                            }
+                            let mut next_row = row.clone();
+                            if let Some(variable) = &edge_pattern.variable {
+                                next_row.insert(variable.clone(), edge_record_to_value(&edge)?);
+                            }
+                            if let Some(variable) = &end_pattern.variable {
+                                next_row.insert(
+                                    variable.clone(),
+                                    Value::Object(end_properties.into_iter().collect()),
+                                );
+                            }
+                            next_frontier.push((next_row, end.id));
+                        }
+                    }
+                    frontier = next_frontier;
+                }
+                result.extend(frontier.into_iter().map(|(row, _)| row));
+            }
+        }
+        Ok(result)
+    }
+
+    fn execute_storage_transaction_set_clause(
+        &self,
+        transaction: &mut StorageTransaction<'_>,
+        rows: &mut [Row],
+        items: &[SetItem],
+        params: &HashMap<String, Value>,
+        stats: &mut QueryStats,
+    ) -> Result<(), EvalError> {
+        for row in rows {
+            for item in items {
+                let SetItem::Property {
+                    variable,
+                    property,
+                    value,
+                } = item else {
+                    match item {
+                        SetItem::MapAssignment { variable, value } => {
+                            let value = self.evaluate_expression(value, row, params)?;
+                            let Value::Object(map) = value else {
+                                continue;
+                            };
+                            let Some(Value::Object(properties)) = row.get_mut(variable) else {
+                                continue;
+                            };
+                            let protected = ["_id", "_labels", "_type", "_start", "_end"];
+                            let metadata = properties
+                                .iter()
+                                .filter(|(key, _)| protected.contains(&key.as_str()))
+                                .map(|(key, value)| (key.clone(), value.clone()))
+                                .collect::<serde_json::Map<_, _>>();
+                            properties.clear();
+                            properties.extend(map);
+                            properties.extend(metadata);
+                            stats.properties_set += properties.len().saturating_sub(2);
+                        }
+                        SetItem::MapMerge { variable, value } => {
+                            let value = self.evaluate_expression(value, row, params)?;
+                            let Value::Object(map) = value else {
+                                continue;
+                            };
+                            let Some(Value::Object(properties)) = row.get_mut(variable) else {
+                                continue;
+                            };
+                            for (key, value) in map {
+                                if !value.is_null() {
+                                    properties.insert(key, value);
+                                    stats.properties_set += 1;
+                                }
+                            }
+                        }
+                        SetItem::Label { variable, label } => {
+                            let Some(Value::Object(properties)) = row.get_mut(variable) else {
+                                continue;
+                            };
+                            let labels = properties
+                                .entry("_labels".to_string())
+                                .or_insert_with(|| Value::Array(Vec::new()));
+                            if let Value::Array(labels) = labels {
+                                let label = Value::String(label.clone());
+                                if !labels.contains(&label) {
+                                    labels.push(label);
+                                }
+                            }
+                        }
+                        SetItem::DynamicLabel {
+                            variable,
+                            expression,
+                        } => {
+                            let value = self.evaluate_expression(expression, row, params)?;
+                            let Some(Value::Object(properties)) = row.get_mut(variable) else {
+                                continue;
+                            };
+                            let labels = properties
+                                .entry("_labels".to_string())
+                                .or_insert_with(|| Value::Array(Vec::new()));
+                            if let Value::Array(labels) = labels {
+                                let additions = match value {
+                                    Value::String(label) => vec![label],
+                                    Value::Array(values) => values
+                                        .into_iter()
+                                        .filter_map(|value| value.as_str().map(str::to_string))
+                                        .collect(),
+                                    _ => Vec::new(),
+                                };
+                                for addition in additions {
+                                    let label = Value::String(addition);
+                                    if !labels.contains(&label) {
+                                        labels.push(label);
+                                    }
+                                }
+                            }
+                        }
+                        SetItem::Property { .. } => unreachable!(),
+                    }
+                    let variable = match item {
+                        SetItem::MapAssignment { variable, .. }
+                        | SetItem::MapMerge { variable, .. }
+                        | SetItem::Label { variable, .. }
+                        | SetItem::DynamicLabel { variable, .. } => variable,
+                        SetItem::Property { .. } => unreachable!(),
+                    };
+                    if let Some(Value::Object(properties)) = row.get(variable) {
+                        self.stage_storage_transaction_bound_props(
+                            transaction,
+                            &properties.clone().into_iter().collect(),
+                        )?;
+                    }
+                    continue;
+                };
+                let value = self.evaluate_expression(value, row, params)?;
+                let Some(Value::Object(properties)) = row.get_mut(variable) else {
+                    continue;
+                };
+                properties.insert(property.clone(), value);
+                self.stage_storage_transaction_bound_props(
+                    transaction,
+                    &properties.clone().into_iter().collect(),
+                )?;
+                stats.properties_set += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn stage_storage_transaction_bound_props(
+        &self,
+        transaction: &mut StorageTransaction<'_>,
+        properties: &HashMap<String, Value>,
+    ) -> Result<(), EvalError> {
+        let now = now_unix_ms();
+        if properties.contains_key("_type")
+            && properties.contains_key("_start")
+            && properties.contains_key("_end")
+        {
+            let mut edge = edge_record_from_props(properties)?;
+            let existing = transaction.get_edge_record(&edge.id)?.ok_or_else(|| {
+                EvalError::ExecutionError(
+                    "transactional SET targets a missing relationship".to_string(),
+                )
+            })?;
+            edge.created_at_unix_ms = existing.created_at_unix_ms;
+            edge.updated_at_unix_ms = now;
+            transaction.put_edge_record(edge);
+        } else {
+            let mut node = node_record_from_props(properties)?;
+            let existing = transaction.get_node_record(&node.id)?.ok_or_else(|| {
+                EvalError::ExecutionError("transactional SET targets a missing node".to_string())
+            })?;
+            node.created_at_unix_ms = existing.created_at_unix_ms;
+            node.updated_at_unix_ms = now;
+            node.named_embeddings = existing.named_embeddings;
+            node.chunk_embeddings = existing.chunk_embeddings;
+            node.embed_meta = existing.embed_meta;
+            transaction.put_node_record(node);
+        }
+        Ok(())
+    }
+
+    fn execute_storage_transaction_remove_clause(
+        &self,
+        transaction: &mut StorageTransaction<'_>,
+        rows: &mut [Row],
+        items: &[RemoveItem],
+    ) -> Result<(), EvalError> {
+        for row in rows {
+            for item in items {
+                match item {
+                    RemoveItem::Property { variable, property } => {
+                        if property.starts_with('_') {
+                            return Err(EvalError::ExecutionError(
+                                "cannot remove internal metadata properties".to_string(),
+                            ));
+                        }
+                        let Some(Value::Object(properties)) = row.get_mut(variable) else {
+                            continue;
+                        };
+                        properties.remove(property);
+                        self.stage_storage_transaction_bound_props(
+                            transaction,
+                            &properties.clone().into_iter().collect(),
+                        )?;
+                    }
+                    RemoveItem::Label { variable, label } => {
+                        let Some(Value::Object(properties)) = row.get_mut(variable) else {
+                            continue;
+                        };
+                        let Some(Value::Array(labels)) = properties.get_mut("_labels") else {
+                            return Err(EvalError::ExecutionError(
+                                "REMOVE label targets must be node bindings".to_string(),
+                            ));
+                        };
+                        labels.retain(|value| value.as_str() != Some(label.as_str()));
+                        self.stage_storage_transaction_bound_props(
+                            transaction,
+                            &properties.clone().into_iter().collect(),
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn execute_storage_transaction_merge_clause(
+        &self,
+        transaction: &mut StorageTransaction<'_>,
+        base_rows: &[Row],
+        merge: &copperdb_cypher::MergeClause,
+        params: &HashMap<String, Value>,
+        stats: &mut QueryStats,
+    ) -> Result<Vec<Row>, EvalError> {
+        if merge.pattern.nodes.len() != 1 || !merge.pattern.edges.is_empty() {
+            return Err(EvalError::ExecutionError(
+                "explicit transactions currently support node-only MERGE patterns".to_string(),
+            ));
+        }
+        let node_pattern = &merge.pattern.nodes[0];
+        let mut rows = Vec::with_capacity(base_rows.len());
+        for base_row in base_rows {
+            let expected = evaluate_pattern_properties(&node_pattern.properties, base_row, params)?;
+            let matched = transaction
+                .all_node_records()?
+                .into_iter()
+                .find(|node| {
+                    let properties = node_record_to_props(node);
+                    node_matches_pattern(&properties, &node_pattern.labels, &expected)
+                        && bound_node_matches_row(
+                            base_row,
+                            node_pattern.variable.as_deref(),
+                            &properties,
+                        )
+                });
+            let (mut row, set_items) = if let Some(node) = matched {
+                let mut row = base_row.clone();
+                if let Some(variable) = &node_pattern.variable {
+                    row.insert(
+                        variable.clone(),
+                        Value::Object(node_record_to_props(&node).into_iter().collect()),
+                    );
+                }
+                (row, &merge.on_match)
+            } else {
+                let label = node_pattern
+                    .labels
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "Node".to_string());
+                let id = format!("{label}:{}", Uuid::new_v4());
+                let mut properties = expected;
+                properties.insert("_id".to_string(), Value::String(id));
+                properties.insert(
+                    "_labels".to_string(),
+                    Value::Array(
+                        node_pattern
+                            .labels
+                            .iter()
+                            .cloned()
+                            .map(Value::String)
+                            .collect(),
+                    ),
+                );
+                let mut node = node_record_from_props(&properties)?;
+                let now = now_unix_ms();
+                node.created_at_unix_ms = now;
+                node.updated_at_unix_ms = now;
+                transaction.put_node_record(node);
+                stats.nodes_created += 1;
+                stats.properties_set += node_pattern.properties.len();
+                let mut row = base_row.clone();
+                if let Some(variable) = &node_pattern.variable {
+                    row.insert(variable.clone(), Value::Object(properties.into_iter().collect()));
+                }
+                (row, &merge.on_create)
+            };
+            self.execute_storage_transaction_set_clause(
+                transaction,
+                std::slice::from_mut(&mut row),
+                set_items,
+                params,
+                stats,
+            )?;
+            rows.push(row);
+        }
+        Ok(rows)
+    }
+
+    fn delete_storage_transaction_bound_value(
+        &self,
+        transaction: &mut StorageTransaction<'_>,
+        value: Option<&Value>,
+        detach: bool,
+        stats: &mut QueryStats,
+    ) -> Result<(), EvalError> {
+        let Some(Value::Object(properties)) = value else {
+            return Ok(());
+        };
+        let Some(id) = properties.get("_id").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        if properties.contains_key("_type")
+            && properties.contains_key("_start")
+            && properties.contains_key("_end")
+        {
+            if transaction.get_edge_record(id)?.is_some() {
+                transaction.delete_edge_record(id);
+                stats.relationships_deleted += 1;
+            }
+            return Ok(());
+        }
+
+        if detach {
+            for edge in transaction.get_adjacent_edges(id, EdgeAdjacencyDirection::Both, None)? {
+                transaction.delete_edge_record(edge.id);
+                stats.relationships_deleted += 1;
+            }
+        }
+        if transaction.get_node_record(id)?.is_some() {
+            transaction.delete_node_record(id);
+            stats.nodes_deleted += 1;
+        }
+        Ok(())
     }
 
     fn with_request_context<T>(
