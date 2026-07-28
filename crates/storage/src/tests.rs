@@ -1440,6 +1440,27 @@ fn storage_open_replays_unapplied_wal_transaction_frame_once() {
 }
 
 #[test]
+fn storage_open_discards_interrupted_wal_replacement_file() {
+    let test_dir = tempfile::tempdir().unwrap();
+    let node = sample_node("durable", &["Node"]);
+    {
+        let engine = StorageEngine::open(test_dir.path()).unwrap();
+        let mut transaction = engine.begin_transaction();
+        transaction.put_node_record(node.clone());
+        transaction.commit().unwrap();
+    }
+
+    let staged_wal = test_dir.path().join("wal.tmp");
+    fs::write(&staged_wal, b"interrupted replacement").unwrap();
+
+    let reopened = StorageEngine::open(test_dir.path()).unwrap();
+    assert!(!staged_wal.exists());
+    assert_eq!(reopened.get_node_record(&node.id).unwrap(), Some(node));
+    assert_eq!(reopened.wal_applied_sequence().unwrap(), 1);
+    assert_eq!(reopened.wal_stats().entries, 1);
+}
+
+#[test]
 fn owned_storage_transaction_keeps_the_engine_alive_until_commit() {
     let engine = Arc::new(StorageEngine::open_temporary().unwrap());
     let mut transaction = engine.begin_owned_transaction();

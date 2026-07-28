@@ -404,6 +404,12 @@ impl WAL {
 
     pub fn open(path: impl AsRef<Path>, config: WALConfig) -> Result<Self, StorageError> {
         let path = path.as_ref().to_path_buf();
+        // A leftover replacement file was never made authoritative. Keep the
+        // previous durable WAL rather than attempting to replay staged bytes.
+        let tmp_path = path.with_extension("tmp");
+        if tmp_path.exists() {
+            fs::remove_file(&tmp_path)?;
+        }
         let (entries, next_seq, compacted_through) = if path.exists() {
             let raw = fs::read(&path)?;
             if raw.is_empty() {
