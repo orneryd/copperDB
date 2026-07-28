@@ -31,7 +31,8 @@ Bolt 4 `HELLO` and Bolt 5 `LOGON` authenticate against the shared authenticator.
 
 - Complete: Phase 1. Bolt `HELLO` and `LOGON` authenticate through the shared durable authenticator; `LOGOFF` clears the session principal; failed or unauthenticated sessions receive `Neo.ClientError.Security.Unauthorized`.
 - Complete: secure `RUN` calls receive the authenticated principal and its actual roles. `AppStateBoltExecutor` no longer grants a hard-coded `admin` role for authenticated Bolt sessions.
-- Pending: explicit transaction ownership and durability (Phases 2-6) remain blocked on the isolated engine/storage transaction contract from Plan 08.
+- Complete: authenticated Bolt `BEGIN`, `COMMIT`, and `ROLLBACK` own a database-scoped engine transaction handle, clean up on `LOGOFF` and `RESET`, and return the engine-issued commit bookmark. This preserves NornicDB and Neo4j Bolt protocol compatibility.
+- Pending: `RUN` must be bound to the active transaction's isolated storage context so writes remain invisible until commit and rollback reverts them (Phases 2-6, dependent on Plan 08).
 
 ## Tests
 

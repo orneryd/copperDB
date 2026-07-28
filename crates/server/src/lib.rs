@@ -17,7 +17,9 @@ use axum::{
 use copperdb_auth::{
     AuthConfig, AuthError, Authenticator, Claims, DatabaseAccessMode, TokenManager,
 };
-use copperdb_bolt::server::{BoltAuthProvider, BoltPrincipal, BoltQueryResult, QueryExecutor};
+use copperdb_bolt::server::{
+    BoltAuthProvider, BoltPrincipal, BoltQueryResult, BoltTransaction, QueryExecutor,
+};
 use copperdb_buildinfo::{display_version, server_announcement, version};
 use copperdb_config::Config as RuntimeConfig;
 use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig};
@@ -1762,6 +1764,60 @@ impl QueryExecutor for AppStateBoltExecutor {
             columns: result.columns,
             rows: result.data.into_iter().map(|row| row.row).collect(),
         })
+    }
+
+    fn begin_transaction(
+        &self,
+        database: &str,
+        metadata: &HashMap<String, serde_json::Value>,
+        _principal: Option<&BoltPrincipal>,
+    ) -> Result<BoltTransaction, String> {
+        let engine = open_engine(&self.state, database)?;
+        let bookmarks: Vec<String> = metadata
+            .get("bookmarks")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let config = SessionConfig {
+            database: Some(database.to_owned()),
+            bookmark_mode: if bookmarks.is_empty() {
+                BookmarkMode::None
+            } else {
+                BookmarkMode::Required
+            },
+            bookmarks,
+            ..SessionConfig::default()
+        };
+        let transaction_id = engine
+            .begin_transaction(&config)
+            .map_err(|error| error.to_string())?;
+        Ok(BoltTransaction {
+            id: transaction_id.to_string(),
+            database: database.to_owned(),
+        })
+    }
+
+    fn commit_transaction(&self, transaction: &BoltTransaction) -> Result<String, String> {
+        let transaction_id = uuid::Uuid::parse_str(&transaction.id)
+            .map_err(|_| "invalid Bolt transaction identifier".to_owned())?;
+        open_engine(&self.state, &transaction.database)?
+            .tx_manager()
+            .commit_with_bookmark(transaction_id)
+            .map_err(|error| error.to_string())
+    }
+
+    fn rollback_transaction(&self, transaction: &BoltTransaction) -> Result<(), String> {
+        let transaction_id = uuid::Uuid::parse_str(&transaction.id)
+            .map_err(|_| "invalid Bolt transaction identifier".to_owned())?;
+        open_engine(&self.state, &transaction.database)?
+            .tx_manager()
+            .rollback(transaction_id)
+            .map_err(|error| error.to_string())
     }
 }
 

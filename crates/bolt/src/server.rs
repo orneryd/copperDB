@@ -30,6 +30,12 @@ pub struct BoltPrincipal {
     pub roles: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoltTransaction {
+    pub id: String,
+    pub database: String,
+}
+
 pub trait BoltAuthProvider: Send + Sync {
     fn authenticate(&self, username: &str, password: &str) -> Result<BoltPrincipal, String>;
 }
@@ -78,6 +84,23 @@ pub trait QueryExecutor: Send + Sync {
         _principal: Option<&BoltPrincipal>,
     ) -> Result<BoltQueryResult, String> {
         self.execute_on_database_with_context(database, query, params, request_context)
+    }
+
+    fn begin_transaction(
+        &self,
+        _database: &str,
+        _metadata: &HashMap<String, serde_json::Value>,
+        _principal: Option<&BoltPrincipal>,
+    ) -> Result<BoltTransaction, String> {
+        Err("explicit transactions are not supported by this executor".into())
+    }
+
+    fn commit_transaction(&self, _transaction: &BoltTransaction) -> Result<String, String> {
+        Err("explicit transactions are not supported by this executor".into())
+    }
+
+    fn rollback_transaction(&self, _transaction: &BoltTransaction) -> Result<(), String> {
+        Err("explicit transactions are not supported by this executor".into())
     }
 }
 
@@ -599,6 +622,7 @@ struct BoltSession {
     current_query: Option<String>,
     last_result: Option<BoltQueryResult>,
     result_index: usize,
+    transaction: Option<BoltTransaction>,
 }
 
 impl BoltSession {
@@ -612,6 +636,7 @@ impl BoltSession {
             current_query: None,
             last_result: None,
             result_index: 0,
+            transaction: None,
         }
     }
 }
@@ -669,6 +694,23 @@ fn authentication_failure_response(message: &str) -> Vec<Vec<u8>> {
             ("message".into(), serde_json::json!(message)),
         ]),
     })]
+}
+
+fn client_failure_response(code: &str, message: &str) -> Vec<Vec<u8>> {
+    vec![dispatch::encode_message(&BoltMessage::Failure {
+        metadata: HashMap::from([
+            ("code".into(), serde_json::json!(code)),
+            ("message".into(), serde_json::json!(message)),
+        ]),
+    })]
+}
+
+fn authentication_required(session: &BoltSession) -> bool {
+    session.auth_enabled && !session.authenticated
+}
+
+fn transaction_failure_response(code: &str, message: &str) -> Vec<Vec<u8>> {
+    client_failure_response(code, message)
 }
 
 async fn process_message(
@@ -749,6 +791,9 @@ async fn process_message(
             }
         }
         BoltMessage::Logoff => {
+            if let Some(transaction) = session.transaction.take() {
+                let _ = executor.rollback_transaction(&transaction);
+            }
             session.authenticated = !session.auth_enabled;
             session.principal = None;
             Ok(vec![dispatch::encode_message(&BoltMessage::Success {
@@ -760,7 +805,7 @@ async fn process_message(
             parameters,
             extra,
         } => {
-            if session.auth_enabled && !session.authenticated {
+            if authentication_required(session) {
                 return Ok(authentication_failure_response("authentication required"));
             }
             session.current_query = Some(query.clone());
@@ -855,26 +900,89 @@ async fn process_message(
             }));
             Ok(responses)
         }
-        BoltMessage::Begin { extra: _ } => {
-            Ok(vec![dispatch::encode_message(&BoltMessage::Success {
-                metadata: HashMap::new(),
-            })])
+        BoltMessage::Begin { extra } => {
+            if authentication_required(session) {
+                return Ok(authentication_failure_response("authentication required"));
+            }
+            if session.transaction.is_some() {
+                return Ok(transaction_failure_response(
+                    "Neo.ClientError.Transaction.TransactionStartFailed",
+                    "transaction already active",
+                ));
+            }
+            let database = database_from_metadata(&extra)
+                .or_else(|| session.database.clone())
+                .unwrap_or_else(|| "copperdb".into());
+            match executor.begin_transaction(&database, &extra, session.principal.as_ref()) {
+                Ok(transaction) => {
+                    session.database = Some(transaction.database.clone());
+                    session.transaction = Some(transaction);
+                    Ok(vec![dispatch::encode_message(&BoltMessage::Success {
+                        metadata: HashMap::new(),
+                    })])
+                }
+                Err(message) => Ok(transaction_failure_response(
+                    "Neo.ClientError.Transaction.TransactionStartFailed",
+                    &message,
+                )),
+            }
         }
-        BoltMessage::Commit => Ok(vec![dispatch::encode_message(&BoltMessage::Success {
-            metadata: HashMap::from([("bookmark".into(), serde_json::json!(""))]),
-        })]),
-        BoltMessage::Rollback => Ok(vec![dispatch::encode_message(&BoltMessage::Success {
-            metadata: HashMap::new(),
-        })]),
+        BoltMessage::Commit => {
+            if authentication_required(session) {
+                return Ok(authentication_failure_response("authentication required"));
+            }
+            let Some(transaction) = session.transaction.take() else {
+                return Ok(transaction_failure_response(
+                    "Neo.ClientError.Transaction.TransactionNotFound",
+                    "no transaction to commit",
+                ));
+            };
+            match executor.commit_transaction(&transaction) {
+                Ok(bookmark) => Ok(vec![dispatch::encode_message(&BoltMessage::Success {
+                    metadata: HashMap::from([("bookmark".into(), serde_json::json!(bookmark))]),
+                })]),
+                Err(message) => Ok(transaction_failure_response(
+                    "Neo.ClientError.Transaction.TransactionCommitFailed",
+                    &message,
+                )),
+            }
+        }
+        BoltMessage::Rollback => {
+            if authentication_required(session) {
+                return Ok(authentication_failure_response("authentication required"));
+            }
+            let Some(transaction) = session.transaction.take() else {
+                return Ok(vec![dispatch::encode_message(&BoltMessage::Success {
+                    metadata: HashMap::new(),
+                })]);
+            };
+            match executor.rollback_transaction(&transaction) {
+                Ok(()) => Ok(vec![dispatch::encode_message(&BoltMessage::Success {
+                    metadata: HashMap::new(),
+                })]),
+                Err(message) => Ok(transaction_failure_response(
+                    "Neo.ClientError.Transaction.TransactionRollbackFailed",
+                    &message,
+                )),
+            }
+        }
         BoltMessage::Reset => {
+            if let Some(transaction) = session.transaction.take() {
+                let _ = executor.rollback_transaction(&transaction);
+            }
             session.current_query = None;
             Ok(vec![dispatch::encode_message(&BoltMessage::Success {
                 metadata: HashMap::new(),
             })])
         }
-        BoltMessage::Route { .. } => Ok(vec![dispatch::encode_message(&BoltMessage::Success {
-            metadata: HashMap::new(),
-        })]),
+        BoltMessage::Route { .. } => {
+            if authentication_required(session) {
+                return Ok(authentication_failure_response("authentication required"));
+            }
+            Ok(vec![dispatch::encode_message(&BoltMessage::Success {
+                metadata: HashMap::new(),
+            })])
+        }
         _ => Ok(vec![]),
     }
 }
@@ -981,6 +1089,46 @@ mod tests {
         }
     }
 
+    struct TransactionRecordingExecutor {
+        operations: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl QueryExecutor for TransactionRecordingExecutor {
+        fn execute(
+            &self,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+        ) -> Result<BoltQueryResult, String> {
+            Ok(BoltQueryResult {
+                columns: vec![],
+                rows: vec![],
+            })
+        }
+
+        fn begin_transaction(
+            &self,
+            database: &str,
+            _metadata: &HashMap<String, serde_json::Value>,
+            _principal: Option<&BoltPrincipal>,
+        ) -> Result<BoltTransaction, String> {
+            self.operations.lock().unwrap().push("begin");
+            Ok(BoltTransaction {
+                id: "test-transaction".into(),
+                database: database.into(),
+            })
+        }
+
+        fn commit_transaction(&self, _transaction: &BoltTransaction) -> Result<String, String> {
+            self.operations.lock().unwrap().push("commit");
+            Ok("copperdb:bookmark:test".into())
+        }
+
+        fn rollback_transaction(&self, _transaction: &BoltTransaction) -> Result<(), String> {
+            self.operations.lock().unwrap().push("rollback");
+            Ok(())
+        }
+    }
+
     fn logon_message(username: &str, password: &str) -> Value {
         Value::Struct {
             signature: 0x6A,
@@ -997,7 +1145,16 @@ mod tests {
         session: &mut BoltSession,
         provider: Option<Arc<dyn BoltAuthProvider>>,
     ) -> u8 {
-        let responses = process_message(message, session, Arc::new(NoopExecutor), provider)
+        response_signature_with_executor(message, session, Arc::new(NoopExecutor), provider).await
+    }
+
+    async fn response_signature_with_executor(
+        message: &Value,
+        session: &mut BoltSession,
+        executor: Arc<dyn QueryExecutor>,
+        provider: Option<Arc<dyn BoltAuthProvider>>,
+    ) -> u8 {
+        let responses = process_message(message, session, executor, provider)
             .await
             .unwrap();
         let (value, _) = crate::packstream::decode(&responses[0]).unwrap();
@@ -1005,6 +1162,35 @@ mod tests {
             panic!("expected Bolt struct response");
         };
         signature
+    }
+
+    async fn failure_code(
+        message: &Value,
+        session: &mut BoltSession,
+        provider: Option<Arc<dyn BoltAuthProvider>>,
+    ) -> String {
+        let responses = process_message(message, session, Arc::new(NoopExecutor), provider)
+            .await
+            .unwrap();
+        let (value, _) = crate::packstream::decode(&responses[0]).unwrap();
+        let Value::Struct {
+            signature: 0x7F,
+            fields,
+        } = value
+        else {
+            panic!("expected Bolt FAILURE response");
+        };
+        let [Value::Map(metadata)] = fields.as_slice() else {
+            panic!("expected Bolt FAILURE metadata");
+        };
+        let code = metadata
+            .iter()
+            .find_map(|(key, value)| (key == "code").then_some(value))
+            .expect("expected Bolt failure code");
+        let Value::String(code) = code else {
+            panic!("expected Bolt failure code string");
+        };
+        code.clone()
     }
 
     #[tokio::test]
@@ -1090,6 +1276,83 @@ mod tests {
                 username: "reader".into(),
                 roles: vec!["reader".into()],
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_transactions_require_authentication_and_use_executor_lifecycle() {
+        let provider: Arc<dyn BoltAuthProvider> = Arc::new(TestAuthProvider);
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let executor: Arc<dyn QueryExecutor> = Arc::new(TransactionRecordingExecutor {
+            operations: Arc::clone(&operations),
+        });
+        let begin = Value::Struct {
+            signature: 0x11,
+            fields: vec![Value::Map(vec![])],
+        };
+        let commit = Value::Struct {
+            signature: 0x12,
+            fields: vec![],
+        };
+        let rollback = Value::Struct {
+            signature: 0x13,
+            fields: vec![],
+        };
+        let mut session = BoltSession::new(true);
+
+        assert_eq!(
+            failure_code(&begin, &mut session, Some(Arc::clone(&provider))).await,
+            "Neo.ClientError.Security.Unauthorized"
+        );
+
+        response_signature(
+            &logon_message("reader", "correct-password"),
+            &mut session,
+            Some(Arc::clone(&provider)),
+        )
+        .await;
+        assert_eq!(
+            response_signature_with_executor(
+                &begin,
+                &mut session,
+                Arc::clone(&executor),
+                Some(Arc::clone(&provider)),
+            )
+            .await,
+            0x70
+        );
+        assert!(session.transaction.is_some());
+        assert_eq!(
+            response_signature_with_executor(
+                &commit,
+                &mut session,
+                Arc::clone(&executor),
+                Some(Arc::clone(&provider)),
+            )
+            .await,
+            0x70
+        );
+        assert!(session.transaction.is_none());
+        assert_eq!(*operations.lock().unwrap(), vec!["begin", "commit"]);
+
+        assert_eq!(
+            response_signature_with_executor(
+                &begin,
+                &mut session,
+                Arc::clone(&executor),
+                Some(Arc::clone(&provider)),
+            )
+            .await,
+            0x70
+        );
+        assert_eq!(
+            response_signature_with_executor(&rollback, &mut session, executor, Some(provider),)
+                .await,
+            0x70
+        );
+        assert_eq!(
+            *operations.lock().unwrap(),
+            vec!["begin", "commit", "begin", "rollback"]
         );
     }
 
