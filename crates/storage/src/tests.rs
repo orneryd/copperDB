@@ -1408,6 +1408,27 @@ fn storage_transaction_persists_wal_frame_and_applied_marker_across_reopen() {
 }
 
 #[test]
+fn structured_batch_writes_use_one_wal_frame_and_missing_delete_is_a_noop() {
+    let test_dir = tempfile::tempdir().unwrap();
+    let engine = StorageEngine::open(test_dir.path()).unwrap();
+    let source = sample_node("source", &["Node"]);
+    let target = sample_node("target", &["Node"]);
+    let edge = sample_edge("edge", "LINK", "source", "target");
+
+    engine.put_node_records_batch(&[source, target]).unwrap();
+    assert_eq!(engine.wal_stats().entries, 1);
+    assert_eq!(engine.wal_applied_sequence().unwrap(), 1);
+
+    engine.put_edge_records_batch(&[edge]).unwrap();
+    assert_eq!(engine.wal_stats().entries, 2);
+    assert_eq!(engine.wal_applied_sequence().unwrap(), 2);
+
+    engine.delete_node_record("missing").unwrap();
+    assert_eq!(engine.wal_stats().entries, 2);
+    assert_eq!(engine.wal_applied_sequence().unwrap(), 2);
+}
+
+#[test]
 fn storage_open_replays_unapplied_wal_transaction_frame_once() {
     let test_dir = tempfile::tempdir().unwrap();
     StorageEngine::open(test_dir.path()).unwrap();

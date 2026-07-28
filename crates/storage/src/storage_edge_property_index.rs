@@ -152,34 +152,6 @@ impl StorageEngine {
         Ok(out)
     }
 
-    pub(crate) fn index_edge_property_indexes(
-        &self,
-        edge: &EdgeRecord,
-    ) -> Result<(), StorageError> {
-        for index in self.relationship_property_index_definitions()? {
-            if index.label == edge.edge_type {
-                if let Some(key) = relationship_property_index_key_for_edge(&index, edge) {
-                    self.indexes.fjall_insert(key.as_bytes(), [])?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub(crate) fn unindex_edge_property_indexes(
-        &self,
-        edge: &EdgeRecord,
-    ) -> Result<(), StorageError> {
-        for index in self.relationship_property_index_definitions()? {
-            if index.label == edge.edge_type {
-                if let Some(key) = relationship_property_index_key_for_edge(&index, edge) {
-                    self.indexes.fjall_remove(key.as_bytes())?;
-                }
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) fn rebuild_relationship_property_index(
         &self,
         index: &IndexDefinition,

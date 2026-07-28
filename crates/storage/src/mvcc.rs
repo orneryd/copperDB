@@ -319,6 +319,15 @@ impl MvccStore {
     }
 
     pub(crate) fn restore_persisted_state(&self, persisted: PersistedMvccStore) {
+        self.replace_persisted_state(persisted);
+        self.active_readers.lock().clear();
+    }
+
+    pub(crate) fn publish_persisted_state(&self, persisted: PersistedMvccStore) {
+        self.replace_persisted_state(persisted);
+    }
+
+    fn replace_persisted_state(&self, persisted: PersistedMvccStore) {
         self.current_version
             .store(persisted.current_version, Ordering::SeqCst);
         self.floor.store(persisted.floor, Ordering::SeqCst);
@@ -327,7 +336,6 @@ impl MvccStore {
         *self.node_label_history.write() = persisted.node_label_history;
         *self.current_edge_types.write() = persisted.current_edge_types;
         *self.edge_type_history.write() = persisted.edge_type_history;
-        self.active_readers.lock().clear();
     }
 
     pub fn for_namespace(&self, namespace: impl Into<String>) -> NamespacedMvccStore<'_> {

@@ -1725,87 +1725,19 @@ impl StorageEngine {
     // --- Structured node/edge APIs (storage v0 baseline) ---
 
     pub fn put_node_record(&self, node: &NodeRecord) -> Result<(), StorageError> {
-        let old = self.get_node_record(&node.id)?;
-        if let Some(ref old) = old {
-            self.unindex_node_labels(old)?;
-            self.unindex_node_properties(old)?;
-            self.apply_node_stats_delta(old, -1)?;
-        }
-        self.nodes.fjall_insert(
-            node.id.as_bytes(),
-            self.encode_record_bytes(rmp_serde::to_vec(node)?)?,
-        )?;
-        self.index_node_labels(node)?;
-        self.index_node_properties(node)?;
-        self.apply_node_stats_delta(node, 1)?;
-        self.update_pending_embedding_index(node)?;
-        self.mvcc.put_node_record(node)?;
-        self.persist_mvcc_state()?;
-
-        if old.is_some() {
-            self.notify_node_updated(node);
-        } else {
-            self.notify_node_created(node);
-        }
-        Ok(())
+        self.batch_write(|batch| {
+            batch.put_node_record(node);
+            Ok::<_, StorageError>(())
+        })
     }
 
     pub fn put_node_records_batch(&self, nodes: &[NodeRecord]) -> Result<(), StorageError> {
-        let property_indexes = self.node_property_index_definitions()?;
-        let fulltext_indexes = self.node_fulltext_index_definitions()?;
-
-        for node in nodes {
-            let old = self.get_node_record(&node.id)?;
-            if let Some(ref old) = old {
-                self.unindex_node_labels(old)?;
-                for index in &property_indexes {
-                    if !old.labels.iter().any(|label| label == &index.label) {
-                        continue;
-                    }
-                    if let Some(key) = node_property_index_key_for_node(index, old) {
-                        self.indexes.fjall_remove(key.as_bytes())?;
-                    }
-                }
-                for index in &fulltext_indexes {
-                    if !old.labels.iter().any(|label| label == &index.label) {
-                        continue;
-                    }
-                    self.delete_node_fulltext_entries(index, old)?;
-                }
-                self.apply_node_stats_delta(old, -1)?;
+        self.batch_write(|batch| {
+            for node in nodes {
+                batch.put_node_record(node);
             }
-
-            self.nodes.fjall_insert(
-                node.id.as_bytes(),
-                self.encode_record_bytes(rmp_serde::to_vec(node)?)?,
-            )?;
-            self.index_node_labels(node)?;
-            for index in &property_indexes {
-                if !node.labels.iter().any(|label| label == &index.label) {
-                    continue;
-                }
-                if let Some(key) = node_property_index_key_for_node(index, node) {
-                    self.indexes.fjall_insert(key.as_bytes(), [])?;
-                }
-            }
-            for index in &fulltext_indexes {
-                if !node.labels.iter().any(|label| label == &index.label) {
-                    continue;
-                }
-                self.index_node_fulltext_entries(index, node)?;
-            }
-            self.apply_node_stats_delta(node, 1)?;
-            self.update_pending_embedding_index(node)?;
-            self.mvcc.put_node_record(node)?;
-            self.persist_mvcc_state()?;
-
-            if old.is_some() {
-                self.notify_node_updated(node);
-            } else {
-                self.notify_node_created(node);
-            }
-        }
-        Ok(())
+            Ok::<_, StorageError>(())
+        })
     }
 
     pub fn get_node_record(&self, id: &str) -> Result<Option<NodeRecord>, StorageError> {
@@ -1818,17 +1750,10 @@ impl StorageEngine {
     }
 
     pub fn delete_node_record(&self, id: &str) -> Result<(), StorageError> {
-        if let Some(existing) = self.get_node_record(id)? {
-            self.unindex_node_labels(&existing)?;
-            self.unindex_node_properties(&existing)?;
-            self.apply_node_stats_delta(&existing, -1)?;
-            self.mark_node_embedded(id)?;
-            self.nodes.fjall_remove(id.as_bytes())?;
-            self.mvcc.delete_node_record(id)?;
-            self.persist_mvcc_state()?;
-            self.notify_node_deleted(id);
-        }
-        Ok(())
+        self.batch_write(|batch| {
+            batch.delete_node_record(id);
+            Ok::<_, StorageError>(())
+        })
     }
 
     pub fn delete_by_prefix(&self, prefix: &str) -> Result<(u64, u64), StorageError> {
@@ -2600,99 +2525,19 @@ impl StorageEngine {
     }
 
     pub fn put_edge_record(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
-        let old = self.get_edge_record(&edge.id)?;
-        if let Some(ref old) = old {
-            self.unindex_edge(old)?;
-            self.apply_edge_stats_delta(old, -1)?;
-        }
-        self.edges.fjall_insert(
-            edge.id.as_bytes(),
-            self.encode_record_bytes(rmp_serde::to_vec(edge)?)?,
-        )?;
-        self.index_edge(edge)?;
-        self.apply_edge_stats_delta(edge, 1)?;
-        self.mvcc.put_edge_record(edge)?;
-        self.persist_mvcc_state()?;
-
-        if old.is_some() {
-            self.notify_edge_updated(edge);
-        } else {
-            self.notify_edge_created(edge);
-        }
-        Ok(())
+        self.batch_write(|batch| {
+            batch.put_edge_record(edge);
+            Ok::<_, StorageError>(())
+        })
     }
 
     pub fn put_edge_records_batch(&self, edges: &[EdgeRecord]) -> Result<(), StorageError> {
-        let relationship_property_indexes = self.relationship_property_index_definitions()?;
-        let mut namespace_edge_deltas: HashMap<String, i64> = HashMap::new();
-        for edge in edges {
-            let old = self.get_edge_record(&edge.id)?;
-            if let Some(ref old) = old {
-                self.indexes
-                    .remove(edge_type_index_key(&old.edge_type, &old.id).as_bytes())?;
-                self.indexes.fjall_remove(
-                    edge_start_index_key(&old.start_node, &old.edge_type, &old.id).as_bytes(),
-                )?;
-                self.indexes.fjall_remove(
-                    edge_end_index_key(&old.end_node, &old.edge_type, &old.id).as_bytes(),
-                )?;
-                for index in &relationship_property_indexes {
-                    if index.label == old.edge_type {
-                        if let Some(key) = relationship_property_index_key_for_edge(index, old) {
-                            self.indexes.fjall_remove(key.as_bytes())?;
-                        }
-                    }
-                }
-                if let Some(namespace) = namespace_from_str(&old.id) {
-                    *namespace_edge_deltas
-                        .entry(namespace.to_string())
-                        .or_default() -= 1;
-                }
+        self.batch_write(|batch| {
+            for edge in edges {
+                batch.put_edge_record(edge);
             }
-
-            self.edges.fjall_insert(
-                edge.id.as_bytes(),
-                self.encode_record_bytes(rmp_serde::to_vec(edge)?)?,
-            )?;
-            self.indexes.fjall_insert(
-                edge_type_index_key(&edge.edge_type, &edge.id).as_bytes(),
-                [],
-            )?;
-            self.indexes.fjall_insert(
-                edge_start_index_key(&edge.start_node, &edge.edge_type, &edge.id).as_bytes(),
-                [],
-            )?;
-            self.indexes.fjall_insert(
-                edge_end_index_key(&edge.end_node, &edge.edge_type, &edge.id).as_bytes(),
-                [],
-            )?;
-            for index in &relationship_property_indexes {
-                if index.label == edge.edge_type {
-                    if let Some(key) = relationship_property_index_key_for_edge(index, edge) {
-                        self.indexes.fjall_insert(key.as_bytes(), [])?;
-                    }
-                }
-            }
-            if let Some(namespace) = namespace_from_str(&edge.id) {
-                *namespace_edge_deltas
-                    .entry(namespace.to_string())
-                    .or_default() += 1;
-            }
-            self.mvcc.put_edge_record(edge)?;
-            self.persist_mvcc_state()?;
-
-            if old.is_some() {
-                self.notify_edge_updated(edge);
-            } else {
-                self.notify_edge_created(edge);
-            }
-        }
-        for (namespace, delta) in namespace_edge_deltas {
-            if delta != 0 {
-                self.adjust_meta_counter(namespace_edge_count_key(&namespace), delta)?;
-            }
-        }
-        Ok(())
+            Ok::<_, StorageError>(())
+        })
     }
 
     /// Batch-insert edges, skipping the old-edge lookup. Use when all edges are
@@ -2767,15 +2612,10 @@ impl StorageEngine {
     }
 
     pub fn delete_edge_record(&self, id: &str) -> Result<(), StorageError> {
-        if let Some(existing) = self.get_edge_record(id)? {
-            self.unindex_edge(&existing)?;
-            self.apply_edge_stats_delta(&existing, -1)?;
-            self.edges.fjall_remove(id.as_bytes())?;
-            self.mvcc.delete_edge_record(id)?;
-            self.persist_mvcc_state()?;
-            self.notify_edge_deleted(id);
-        }
-        Ok(())
+        self.batch_write(|batch| {
+            batch.delete_edge_record(id);
+            Ok::<_, StorageError>(())
+        })
     }
 
     pub fn begin_mvcc_snapshot(&self) -> MvccSnapshot {
@@ -3817,50 +3657,6 @@ impl StorageEngine {
             .unwrap_or(0)
     }
 
-    fn index_node_labels(&self, node: &NodeRecord) -> Result<(), StorageError> {
-        for label in &node.labels {
-            self.indexes
-                .insert(label_index_key(label, &node.id).as_bytes(), [])?;
-        }
-        Ok(())
-    }
-
-    fn index_node_properties(&self, node: &NodeRecord) -> Result<(), StorageError> {
-        for index in self.node_property_index_definitions()? {
-            if !node.labels.iter().any(|label| label == &index.label) {
-                continue;
-            }
-            if let Some(key) = node_property_index_key_for_node(&index, node) {
-                self.indexes.fjall_insert(key.as_bytes(), [])?;
-            }
-        }
-        for index in self.node_fulltext_index_definitions()? {
-            if !node.labels.iter().any(|label| label == &index.label) {
-                continue;
-            }
-            self.index_node_fulltext_entries(&index, node)?;
-        }
-        Ok(())
-    }
-
-    fn unindex_node_properties(&self, node: &NodeRecord) -> Result<(), StorageError> {
-        for index in self.node_property_index_definitions()? {
-            if !node.labels.iter().any(|label| label == &index.label) {
-                continue;
-            }
-            if let Some(key) = node_property_index_key_for_node(&index, node) {
-                self.indexes.fjall_remove(key.as_bytes())?;
-            }
-        }
-        for index in self.node_fulltext_index_definitions()? {
-            if !node.labels.iter().any(|label| label == &index.label) {
-                continue;
-            }
-            self.delete_node_fulltext_entries(&index, node)?;
-        }
-        Ok(())
-    }
-
     fn has_node_property_index(&self, label: &str, property: &str) -> Result<bool, StorageError> {
         Ok(self
             .node_property_index_definitions()?
@@ -4045,51 +3841,6 @@ impl StorageEngine {
         Ok(())
     }
 
-    fn index_node_fulltext_entries(
-        &self,
-        index: &IndexDefinition,
-        node: &NodeRecord,
-    ) -> Result<(), StorageError> {
-        for property in &index.properties {
-            let Some(value) = node.properties.get(property) else {
-                continue;
-            };
-            for token in fulltext_tokens_for_value(value) {
-                self.indexes.fjall_insert(
-                    node_fulltext_index_key(&index.label, property, &token, &node.id).as_bytes(),
-                    [],
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    fn delete_node_fulltext_entries(
-        &self,
-        index: &IndexDefinition,
-        node: &NodeRecord,
-    ) -> Result<(), StorageError> {
-        for property in &index.properties {
-            let Some(value) = node.properties.get(property) else {
-                continue;
-            };
-            for token in fulltext_tokens_for_value(value) {
-                self.indexes.fjall_remove(
-                    node_fulltext_index_key(&index.label, property, &token, &node.id).as_bytes(),
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    fn unindex_node_labels(&self, node: &NodeRecord) -> Result<(), StorageError> {
-        for label in &node.labels {
-            self.indexes
-                .remove(label_index_key(label, &node.id).as_bytes())?;
-        }
-        Ok(())
-    }
-
     fn get_edges_by_adjacency_prefix(&self, prefix: &str) -> Result<Vec<EdgeRecord>, StorageError> {
         let mut out = Vec::new();
         for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
@@ -4131,52 +3882,6 @@ impl StorageEngine {
     }
 
     // ── Batch write infrastructure ───────────────────────────────────────
-
-    fn index_edge(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
-        self.indexes.fjall_insert(
-            edge_type_index_key(&edge.edge_type, &edge.id).as_bytes(),
-            [],
-        )?;
-        self.indexes.fjall_insert(
-            edge_start_index_key(&edge.start_node, &edge.edge_type, &edge.id).as_bytes(),
-            [],
-        )?;
-        self.indexes.fjall_insert(
-            edge_end_index_key(&edge.end_node, &edge.edge_type, &edge.id).as_bytes(),
-            [],
-        )?;
-        self.index_edge_property_indexes(edge)?;
-        Ok(())
-    }
-
-    fn unindex_edge(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
-        self.indexes
-            .remove(edge_type_index_key(&edge.edge_type, &edge.id).as_bytes())?;
-        self.indexes
-            .remove(edge_start_index_key(&edge.start_node, &edge.edge_type, &edge.id).as_bytes())?;
-        self.indexes
-            .remove(edge_end_index_key(&edge.end_node, &edge.edge_type, &edge.id).as_bytes())?;
-        self.unindex_edge_property_indexes(edge)?;
-        Ok(())
-    }
-
-    fn apply_node_stats_delta(&self, node: &NodeRecord, delta: i64) -> Result<(), StorageError> {
-        let Some(namespace) = namespace_from_str(&node.id) else {
-            return Ok(());
-        };
-        self.adjust_meta_counter(namespace_node_count_key(namespace), delta)?;
-        for label in node.labels.iter().collect::<BTreeSet<_>>() {
-            self.adjust_meta_counter(namespace_label_count_key(namespace, label), delta)?;
-        }
-        Ok(())
-    }
-
-    fn apply_edge_stats_delta(&self, edge: &EdgeRecord, delta: i64) -> Result<(), StorageError> {
-        let Some(namespace) = namespace_from_str(&edge.id) else {
-            return Ok(());
-        };
-        self.adjust_meta_counter(namespace_edge_count_key(namespace), delta)
-    }
 
     fn meta_counter(&self, key: Vec<u8>) -> Result<u64, StorageError> {
         match self.meta.fjall_get(key)? {
@@ -5410,6 +5115,7 @@ impl<'a> BatchWriter<'a> {
             .staged_record_batch_state(mutations.clone())?;
         let mut wal_records = nodes
             .iter()
+            .filter(|(_, (old, new))| old.is_some() || new.is_some())
             .map(|(id, (_, new))| match new {
                 Some(node) => Ok(WALTransactionRecord {
                     op: "put_node".to_string(),
@@ -5422,7 +5128,8 @@ impl<'a> BatchWriter<'a> {
                     payload: Vec::new(),
                 }),
             })
-            .chain(edges.iter().map(|(id, (_, new))| match new {
+            .chain(edges.iter().filter(|(_, (old, new))| old.is_some() || new.is_some()).map(
+                |(id, (_, new))| match new {
                 Some(edge) => Ok(WALTransactionRecord {
                     op: "put_edge".to_string(),
                     key: id.clone(),
@@ -5433,7 +5140,8 @@ impl<'a> BatchWriter<'a> {
                     key: id.clone(),
                     payload: Vec::new(),
                 }),
-            }))
+            },
+            ))
             .collect::<Result<Vec<_>, rmp_serde::encode::Error>>()?;
         wal_records.sort_by(|left, right| left.op.cmp(&right.op).then(left.key.cmp(&right.key)));
         let wal_sequence = match replay_sequence {
@@ -5550,7 +5258,7 @@ impl<'a> BatchWriter<'a> {
 
         let node_changes = nodes.into_iter().collect::<Vec<_>>();
         let edge_changes = edges.into_iter().collect::<Vec<_>>();
-        self.engine.mvcc.restore_persisted_state(staged_mvcc_state);
+        self.engine.mvcc.publish_persisted_state(staged_mvcc_state);
 
         for (id, (old, new)) in node_changes {
             match (old, new) {
