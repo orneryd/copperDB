@@ -1,6 +1,6 @@
 # 02: Bolt Authentication And Explicit Transactions
 
-Status: planned. Priority: P0. Owners: `bolt`, `server`, `auth`, `engine`, `txsession`, `storage`, `errors`.
+Status: in progress. Priority: P0. Owners: `bolt`, `server`, `auth`, `engine`, `txsession`, `storage`, `errors`.
 
 ## Objective
 
@@ -26,6 +26,12 @@ Bolt 4 `HELLO` and Bolt 5 `LOGON` authenticate against the shared authenticator.
 4. Roll back on `RESET`, `LOGOFF`, disconnect, timeout, handler error, or failed-state cleanup. Never report rollback after a durable commit decision.
 5. Implement cursor IDs and bounded `PULL`/`DISCARD {n,qid}`, `has_more`, summary counters, notifications, and bookmarks.
 6. Centralize Neo4j status/error encoding through `copperdb-errors`, including retryable transaction conflicts.
+
+## Progress
+
+- Complete: Phase 1. Bolt `HELLO` and `LOGON` authenticate through the shared durable authenticator; `LOGOFF` clears the session principal; failed or unauthenticated sessions receive `Neo.ClientError.Security.Unauthorized`.
+- Complete: secure `RUN` calls receive the authenticated principal and its actual roles. `AppStateBoltExecutor` no longer grants a hard-coded `admin` role for authenticated Bolt sessions.
+- Pending: explicit transaction ownership and durability (Phases 2-6) remain blocked on the isolated engine/storage transaction contract from Plan 08.
 
 ## Tests
 

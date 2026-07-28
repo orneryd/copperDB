@@ -17,7 +17,7 @@ use axum::{
 use copperdb_auth::{
     AuthConfig, AuthError, Authenticator, Claims, DatabaseAccessMode, TokenManager,
 };
-use copperdb_bolt::server::{BoltQueryResult, QueryExecutor};
+use copperdb_bolt::server::{BoltAuthProvider, BoltPrincipal, BoltQueryResult, QueryExecutor};
 use copperdb_buildinfo::{display_version, server_announcement, version};
 use copperdb_config::Config as RuntimeConfig;
 use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig};
@@ -1670,6 +1670,24 @@ impl AppStateBoltExecutor {
     }
 }
 
+impl BoltAuthProvider for AppStateBoltExecutor {
+    fn authenticate(&self, username: &str, password: &str) -> Result<BoltPrincipal, String> {
+        let authenticator = self
+            .state
+            .auth
+            .open_authenticator()
+            .map_err(|error| error.to_string())?;
+        let (_, user) = authenticator
+            .authenticate(username, password)
+            .map_err(|error| error.to_string())?;
+        let roles = user.role_names();
+        Ok(BoltPrincipal {
+            username: user.username,
+            roles,
+        })
+    }
+}
+
 impl QueryExecutor for AppStateBoltExecutor {
     fn execute(
         &self,
@@ -1704,6 +1722,37 @@ impl QueryExecutor for AppStateBoltExecutor {
             query.to_owned(),
             params.clone(),
             vec!["admin".into()],
+            false,
+            None,
+            None,
+            None,
+        )?;
+        Ok(BoltQueryResult {
+            columns: result.columns,
+            rows: result.data.into_iter().map(|row| row.row).collect(),
+        })
+    }
+
+    fn execute_as_on_database_with_context(
+        &self,
+        database: &str,
+        query: &str,
+        params: &HashMap<String, serde_json::Value>,
+        request_context: RequestContext,
+        principal: Option<&BoltPrincipal>,
+    ) -> Result<BoltQueryResult, String> {
+        let roles = match principal {
+            Some(principal) => principal.roles.clone(),
+            None if !self.state.auth.security_enabled => vec!["admin".into()],
+            None => return Err("authentication required".into()),
+        };
+        let result = execute_statement(
+            Arc::clone(&self.state),
+            database.to_owned(),
+            request_context,
+            query.to_owned(),
+            params.clone(),
+            roles,
             false,
             None,
             None,

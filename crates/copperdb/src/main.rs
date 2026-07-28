@@ -323,9 +323,11 @@ async fn main() -> Result<()> {
 
     if startup.bolt_enabled {
         let executor = Arc::new(AppStateBoltExecutor::new(Arc::clone(&state)));
+        let auth_provider = Arc::clone(&executor);
         supervisor.register(BoltComponent {
             server: BoltServer::new(startup.bolt_address.clone(), telemetry, executor)
-                .with_auth_enabled(state.auth.security_enabled),
+                .with_auth_enabled(state.auth.security_enabled)
+                .with_auth_provider(auth_provider),
         });
     }
 

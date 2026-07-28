@@ -24,6 +24,16 @@ pub struct BoltQueryResult {
     pub rows: Vec<Vec<serde_json::Value>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoltPrincipal {
+    pub username: String,
+    pub roles: Vec<String>,
+}
+
+pub trait BoltAuthProvider: Send + Sync {
+    fn authenticate(&self, username: &str, password: &str) -> Result<BoltPrincipal, String>;
+}
+
 /// Trait for components that can execute Cypher queries.
 /// Mirrors NornicDB's `QueryExecutor` interface.
 pub trait QueryExecutor: Send + Sync {
@@ -57,6 +67,17 @@ pub trait QueryExecutor: Send + Sync {
     ) -> Result<BoltQueryResult, String> {
         let _ = request_context;
         self.execute_on_database(Some(database), query, params)
+    }
+
+    fn execute_as_on_database_with_context(
+        &self,
+        database: &str,
+        query: &str,
+        params: &HashMap<String, serde_json::Value>,
+        request_context: copperdb_util::RequestContext,
+        _principal: Option<&BoltPrincipal>,
+    ) -> Result<BoltQueryResult, String> {
+        self.execute_on_database_with_context(database, query, params, request_context)
     }
 }
 
@@ -173,6 +194,7 @@ pub struct BoltServer {
     telemetry: Arc<Telemetry>,
     active_connections: Arc<AtomicU64>,
     executor: Arc<dyn QueryExecutor>,
+    auth_provider: Option<Arc<dyn BoltAuthProvider>>,
 }
 
 impl BoltServer {
@@ -192,6 +214,7 @@ impl BoltServer {
             telemetry,
             active_connections: Arc::new(AtomicU64::new(0)),
             executor,
+            auth_provider: None,
         }
     }
 
@@ -202,6 +225,11 @@ impl BoltServer {
 
     pub fn auth_enabled(&self) -> bool {
         self.config.auth_enabled
+    }
+
+    pub fn with_auth_provider(mut self, auth_provider: Arc<dyn BoltAuthProvider>) -> Self {
+        self.auth_provider = Some(auth_provider);
+        self
     }
 
     pub async fn serve(&self) -> Result<(), BoltError> {
@@ -238,6 +266,7 @@ impl BoltServer {
         let active_connections = Arc::clone(&self.active_connections);
         let executor = Arc::clone(&self.executor);
         let auth_enabled = self.config.auth_enabled;
+        let auth_provider = self.auth_provider.clone();
         let _ = telemetry.record_counter(
             "nornicdb_bolt_connections_total",
             &[("result", "success"), ("transport", "ws")],
@@ -252,8 +281,14 @@ impl BoltServer {
         tokio::spawn(async move {
             match accept_async(stream).await {
                 Ok(mut ws_stream) => {
-                    let result =
-                        handle_ws_session(&mut ws_stream, &telemetry, executor, auth_enabled).await;
+                    let result = handle_ws_session(
+                        &mut ws_stream,
+                        &telemetry,
+                        executor,
+                        auth_enabled,
+                        auth_provider,
+                    )
+                    .await;
                     if let Err(ref e) = result {
                         warn!(%peer_addr, %e, "bolt ws connection failed");
                         let _ = telemetry.record_counter(
@@ -286,6 +321,7 @@ impl BoltServer {
         let active_connections = Arc::clone(&self.active_connections);
         let executor = Arc::clone(&self.executor);
         let auth_enabled = self.config.auth_enabled;
+        let auth_provider = self.auth_provider.clone();
         let _ = telemetry.record_counter(
             "nornicdb_bolt_connections_total",
             &[("result", "success"), ("transport", "tcp")],
@@ -299,7 +335,14 @@ impl BoltServer {
         debug!(%peer_addr, "accepted bolt tcp");
 
         tokio::spawn(async move {
-            let result = handle_tcp_session(&mut stream, &telemetry, executor, auth_enabled).await;
+            let result = handle_tcp_session(
+                &mut stream,
+                &telemetry,
+                executor,
+                auth_enabled,
+                auth_provider,
+            )
+            .await;
             if let Err(ref e) = result {
                 let _ = telemetry.record_counter(
                     "nornicdb_bolt_connections_total",
@@ -328,6 +371,7 @@ async fn handle_tcp_session(
     telemetry: &Telemetry,
     executor: Arc<dyn QueryExecutor>,
     auth_enabled: bool,
+    auth_provider: Option<Arc<dyn BoltAuthProvider>>,
 ) -> Result<(), BoltError> {
     let peer = stream
         .peer_addr()
@@ -360,6 +404,7 @@ async fn handle_tcp_session(
             &mut session,
             telemetry,
             Arc::clone(&executor),
+            auth_provider.clone(),
         )
         .await?;
     }
@@ -372,6 +417,7 @@ async fn handle_ws_session<S>(
     _telemetry: &Telemetry,
     executor: Arc<dyn QueryExecutor>,
     auth_enabled: bool,
+    auth_provider: Option<Arc<dyn BoltAuthProvider>>,
 ) -> Result<(), BoltError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -436,7 +482,14 @@ where
                 )));
             }
 
-            match process_message(&value, &mut session, Arc::clone(&executor)).await {
+            match process_message(
+                &value,
+                &mut session,
+                Arc::clone(&executor),
+                auth_provider.clone(),
+            )
+            .await
+            {
                 Ok(responses) => {
                     let has_responses = !responses.is_empty();
                     for response_bytes in &responses {
@@ -477,13 +530,19 @@ async fn process_buffer(
     session: &mut BoltSession,
     telemetry: &Telemetry,
     executor: Arc<dyn QueryExecutor>,
+    auth_provider: Option<Arc<dyn BoltAuthProvider>>,
 ) -> Result<(), BoltError> {
     loop {
         match crate::packstream::decode(read_buf) {
             Ok((value, consumed)) => {
                 read_buf.drain(..consumed);
-                let (op, result) = match process_message(&value, session, Arc::clone(&executor))
-                    .await
+                let (op, result) = match process_message(
+                    &value,
+                    session,
+                    Arc::clone(&executor),
+                    auth_provider.clone(),
+                )
+                .await
                 {
                     Ok(responses) => {
                         let len = responses.len();
@@ -534,6 +593,7 @@ async fn process_buffer(
 struct BoltSession {
     auth_enabled: bool,
     authenticated: bool,
+    principal: Option<BoltPrincipal>,
     database: Option<String>,
     last_query_database: Option<String>,
     current_query: Option<String>,
@@ -546,6 +606,7 @@ impl BoltSession {
         Self {
             auth_enabled,
             authenticated: !auth_enabled,
+            principal: None,
             database: None,
             last_query_database: None,
             current_query: None,
@@ -564,10 +625,57 @@ fn database_from_metadata(metadata: &HashMap<String, serde_json::Value>) -> Opti
         .map(str::to_owned)
 }
 
+fn credentials_from_hello(
+    metadata: &HashMap<String, serde_json::Value>,
+) -> Option<(String, String)> {
+    let username = metadata
+        .get("principal")
+        .or_else(|| metadata.get("username"))?
+        .as_str()?;
+    let password = metadata
+        .get("credentials")
+        .or_else(|| metadata.get("password"))?
+        .as_str()?;
+    Some((username.to_owned(), password.to_owned()))
+}
+
+fn authenticate_session(
+    session: &mut BoltSession,
+    auth_provider: Option<&dyn BoltAuthProvider>,
+    username: &str,
+    password: &str,
+) -> Result<(), String> {
+    let auth_provider =
+        auth_provider.ok_or_else(|| "Bolt authentication is unavailable".to_owned())?;
+    let principal = auth_provider.authenticate(username, password)?;
+    session.principal = Some(principal);
+    session.authenticated = true;
+    Ok(())
+}
+
+fn success_response() -> Vec<Vec<u8>> {
+    vec![dispatch::encode_message(&BoltMessage::Success {
+        metadata: HashMap::from([("server".into(), serde_json::json!("copperdb/1.0"))]),
+    })]
+}
+
+fn authentication_failure_response(message: &str) -> Vec<Vec<u8>> {
+    vec![dispatch::encode_message(&BoltMessage::Failure {
+        metadata: HashMap::from([
+            (
+                "code".into(),
+                serde_json::json!("Neo.ClientError.Security.Unauthorized"),
+            ),
+            ("message".into(), serde_json::json!(message)),
+        ]),
+    })]
+}
+
 async fn process_message(
     value: &Value,
     session: &mut BoltSession,
     executor: Arc<dyn QueryExecutor>,
+    auth_provider: Option<Arc<dyn BoltAuthProvider>>,
 ) -> Result<Vec<Vec<u8>>, BoltError> {
     let (sig, fields) = match value {
         Value::Struct { signature, fields } => (*signature, fields.as_slice()),
@@ -581,8 +689,24 @@ async fn process_message(
     info!(signature = format!("0x{sig:02X}"), "bolt message received");
     match msg {
         BoltMessage::Hello { extra } => {
-            session.authenticated = false;
+            session.authenticated = !session.auth_enabled;
+            session.principal = None;
             session.database = database_from_metadata(&extra);
+            if session.auth_enabled {
+                if let Some((username, password)) = credentials_from_hello(&extra) {
+                    return Ok(
+                        match authenticate_session(
+                            session,
+                            auth_provider.as_deref(),
+                            &username,
+                            &password,
+                        ) {
+                            Ok(()) => success_response(),
+                            Err(message) => authentication_failure_response(&message),
+                        },
+                    );
+                }
+            }
             let meta = HashMap::from([
                 ("server".into(), serde_json::json!("copperdb/1.0")),
                 ("connection_id".into(), serde_json::json!("copperdb-1")),
@@ -597,14 +721,36 @@ async fn process_message(
                 metadata: meta,
             })])
         }
-        BoltMessage::Logon { auth: _ } => {
-            session.authenticated = true;
-            Ok(vec![dispatch::encode_message(&BoltMessage::Success {
-                metadata: HashMap::from([("server".into(), serde_json::json!("copperdb/1.0"))]),
-            })])
+        BoltMessage::Logon { auth } => {
+            if !session.auth_enabled {
+                return Ok(success_response());
+            }
+            let username = auth
+                .get("principal")
+                .or_else(|| auth.get("username"))
+                .map(String::as_str);
+            let password = auth
+                .get("credentials")
+                .or_else(|| auth.get("password"))
+                .map(String::as_str);
+            match (username, password) {
+                (Some(username), Some(password)) => {
+                    match authenticate_session(
+                        session,
+                        auth_provider.as_deref(),
+                        username,
+                        password,
+                    ) {
+                        Ok(()) => Ok(success_response()),
+                        Err(message) => Ok(authentication_failure_response(&message)),
+                    }
+                }
+                _ => Ok(authentication_failure_response("missing Bolt credentials")),
+            }
         }
         BoltMessage::Logoff => {
-            session.authenticated = false;
+            session.authenticated = !session.auth_enabled;
+            session.principal = None;
             Ok(vec![dispatch::encode_message(&BoltMessage::Success {
                 metadata: HashMap::new(),
             })])
@@ -615,38 +761,28 @@ async fn process_message(
             extra,
         } => {
             if session.auth_enabled && !session.authenticated {
-                return Ok(vec![dispatch::encode_message(&BoltMessage::Failure {
-                    metadata: HashMap::from([
-                        (
-                            "code".into(),
-                            serde_json::json!("Neo.ClientError.Security.Unauthorized"),
-                        ),
-                        (
-                            "message".into(),
-                            serde_json::json!("authentication required"),
-                        ),
-                    ]),
-                })]);
+                return Ok(authentication_failure_response("authentication required"));
             }
             session.current_query = Some(query.clone());
             let database = database_from_metadata(&extra).or_else(|| session.database.clone());
             let execution_database = database.clone();
             let execution_query = query.clone();
             let execution_parameters = parameters.clone();
+            let principal = session.principal.clone();
 
             // Create request context OUTSIDE spawn_blocking so the guard
             // lives in the async scope.  When the client disconnects, the
             // guard is dropped → cancel fires → the BFS (or any long-running
             // query) observes RequestCancelled and aborts.
-            let (request_context, _request_guard) =
-                copperdb_util::RequestContext::root(None);
+            let (request_context, _request_guard) = copperdb_util::RequestContext::root(None);
 
             let execution_result = tokio::task::spawn_blocking(move || {
-                executor.execute_on_database_with_context(
+                executor.execute_as_on_database_with_context(
                     execution_database.as_deref().unwrap_or("copperdb"),
                     &execution_query,
                     &execution_parameters,
                     request_context,
+                    principal.as_ref(),
                 )
             })
             .await
@@ -746,6 +882,7 @@ async fn process_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
 
@@ -800,10 +937,166 @@ mod tests {
         }
     }
 
+    struct TestAuthProvider;
+
+    impl BoltAuthProvider for TestAuthProvider {
+        fn authenticate(&self, username: &str, password: &str) -> Result<BoltPrincipal, String> {
+            if username == "reader" && password == "correct-password" {
+                Ok(BoltPrincipal {
+                    username: username.into(),
+                    roles: vec!["reader".into()],
+                })
+            } else {
+                Err("invalid credentials".into())
+            }
+        }
+    }
+
+    struct PrincipalRecordingExecutor {
+        principal: Arc<Mutex<Option<BoltPrincipal>>>,
+    }
+
+    impl QueryExecutor for PrincipalRecordingExecutor {
+        fn execute(
+            &self,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+        ) -> Result<BoltQueryResult, String> {
+            Ok(BoltQueryResult {
+                columns: vec![],
+                rows: vec![],
+            })
+        }
+
+        fn execute_as_on_database_with_context(
+            &self,
+            _database: &str,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+            _request_context: copperdb_util::RequestContext,
+            principal: Option<&BoltPrincipal>,
+        ) -> Result<BoltQueryResult, String> {
+            *self.principal.lock().unwrap() = principal.cloned();
+            self.execute("", &HashMap::new())
+        }
+    }
+
+    fn logon_message(username: &str, password: &str) -> Value {
+        Value::Struct {
+            signature: 0x6A,
+            fields: vec![Value::Map(vec![
+                ("scheme".into(), Value::String("basic".into())),
+                ("principal".into(), Value::String(username.into())),
+                ("credentials".into(), Value::String(password.into())),
+            ])],
+        }
+    }
+
+    async fn response_signature(
+        message: &Value,
+        session: &mut BoltSession,
+        provider: Option<Arc<dyn BoltAuthProvider>>,
+    ) -> u8 {
+        let responses = process_message(message, session, Arc::new(NoopExecutor), provider)
+            .await
+            .unwrap();
+        let (value, _) = crate::packstream::decode(&responses[0]).unwrap();
+        let Value::Struct { signature, .. } = value else {
+            panic!("expected Bolt struct response");
+        };
+        signature
+    }
+
+    #[tokio::test]
+    async fn logon_authenticates_and_logoff_clears_the_principal() {
+        let provider: Arc<dyn BoltAuthProvider> = Arc::new(TestAuthProvider);
+        let mut session = BoltSession::new(true);
+
+        assert_eq!(
+            response_signature(
+                &logon_message("reader", "correct-password"),
+                &mut session,
+                Some(Arc::clone(&provider)),
+            )
+            .await,
+            0x70
+        );
+        assert_eq!(session.principal.as_ref().unwrap().roles, vec!["reader"]);
+        assert!(session.authenticated);
+
+        let logoff = Value::Struct {
+            signature: 0x6B,
+            fields: vec![],
+        };
+        assert_eq!(
+            response_signature(&logoff, &mut session, Some(provider)).await,
+            0x70
+        );
+        assert!(session.principal.is_none());
+        assert!(!session.authenticated);
+    }
+
+    #[tokio::test]
+    async fn failed_logon_returns_unauthorized_and_does_not_authenticate_session() {
+        let provider: Arc<dyn BoltAuthProvider> = Arc::new(TestAuthProvider);
+        let mut session = BoltSession::new(true);
+
+        assert_eq!(
+            response_signature(
+                &logon_message("reader", "wrong-password"),
+                &mut session,
+                Some(Arc::clone(&provider)),
+            )
+            .await,
+            0x7F
+        );
+        assert!(session.principal.is_none());
+        assert!(!session.authenticated);
+        assert_eq!(
+            response_signature(&run_message(), &mut session, Some(provider)).await,
+            0x7F
+        );
+    }
+
+    #[tokio::test]
+    async fn run_forwards_authenticated_principal_to_executor() {
+        let provider: Arc<dyn BoltAuthProvider> = Arc::new(TestAuthProvider);
+        let recorded_principal = Arc::new(Mutex::new(None));
+        let executor = Arc::new(PrincipalRecordingExecutor {
+            principal: Arc::clone(&recorded_principal),
+        });
+        let mut session = BoltSession::new(true);
+
+        response_signature(
+            &logon_message("reader", "correct-password"),
+            &mut session,
+            Some(Arc::clone(&provider)),
+        )
+        .await;
+        let responses = process_message(&run_message(), &mut session, executor, Some(provider))
+            .await
+            .unwrap();
+        let (value, _) = crate::packstream::decode(&responses[0]).unwrap();
+        assert!(matches!(
+            value,
+            Value::Struct {
+                signature: 0x70,
+                ..
+            }
+        ));
+        assert_eq!(
+            *recorded_principal.lock().unwrap(),
+            Some(BoltPrincipal {
+                username: "reader".into(),
+                roles: vec!["reader".into()],
+            })
+        );
+    }
+
     #[tokio::test]
     async fn run_requires_logon_when_authentication_is_enabled() {
         let mut session = BoltSession::new(true);
-        let responses = process_message(&run_message(), &mut session, Arc::new(NoopExecutor))
+        let responses = process_message(&run_message(), &mut session, Arc::new(NoopExecutor), None)
             .await
             .unwrap();
         let (value, _) = crate::packstream::decode(&responses[0]).unwrap();
@@ -829,7 +1122,7 @@ mod tests {
     #[tokio::test]
     async fn run_is_allowed_when_authentication_is_disabled() {
         let mut session = BoltSession::new(false);
-        let responses = process_message(&run_message(), &mut session, Arc::new(NoopExecutor))
+        let responses = process_message(&run_message(), &mut session, Arc::new(NoopExecutor), None)
             .await
             .unwrap();
         let (value, _) = crate::packstream::decode(&responses[0]).unwrap();
@@ -854,7 +1147,8 @@ mod tests {
         tokio::spawn(async move {
             let (mut stream, _peer) = listener.accept().await.unwrap();
             let exec = Arc::new(NoopExecutor);
-            let result = handle_tcp_session(&mut stream, &server_telemetry, exec, false).await;
+            let result =
+                handle_tcp_session(&mut stream, &server_telemetry, exec, false, None).await;
             if let Err(ref e) = result {
                 eprintln!("server error: {e}");
             }
@@ -982,7 +1276,7 @@ mod tests {
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let exec = Arc::new(NoopExecutor);
-            let result = handle_tcp_session(&mut stream, &st, exec, false).await;
+            let result = handle_tcp_session(&mut stream, &st, exec, false, None).await;
             assert!(result.is_err());
         });
 
@@ -1014,7 +1308,7 @@ mod tests {
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let exec = Arc::new(NoopExecutor);
-            let result = handle_tcp_session(&mut stream, &st, exec, false).await;
+            let result = handle_tcp_session(&mut stream, &st, exec, false, None).await;
             // EOF after preamble should be Ok (clean disconnect)
             assert!(result.is_ok());
         });
