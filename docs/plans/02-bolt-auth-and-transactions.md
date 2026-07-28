@@ -33,7 +33,8 @@ Bolt 4 `HELLO` and Bolt 5 `LOGON` authenticate against the shared authenticator.
 - Complete: secure `RUN` calls receive the authenticated principal and its actual roles. `AppStateBoltExecutor` no longer grants a hard-coded `admin` role for authenticated Bolt sessions.
 - Complete: authenticated Bolt `BEGIN`, `COMMIT`, and `ROLLBACK` own a database-scoped engine transaction handle, clean up on `LOGOFF` and `RESET`, and return the engine-issued commit bookmark. This preserves NornicDB and Neo4j Bolt protocol compatibility.
 - Complete: `RUN` carries the active transaction handle through the executor boundary and is pinned to the database selected at `BEGIN`; an attempt to switch databases during a transaction fails without executing the query.
-- Pending: the engine executor must bind that handle to an isolated storage context so writes remain invisible until commit and rollback reverts them (Phases 2-6, dependent on Plan 08).
+- Complete: Phase 3. `AppStateBoltExecutor` owns an `Arc`-backed `StorageTransaction` for each Bolt transaction, routes transactional `RUN` through the private storage overlay, commits that overlay before issuing the engine bookmark, and discards it on rollback. Server regressions prove read-your-writes, private node and relationship visibility, durable commit publication, and rollback invisibility.
+- Complete: Phase 4. `RESET`, `LOGOFF`, TCP and WebSocket teardown, transport and handler errors, idle receive timeouts, and failed transactional `RUN` all roll back an active explicit transaction through one idempotent cleanup path. Durable commit removes the active handle before its logical bookmark commit, so later cleanup cannot report a rollback after the storage commit decision. Regressions cover disconnect, timeout, and failed-query cleanup.
 
 ## Tests
 

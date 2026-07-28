@@ -12,10 +12,13 @@ use copperdb_otel::Telemetry;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::accept_async;
 use tracing::{debug, info, warn};
+
+const BOLT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Result of executing a Cypher query through Bolt.
 #[derive(Debug, Clone)]
@@ -413,6 +416,25 @@ async fn handle_tcp_session(
     auth_enabled: bool,
     auth_provider: Option<Arc<dyn BoltAuthProvider>>,
 ) -> Result<(), BoltError> {
+    handle_tcp_session_with_timeout(
+        stream,
+        telemetry,
+        executor,
+        auth_enabled,
+        auth_provider,
+        BOLT_RECEIVE_TIMEOUT,
+    )
+    .await
+}
+
+async fn handle_tcp_session_with_timeout(
+    stream: &mut TcpStream,
+    telemetry: &Telemetry,
+    executor: Arc<dyn QueryExecutor>,
+    auth_enabled: bool,
+    auth_provider: Option<Arc<dyn BoltAuthProvider>>,
+    receive_timeout: Duration,
+) -> Result<(), BoltError> {
     let peer = stream
         .peer_addr()
         .map(|a| a.to_string())
@@ -432,13 +454,17 @@ async fn handle_tcp_session(
     let mut read_buf = Vec::with_capacity(4096);
     let mut temp_buf = [0u8; 4096];
 
-    loop {
-        let bytes_read = stream.read(&mut temp_buf).await?;
+    let result = loop {
+        let bytes_read = match tokio::time::timeout(receive_timeout, stream.read(&mut temp_buf)).await {
+            Ok(Ok(bytes_read)) => bytes_read,
+            Ok(Err(error)) => break Err(error.into()),
+            Err(_) => break Err(BoltError::ProtocolViolation("Bolt receive timeout".into())),
+        };
         if bytes_read == 0 {
-            break;
+            break Ok(());
         }
         read_buf.extend_from_slice(&temp_buf[..bytes_read]);
-        process_buffer(
+        if let Err(error) = process_buffer(
             &mut read_buf,
             stream,
             &mut session,
@@ -446,9 +472,13 @@ async fn handle_tcp_session(
             Arc::clone(&executor),
             auth_provider.clone(),
         )
-        .await?;
-    }
-    Ok(())
+        .await
+        {
+            break Err(error);
+        }
+    };
+    rollback_active_transaction(&mut session, executor.as_ref());
+    result
 }
 
 /// Handle a Bolt session over WebSocket.
@@ -458,6 +488,28 @@ async fn handle_ws_session<S>(
     executor: Arc<dyn QueryExecutor>,
     auth_enabled: bool,
     auth_provider: Option<Arc<dyn BoltAuthProvider>>,
+) -> Result<(), BoltError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    handle_ws_session_with_timeout(
+        ws,
+        _telemetry,
+        executor,
+        auth_enabled,
+        auth_provider,
+        BOLT_RECEIVE_TIMEOUT,
+    )
+    .await
+}
+
+async fn handle_ws_session_with_timeout<S>(
+    ws: &mut tokio_tungstenite::WebSocketStream<S>,
+    _telemetry: &Telemetry,
+    executor: Arc<dyn QueryExecutor>,
+    auth_enabled: bool,
+    auth_provider: Option<Arc<dyn BoltAuthProvider>>,
+    receive_timeout: Duration,
 ) -> Result<(), BoltError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -498,25 +550,34 @@ where
     let mut session = BoltSession::new(auth_enabled);
     let mut decoder = wsconn::BoltChunkDecoder::new();
 
-    loop {
-        let frames = match wsconn::read_ws_message(ws, &mut decoder).await {
-            Some(Ok(messages)) => {
+    let result = 'session_loop: loop {
+        let frames = match tokio::time::timeout(
+            receive_timeout,
+            wsconn::read_ws_message(ws, &mut decoder),
+        )
+        .await
+        {
+            Ok(Some(Ok(messages))) => {
                 info!(count = messages.len(), "bolt WS messages received");
                 messages
             }
-            Some(Err(e)) => {
-                return Err(BoltError::ProtocolViolation(format!("WS read error: {e}")))
+            Ok(Some(Err(e))) => {
+                break 'session_loop Err(BoltError::ProtocolViolation(format!("WS read error: {e}")))
             }
-            None => {
+            Ok(None) => {
                 info!("bolt WS connection closed");
-                break;
+                break 'session_loop Ok(());
             }
+            Err(_) => break 'session_loop Err(BoltError::ProtocolViolation("Bolt receive timeout".into())),
         };
 
         for frame in frames {
-            let (value, consumed) = crate::packstream::decode(&frame)?;
+            let (value, consumed) = match crate::packstream::decode(&frame) {
+                Ok(decoded) => decoded,
+                Err(error) => break 'session_loop Err(error),
+            };
             if consumed != frame.len() {
-                return Err(BoltError::ProtocolViolation(format!(
+                break 'session_loop Err(BoltError::ProtocolViolation(format!(
                     "trailing bytes after Bolt message: {}",
                     frame.len() - consumed
                 )));
@@ -534,9 +595,9 @@ where
                     let has_responses = !responses.is_empty();
                     for response_bytes in &responses {
                         info!(len = response_bytes.len(), "bolt WS sending response");
-                        wsconn::write_ws_message(ws, response_bytes)
-                            .await
-                            .map_err(|e| BoltError::ProtocolViolation(e.to_string()))?;
+                        if let Err(error) = wsconn::write_ws_message(ws, response_bytes).await {
+                            break 'session_loop Err(BoltError::ProtocolViolation(error.to_string()));
+                        }
                     }
                     if has_responses {
                         info!("bolt WS responses sent");
@@ -553,14 +614,15 @@ where
                         ]),
                     };
                     let bytes = dispatch::encode_message(&failure);
-                    wsconn::write_ws_message(ws, &bytes)
-                        .await
-                        .map_err(|e| BoltError::ProtocolViolation(e.to_string()))?;
+                    if let Err(error) = wsconn::write_ws_message(ws, &bytes).await {
+                        break 'session_loop Err(BoltError::ProtocolViolation(error.to_string()));
+                    }
                 }
             }
         }
-    }
-    Ok(())
+    };
+    rollback_active_transaction(&mut session, executor.as_ref());
+    result
 }
 
 /// Process buffered bytes, dispatching complete messages and writing responses.
@@ -726,6 +788,14 @@ fn authentication_required(session: &BoltSession) -> bool {
     session.auth_enabled && !session.authenticated
 }
 
+fn rollback_active_transaction(session: &mut BoltSession, executor: &dyn QueryExecutor) {
+    if let Some(transaction) = session.transaction.take() {
+        if let Err(error) = executor.rollback_transaction(&transaction) {
+            warn!(%error, transaction_id = %transaction.id, "Bolt session cleanup rollback failed");
+        }
+    }
+}
+
 fn transaction_failure_response(code: &str, message: &str) -> Vec<Vec<u8>> {
     client_failure_response(code, message)
 }
@@ -848,6 +918,7 @@ async fn process_message(
             let execution_parameters = parameters.clone();
             let principal = session.principal.clone();
             let transaction = session.transaction.clone();
+            let execution_executor = Arc::clone(&executor);
 
             // Create request context OUTSIDE spawn_blocking so the guard
             // lives in the async scope.  When the client disconnects, the
@@ -857,14 +928,14 @@ async fn process_message(
 
             let execution_result =
                 tokio::task::spawn_blocking(move || match transaction.as_ref() {
-                    Some(transaction) => executor.execute_in_transaction_with_context(
+                    Some(transaction) => execution_executor.execute_in_transaction_with_context(
                         transaction,
                         &execution_query,
                         &execution_parameters,
                         request_context,
                         principal.as_ref(),
                     ),
-                    None => executor.execute_as_on_database_with_context(
+                    None => execution_executor.execute_as_on_database_with_context(
                         execution_database.as_deref().unwrap_or("copperdb"),
                         &execution_query,
                         &execution_parameters,
@@ -898,6 +969,7 @@ async fn process_message(
                 }
                 Err(e) => {
                     warn!(%query, %e, "bolt RUN failed");
+                    rollback_active_transaction(session, executor.as_ref());
                     Ok(vec![dispatch::encode_message(&BoltMessage::Failure {
                         metadata: HashMap::from([
                             (
@@ -1180,6 +1252,53 @@ mod tests {
         ) -> Result<BoltQueryResult, String> {
             self.operations.lock().unwrap().push("run");
             self.execute("", &HashMap::new())
+        }
+    }
+
+    struct FailingTransactionExecutor {
+        operations: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl QueryExecutor for FailingTransactionExecutor {
+        fn execute(
+            &self,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+        ) -> Result<BoltQueryResult, String> {
+            Ok(BoltQueryResult {
+                columns: vec![],
+                rows: vec![],
+            })
+        }
+
+        fn begin_transaction(
+            &self,
+            database: &str,
+            _metadata: &HashMap<String, serde_json::Value>,
+            _principal: Option<&BoltPrincipal>,
+        ) -> Result<BoltTransaction, String> {
+            self.operations.lock().unwrap().push("begin");
+            Ok(BoltTransaction {
+                id: "test-transaction".into(),
+                database: database.into(),
+            })
+        }
+
+        fn rollback_transaction(&self, _transaction: &BoltTransaction) -> Result<(), String> {
+            self.operations.lock().unwrap().push("rollback");
+            Ok(())
+        }
+
+        fn execute_in_transaction_with_context(
+            &self,
+            _transaction: &BoltTransaction,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+            _request_context: copperdb_util::RequestContext,
+            _principal: Option<&BoltPrincipal>,
+        ) -> Result<BoltQueryResult, String> {
+            self.operations.lock().unwrap().push("run");
+            Err("query failed".into())
         }
     }
 
@@ -1487,6 +1606,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_transactional_run_rolls_back_and_clears_the_active_handle() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let executor: Arc<dyn QueryExecutor> = Arc::new(FailingTransactionExecutor {
+            operations: Arc::clone(&operations),
+        });
+        let begin = Value::Struct {
+            signature: 0x11,
+            fields: vec![Value::Map(vec![])],
+        };
+        let mut session = BoltSession::new(false);
+
+        assert_eq!(
+            response_signature_with_executor(&begin, &mut session, Arc::clone(&executor), None)
+                .await,
+            0x70
+        );
+        assert_eq!(
+            response_signature_with_executor(&run_message(), &mut session, executor, None).await,
+            0x7F
+        );
+        assert!(session.transaction.is_none());
+        assert_eq!(*operations.lock().unwrap(), vec!["begin", "run", "rollback"]);
+    }
+
+    #[tokio::test]
     async fn run_requires_logon_when_authentication_is_enabled() {
         let mut session = BoltSession::new(true);
         let responses = process_message(&run_message(), &mut session, Arc::new(NoopExecutor), None)
@@ -1719,6 +1863,90 @@ mod tests {
         // Close immediately — server should handle gracefully
         drop(client);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn tcp_disconnect_rolls_back_active_transaction() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let telemetry = Arc::new(Telemetry::new());
+        telemetry.seed_zero_catalog_metrics();
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let executor: Arc<dyn QueryExecutor> = Arc::new(TransactionRecordingExecutor {
+            operations: Arc::clone(&operations),
+        });
+        let server_telemetry = Arc::clone(&telemetry);
+
+        let handler = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            handle_tcp_session(&mut stream, &server_telemetry, executor, false, None).await
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(&[
+                0x60, 0x60, 0xB0, 0x17, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x04, 0x03, 0x00,
+                0x00, 0x04, 0x02, 0x00, 0x00, 0x04, 0x01,
+            ])
+            .await
+            .unwrap();
+        let mut version = [0u8; 4];
+        client.read_exact(&mut version).await.unwrap();
+
+        let begin = encode_bolt_struct(0x11, &[Value::Map(vec![])]);
+        client.write_all(&begin).await.unwrap();
+        let mut response = [0u8; 128];
+        assert!(client.read(&mut response).await.unwrap() > 0);
+        drop(client);
+
+        assert!(handler.await.unwrap().is_ok());
+        assert_eq!(*operations.lock().unwrap(), vec!["begin", "rollback"]);
+    }
+
+    #[tokio::test]
+    async fn tcp_receive_timeout_rolls_back_active_transaction() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let telemetry = Arc::new(Telemetry::new());
+        telemetry.seed_zero_catalog_metrics();
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let executor: Arc<dyn QueryExecutor> = Arc::new(TransactionRecordingExecutor {
+            operations: Arc::clone(&operations),
+        });
+        let server_telemetry = Arc::clone(&telemetry);
+
+        let handler = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            handle_tcp_session_with_timeout(
+                &mut stream,
+                &server_telemetry,
+                executor,
+                false,
+                None,
+                Duration::from_millis(20),
+            )
+            .await
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(&[
+                0x60, 0x60, 0xB0, 0x17, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x04, 0x03, 0x00,
+                0x00, 0x04, 0x02, 0x00, 0x00, 0x04, 0x01,
+            ])
+            .await
+            .unwrap();
+        let mut version = [0u8; 4];
+        client.read_exact(&mut version).await.unwrap();
+
+        let begin = encode_bolt_struct(0x11, &[Value::Map(vec![])]);
+        client.write_all(&begin).await.unwrap();
+        let mut response = [0u8; 128];
+        assert!(client.read(&mut response).await.unwrap() > 0);
+
+        let error = handler.await.unwrap().expect_err("idle session should time out");
+        assert!(error.to_string().contains("Bolt receive timeout"));
+        assert_eq!(*operations.lock().unwrap(), vec!["begin", "rollback"]);
     }
 
     /// Wrap raw PackStream bytes in Bolt chunk encoding.
