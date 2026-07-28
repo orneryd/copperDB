@@ -487,6 +487,8 @@ impl Default for BoltConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
+    /// Require authentication for protected ingress routes.
+    pub enabled: bool,
     /// Secret used to sign JWT tokens.
     pub jwt_secret: String,
     /// Token expiry in seconds.
@@ -498,6 +500,7 @@ pub struct AuthConfig {
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             jwt_secret: default_jwt_secret(),
             token_expiry_secs: 3600,
             allow_anonymous: false,
@@ -974,6 +977,9 @@ pub fn apply_env_overrides_from(config: &mut Config, env: &BTreeMap<String, Stri
     set_if_present(parse_env_bool(env, "COPPERDB_GRPC_ENABLED"), |value| {
         config.server.grpc_enabled = value
     });
+    set_if_present(parse_env_bool(env, "COPPERDB_AUTH_ENABLED"), |value| {
+        config.auth.enabled = value
+    });
     set_if_present(parse_env_bool(env, "COPPERDB_HEADLESS"), |value| {
         config.server.headless = value
     });
@@ -1342,6 +1348,7 @@ mod tests {
         assert_eq!(cfg.bolt.listen_addr, "127.0.0.1:7687");
         assert_eq!(cfg.storage.path, "./data");
         assert!(!cfg.embedding.enabled);
+        assert!(cfg.auth.enabled);
         assert!(!cfg.search.bm25_enabled);
         assert!(!cfg.search.vector_enabled);
         assert!(!cfg.features.auto_links_enabled);
@@ -1518,6 +1525,8 @@ server:
   http_port: 8000
   bolt_port: 9000
   headless: false
+auth:
+    enabled: false
 "#,
         )
         .unwrap();
@@ -1531,6 +1540,7 @@ server:
             "env.mesh.local".to_string(),
         );
         env.insert("COPPERDB_HEADLESS".to_string(), "true".to_string());
+        env.insert("COPPERDB_AUTH_ENABLED".to_string(), "true".to_string());
 
         let cli = ConfigOverrides {
             bolt_port: Some(9100),
@@ -1552,8 +1562,27 @@ server:
         );
         assert!(cfg.server.grpc_tls_client_auth_optional);
         assert!(cfg.server.grpc_enabled);
+        assert!(cfg.auth.enabled);
         assert!(!cfg.server.headless);
     }
+
+    #[test]
+    fn auth_enabled_preserves_file_false_without_higher_overrides() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("copperdb.toml");
+        std::fs::write(&path, "[auth]\nenabled = false\n").unwrap();
+
+        let cfg = load_with_precedence_from(
+            Some(path.as_path()),
+            &BTreeMap::new(),
+            temp.path(),
+            &ConfigOverrides::default(),
+        )
+        .unwrap();
+
+        assert!(!cfg.auth.enabled);
+    }
+
 
     #[test]
     fn env_overrides_apply_default_off_search_and_embedding_settings() {

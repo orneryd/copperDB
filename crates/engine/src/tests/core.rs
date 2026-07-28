@@ -1297,7 +1297,7 @@ fn engine_exports_compliance_evidence_from_audit_log() {
 #[test]
 fn test_default_config() {
     let config = DatabaseConfig::default();
-    assert!(!config.auth_enabled);
+    assert!(config.auth_enabled);
     assert_eq!(config.max_connections, 100);
     assert!(!config.runtime_config.bm25_enabled);
     assert!(!config.runtime_config.vector_enabled);

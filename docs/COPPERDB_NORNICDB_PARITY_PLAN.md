@@ -41,11 +41,11 @@ The first work must close verified audit findings. New feature expansion should 
 
 ### P0: Correctness And Security
 
-1. **Enable authentication by default and define one override contract.**
+1. **Complete: enable authentication by default and define one override contract.**
    - Upstream: commits `20215f13` and `1837c8c7`; `pkg/config/config.go`, `cmd/nornicdb/main.go`.
    - Copper targets: [crates/config/src/lib.rs](../crates/config/src/lib.rs), [crates/server/src/lib.rs](../crates/server/src/lib.rs), [crates/copperdb/src/main.rs](../crates/copperdb/src/main.rs), and [crates/engine/src/lib.rs](../crates/engine/src/lib.rs).
-   - Required behavior: authentication defaults on; explicit configuration participates in normal precedence; an explicit startup `--no-auth` is the only hard bypass; HTTP, Bolt, and internal services consume the same resolved setting.
-   - Exit tests: default startup rejects anonymous protected requests, configured auth remains enabled, `--no-auth` bypasses intentionally, and contradictory env/config/CLI inputs resolve deterministically.
+   - Delivered behavior: authentication defaults on; `auth.enabled` and `COPPERDB_AUTH_ENABLED` participate in normal precedence; `--no-auth` is the only command-line bypass; HTTP, Bolt, and internal services consume the same resolved setting.
+   - Validated: config, executable startup, Bolt, server auth, and engine test suites. An isolated workspace run remains red only on unrelated server discovery and distributed-quorum tests.
 
 2. **Replace Bolt's placeholder authentication and transaction acknowledgements.**
    - Upstream: `pkg/bolt/server.go` and transaction/write tests.
@@ -169,7 +169,7 @@ This ledger prevents recent NornicDB fixes from disappearing into broad package 
 | Upstream commit/family | Behavior | Copper disposition |
 | --- | --- | --- |
 | `36f2e532` | Retryable post-snapshot edge update conflict | P0, missing |
-| `20215f13`, `1837c8c7` | Auth defaults on and explicit precedence | P0, missing/inconsistent |
+| `20215f13`, `1837c8c7` | Auth defaults on and explicit precedence | P0, complete |
 | `e090df01` | Lucene-classic fulltext grammar | P0, missing |
 | `e4b84afe`, `883065cd` | Generalized OPTIONAL MATCH projection/aggregate behavior | P0, partial; exact tests required |
 | `4f35ea92`, `8775bf1c` | Relationship existence/scoping and connected-node delete guard | P0, partial; guard proof missing |

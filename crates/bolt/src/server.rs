@@ -144,6 +144,7 @@ impl QueryExecutor for NoopExecutor {
 pub struct BoltServerConfig {
     pub listen_addr: String,
     pub web_socket_enabled: bool,
+    pub auth_enabled: bool,
 }
 
 impl Default for BoltServerConfig {
@@ -151,6 +152,7 @@ impl Default for BoltServerConfig {
         Self {
             listen_addr: "127.0.0.1:7687".into(),
             web_socket_enabled: true,
+            auth_enabled: true,
         }
     }
 }
@@ -185,11 +187,21 @@ impl BoltServer {
             config: BoltServerConfig {
                 listen_addr: addr,
                 web_socket_enabled: true,
+                auth_enabled: true,
             },
             telemetry,
             active_connections: Arc::new(AtomicU64::new(0)),
             executor,
         }
+    }
+
+    pub fn with_auth_enabled(mut self, auth_enabled: bool) -> Self {
+        self.config.auth_enabled = auth_enabled;
+        self
+    }
+
+    pub fn auth_enabled(&self) -> bool {
+        self.config.auth_enabled
     }
 
     pub async fn serve(&self) -> Result<(), BoltError> {
@@ -225,6 +237,7 @@ impl BoltServer {
         let telemetry = Arc::clone(&self.telemetry);
         let active_connections = Arc::clone(&self.active_connections);
         let executor = Arc::clone(&self.executor);
+        let auth_enabled = self.config.auth_enabled;
         let _ = telemetry.record_counter(
             "nornicdb_bolt_connections_total",
             &[("result", "success"), ("transport", "ws")],
@@ -239,7 +252,8 @@ impl BoltServer {
         tokio::spawn(async move {
             match accept_async(stream).await {
                 Ok(mut ws_stream) => {
-                    let result = handle_ws_session(&mut ws_stream, &telemetry, executor).await;
+                    let result =
+                        handle_ws_session(&mut ws_stream, &telemetry, executor, auth_enabled).await;
                     if let Err(ref e) = result {
                         warn!(%peer_addr, %e, "bolt ws connection failed");
                         let _ = telemetry.record_counter(
@@ -271,6 +285,7 @@ impl BoltServer {
         let telemetry = Arc::clone(&self.telemetry);
         let active_connections = Arc::clone(&self.active_connections);
         let executor = Arc::clone(&self.executor);
+        let auth_enabled = self.config.auth_enabled;
         let _ = telemetry.record_counter(
             "nornicdb_bolt_connections_total",
             &[("result", "success"), ("transport", "tcp")],
@@ -284,7 +299,7 @@ impl BoltServer {
         debug!(%peer_addr, "accepted bolt tcp");
 
         tokio::spawn(async move {
-            let result = handle_tcp_session(&mut stream, &telemetry, executor).await;
+            let result = handle_tcp_session(&mut stream, &telemetry, executor, auth_enabled).await;
             if let Err(ref e) = result {
                 let _ = telemetry.record_counter(
                     "nornicdb_bolt_connections_total",
@@ -312,6 +327,7 @@ async fn handle_tcp_session(
     stream: &mut TcpStream,
     telemetry: &Telemetry,
     executor: Arc<dyn QueryExecutor>,
+    auth_enabled: bool,
 ) -> Result<(), BoltError> {
     let peer = stream
         .peer_addr()
@@ -328,7 +344,7 @@ async fn handle_tcp_session(
     stream.write_all(&[0x00, 0x00, 0x04, 0x04]).await?;
     info!(%peer, "bolt tcp version 4.4 sent, entering message loop");
 
-    let mut session = BoltSession::new();
+    let mut session = BoltSession::new(auth_enabled);
     let mut read_buf = Vec::with_capacity(4096);
     let mut temp_buf = [0u8; 4096];
 
@@ -355,6 +371,7 @@ async fn handle_ws_session<S>(
     ws: &mut tokio_tungstenite::WebSocketStream<S>,
     _telemetry: &Telemetry,
     executor: Arc<dyn QueryExecutor>,
+    auth_enabled: bool,
 ) -> Result<(), BoltError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -392,7 +409,7 @@ where
         .map_err(|e| BoltError::ProtocolViolation(format!("WS version response error: {e}")))?;
     info!("bolt WS version response sent, entering message loop");
 
-    let mut session = BoltSession::new();
+    let mut session = BoltSession::new(auth_enabled);
     let mut decoder = wsconn::BoltChunkDecoder::new();
 
     loop {
@@ -515,6 +532,7 @@ async fn process_buffer(
 
 /// Per-connection Bolt session state. Mirrors NornicDB's Session struct.
 struct BoltSession {
+    auth_enabled: bool,
     authenticated: bool,
     database: Option<String>,
     last_query_database: Option<String>,
@@ -524,9 +542,10 @@ struct BoltSession {
 }
 
 impl BoltSession {
-    fn new() -> Self {
+    fn new(auth_enabled: bool) -> Self {
         Self {
-            authenticated: false,
+            auth_enabled,
+            authenticated: !auth_enabled,
             database: None,
             last_query_database: None,
             current_query: None,
@@ -595,6 +614,20 @@ async fn process_message(
             parameters,
             extra,
         } => {
+            if session.auth_enabled && !session.authenticated {
+                return Ok(vec![dispatch::encode_message(&BoltMessage::Failure {
+                    metadata: HashMap::from([
+                        (
+                            "code".into(),
+                            serde_json::json!("Neo.ClientError.Security.Unauthorized"),
+                        ),
+                        (
+                            "message".into(),
+                            serde_json::json!("authentication required"),
+                        ),
+                    ]),
+                })]);
+            }
             session.current_query = Some(query.clone());
             let database = database_from_metadata(&extra).or_else(|| session.database.clone());
             let execution_database = database.clone();
@@ -756,6 +789,57 @@ mod tests {
         }
     }
 
+    fn run_message() -> Value {
+        Value::Struct {
+            signature: 0x10,
+            fields: vec![
+                Value::String("RETURN 1".into()),
+                Value::Map(vec![]),
+                Value::Map(vec![]),
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn run_requires_logon_when_authentication_is_enabled() {
+        let mut session = BoltSession::new(true);
+        let responses = process_message(&run_message(), &mut session, Arc::new(NoopExecutor))
+            .await
+            .unwrap();
+        let (value, _) = crate::packstream::decode(&responses[0]).unwrap();
+        let Value::Struct { signature, fields } = value else {
+            panic!("expected Bolt FAILURE response");
+        };
+
+        assert_eq!(signature, 0x7F);
+        let [Value::Map(metadata)] = fields.as_slice() else {
+            panic!("expected Bolt FAILURE metadata");
+        };
+        let code = metadata
+            .iter()
+            .find_map(|(key, value)| (key == "code").then_some(value));
+        assert_eq!(
+            code,
+            Some(&Value::String(
+                "Neo.ClientError.Security.Unauthorized".into()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn run_is_allowed_when_authentication_is_disabled() {
+        let mut session = BoltSession::new(false);
+        let responses = process_message(&run_message(), &mut session, Arc::new(NoopExecutor))
+            .await
+            .unwrap();
+        let (value, _) = crate::packstream::decode(&responses[0]).unwrap();
+        let Value::Struct { signature, .. } = value else {
+            panic!("expected Bolt SUCCESS response");
+        };
+
+        assert_eq!(signature, 0x70);
+    }
+
     #[tokio::test]
     async fn test_full_tcp_handshake_and_message_flow() {
         // Bind to an ephemeral port
@@ -770,7 +854,7 @@ mod tests {
         tokio::spawn(async move {
             let (mut stream, _peer) = listener.accept().await.unwrap();
             let exec = Arc::new(NoopExecutor);
-            let result = handle_tcp_session(&mut stream, &server_telemetry, exec).await;
+            let result = handle_tcp_session(&mut stream, &server_telemetry, exec, false).await;
             if let Err(ref e) = result {
                 eprintln!("server error: {e}");
             }
@@ -898,7 +982,7 @@ mod tests {
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let exec = Arc::new(NoopExecutor);
-            let result = handle_tcp_session(&mut stream, &st, exec).await;
+            let result = handle_tcp_session(&mut stream, &st, exec, false).await;
             assert!(result.is_err());
         });
 
@@ -930,7 +1014,7 @@ mod tests {
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let exec = Arc::new(NoopExecutor);
-            let result = handle_tcp_session(&mut stream, &st, exec).await;
+            let result = handle_tcp_session(&mut stream, &st, exec, false).await;
             // EOF after preamble should be Ok (clean disconnect)
             assert!(result.is_ok());
         });
@@ -974,7 +1058,8 @@ mod tests {
             addr.to_string(),
             Arc::clone(&telemetry),
             Arc::new(NoopExecutor),
-        );
+        )
+        .with_auth_enabled(false);
 
         // Spawn server that accepts one connection
         tokio::spawn(async move {

@@ -257,7 +257,7 @@ impl Default for DatabaseConfig {
             data_dir: "data".to_string(),
             max_connections: 100,
             default_database: "copperdb".to_string(),
-            auth_enabled: false,
+            auth_enabled: true,
             log_queries: false,
             runtime_config,
             storage_encryption_master_key: None,

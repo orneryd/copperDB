@@ -60,6 +60,12 @@ cargo run --release --package copperdb
 
 > See [docs/BUILDING.md](docs/BUILDING.md) for full configuration options.
 
+### Authentication Configuration
+
+Authentication is enabled by default for HTTP, Bolt, and internal gRPC services. Configure it with the canonical `auth.enabled` setting or `COPPERDB_AUTH_ENABLED`. Resolution order is built-in defaults, configuration file, environment, then the explicit `--no-auth` bypass.
+
+For local development without authentication, start the process with `--no-auth`. This is the only supported anonymous mode. Deployments configure normal operation with `COPPERDB_AUTH_ENABLED`.
+
 ---
 
 ## Features
@@ -128,7 +134,7 @@ RETURN p
 
 ## Status
 
-copperDB is under active development. The core engine runs a substantial Cypher subset, serves Bolt clients, and maintains local indexes. Authentication defaults, explicit Bolt transactions, and semantic/vector runtime behavior remain active parity work.
+copperDB is under active development. The core engine runs a substantial Cypher subset, serves Bolt clients, and maintains local indexes. Explicit Bolt transactions and semantic/vector runtime behavior remain active parity work.
 
 See [docs/COPPERDB_NORNICDB_PARITY_PLAN.md](docs/COPPERDB_NORNICDB_PARITY_PLAN.md) for the audited implementation status and next steps.
 

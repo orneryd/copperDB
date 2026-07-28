@@ -84,13 +84,17 @@ pub struct AuthState {
 
 impl Default for AuthState {
     fn default() -> Self {
+        Self::from_runtime_config(&RuntimeConfig::default())
+            .expect("durable authenticator must initialize during server startup")
+    }
+}
+
+impl AuthState {
+    pub fn from_runtime_config(config: &RuntimeConfig) -> Result<Self, AuthError> {
         let username = env_get("COPPERDB_AUTH_USERNAME", "admin");
         let password = env_get("COPPERDB_AUTH_PASSWORD", "password");
-        let secret = env_get(
-            "COPPERDB_AUTH_JWT_SECRET",
-            "copperdb-development-secret-change-me",
-        );
-        let security_enabled = get_bool_loose("COPPERDB_SECURITY_ENABLED", false);
+        let secret = env_get("COPPERDB_AUTH_JWT_SECRET", &config.auth.jwt_secret);
+        let security_enabled = config.auth.enabled;
         let dev_login_enabled = get_bool_loose("COPPERDB_DEV_LOGIN_ENABLED", true);
         let default_storage_path = default_auth_storage_path();
         let storage_path = env_get("COPPERDB_AUTH_STORAGE_PATH", &default_storage_path);
@@ -102,11 +106,8 @@ impl Default for AuthState {
             password,
             secret,
         )
-        .expect("durable authenticator must initialize during server startup")
     }
-}
 
-impl AuthState {
     pub fn from_storage_path(
         auth_storage_path: String,
         security_enabled: bool,

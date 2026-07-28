@@ -17,7 +17,7 @@ use copperdb_server::{
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 fn ensure_tls_crypto_provider() {
@@ -84,6 +84,10 @@ struct Cli {
 
     #[arg(long)]
     headless: bool,
+
+    /// Disable authentication for this process after normal config resolution.
+    #[arg(long)]
+    no_auth: bool,
 
     #[arg(long)]
     base_path: Option<String>,
@@ -280,8 +284,15 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let startup = resolve_startup_config(&cli).await?;
     info!(version = %display_version(), "starting copperdb");
+    if cli.no_auth {
+        warn!("authentication disabled by explicit --no-auth override");
+    } else {
+        info!(auth_enabled = startup.runtime_config.auth.enabled, "resolved authentication configuration");
+    }
     let telemetry = Arc::new(Telemetry::new());
     telemetry.seed_zero_catalog_metrics();
+    let auth = copperdb_server::AuthState::from_runtime_config(startup.runtime_config.as_ref())
+        .context("failed to initialize configured authentication")?;
     let state = Arc::new(AppState {
         db_name: startup.db_name.clone(),
         runtime_config: Arc::clone(&startup.runtime_config),
@@ -289,6 +300,7 @@ async fn main() -> Result<()> {
         base_path: startup.base_path.clone(),
         headless: startup.headless,
         telemetry: Arc::clone(&telemetry),
+        auth,
         ..Default::default()
     });
     if state.db_manager.get(&startup.db_name).is_none() {
@@ -312,7 +324,8 @@ async fn main() -> Result<()> {
     if startup.bolt_enabled {
         let executor = Arc::new(AppStateBoltExecutor::new(Arc::clone(&state)));
         supervisor.register(BoltComponent {
-            server: BoltServer::new(startup.bolt_address.clone(), telemetry, executor),
+            server: BoltServer::new(startup.bolt_address.clone(), telemetry, executor)
+                .with_auth_enabled(state.auth.security_enabled),
         });
     }
 
@@ -338,7 +351,10 @@ async fn main() -> Result<()> {
 }
 
 async fn resolve_startup_config(cli: &Cli) -> Result<StartupConfig> {
-    let config = load_with_precedence(cli.config.as_deref(), &cli_config_overrides(cli))?;
+    let mut config = load_with_precedence(cli.config.as_deref(), &cli_config_overrides(cli))?;
+    if cli.no_auth {
+        config.auth.enabled = false;
+    }
     config.validate()?;
     let config = Arc::new(config);
     let listeners = config.listener_config();
@@ -390,4 +406,43 @@ fn cli_config_overrides(cli: &Cli) -> ConfigOverrides {
         static_dir: cli.static_dir.clone(),
         ..Default::default()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn startup_config_enables_auth_by_default() {
+        let cli = Cli::parse_from(["copperdb"]);
+
+        let startup = resolve_startup_config(&cli).await.unwrap();
+
+        assert!(startup.runtime_config.auth.enabled);
+    }
+
+    #[tokio::test]
+    async fn no_auth_overrides_resolved_auth_configuration() {
+        let config_path = std::env::temp_dir().join(format!(
+            "copperdb-no-auth-test-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&config_path, "[auth]\nenabled = true\n").unwrap();
+        let cli = Cli::parse_from([
+            "copperdb",
+            "--config",
+            config_path.to_str().unwrap(),
+            "--no-auth",
+        ]);
+
+        let startup = resolve_startup_config(&cli).await.unwrap();
+
+        assert!(!startup.runtime_config.auth.enabled);
+        std::fs::remove_file(config_path).unwrap();
+    }
+
 }
