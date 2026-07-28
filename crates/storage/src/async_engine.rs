@@ -362,39 +362,44 @@ impl AsyncStorageShared {
         &self,
         engine: &StorageEngine,
     ) -> Result<AsyncFlushResult, StorageError> {
-        let (mut node_ops, mut edge_ops) = self.pending.lock().take_ops();
+        let (node_ops, edge_ops) = self.pending.lock().take_ops();
+        let result = AsyncFlushResult {
+            nodes_written: node_ops
+                .iter()
+                .filter(|(_, pending)| pending.is_some())
+                .count() as u64,
+            nodes_deleted: node_ops
+                .iter()
+                .filter(|(_, pending)| pending.is_none())
+                .count() as u64,
+            edges_written: edge_ops
+                .iter()
+                .filter(|(_, pending)| pending.is_some())
+                .count() as u64,
+            edges_deleted: edge_ops
+                .iter()
+                .filter(|(_, pending)| pending.is_none())
+                .count() as u64,
+        };
 
-        let mut result = AsyncFlushResult::default();
-
-        for (index, (id, pending)) in node_ops.iter().enumerate() {
-            let apply = match pending {
-                Some(node) => engine.put_node_record(node).map(|_| {
-                    result.nodes_written += 1;
-                }),
-                None => engine.delete_node_record(id).map(|_| {
-                    result.nodes_deleted += 1;
-                }),
-            };
-            if let Err(err) = apply {
-                self.requeue_node_ops(node_ops.split_off(index));
-                self.requeue_edge_ops(edge_ops);
-                return Err(err);
+        if let Err(error) = engine.batch_write(|batch| {
+            for (id, pending) in &node_ops {
+                match pending {
+                    Some(node) => batch.put_node_record(node),
+                    None => batch.delete_node_record(id),
+                }
             }
-        }
-
-        for (index, (id, pending)) in edge_ops.iter().enumerate() {
-            let apply = match pending {
-                Some(edge) => engine.put_edge_record(edge).map(|_| {
-                    result.edges_written += 1;
-                }),
-                None => engine.delete_edge_record(id).map(|_| {
-                    result.edges_deleted += 1;
-                }),
-            };
-            if let Err(err) = apply {
-                self.requeue_edge_ops(edge_ops.split_off(index));
-                return Err(err);
+            for (id, pending) in &edge_ops {
+                match pending {
+                    Some(edge) => batch.put_edge_record(edge),
+                    None => batch.delete_edge_record(id),
+                }
             }
+            Ok::<_, StorageError>(())
+        }) {
+            self.requeue_node_ops(node_ops);
+            self.requeue_edge_ops(edge_ops);
+            return Err(error);
         }
 
         engine.flush()?;

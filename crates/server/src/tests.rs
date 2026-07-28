@@ -3,6 +3,32 @@
 use super::*;
 
 #[test]
+fn open_engine_maps_storage_sync_writes_to_immediate_wal_durability() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage_path = temp_dir
+        .path()
+        .join("copper")
+        .to_string_lossy()
+        .into_owned();
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager.create("copper", storage_path).unwrap();
+    let mut runtime_config = RuntimeConfig::default();
+    runtime_config.storage.sync_writes = true;
+    let state = AppState {
+        db_name: "copper".into(),
+        db_manager,
+        runtime_config: Arc::new(runtime_config),
+        ..Default::default()
+    };
+
+    let engine = open_engine(&state, "copper").unwrap();
+    assert_eq!(
+        engine.storage().wal_sync_mode(),
+        copperdb_storage::WALSyncMode::Immediate
+    );
+}
+
+#[test]
 fn test_health_response_serialization() {
     let hr = HealthResponse {
         status: "ok".into(),

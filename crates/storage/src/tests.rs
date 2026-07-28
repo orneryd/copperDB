@@ -1987,6 +1987,38 @@ fn async_storage_engine_buffers_structured_node_writes_until_flush() {
 }
 
 #[test]
+fn async_storage_engine_flushes_mixed_records_in_one_wal_frame() {
+    let test_dir = tempfile::tempdir().unwrap();
+    let async_engine = AsyncStorageEngine::new(
+        StorageEngine::open(test_dir.path()).unwrap(),
+        Some(AsyncStorageConfig {
+            flush_interval_ms: 60_000,
+            ..Default::default()
+        }),
+    );
+    let source = sample_node("source", &["Node"]);
+    let target = sample_node("target", &["Node"]);
+    let edge = sample_edge("edge", "LINK", "source", "target");
+
+    async_engine.put_node_record(&source).unwrap();
+    async_engine.put_node_record(&target).unwrap();
+    async_engine.put_edge_record(&edge).unwrap();
+    let flushed = async_engine.flush().unwrap();
+    assert_eq!(flushed.nodes_written, 2);
+    assert_eq!(flushed.edges_written, 1);
+    async_engine.close().unwrap();
+
+    let wal = WAL::open(
+        test_dir.path().join(STORAGE_WAL_FILENAME),
+        WALConfig::default(),
+    )
+    .unwrap();
+    let frames = wal.replay_transactions_after(0).unwrap();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].1.records.len(), 3);
+}
+
+#[test]
 fn async_storage_engine_background_flush_persists_pending_writes() {
     let async_engine = AsyncStorageEngine::new(
         StorageEngine::open_temporary().unwrap(),

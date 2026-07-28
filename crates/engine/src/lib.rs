@@ -241,6 +241,8 @@ pub struct DatabaseConfig {
     pub default_database: String,
     pub auth_enabled: bool,
     pub log_queries: bool,
+    /// Fsync the CopperDB WAL and Fjall batch before acknowledging writes.
+    pub sync_writes: bool,
     pub runtime_config: copperdb_config::EffectiveDatabaseConfig,
     pub storage_encryption_master_key: Option<Vec<u8>>,
     pub storage_encryption_key_uri: String,
@@ -260,6 +262,7 @@ impl Default for DatabaseConfig {
             default_database: "copperdb".to_string(),
             auth_enabled: true,
             log_queries: false,
+            sync_writes: false,
             runtime_config,
             storage_encryption_master_key: None,
             storage_encryption_key_uri: "kms://local/storage".into(),

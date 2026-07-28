@@ -2140,6 +2140,7 @@ fn open_engine(state: &AppState, database: &str) -> Result<Arc<GraphEngine>, Str
         default_database: database.into(),
         auth_enabled: state.auth.security_enabled,
         log_queries: false,
+        sync_writes: state.runtime_config.storage.sync_writes,
         runtime_config,
         ..Default::default()
     };

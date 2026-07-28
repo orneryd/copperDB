@@ -1030,6 +1030,14 @@ impl CopperDb {
 }
 
 fn open_storage(config: &DatabaseConfig) -> Result<StorageEngine, CopperDbError> {
+    let wal_config = copperdb_storage::WALConfig {
+        sync_mode: if config.sync_writes {
+            copperdb_storage::WALSyncMode::Immediate
+        } else {
+            copperdb_storage::WALSyncMode::NoSync
+        },
+        ..Default::default()
+    };
     match &config.storage_encryption_master_key {
         Some(master_key) => {
             let provider = new_provider(ProviderFactoryConfig {
@@ -1039,15 +1047,17 @@ fn open_storage(config: &DatabaseConfig) -> Result<StorageEngine, CopperDbError>
                 audit_signing_key: None,
             })
             .map_err(|err| CopperDbError::Init(err.to_string()))?;
-            StorageEngine::open_encrypted(
+            StorageEngine::open_encrypted_with_wal_config(
                 &config.data_dir,
                 provider,
                 config.storage_encryption_key_uri.clone(),
+                wal_config,
             )
             .map_err(|e| CopperDbError::Storage(e.to_string()))
         }
         None => {
-            StorageEngine::open(&config.data_dir).map_err(|e| CopperDbError::Storage(e.to_string()))
+            StorageEngine::open_with_wal_config(&config.data_dir, wal_config)
+                .map_err(|e| CopperDbError::Storage(e.to_string()))
         }
     }
 }

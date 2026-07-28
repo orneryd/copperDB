@@ -1322,7 +1322,28 @@ fn test_default_config() {
     assert_eq!(config.max_connections, 100);
     assert!(!config.runtime_config.bm25_enabled);
     assert!(!config.runtime_config.vector_enabled);
+    assert!(!config.sync_writes);
     assert!(config.storage_encryption_master_key.is_none());
+}
+
+#[test]
+fn persistent_engine_maps_sync_writes_to_immediate_wal_durability() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = CopperDb::open(DatabaseConfig {
+        data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+        sync_writes: true,
+        ..Default::default()
+    })
+    .unwrap();
+
+    assert_eq!(
+        db.storage().wal_sync_mode(),
+        copperdb_storage::WALSyncMode::Immediate
+    );
+    let applied_before = db.storage().wal_applied_sequence().unwrap();
+    db.execute("CREATE (n:Durable {v: 1})", Default::default())
+        .unwrap();
+    assert!(db.storage().wal_applied_sequence().unwrap() > applied_before);
 }
 
 #[test]

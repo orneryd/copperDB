@@ -1501,13 +1501,23 @@ impl StorageEngine {
         provider: Arc<dyn KeyProvider>,
         key_uri: impl Into<String>,
     ) -> Result<Self, StorageError> {
+        Self::open_encrypted_with_wal_config(path, provider, key_uri, WALConfig::default())
+    }
+
+    /// Open encrypted storage with an explicit WAL durability policy.
+    pub fn open_encrypted_with_wal_config(
+        path: impl AsRef<Path>,
+        provider: Arc<dyn KeyProvider>,
+        key_uri: impl Into<String>,
+        wal_config: WALConfig,
+    ) -> Result<Self, StorageError> {
         let path = path.as_ref();
         let db = Database::open(fjall::Config::new(path)).map_err(StorageError::Fjall)?;
         let encryption = StorageEncryption::new(provider, key_uri.into())?;
         Self::open_with_db(
             db,
             Some(encryption),
-            WAL::open(path.join(STORAGE_WAL_FILENAME), WALConfig::default())?,
+            WAL::open(path.join(STORAGE_WAL_FILENAME), wal_config)?,
         )
     }
 
