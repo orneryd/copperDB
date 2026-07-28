@@ -1,5 +1,7 @@
 # NornicDB Main Parity Checklist (Storage-Centric)
 
+> Superseded historical checklist. Use [../../COPPERDB_NORNICDB_PARITY_PLAN.md](../../COPPERDB_NORNICDB_PARITY_PLAN.md) for current status, upstream fixes, and next implementation steps.
+
 Documentation status note: copperDB's supported runtime architecture is currently single-node only. Any distributed, fabric, replication, remote graph-read, or cluster-search items in this checklist are parity backlog and future architecture notes, not a current product/runtime guarantee.
 
 ## Upstream reference

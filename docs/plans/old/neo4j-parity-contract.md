@@ -1,5 +1,7 @@
 # Neo4j/NornicDB Parity Contract (Current Slice)
 
+> Historical slice contract. Current parity status and regression work are consolidated in [../../COPPERDB_NORNICDB_PARITY_PLAN.md](../../COPPERDB_NORNICDB_PARITY_PLAN.md).
+
 Scope note: this file describes local Cypher/parser/storage parity only. copperDB's supported runtime architecture remains single-node, and distributed execution is intentionally out of scope here.
 
 ## Cypher DDL surface (implemented in this slice)

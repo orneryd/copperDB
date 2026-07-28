@@ -1,5 +1,7 @@
 # CopperDB Strategic Product Roadmap
 
+> This is a long-range product vision, not the implementation queue. Current status and engineering priority are governed by [COPPERDB_NORNICDB_PARITY_PLAN.md](COPPERDB_NORNICDB_PARITY_PLAN.md); distributed and GPU phases remain deferred until its single-node completion gate passes.
+
 **Investor Demonstration Draft**  
 **Date:** May 26, 2026  
 **Positioning:** Single-node graph and retrieval engine first; broader distributed cognitive infrastructure later.

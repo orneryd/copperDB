@@ -1,5 +1,7 @@
 # copperDB / NornicDB Parity Audit
 
+> Superseded historical audit. Use [COPPERDB_NORNICDB_PARITY_PLAN.md](COPPERDB_NORNICDB_PARITY_PLAN.md) for the current audited commits, implementation findings, upstream fix ledger, and execution order.
+
 Date: 2026-05-26
 
 This audit compares the local Rust workspace at `~/src/copperDB` against the local Go upstream at `~/src/NornicDB`. NornicDB is the source of truth for package boundaries and runtime behavior. copperDB is a Rust conversion of that architecture.

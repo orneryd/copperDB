@@ -1,5 +1,7 @@
 # Implementation Status
 
+> Historical status snapshot. The authoritative current audit, package status, and next steps are in [COPPERDB_NORNICDB_PARITY_PLAN.md](COPPERDB_NORNICDB_PARITY_PLAN.md). A checked crate below means a baseline existed when this snapshot was written; it must not be read as full NornicDB parity or production readiness.
+
 | Crate            | Status       | Notes |
 |------------------|-------------|-------|
 | `util`           | ✅ Complete  | |

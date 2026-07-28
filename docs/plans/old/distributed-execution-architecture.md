@@ -1,5 +1,7 @@
 # Distributed Execution Architecture
 
+> Deferred design reference. Current implementation priority and the gate for resuming distributed work are defined in [../../COPPERDB_NORNICDB_PARITY_PLAN.md](../../COPPERDB_NORNICDB_PARITY_PLAN.md).
+
 Date: 2026-05-26
 
 Status: deferred roadmap only.

@@ -1,5 +1,7 @@
 # NornicDB Full Sweep Audit
 
+> Superseded by the 2026-07-28 audit at [../../COPPERDB_NORNICDB_PARITY_PLAN.md](../../COPPERDB_NORNICDB_PARITY_PLAN.md). This file remains as historical evidence and must not be used for current completion status.
+
 Date: 2026-05-28
 
 Scope: local on-disk comparison between `copperDB` and `NornicDB`, using the current hierarchy plan plus the actual package implementations in `c:\Users\timot\Documents\GitHub\copperDB` and `c:\Users\timot\Documents\GitHub\NornicDB`.

@@ -30,7 +30,7 @@ copperDB is an **experimental graph database** built in Rust. It speaks Neo4j's 
 
 It's the Rust evolution of [NornicDB](https://github.com/orneryd/NornicDB), rebuilt from the storage engine up for performance and safety.
 
-> **copperDB is experimental.** APIs may change, features are evolving, and production deployments should validate against their workload. That said — it passes 540+ tests, serves Neo4j Browser and Bloom, and is actively developed.
+> **copperDB is experimental.** APIs may change, features are evolving, and production deployments should validate against their workload. The current parity audit identifies security, transaction, search, and lifecycle work that must land before production-readiness claims.
 
 ---
 
@@ -84,7 +84,7 @@ cargo run --release --package copperdb
 ### Embeddings & AI
 - **Local LLM inference** via llama.cpp GGUF models — GPU-first with CPU fallback
 - **Managed embeddings** — typed node embedding fields with metadata tracking
-- **HNSW vector search** — cosine similarity scoring
+- **Vector search baseline** — cosine similarity scoring; maintained HNSW indexing is active parity work
 
 ### Operations
 - **Web dashboard** — React UI for database management
@@ -128,9 +128,9 @@ RETURN p
 
 ## Status
 
-copperDB is under active development. The core engine runs Cypher queries, serves Bolt clients, and indexes data. 540+ tests pass deterministically.
+copperDB is under active development. The core engine runs a substantial Cypher subset, serves Bolt clients, and maintains local indexes. Authentication defaults, explicit Bolt transactions, and semantic/vector runtime behavior remain active parity work.
 
-See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for detailed crate-by-crate status.
+See [docs/COPPERDB_NORNICDB_PARITY_PLAN.md](docs/COPPERDB_NORNICDB_PARITY_PLAN.md) for the audited implementation status and next steps.
 
 **Current focus**: Engine parity with NornicDB — search, embeddings, Cypher coverage, and performance.
 
@@ -142,7 +142,7 @@ See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for detailed 
 |--------------------------------------------------------------|--------------------------------------|
 | [docs/BUILDING.md](docs/BUILDING.md)                         | Build, run, test, and configure      |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)                 | Project structure and design          |
-| [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) | Crate-by-crate completion status     |
+| [docs/COPPERDB_NORNICDB_PARITY_PLAN.md](docs/COPPERDB_NORNICDB_PARITY_PLAN.md) | Authoritative parity audit and implementation plan |
 | [docs/COPPERDB_STRATEGIC_ROADMAP.md](docs/COPPERDB_STRATEGIC_ROADMAP.md) | Long-term roadmap          |
 
 ---

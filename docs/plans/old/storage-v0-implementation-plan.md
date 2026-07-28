@@ -1,5 +1,7 @@
 # Storage V0 Implementation Plan (Copper)
 
+> Historical storage phase plan. Current storage findings and next steps are consolidated in [../../COPPERDB_NORNICDB_PARITY_PLAN.md](../../COPPERDB_NORNICDB_PARITY_PLAN.md).
+
 ## Objective
 Implement a Rust-native storage architecture baseline aligned to current NornicDB storage concepts while locking Copper storage to layout version **0** and excluding migration baggage.
 

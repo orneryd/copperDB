@@ -1,5 +1,7 @@
 # Request Cancellation Propagation
 
+> Detailed cancellation design reference. Current implementation status and sequencing are defined in [../../COPPERDB_NORNICDB_PARITY_PLAN.md](../../COPPERDB_NORNICDB_PARITY_PLAN.md).
+
 Date: 2026-05-29
 
 Status: local cancellation is in scope; distributed propagation is deferred.

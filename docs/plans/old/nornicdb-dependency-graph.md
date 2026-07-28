@@ -1,5 +1,7 @@
 # NornicDB Architecture Dependency Graph
 
+> Historical dependency-order reference. Current package status and implementation priority are governed by [../../COPPERDB_NORNICDB_PARITY_PLAN.md](../../COPPERDB_NORNICDB_PARITY_PLAN.md).
+
 Date: 2026-05-26
 
 This graph is the package-porting order for copperDB. It follows NornicDB's package architecture while keeping Rust dependency cycles out of the workspace. Each layer may depend on earlier layers; later layers should not be required by earlier layers.

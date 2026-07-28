@@ -2,6 +2,8 @@
 
 copperDB is a Rust rewrite of [NornicDB](https://github.com/orneryd/NornicDB)'s property-graph database engine. The current supported runtime is single-node execution. Distributed/fabric/replication, cross-node transactions, and GPU acceleration are retained as future-state architecture.
 
+Current implementation status and execution priority are tracked only in [COPPERDB_NORNICDB_PARITY_PLAN.md](COPPERDB_NORNICDB_PARITY_PLAN.md). Architecture descriptions here are not completion claims.
+
 ## Project Structure
 
 ```
@@ -93,7 +95,7 @@ Implements the BM25 V2 algorithm matching NornicDB's scoring:
 
 ### Vector Search
 
-The `vectorspace` crate provides HNSW-preferred cosine similarity scoring. Embeddings are generated via llama.cpp GGUF models loaded through the `localllm` crate.
+The `vectorspace` crate currently provides cosine similarity scoring over an in-memory registry. A maintained HNSW index, persistence lifecycle, and engine-owned embedding workers remain active parity work. The `localllm` and `embed` crates provide local GGUF/llama.cpp components that still need full per-database runtime composition.
 
 ### Hybrid Search (RRF)
 
@@ -110,7 +112,7 @@ Text → textchunk → localllm (llama.cpp GGUF) → typed node embedding fields
 | NornicDB Go             | copperDB Rust        |
 |-------------------------|----------------------|
 | badger/v4 (KV store)    | fjall                |
-| antlr4-go (Cypher parser)| pest (PEG grammar)   |
+| antlr4-go (Cypher parser)| handwritten Rust parser |
 | neo4j-go-driver (client)| neo4rs               |
 | gqlgen (GraphQL)        | async-graphql        |
 | vek (SIMD)              | wide                 |
