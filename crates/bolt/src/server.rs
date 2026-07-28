@@ -102,6 +102,23 @@ pub trait QueryExecutor: Send + Sync {
     fn rollback_transaction(&self, _transaction: &BoltTransaction) -> Result<(), String> {
         Err("explicit transactions are not supported by this executor".into())
     }
+
+    fn execute_in_transaction_with_context(
+        &self,
+        transaction: &BoltTransaction,
+        query: &str,
+        params: &HashMap<String, serde_json::Value>,
+        request_context: copperdb_util::RequestContext,
+        principal: Option<&BoltPrincipal>,
+    ) -> Result<BoltQueryResult, String> {
+        self.execute_as_on_database_with_context(
+            &transaction.database,
+            query,
+            params,
+            request_context,
+            principal,
+        )
+    }
 }
 
 /// A no-op query executor that returns empty results for all queries.
@@ -809,11 +826,28 @@ async fn process_message(
                 return Ok(authentication_failure_response("authentication required"));
             }
             session.current_query = Some(query.clone());
-            let database = database_from_metadata(&extra).or_else(|| session.database.clone());
+            let requested_database = database_from_metadata(&extra);
+            if let (Some(transaction), Some(requested_database)) =
+                (session.transaction.as_ref(), requested_database.as_ref())
+            {
+                if requested_database != &transaction.database {
+                    return Ok(transaction_failure_response(
+                        "Neo.ClientError.Transaction.TransactionAccessedConcurrently",
+                        "cannot change database during an active transaction",
+                    ));
+                }
+            }
+            let database = session
+                .transaction
+                .as_ref()
+                .map(|transaction| transaction.database.clone())
+                .or(requested_database)
+                .or_else(|| session.database.clone());
             let execution_database = database.clone();
             let execution_query = query.clone();
             let execution_parameters = parameters.clone();
             let principal = session.principal.clone();
+            let transaction = session.transaction.clone();
 
             // Create request context OUTSIDE spawn_blocking so the guard
             // lives in the async scope.  When the client disconnects, the
@@ -821,19 +855,27 @@ async fn process_message(
             // query) observes RequestCancelled and aborts.
             let (request_context, _request_guard) = copperdb_util::RequestContext::root(None);
 
-            let execution_result = tokio::task::spawn_blocking(move || {
-                executor.execute_as_on_database_with_context(
-                    execution_database.as_deref().unwrap_or("copperdb"),
-                    &execution_query,
-                    &execution_parameters,
-                    request_context,
-                    principal.as_ref(),
-                )
-            })
-            .await
-            .map_err(|error| {
-                BoltError::ProtocolViolation(format!("bolt executor task failed: {error}"))
-            })?;
+            let execution_result =
+                tokio::task::spawn_blocking(move || match transaction.as_ref() {
+                    Some(transaction) => executor.execute_in_transaction_with_context(
+                        transaction,
+                        &execution_query,
+                        &execution_parameters,
+                        request_context,
+                        principal.as_ref(),
+                    ),
+                    None => executor.execute_as_on_database_with_context(
+                        execution_database.as_deref().unwrap_or("copperdb"),
+                        &execution_query,
+                        &execution_parameters,
+                        request_context,
+                        principal.as_ref(),
+                    ),
+                })
+                .await
+                .map_err(|error| {
+                    BoltError::ProtocolViolation(format!("bolt executor task failed: {error}"))
+                })?;
 
             match execution_result {
                 Ok(result) => {
@@ -1127,6 +1169,18 @@ mod tests {
             self.operations.lock().unwrap().push("rollback");
             Ok(())
         }
+
+        fn execute_in_transaction_with_context(
+            &self,
+            _transaction: &BoltTransaction,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+            _request_context: copperdb_util::RequestContext,
+            _principal: Option<&BoltPrincipal>,
+        ) -> Result<BoltQueryResult, String> {
+            self.operations.lock().unwrap().push("run");
+            self.execute("", &HashMap::new())
+        }
     }
 
     fn logon_message(username: &str, password: &str) -> Value {
@@ -1137,6 +1191,17 @@ mod tests {
                 ("principal".into(), Value::String(username.into())),
                 ("credentials".into(), Value::String(password.into())),
             ])],
+        }
+    }
+
+    fn run_message_for_database(database: &str) -> Value {
+        Value::Struct {
+            signature: 0x10,
+            fields: vec![
+                Value::String("RETURN 1".into()),
+                Value::Map(vec![]),
+                Value::Map(vec![("db".into(), Value::String(database.into()))]),
+            ],
         }
     }
 
@@ -1169,7 +1234,16 @@ mod tests {
         session: &mut BoltSession,
         provider: Option<Arc<dyn BoltAuthProvider>>,
     ) -> String {
-        let responses = process_message(message, session, Arc::new(NoopExecutor), provider)
+        failure_code_with_executor(message, session, Arc::new(NoopExecutor), provider).await
+    }
+
+    async fn failure_code_with_executor(
+        message: &Value,
+        session: &mut BoltSession,
+        executor: Arc<dyn QueryExecutor>,
+        provider: Option<Arc<dyn BoltAuthProvider>>,
+    ) -> String {
+        let responses = process_message(message, session, executor, provider)
             .await
             .unwrap();
         let (value, _) = crate::packstream::decode(&responses[0]).unwrap();
@@ -1354,6 +1428,62 @@ mod tests {
             *operations.lock().unwrap(),
             vec!["begin", "commit", "begin", "rollback"]
         );
+    }
+
+    #[tokio::test]
+    async fn transaction_run_uses_active_transaction_and_rejects_database_switches() {
+        let provider: Arc<dyn BoltAuthProvider> = Arc::new(TestAuthProvider);
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let executor: Arc<dyn QueryExecutor> = Arc::new(TransactionRecordingExecutor {
+            operations: Arc::clone(&operations),
+        });
+        let begin = Value::Struct {
+            signature: 0x11,
+            fields: vec![Value::Map(vec![(
+                "db".into(),
+                Value::String("primary".into()),
+            )])],
+        };
+        let mut session = BoltSession::new(true);
+
+        response_signature(
+            &logon_message("reader", "correct-password"),
+            &mut session,
+            Some(Arc::clone(&provider)),
+        )
+        .await;
+        assert_eq!(
+            response_signature_with_executor(
+                &begin,
+                &mut session,
+                Arc::clone(&executor),
+                Some(Arc::clone(&provider)),
+            )
+            .await,
+            0x70
+        );
+        assert_eq!(
+            response_signature_with_executor(
+                &run_message(),
+                &mut session,
+                Arc::clone(&executor),
+                Some(Arc::clone(&provider)),
+            )
+            .await,
+            0x70
+        );
+        assert_eq!(*operations.lock().unwrap(), vec!["begin", "run"]);
+        assert_eq!(
+            failure_code_with_executor(
+                &run_message_for_database("other"),
+                &mut session,
+                executor,
+                Some(provider),
+            )
+            .await,
+            "Neo.ClientError.Transaction.TransactionAccessedConcurrently"
+        );
+        assert_eq!(*operations.lock().unwrap(), vec!["begin", "run"]);
     }
 
     #[tokio::test]

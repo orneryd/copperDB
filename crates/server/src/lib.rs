@@ -1819,6 +1819,34 @@ impl QueryExecutor for AppStateBoltExecutor {
             .rollback(transaction_id)
             .map_err(|error| error.to_string())
     }
+
+    fn execute_in_transaction_with_context(
+        &self,
+        transaction: &BoltTransaction,
+        query: &str,
+        params: &HashMap<String, serde_json::Value>,
+        request_context: RequestContext,
+        principal: Option<&BoltPrincipal>,
+    ) -> Result<BoltQueryResult, String> {
+        let transaction_id = uuid::Uuid::parse_str(&transaction.id)
+            .map_err(|_| "invalid Bolt transaction identifier".to_owned())?;
+        let engine = open_engine(&self.state, &transaction.database)?;
+        let active = engine
+            .tx_manager()
+            .get(&transaction_id)
+            .ok_or_else(|| "Bolt transaction is no longer active".to_owned())?;
+        if active.database.as_deref() != Some(transaction.database.as_str()) || !active.is_active() {
+            return Err("Bolt transaction is no longer active".into());
+        }
+        drop(active);
+        self.execute_as_on_database_with_context(
+            &transaction.database,
+            query,
+            params,
+            request_context,
+            principal,
+        )
+    }
 }
 
 fn derive_distributed_read_fence(
