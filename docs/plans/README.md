@@ -38,6 +38,7 @@ These plans expand the numbered findings in [../COPPERDB_NORNICDB_PARITY_PLAN.md
 | 19 | P2 | [Heimdall, inference, link prediction, and reranking](19-ai-governance-runtime.md) | 11, 12, 16 |
 | 20 | P2 | [GPU and SIMD acceleration](20-gpu-simd-acceleration.md) | 10, 12 and CPU benchmarks |
 
+TBD:   36f2e532..2ec94c08  main       -> origin/main - apply changes from upstream NornicDB security codeQL flagged items (security)
 ## Status Convention
 
 Each plan starts as `planned`. Change it to `in progress` only when implementation begins and to `complete` only when every definition-of-done item and validation command passes. Record blocked phases and upstream commit changes directly in the plan.

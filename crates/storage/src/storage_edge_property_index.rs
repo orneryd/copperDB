@@ -290,7 +290,10 @@ fn edge_property_index_key(
     )
 }
 
-fn edge_property_index_definition_prefix(edge_type: &str, properties: &[String]) -> String {
+pub(crate) fn edge_property_index_definition_prefix(
+    edge_type: &str,
+    properties: &[String],
+) -> String {
     if properties.len() == 1 {
         return edge_property_index_property_prefix(edge_type, &properties[0]);
     }

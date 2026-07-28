@@ -494,6 +494,485 @@ impl EvalEngine {
                         }
                     }
                 }
+                Clause::CreateConstraint(create) => {
+                    let existing = transaction.constraints_with_writes();
+                    if existing.iter().any(|constraint| constraint.name == create.name) {
+                        if create.if_not_exists {
+                            continue;
+                        }
+                        return Err(EvalError::ExecutionError(format!(
+                            "constraint \"{}\" already exists",
+                            create.name
+                        )));
+                    }
+                    for entry in &create.entries {
+                        let (constraint_type, type_name, allowed_values) = match &entry.kind {
+                            ConstraintKind::Unique => (ConstraintType::Unique, None, Vec::new()),
+                            ConstraintKind::Exists => (ConstraintType::Exists, None, Vec::new()),
+                            ConstraintKind::NodeKey => (ConstraintType::NodeKey, None, Vec::new()),
+                            ConstraintKind::RelationshipKey => {
+                                (ConstraintType::Relationship, None, Vec::new())
+                            }
+                            ConstraintKind::Type(name) => {
+                                (ConstraintType::Type, Some(name.clone()), Vec::new())
+                            }
+                            ConstraintKind::Temporal => {
+                                (ConstraintType::Temporal, None, Vec::new())
+                            }
+                            ConstraintKind::Domain(values) => {
+                                (ConstraintType::Domain, None, values.clone())
+                            }
+                        };
+                        transaction.put_constraint(Constraint {
+                            name: create.name.clone(),
+                            constraint_type,
+                            entity_type: match create.entity_type {
+                                CypherConstraintEntityType::Node => ConstraintEntityType::Node,
+                                CypherConstraintEntityType::Relationship => {
+                                    ConstraintEntityType::Relationship
+                                }
+                            },
+                            label: create.label.clone(),
+                            properties: entry.properties.clone(),
+                            type_name,
+                            allowed_values,
+                        });
+                    }
+                }
+                Clause::DropConstraint(drop) => {
+                    let exists = transaction
+                        .constraints_with_writes()
+                        .iter()
+                        .any(|constraint| constraint.name == drop.name);
+                    if !exists && !drop.if_exists {
+                        return Err(EvalError::ExecutionError(format!(
+                            "constraint \"{}\" not found",
+                            drop.name
+                        )));
+                    }
+                    if exists {
+                        transaction.delete_constraint(&drop.name);
+                    }
+                }
+                Clause::ShowConstraints(_) => {
+                    columns = vec![
+                        "name".to_string(),
+                        "type".to_string(),
+                        "entityType".to_string(),
+                        "label".to_string(),
+                        "properties".to_string(),
+                    ];
+                    result_rows = transaction
+                        .constraints_with_writes()
+                        .iter()
+                        .cloned()
+                        .map(|constraint| {
+                            let mut row = Row::new();
+                            row.insert("name".to_string(), Value::String(constraint.name));
+                            row.insert(
+                                "type".to_string(),
+                                Value::String(
+                                    match constraint.constraint_type {
+                                        ConstraintType::Unique => "UNIQUE",
+                                        ConstraintType::Exists => "EXISTS",
+                                        ConstraintType::NodeKey => "NODE_KEY",
+                                        ConstraintType::Type => "TYPE",
+                                        ConstraintType::Relationship => "RELATIONSHIP",
+                                        ConstraintType::Temporal => "TEMPORAL",
+                                        ConstraintType::Domain => "DOMAIN",
+                                    }
+                                    .to_string(),
+                                ),
+                            );
+                            row.insert(
+                                "entityType".to_string(),
+                                Value::String(
+                                    match constraint.entity_type {
+                                        ConstraintEntityType::Node => "NODE",
+                                        ConstraintEntityType::Relationship => "RELATIONSHIP",
+                                    }
+                                    .to_string(),
+                                ),
+                            );
+                            row.insert("label".to_string(), Value::String(constraint.label));
+                            row.insert(
+                                "properties".to_string(),
+                                Value::Array(
+                                    constraint.properties.into_iter().map(Value::String).collect(),
+                                ),
+                            );
+                            row
+                        })
+                        .collect();
+                }
+                Clause::CreateIndex(create) => {
+                    if transaction
+                        .index_definitions_with_writes()
+                        .iter()
+                        .any(|index| index.name == create.name)
+                    {
+                        if create.if_not_exists {
+                            continue;
+                        }
+                        return Err(EvalError::ExecutionError(format!(
+                            "index already exists: {}",
+                            create.name
+                        )));
+                    }
+                    transaction.put_index_definition(copperdb_indexing::CatalogIndexDefinition {
+                        name: create.name.clone(),
+                        entity_type: match create.entity_type {
+                            copperdb_cypher::IndexEntityType::Node => {
+                                copperdb_indexing::CatalogIndexEntityType::Node
+                            }
+                            copperdb_cypher::IndexEntityType::Relationship => {
+                                copperdb_indexing::CatalogIndexEntityType::Relationship
+                            }
+                        },
+                        kind: match create.kind {
+                            copperdb_cypher::IndexKind::Range => {
+                                copperdb_indexing::CatalogIndexKind::Range
+                            }
+                            copperdb_cypher::IndexKind::Temporal => {
+                                copperdb_indexing::CatalogIndexKind::Temporal
+                            }
+                            copperdb_cypher::IndexKind::FullText => {
+                                copperdb_indexing::CatalogIndexKind::FullText
+                            }
+                            copperdb_cypher::IndexKind::Vector => {
+                                copperdb_indexing::CatalogIndexKind::Vector
+                            }
+                        },
+                        label: create.label.clone(),
+                        properties: create.properties.clone(),
+                    });
+                    if matches!(create.kind, copperdb_cypher::IndexKind::Vector)
+                        && !create.options.is_empty()
+                    {
+                        transaction.put_index_options(create.name.clone(), create.options.clone());
+                    }
+                }
+                Clause::DropIndex(drop) => {
+                    let exists = transaction
+                        .index_definitions_with_writes()
+                        .iter()
+                        .any(|index| index.name == drop.name);
+                    if !exists && !drop.if_exists {
+                        return Err(EvalError::ExecutionError(format!(
+                            "index not found: {}",
+                            drop.name
+                        )));
+                    }
+                    if exists {
+                        transaction.delete_index_definition(&drop.name);
+                        transaction.delete_index_options(&drop.name);
+                    }
+                }
+                Clause::ShowIndexes(show) => {
+                    columns = vec![
+                        "name".to_string(),
+                        "entityType".to_string(),
+                        "kind".to_string(),
+                        "label".to_string(),
+                        "properties".to_string(),
+                    ];
+                    result_rows = transaction
+                        .index_definitions_with_writes()
+                        .iter()
+                        .cloned()
+                        .filter(|index| match show.kind {
+                            Some(copperdb_cypher::IndexKind::Range) => {
+                                index.kind == copperdb_indexing::CatalogIndexKind::Range
+                            }
+                            Some(copperdb_cypher::IndexKind::Temporal) => {
+                                index.kind == copperdb_indexing::CatalogIndexKind::Temporal
+                            }
+                            Some(copperdb_cypher::IndexKind::FullText) => {
+                                index.kind == copperdb_indexing::CatalogIndexKind::FullText
+                            }
+                            Some(copperdb_cypher::IndexKind::Vector) => {
+                                index.kind == copperdb_indexing::CatalogIndexKind::Vector
+                            }
+                            None => true,
+                        })
+                        .map(|index| {
+                            let mut row = Row::new();
+                            row.insert("name".to_string(), Value::String(index.name));
+                            row.insert(
+                                "entityType".to_string(),
+                                Value::String(
+                                    match index.entity_type {
+                                        copperdb_indexing::CatalogIndexEntityType::Node => "NODE",
+                                        copperdb_indexing::CatalogIndexEntityType::Relationship => {
+                                            "RELATIONSHIP"
+                                        }
+                                    }
+                                    .to_string(),
+                                ),
+                            );
+                            row.insert(
+                                "kind".to_string(),
+                                Value::String(
+                                    match index.kind {
+                                        copperdb_indexing::CatalogIndexKind::Range => "RANGE",
+                                        copperdb_indexing::CatalogIndexKind::Temporal => "TEMPORAL",
+                                        copperdb_indexing::CatalogIndexKind::FullText => "FULLTEXT",
+                                        copperdb_indexing::CatalogIndexKind::Vector => "VECTOR",
+                                    }
+                                    .to_string(),
+                                ),
+                            );
+                            row.insert("label".to_string(), Value::String(index.label));
+                            row.insert(
+                                "properties".to_string(),
+                                Value::Array(index.properties.into_iter().map(Value::String).collect()),
+                            );
+                            row
+                        })
+                        .collect();
+                }
+                Clause::CreateDecayProfile(create) => {
+                    if let Some(target) = &create.target {
+                        transaction.put_decay_binding(DecayProfileBindingSchema {
+                            name: create.name.clone(),
+                            target_labels: target.target_labels.clone(),
+                            target_edge_type: target.target_edge_type.clone(),
+                            is_wildcard: target.is_wildcard,
+                            is_edge: target.is_edge,
+                            profile_ref: create
+                                .options
+                                .get("profileRef")
+                                .and_then(|value| value.as_str().map(str::to_string)),
+                            no_decay: option_bool(&create.options, "noDecay", false)?,
+                            visibility_threshold: create
+                                .options
+                                .contains_key("visibilityThreshold")
+                                .then(|| {
+                                    option_f64(&create.options, "visibilityThreshold", 0.0)
+                                })
+                                .transpose()?,
+                            order: option_i64(&create.options, "order", 0)?,
+                        })?;
+                    } else {
+                        transaction.put_decay_profile(DecayProfileSchema {
+                            name: create.name.clone(),
+                            half_life_seconds: option_i64(&create.options, "halfLifeSeconds", 0)?,
+                            visibility_threshold: option_f64(
+                                &create.options,
+                                "visibilityThreshold",
+                                0.0,
+                            )?,
+                            score_floor: option_f64(&create.options, "scoreFloor", 0.0)?,
+                            function: option_string(&create.options, "function", "none")?,
+                            scope: option_string(&create.options, "scope", "NODE")?,
+                            decay_enabled: option_bool(&create.options, "decayEnabled", true)?,
+                            score_from: option_string(&create.options, "scoreFrom", "CREATED")?,
+                            score_from_property: create
+                                .options
+                                .get("scoreFromProperty")
+                                .and_then(|value| value.as_str().map(str::to_string)),
+                            enabled: option_bool(&create.options, "enabled", true)?,
+                        })?;
+                    }
+                }
+                Clause::AlterDecayProfile(alter) => {
+                    transaction.alter_decay_profile(&alter.name, &options_to_btreemap(&alter.options))?;
+                }
+                Clause::DropDecayProfile(drop) => {
+                    transaction.drop_decay_profile(&drop.name, drop.if_exists)?;
+                }
+                Clause::ShowDecayProfiles(_) => {
+                    let catalog = transaction.knowledge_policy_catalog();
+                    columns = vec![
+                        "kind".to_string(),
+                        "name".to_string(),
+                        "scope".to_string(),
+                        "target".to_string(),
+                        "profileRef".to_string(),
+                        "enabled".to_string(),
+                    ];
+                    result_rows = catalog
+                        .decay_profiles
+                        .iter()
+                        .cloned()
+                        .map(|profile| {
+                            let mut row = Row::new();
+                            row.insert("kind".to_string(), Value::String("bundle".to_string()));
+                            row.insert("name".to_string(), Value::String(profile.name));
+                            row.insert("scope".to_string(), Value::String(profile.scope));
+                            row.insert("target".to_string(), Value::String(String::new()));
+                            row.insert("profileRef".to_string(), Value::Null);
+                            row.insert("enabled".to_string(), Value::Bool(profile.enabled));
+                            row
+                        })
+                        .chain(catalog.decay_bindings.iter().cloned().map(|binding| {
+                            let scope = binding_scope(&binding).to_string();
+                            let target = binding_target(&binding);
+                            let mut row = Row::new();
+                            row.insert("kind".to_string(), Value::String("binding".to_string()));
+                            row.insert("name".to_string(), Value::String(binding.name));
+                            row.insert("scope".to_string(), Value::String(scope));
+                            row.insert("target".to_string(), Value::String(target));
+                            row.insert(
+                                "profileRef".to_string(),
+                                binding.profile_ref.map(Value::String).unwrap_or(Value::Null),
+                            );
+                            row.insert("enabled".to_string(), Value::Bool(true));
+                            row
+                        }))
+                        .collect();
+                }
+                Clause::CreatePromotionProfile(create) => {
+                    transaction.put_promotion_profile(PromotionProfileSchema {
+                        name: create.name.clone(),
+                        scope: option_string(&create.options, "scope", "NODE")?,
+                        multiplier: option_f64(&create.options, "multiplier", 1.0)?,
+                        score_floor: option_f64(&create.options, "scoreFloor", 0.0)?,
+                        score_cap: option_f64(&create.options, "scoreCap", 1.0)?,
+                        enabled: option_bool(&create.options, "enabled", true)?,
+                    })?;
+                }
+                Clause::AlterPromotionProfile(alter) => {
+                    transaction.alter_promotion_profile(
+                        &alter.name,
+                        &options_to_btreemap(&alter.options),
+                    )?;
+                }
+                Clause::DropPromotionProfile(drop) => {
+                    transaction.drop_promotion_profile(&drop.name, drop.if_exists)?;
+                }
+                Clause::ShowPromotionProfiles(_) => {
+                    columns = vec![
+                        "name".to_string(),
+                        "scope".to_string(),
+                        "multiplier".to_string(),
+                        "scoreFloor".to_string(),
+                        "scoreCap".to_string(),
+                        "enabled".to_string(),
+                    ];
+                    result_rows = transaction
+                        .knowledge_policy_catalog()
+                        .promotion_profiles
+                        .iter()
+                        .cloned()
+                        .map(|profile| {
+                            let mut row = Row::new();
+                            row.insert("name".to_string(), Value::String(profile.name));
+                            row.insert("scope".to_string(), Value::String(profile.scope));
+                            row.insert("multiplier".to_string(), Value::from(profile.multiplier));
+                            row.insert("scoreFloor".to_string(), Value::from(profile.score_floor));
+                            row.insert("scoreCap".to_string(), Value::from(profile.score_cap));
+                            row.insert("enabled".to_string(), Value::Bool(profile.enabled));
+                            row
+                        })
+                        .collect();
+                }
+                Clause::CreatePromotionPolicy(create) => {
+                    transaction.put_promotion_policy(PromotionPolicySchema {
+                        name: create.name.clone(),
+                        target_labels: create.target.target_labels.clone(),
+                        target_edge_type: create.target.target_edge_type.clone(),
+                        is_wildcard: create.target.is_wildcard,
+                        is_edge: create.target.is_edge,
+                        enabled: create.enabled,
+                        on_access_mutations: create
+                            .on_access_mutations
+                            .iter()
+                            .map(|mutation| PromotionOnAccessMutationSchema {
+                                kind: match mutation.kind {
+                                    copperdb_cypher::PromotionOnAccessMutationKind::SetLastAccessedNow => {
+                                        PromotionOnAccessMutationKindSchema::SetLastAccessedNow
+                                    }
+                                    copperdb_cypher::PromotionOnAccessMutationKind::IncrementAccessCount => {
+                                        PromotionOnAccessMutationKindSchema::IncrementAccessCount
+                                    }
+                                },
+                            })
+                            .collect(),
+                        when_clauses: create
+                            .when_clauses
+                            .iter()
+                            .map(|clause| PromotionWhenClauseSchema {
+                                profile_ref: clause.profile_ref.clone(),
+                                predicate: clause.predicate.clone(),
+                                order: clause.order,
+                            })
+                            .collect(),
+                    })?;
+                }
+                Clause::AlterPromotionPolicy(alter) => {
+                    transaction.alter_promotion_policy(&alter.name, alter.enabled)?;
+                }
+                Clause::DropPromotionPolicy(drop) => {
+                    transaction.drop_promotion_policy(&drop.name, drop.if_exists)?;
+                }
+                Clause::ShowPromotionPolicies(_) => {
+                    columns = vec![
+                        "name".to_string(),
+                        "targetLabels".to_string(),
+                        "targetEdgeType".to_string(),
+                        "isWildcard".to_string(),
+                        "isEdge".to_string(),
+                        "enabled".to_string(),
+                        "onAccessMutations".to_string(),
+                        "whenClauses".to_string(),
+                    ];
+                    result_rows = transaction
+                        .knowledge_policy_catalog()
+                        .promotion_policies
+                        .iter()
+                        .cloned()
+                        .map(|policy| {
+                            let mut row = Row::new();
+                            row.insert("name".to_string(), Value::String(policy.name));
+                            row.insert(
+                                "targetLabels".to_string(),
+                                Value::Array(policy.target_labels.into_iter().map(Value::String).collect()),
+                            );
+                            row.insert(
+                                "targetEdgeType".to_string(),
+                                policy.target_edge_type.map(Value::String).unwrap_or(Value::Null),
+                            );
+                            row.insert("isWildcard".to_string(), Value::Bool(policy.is_wildcard));
+                            row.insert("isEdge".to_string(), Value::Bool(policy.is_edge));
+                            row.insert("enabled".to_string(), Value::Bool(policy.enabled));
+                            row.insert(
+                                "onAccessMutations".to_string(),
+                                Value::Array(
+                                    policy
+                                        .on_access_mutations
+                                        .into_iter()
+                                        .map(|mutation| Value::String(match mutation.kind {
+                                            PromotionOnAccessMutationKindSchema::SetLastAccessedNow => {
+                                                "SET_LAST_ACCESSED_NOW".to_string()
+                                            }
+                                            PromotionOnAccessMutationKindSchema::IncrementAccessCount => {
+                                                "INCREMENT_ACCESS_COUNT".to_string()
+                                            }
+                                        }))
+                                        .collect(),
+                                ),
+                            );
+                            row.insert(
+                                "whenClauses".to_string(),
+                                Value::Array(
+                                    policy
+                                        .when_clauses
+                                        .into_iter()
+                                        .map(|clause| {
+                                            serde_json::json!({
+                                                "profileRef": clause.profile_ref,
+                                                "predicate": clause.predicate,
+                                                "order": clause.order,
+                                            })
+                                        })
+                                        .collect(),
+                                ),
+                            );
+                            row
+                        })
+                        .collect();
+                }
                 Clause::Return(return_clause) => {
                     columns = return_clause.items.iter().map(column_name).collect();
                     let aggregation = has_aggregation_items(&return_clause.items);
@@ -510,7 +989,7 @@ impl EvalEngine {
                 }
                 _ => {
                     return Err(EvalError::ExecutionError(
-                        "explicit transactions currently support CREATE, MERGE, fixed-length MATCH, SET, REMOVE, DELETE, and RETURN"
+                        "explicit transactions currently support graph mutations, SHOW INDEXES, SHOW CONSTRAINTS, and RETURN"
                             .to_string(),
                     ));
                 }

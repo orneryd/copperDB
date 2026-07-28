@@ -4524,6 +4524,314 @@ fn appstate_bolt_executor_traverses_staged_fixed_length_chains() {
 }
 
 #[test]
+fn appstate_bolt_executor_reads_schema_catalogs_inside_explicit_transactions() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    executor
+        .execute_on_database(
+            Some("copperdb"),
+            "CREATE INDEX tx_catalog_idx FOR (n:TxCatalog) ON (n.id)",
+            &empty,
+        )
+        .unwrap();
+    executor
+        .execute_on_database(
+            Some("copperdb"),
+            "CREATE CONSTRAINT tx_catalog_constraint FOR (n:TxCatalog) REQUIRE n.id IS UNIQUE",
+            &empty,
+        )
+        .unwrap();
+
+    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+    let indexes = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "SHOW INDEXES",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    assert!(indexes.rows.iter().any(|row| row[0] == serde_json::json!("tx_catalog_idx")));
+    let constraints = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "SHOW CONSTRAINTS",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    assert!(constraints
+        .rows
+        .iter()
+        .any(|row| row[0] == serde_json::json!("tx_catalog_constraint")));
+    executor.rollback_transaction(&transaction).unwrap();
+}
+
+#[test]
+fn appstate_bolt_executor_schema_catalog_reads_are_pinned_at_begin() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+
+    executor
+        .execute_on_database(
+            Some("copperdb"),
+            "CREATE INDEX after_begin_idx FOR (n:AfterBegin) ON (n.id)",
+            &empty,
+        )
+        .unwrap();
+
+    let indexes = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "SHOW INDEXES",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    assert!(!indexes
+        .rows
+        .iter()
+        .any(|row| row[0] == serde_json::json!("after_begin_idx")));
+    executor.rollback_transaction(&transaction).unwrap();
+}
+
+#[test]
+fn appstate_bolt_executor_stages_constraint_ddl_until_commit() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+
+    executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "CREATE CONSTRAINT tx_staged_constraint FOR (n:TxStaged) REQUIRE n.id IS UNIQUE",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    let inside = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "SHOW CONSTRAINTS",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    assert!(inside
+        .rows
+        .iter()
+        .any(|row| row[0] == serde_json::json!("tx_staged_constraint")));
+    let outside = executor
+        .execute_on_database(Some("copperdb"), "SHOW CONSTRAINTS", &empty)
+        .unwrap();
+    assert!(!outside
+        .rows
+        .iter()
+        .any(|row| row[0] == serde_json::json!("tx_staged_constraint")));
+
+    executor.commit_transaction(&transaction).unwrap();
+    let committed = executor
+        .execute_on_database(Some("copperdb"), "SHOW CONSTRAINTS", &empty)
+        .unwrap();
+    assert!(committed
+        .rows
+        .iter()
+        .any(|row| row[0] == serde_json::json!("tx_staged_constraint")));
+}
+
+#[test]
+fn appstate_bolt_executor_rolls_back_staged_constraint_ddl() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+
+    executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "CREATE CONSTRAINT tx_rolled_back_constraint FOR (n:TxRolledBack) REQUIRE n.id IS UNIQUE",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    executor.rollback_transaction(&transaction).unwrap();
+
+    let outside = executor
+        .execute_on_database(Some("copperdb"), "SHOW CONSTRAINTS", &empty)
+        .unwrap();
+    assert!(!outside
+        .rows
+        .iter()
+        .any(|row| row[0] == serde_json::json!("tx_rolled_back_constraint")));
+}
+
+#[test]
+fn appstate_bolt_executor_stages_index_ddl_until_commit() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+
+    executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "CREATE INDEX tx_staged_index FOR (n:TxStaged) ON (n.id)",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    let inside = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "SHOW INDEXES",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    assert!(inside
+        .rows
+        .iter()
+        .any(|row| row[0] == serde_json::json!("tx_staged_index")));
+    let outside = executor
+        .execute_on_database(Some("copperdb"), "SHOW INDEXES", &empty)
+        .unwrap();
+    assert!(!outside
+        .rows
+        .iter()
+        .any(|row| row[0] == serde_json::json!("tx_staged_index")));
+
+    executor.commit_transaction(&transaction).unwrap();
+    let committed = executor
+        .execute_on_database(Some("copperdb"), "SHOW INDEXES", &empty)
+        .unwrap();
+    assert!(committed
+        .rows
+        .iter()
+        .any(|row| row[0] == serde_json::json!("tx_staged_index")));
+}
+
+#[test]
+fn appstate_bolt_executor_rolls_back_staged_index_ddl() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+
+    executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "CREATE INDEX tx_rolled_back_index FOR (n:TxRolledBack) ON (n.id)",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    executor.rollback_transaction(&transaction).unwrap();
+
+    let outside = executor
+        .execute_on_database(Some("copperdb"), "SHOW INDEXES", &empty)
+        .unwrap();
+    assert!(!outside
+        .rows
+        .iter()
+        .any(|row| row[0] == serde_json::json!("tx_rolled_back_index")));
+}
+
+#[test]
+fn appstate_bolt_executor_stages_knowledge_policy_ddl_until_commit() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+
+    executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "CREATE DECAY PROFILE tx_slow_decay OPTIONS { halfLifeSeconds: 60, visibilityThreshold: 0.1, scoreFloor: 0.0, function: 'exponential', scope: 'NODE', scoreFrom: 'CREATED', enabled: true }",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    let inside = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "SHOW DECAY PROFILES",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    assert!(inside
+        .rows
+        .iter()
+        .any(|row| row[1] == serde_json::json!("tx_slow_decay")));
+    let outside = executor
+        .execute_on_database(Some("copperdb"), "SHOW DECAY PROFILES", &empty)
+        .unwrap();
+    assert!(!outside
+        .rows
+        .iter()
+        .any(|row| row[1] == serde_json::json!("tx_slow_decay")));
+
+    executor.commit_transaction(&transaction).unwrap();
+    let committed = executor
+        .execute_on_database(Some("copperdb"), "SHOW DECAY PROFILES", &empty)
+        .unwrap();
+    assert!(committed
+        .rows
+        .iter()
+        .any(|row| row[1] == serde_json::json!("tx_slow_decay")));
+}
+
+#[test]
+fn appstate_bolt_executor_rolls_back_staged_knowledge_policy_ddl() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+
+    executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "CREATE DECAY PROFILE tx_rolled_back_decay OPTIONS { halfLifeSeconds: 60, visibilityThreshold: 0.1, scoreFloor: 0.0, function: 'exponential', scope: 'NODE', scoreFrom: 'CREATED', enabled: true }",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    executor.rollback_transaction(&transaction).unwrap();
+
+    let outside = executor
+        .execute_on_database(Some("copperdb"), "SHOW DECAY PROFILES", &empty)
+        .unwrap();
+    assert!(!outside
+        .rows
+        .iter()
+        .any(|row| row[1] == serde_json::json!("tx_rolled_back_decay")));
+}
+
+#[test]
 fn appstate_bolt_executor_traverses_staged_variable_length_chains() {
     let temp_dir = tempfile::tempdir().unwrap();
     let state = demo_temp_appstate_with_catalog(&temp_dir);

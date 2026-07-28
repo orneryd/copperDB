@@ -1836,9 +1836,16 @@ impl QueryExecutor for AppStateBoltExecutor {
         let transaction_id = engine
             .begin_transaction(&config)
             .map_err(|error| error.to_string())?;
+        let storage_transaction = match engine.begin_storage_transaction() {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                let _ = engine.tx_manager().rollback(transaction_id);
+                return Err(error.to_string());
+            }
+        };
         self.storage_transactions
             .lock()
-            .insert(transaction_id, engine.begin_storage_transaction());
+            .insert(transaction_id, storage_transaction);
         Ok(BoltTransaction {
             id: transaction_id.to_string(),
             database: database.to_owned(),

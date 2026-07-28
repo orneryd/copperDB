@@ -22,6 +22,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::storage_edge_property_index::edge_property_index_definition_prefix;
+
 // ── fjall→Fjall compatibility layer ──────────────────────────────────────────
 
 /// Re-export for backward compatibility: fjall Keyspace replaces fjall Tree.
@@ -1096,6 +1098,14 @@ pub struct KnowledgePolicyAccessMetadata {
     pub access_count: u64,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct KnowledgePolicyCatalog {
+    pub decay_profiles: Vec<DecayProfileSchema>,
+    pub decay_bindings: Vec<DecayProfileBindingSchema>,
+    pub promotion_profiles: Vec<PromotionProfileSchema>,
+    pub promotion_policies: Vec<PromotionPolicySchema>,
+}
+
 #[derive(Debug, Default)]
 pub struct SchemaManager {
     constraints: RwLock<BTreeMap<String, Constraint>>,
@@ -1405,6 +1415,13 @@ pub struct StorageEngine {
 pub struct StorageTransaction<'a> {
     engine: StorageTransactionEngine<'a>,
     snapshot: MvccSnapshotLease,
+    constraints: Vec<Constraint>,
+    indexes: Vec<IndexDefinition>,
+    constraint_writes: BTreeMap<String, Option<Constraint>>,
+    index_writes: BTreeMap<String, Option<IndexDefinition>>,
+    index_option_writes: BTreeMap<String, Option<HashMap<String, serde_json::Value>>>,
+    initial_knowledge_policy: KnowledgePolicyCatalog,
+    knowledge_policy: KnowledgePolicyCatalog,
     node_writes: BTreeMap<String, Option<NodeRecord>>,
     edge_writes: BTreeMap<String, Option<EdgeRecord>>,
 }
@@ -1878,6 +1895,28 @@ fn install_storage_snapshot_entries(
             };
             for record in frame.records {
                 match record.op.as_str() {
+                    "put_constraint" => {
+                        writer.put_constraint(&rmp_serde::from_slice(&record.payload)?)
+                    }
+                    "delete_constraint" if record.payload.is_empty() => {
+                        writer.delete_constraint(&record.key)
+                    }
+                    "put_index" => {
+                        writer.put_index_definition(&rmp_serde::from_slice(&record.payload)?)
+                    }
+                    "delete_index" if record.payload.is_empty() => {
+                        writer.delete_index_definition(&record.key)
+                    }
+                    "put_index_options" => writer.put_index_options(
+                        &record.key,
+                        &rmp_serde::from_slice(&record.payload)?,
+                    ),
+                    "delete_index_options" if record.payload.is_empty() => {
+                        writer.delete_index_options(&record.key)
+                    }
+                    "put_knowledge_policy_catalog" => writer.put_knowledge_policy_catalog(
+                        &rmp_serde::from_slice(&record.payload)?,
+                    ),
                     "put_node" => writer.put_node_record(&rmp_serde::from_slice(&record.payload)?),
                     "delete_node" if record.payload.is_empty() => {
                         writer.delete_node_record(&record.key)
@@ -2235,24 +2274,42 @@ fn install_storage_snapshot_entries(
     }
 
     /// Begin a storage transaction at the current MVCC snapshot.
-    pub fn begin_transaction(&self) -> StorageTransaction<'_> {
-        StorageTransaction {
+    pub fn begin_transaction(&self) -> Result<StorageTransaction<'_>, StorageError> {
+        let knowledge_policy = self.load_knowledge_policy_catalog()?;
+        Ok(StorageTransaction {
             engine: StorageTransactionEngine::Borrowed(self),
             snapshot: self.begin_registered_mvcc_snapshot(),
+            constraints: self.load_constraints()?,
+            indexes: self.load_index_definitions()?,
+            constraint_writes: BTreeMap::new(),
+            index_writes: BTreeMap::new(),
+            index_option_writes: BTreeMap::new(),
+            initial_knowledge_policy: knowledge_policy.clone(),
+            knowledge_policy,
             node_writes: BTreeMap::new(),
             edge_writes: BTreeMap::new(),
-        }
+        })
     }
 
     /// Begin a transaction that owns the storage handle and may outlive the
     /// request frame that created it.
-    pub fn begin_owned_transaction(self: &Arc<Self>) -> StorageTransaction<'static> {
-        StorageTransaction {
+    pub fn begin_owned_transaction(
+        self: &Arc<Self>,
+    ) -> Result<StorageTransaction<'static>, StorageError> {
+        let knowledge_policy = self.load_knowledge_policy_catalog()?;
+        Ok(StorageTransaction {
             engine: StorageTransactionEngine::Owned(Arc::clone(self)),
             snapshot: self.begin_registered_mvcc_snapshot(),
+            constraints: self.load_constraints()?,
+            indexes: self.load_index_definitions()?,
+            constraint_writes: BTreeMap::new(),
+            index_writes: BTreeMap::new(),
+            index_option_writes: BTreeMap::new(),
+            initial_knowledge_policy: knowledge_policy.clone(),
+            knowledge_policy,
             node_writes: BTreeMap::new(),
             edge_writes: BTreeMap::new(),
-        }
+        })
     }
 
     // ── Event notification ─────────────────────────────────────────────────
@@ -3727,43 +3784,7 @@ fn install_storage_snapshot_entries(
             StorageError::KnowledgePolicyNotFound(format!("decay profile {}", name))
         })?;
         let mut profile: DecayProfileSchema = rmp_serde::from_slice(raw.as_ref())?;
-        for (k, v) in updates {
-            match k.as_str() {
-                "halfLifeSeconds" => {
-                    profile.half_life_seconds = value_as_i64(v, "halfLifeSeconds")?;
-                }
-                "visibilityThreshold" => {
-                    profile.visibility_threshold = value_as_f64(v, "visibilityThreshold")?;
-                }
-                "scoreFloor" => {
-                    profile.score_floor = value_as_f64(v, "scoreFloor")?;
-                }
-                "function" => {
-                    profile.function = value_as_string(v, "function")?;
-                }
-                "scope" => {
-                    profile.scope = value_as_string(v, "scope")?;
-                }
-                "decayEnabled" => {
-                    profile.decay_enabled = value_as_bool(v, "decayEnabled")?;
-                }
-                "scoreFrom" => {
-                    profile.score_from = value_as_string(v, "scoreFrom")?;
-                }
-                "scoreFromProperty" => {
-                    profile.score_from_property = Some(value_as_string(v, "scoreFromProperty")?);
-                }
-                "enabled" => {
-                    profile.enabled = value_as_bool(v, "enabled")?;
-                }
-                other => {
-                    return Err(StorageError::KnowledgePolicyInvalid(format!(
-                        "unknown option '{}'",
-                        other
-                    )));
-                }
-            }
-        }
+        apply_decay_profile_updates(&mut profile, updates)?;
         validate_decay_profile(&profile)?;
         self.meta.fjall_insert(key, rmp_serde::to_vec(&profile)?)?;
         Ok(())
@@ -3878,21 +3899,7 @@ fn install_storage_snapshot_entries(
             StorageError::KnowledgePolicyNotFound(format!("promotion profile {}", name))
         })?;
         let mut profile: PromotionProfileSchema = rmp_serde::from_slice(raw.as_ref())?;
-        for (k, v) in updates {
-            match k.as_str() {
-                "multiplier" => profile.multiplier = value_as_f64(v, "multiplier")?,
-                "scoreFloor" => profile.score_floor = value_as_f64(v, "scoreFloor")?,
-                "scoreCap" => profile.score_cap = value_as_f64(v, "scoreCap")?,
-                "scope" => profile.scope = value_as_string(v, "scope")?,
-                "enabled" => profile.enabled = value_as_bool(v, "enabled")?,
-                other => {
-                    return Err(StorageError::KnowledgePolicyInvalid(format!(
-                        "unknown option '{}'",
-                        other
-                    )));
-                }
-            }
-        }
+        apply_promotion_profile_updates(&mut profile, updates)?;
         validate_promotion_profile(&profile)?;
         self.meta.fjall_insert(key, rmp_serde::to_vec(&profile)?)?;
         Ok(())
@@ -3952,6 +3959,15 @@ fn install_storage_snapshot_entries(
         }
         policies.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(policies)
+    }
+
+    fn load_knowledge_policy_catalog(&self) -> Result<KnowledgePolicyCatalog, StorageError> {
+        Ok(KnowledgePolicyCatalog {
+            decay_profiles: self.load_decay_profile_schemas()?,
+            decay_bindings: self.load_decay_profile_binding_schemas()?,
+            promotion_profiles: self.load_promotion_profile_schemas()?,
+            promotion_policies: self.load_promotion_policy_schemas()?,
+        })
     }
 
     pub fn alter_promotion_policy_schema(
@@ -4061,14 +4077,6 @@ fn install_storage_snapshot_entries(
             .load_index_definitions()?
             .into_iter()
             .filter(is_node_property_index)
-            .collect())
-    }
-
-    fn node_fulltext_index_definitions(&self) -> Result<Vec<IndexDefinition>, StorageError> {
-        Ok(self
-            .load_index_definitions()?
-            .into_iter()
-            .filter(is_node_fulltext_index)
             .collect())
     }
 
@@ -4843,6 +4851,35 @@ fn validate_decay_profile(profile: &DecayProfileSchema) -> Result<(), StorageErr
     Ok(())
 }
 
+fn apply_decay_profile_updates(
+    profile: &mut DecayProfileSchema,
+    updates: &BTreeMap<String, serde_json::Value>,
+) -> Result<(), StorageError> {
+    for (key, value) in updates {
+        match key.as_str() {
+            "halfLifeSeconds" => profile.half_life_seconds = value_as_i64(value, "halfLifeSeconds")?,
+            "visibilityThreshold" => {
+                profile.visibility_threshold = value_as_f64(value, "visibilityThreshold")?
+            }
+            "scoreFloor" => profile.score_floor = value_as_f64(value, "scoreFloor")?,
+            "function" => profile.function = value_as_string(value, "function")?,
+            "scope" => profile.scope = value_as_string(value, "scope")?,
+            "decayEnabled" => profile.decay_enabled = value_as_bool(value, "decayEnabled")?,
+            "scoreFrom" => profile.score_from = value_as_string(value, "scoreFrom")?,
+            "scoreFromProperty" => {
+                profile.score_from_property = Some(value_as_string(value, "scoreFromProperty")?)
+            }
+            "enabled" => profile.enabled = value_as_bool(value, "enabled")?,
+            other => {
+                return Err(StorageError::KnowledgePolicyInvalid(format!(
+                    "unknown option '{other}'"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_decay_profile_binding(binding: &DecayProfileBindingSchema) -> Result<(), StorageError> {
     if binding.name.trim().is_empty() {
         return Err(StorageError::KnowledgePolicyInvalid(
@@ -4930,6 +4967,27 @@ fn validate_promotion_profile(profile: &PromotionProfileSchema) -> Result<(), St
         return Err(StorageError::KnowledgePolicyInvalid(
             "scoreCap must be between 0 and 1".into(),
         ));
+    }
+    Ok(())
+}
+
+fn apply_promotion_profile_updates(
+    profile: &mut PromotionProfileSchema,
+    updates: &BTreeMap<String, serde_json::Value>,
+) -> Result<(), StorageError> {
+    for (key, value) in updates {
+        match key.as_str() {
+            "multiplier" => profile.multiplier = value_as_f64(value, "multiplier")?,
+            "scoreFloor" => profile.score_floor = value_as_f64(value, "scoreFloor")?,
+            "scoreCap" => profile.score_cap = value_as_f64(value, "scoreCap")?,
+            "scope" => profile.scope = value_as_string(value, "scope")?,
+            "enabled" => profile.enabled = value_as_bool(value, "enabled")?,
+            other => {
+                return Err(StorageError::KnowledgePolicyInvalid(format!(
+                    "unknown option '{other}'"
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -5095,6 +5153,13 @@ impl StorageEventNotifier for StorageEngine {
 
 /// An operation buffered for atomic batch commit.
 enum BatchOp {
+    PutConstraint(Constraint),
+    DeleteConstraint(String),
+    PutIndex(IndexDefinition),
+    DeleteIndex(String),
+    PutIndexOptions(String, HashMap<String, serde_json::Value>),
+    DeleteIndexOptions(String),
+    PutKnowledgePolicyCatalog(KnowledgePolicyCatalog),
     PutNode(NodeRecord),
     PutEdge(EdgeRecord),
     DeleteNode(String),
@@ -5193,6 +5258,342 @@ impl<'a> StorageTransaction<'a> {
 
     pub fn snapshot(&self) -> &MvccSnapshot {
         self.snapshot.snapshot()
+    }
+
+    pub fn constraints(&self) -> &[Constraint] {
+        &self.constraints
+    }
+
+    pub fn constraints_with_writes(&self) -> Vec<Constraint> {
+        let mut constraints = self
+            .constraints
+            .iter()
+            .cloned()
+            .map(|constraint| (constraint.name.clone(), constraint))
+            .collect::<BTreeMap<_, _>>();
+        for (name, write) in &self.constraint_writes {
+            match write {
+                Some(constraint) => {
+                    constraints.insert(name.clone(), constraint.clone());
+                }
+                None => {
+                    constraints.remove(name);
+                }
+            }
+        }
+        constraints.into_values().collect()
+    }
+
+    pub fn put_constraint(&mut self, constraint: Constraint) {
+        self.constraint_writes
+            .insert(constraint.name.clone(), Some(constraint));
+    }
+
+    pub fn delete_constraint(&mut self, name: impl Into<String>) {
+        self.constraint_writes.insert(name.into(), None);
+    }
+
+    pub fn index_definitions(&self) -> &[IndexDefinition] {
+        &self.indexes
+    }
+
+    pub fn index_definitions_with_writes(&self) -> Vec<IndexDefinition> {
+        let mut indexes = self
+            .indexes
+            .iter()
+            .cloned()
+            .map(|index| (index.name.clone(), index))
+            .collect::<BTreeMap<_, _>>();
+        for (name, write) in &self.index_writes {
+            match write {
+                Some(index) => {
+                    indexes.insert(name.clone(), index.clone());
+                }
+                None => {
+                    indexes.remove(name);
+                }
+            }
+        }
+        indexes.into_values().collect()
+    }
+
+    pub fn put_index_definition(&mut self, index: IndexDefinition) {
+        self.index_writes.insert(index.name.clone(), Some(index));
+    }
+
+    pub fn delete_index_definition(&mut self, name: impl Into<String>) {
+        self.index_writes.insert(name.into(), None);
+    }
+
+    pub fn put_index_options(
+        &mut self,
+        name: impl Into<String>,
+        options: HashMap<String, serde_json::Value>,
+    ) {
+        self.index_option_writes.insert(name.into(), Some(options));
+    }
+
+    pub fn delete_index_options(&mut self, name: impl Into<String>) {
+        self.index_option_writes.insert(name.into(), None);
+    }
+
+    pub fn knowledge_policy_catalog(&self) -> &KnowledgePolicyCatalog {
+        &self.knowledge_policy
+    }
+
+    pub fn put_decay_profile(&mut self, profile: DecayProfileSchema) -> Result<(), StorageError> {
+        validate_decay_profile(&profile)?;
+        if self
+            .knowledge_policy
+            .decay_profiles
+            .iter()
+            .any(|existing| existing.name == profile.name)
+            || self
+                .knowledge_policy
+                .decay_bindings
+                .iter()
+                .any(|existing| existing.name == profile.name)
+        {
+            return Err(StorageError::KnowledgePolicyAlreadyExists(format!(
+                "decay profile {}",
+                profile.name
+            )));
+        }
+        self.knowledge_policy.decay_profiles.push(profile);
+        Ok(())
+    }
+
+    pub fn put_decay_binding(
+        &mut self,
+        mut binding: DecayProfileBindingSchema,
+    ) -> Result<(), StorageError> {
+        validate_decay_profile_binding(&binding)?;
+        if let Some(profile_ref) = &binding.profile_ref {
+            if !self
+                .knowledge_policy
+                .decay_profiles
+                .iter()
+                .any(|profile| profile.name == *profile_ref)
+            {
+                return Err(StorageError::KnowledgePolicyNotFound(format!(
+                    "decay profile {profile_ref}"
+                )));
+            }
+        }
+        if self
+            .knowledge_policy
+            .decay_bindings
+            .iter()
+            .any(|existing| existing.name == binding.name)
+            || self
+                .knowledge_policy
+                .decay_profiles
+                .iter()
+                .any(|existing| existing.name == binding.name)
+        {
+            return Err(StorageError::KnowledgePolicyAlreadyExists(format!(
+                "decay profile {}",
+                binding.name
+            )));
+        }
+        binding.target_labels.sort();
+        self.knowledge_policy.decay_bindings.push(binding);
+        Ok(())
+    }
+
+    pub fn put_promotion_profile(
+        &mut self,
+        profile: PromotionProfileSchema,
+    ) -> Result<(), StorageError> {
+        validate_promotion_profile(&profile)?;
+        if self
+            .knowledge_policy
+            .promotion_profiles
+            .iter()
+            .any(|existing| existing.name == profile.name)
+        {
+            return Err(StorageError::KnowledgePolicyAlreadyExists(format!(
+                "promotion profile {}",
+                profile.name
+            )));
+        }
+        self.knowledge_policy.promotion_profiles.push(profile);
+        Ok(())
+    }
+
+    pub fn put_promotion_policy(
+        &mut self,
+        policy: PromotionPolicySchema,
+    ) -> Result<(), StorageError> {
+        validate_promotion_policy(
+            &policy,
+            &self.knowledge_policy.promotion_profiles,
+            &self.knowledge_policy.promotion_policies,
+        )?;
+        if self
+            .knowledge_policy
+            .promotion_policies
+            .iter()
+            .any(|existing| existing.name == policy.name)
+        {
+            return Err(StorageError::KnowledgePolicyAlreadyExists(format!(
+                "promotion policy {}",
+                policy.name
+            )));
+        }
+        self.knowledge_policy.promotion_policies.push(policy);
+        Ok(())
+    }
+
+    pub fn alter_decay_profile(
+        &mut self,
+        name: &str,
+        updates: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<(), StorageError> {
+        let profile = self
+            .knowledge_policy
+            .decay_profiles
+            .iter_mut()
+            .find(|profile| profile.name == name)
+            .ok_or_else(|| {
+                StorageError::KnowledgePolicyNotFound(format!("decay profile {name}"))
+            })?;
+        apply_decay_profile_updates(profile, updates)?;
+        validate_decay_profile(profile)
+    }
+
+    pub fn drop_decay_profile(&mut self, name: &str, if_exists: bool) -> Result<(), StorageError> {
+        if let Some(binding_name) = self
+            .knowledge_policy
+            .decay_bindings
+            .iter()
+            .find(|binding| binding.name == name)
+            .map(|binding| binding.name.clone())
+        {
+            self.knowledge_policy
+                .decay_bindings
+                .retain(|existing| existing.name != binding_name);
+            return Ok(());
+        }
+        if let Some(binding) = self
+            .knowledge_policy
+            .decay_bindings
+            .iter()
+            .find(|binding| binding.profile_ref.as_deref() == Some(name))
+        {
+            return Err(StorageError::KnowledgePolicyInUse(format!(
+                "decay profile {name} referenced by decay binding {}",
+                binding.name
+            )));
+        }
+        let before = self.knowledge_policy.decay_profiles.len();
+        self.knowledge_policy
+            .decay_profiles
+            .retain(|profile| profile.name != name);
+        if before == self.knowledge_policy.decay_profiles.len() && !if_exists {
+            return Err(StorageError::KnowledgePolicyNotFound(format!(
+                "decay profile {name}"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn alter_promotion_profile(
+        &mut self,
+        name: &str,
+        updates: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<(), StorageError> {
+        let profile = self
+            .knowledge_policy
+            .promotion_profiles
+            .iter_mut()
+            .find(|profile| profile.name == name)
+            .ok_or_else(|| {
+                StorageError::KnowledgePolicyNotFound(format!("promotion profile {name}"))
+            })?;
+        apply_promotion_profile_updates(profile, updates)?;
+        validate_promotion_profile(profile)
+    }
+
+    pub fn drop_promotion_profile(
+        &mut self,
+        name: &str,
+        if_exists: bool,
+    ) -> Result<(), StorageError> {
+        for policy in &self.knowledge_policy.promotion_policies {
+            if policy
+                .when_clauses
+                .iter()
+                .any(|clause| clause.profile_ref == name)
+            {
+                return Err(StorageError::KnowledgePolicyInUse(format!(
+                    "promotion profile {name} referenced by promotion policy {}",
+                    policy.name
+                )));
+            }
+        }
+        let before = self.knowledge_policy.promotion_profiles.len();
+        self.knowledge_policy
+            .promotion_profiles
+            .retain(|profile| profile.name != name);
+        if before == self.knowledge_policy.promotion_profiles.len() && !if_exists {
+            return Err(StorageError::KnowledgePolicyNotFound(format!(
+                "promotion profile {name}"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn alter_promotion_policy(
+        &mut self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<(), StorageError> {
+        let policy_index = self
+            .knowledge_policy
+            .promotion_policies
+            .iter()
+            .find(|policy| policy.name == name)
+            .map(|policy| policy.name.clone())
+            .ok_or_else(|| {
+                StorageError::KnowledgePolicyNotFound(format!("promotion policy {name}"))
+            })?;
+        let existing = self
+            .knowledge_policy
+            .promotion_policies
+            .iter()
+            .filter(|existing| existing.name != name)
+            .cloned()
+            .collect::<Vec<_>>();
+        let policy = self
+            .knowledge_policy
+            .promotion_policies
+            .iter_mut()
+            .find(|policy| policy.name == policy_index)
+            .expect("existing promotion policy disappeared from transaction overlay");
+        policy.enabled = enabled;
+        validate_promotion_policy(
+            policy,
+            &self.knowledge_policy.promotion_profiles,
+            &existing,
+        )
+    }
+
+    pub fn drop_promotion_policy(
+        &mut self,
+        name: &str,
+        if_exists: bool,
+    ) -> Result<(), StorageError> {
+        let before = self.knowledge_policy.promotion_policies.len();
+        self.knowledge_policy
+            .promotion_policies
+            .retain(|policy| policy.name != name);
+        if before == self.knowledge_policy.promotion_policies.len() && !if_exists {
+            return Err(StorageError::KnowledgePolicyNotFound(format!(
+                "promotion policy {name}"
+            )));
+        }
+        Ok(())
     }
 
     pub fn get_node_record(&self, id: &str) -> Result<Option<NodeRecord>, StorageError> {
@@ -5336,6 +5737,27 @@ impl<'a> StorageTransaction<'a> {
     pub fn commit(&mut self) -> Result<(), StorageError> {
         self.ensure_no_write_conflicts()?;
         self.engine().batch_write(|batch| {
+            for (name, constraint) in &self.constraint_writes {
+                match constraint {
+                    Some(constraint) => batch.put_constraint(constraint),
+                    None => batch.delete_constraint(name),
+                }
+            }
+            for (name, index) in &self.index_writes {
+                match index {
+                    Some(index) => batch.put_index_definition(index),
+                    None => batch.delete_index_definition(name),
+                }
+            }
+            for (name, options) in &self.index_option_writes {
+                match options {
+                    Some(options) => batch.put_index_options(name, options),
+                    None => batch.delete_index_options(name),
+                }
+            }
+            if self.knowledge_policy != self.initial_knowledge_policy {
+                batch.put_knowledge_policy_catalog(&self.knowledge_policy);
+            }
             for (id, node) in &self.node_writes {
                 match node {
                     Some(node) => batch.put_node_record(node),
@@ -5350,17 +5772,60 @@ impl<'a> StorageTransaction<'a> {
             }
             Ok::<_, StorageError>(())
         })?;
+        self.constraints = self.constraints_with_writes();
+        self.indexes = self.index_definitions_with_writes();
+        self.initial_knowledge_policy = self.knowledge_policy.clone();
+        self.constraint_writes.clear();
+        self.index_writes.clear();
+        self.index_option_writes.clear();
         self.node_writes.clear();
         self.edge_writes.clear();
         Ok(())
     }
 
     pub fn rollback(&mut self) {
+        self.constraint_writes.clear();
+        self.index_writes.clear();
+        self.index_option_writes.clear();
+        self.knowledge_policy = self.initial_knowledge_policy.clone();
         self.node_writes.clear();
         self.edge_writes.clear();
     }
 
     fn ensure_no_write_conflicts(&self) -> Result<(), StorageError> {
+        let current_constraints = self.engine().load_constraints()?;
+        for name in self.constraint_writes.keys() {
+            let snapshot_constraint = self.constraints.iter().find(|constraint| constraint.name == *name);
+            let current_constraint = current_constraints.iter().find(|constraint| constraint.name == *name);
+            if current_constraint != snapshot_constraint {
+                return Err(StorageError::TransactionConflict {
+                    logical_key: format!("constraint:{name}"),
+                    snapshot_version: self.snapshot.snapshot().read_ts,
+                    current_version: self.engine().mvcc.head().head,
+                });
+            }
+        }
+        let current_indexes = self.engine().load_index_definitions()?;
+        for name in self.index_writes.keys() {
+            let snapshot_index = self.indexes.iter().find(|index| index.name == *name);
+            let current_index = current_indexes.iter().find(|index| index.name == *name);
+            if current_index != snapshot_index {
+                return Err(StorageError::TransactionConflict {
+                    logical_key: format!("index:{name}"),
+                    snapshot_version: self.snapshot.snapshot().read_ts,
+                    current_version: self.engine().mvcc.head().head,
+                });
+            }
+        }
+        if self.knowledge_policy != self.initial_knowledge_policy
+            && self.engine().load_knowledge_policy_catalog()? != self.initial_knowledge_policy
+        {
+            return Err(StorageError::TransactionConflict {
+                logical_key: "knowledge_policy_catalog".to_string(),
+                snapshot_version: self.snapshot.snapshot().read_ts,
+                current_version: self.engine().mvcc.head().head,
+            });
+        }
         for id in self.node_writes.keys() {
             self.ensure_key_is_unmodified_since_snapshot(&format!("node:{id}"))?;
         }
@@ -5390,6 +5855,40 @@ impl<'a> StorageTransaction<'a> {
 }
 
 impl<'a> BatchWriter<'a> {
+    pub fn put_constraint(&mut self, constraint: &Constraint) {
+        self.ops.push(BatchOp::PutConstraint(constraint.clone()));
+    }
+
+    pub fn delete_constraint(&mut self, name: &str) {
+        self.ops.push(BatchOp::DeleteConstraint(name.to_string()));
+    }
+
+    pub fn put_index_definition(&mut self, index: &IndexDefinition) {
+        self.ops.push(BatchOp::PutIndex(index.clone()));
+    }
+
+    pub fn delete_index_definition(&mut self, name: &str) {
+        self.ops.push(BatchOp::DeleteIndex(name.to_string()));
+    }
+
+    pub fn put_index_options(
+        &mut self,
+        name: &str,
+        options: &HashMap<String, serde_json::Value>,
+    ) {
+        self.ops
+            .push(BatchOp::PutIndexOptions(name.to_string(), options.clone()));
+    }
+
+    pub fn delete_index_options(&mut self, name: &str) {
+        self.ops.push(BatchOp::DeleteIndexOptions(name.to_string()));
+    }
+
+    pub fn put_knowledge_policy_catalog(&mut self, catalog: &KnowledgePolicyCatalog) {
+        self.ops
+            .push(BatchOp::PutKnowledgePolicyCatalog(catalog.clone()));
+    }
+
     pub fn put_node_record(&mut self, node: &NodeRecord) {
         self.ops.push(BatchOp::PutNode(node.clone()));
     }
@@ -5412,14 +5911,37 @@ impl<'a> BatchWriter<'a> {
 
     fn commit_with_wal_sequence(&self, replay_sequence: Option<u64>) -> Result<(), StorageError> {
         let _commit_guard = self.engine.batch_commit_lock.lock();
-        let node_property_indexes = self.engine.node_property_index_definitions()?;
-        let node_fulltext_indexes = self.engine.node_fulltext_index_definitions()?;
-        let edge_property_indexes = self.engine.relationship_property_index_definitions()?;
         let mut nodes = HashMap::<String, (Option<NodeRecord>, Option<NodeRecord>)>::new();
         let mut edges = HashMap::<String, (Option<EdgeRecord>, Option<EdgeRecord>)>::new();
+        let mut constraints = BTreeMap::<String, Option<Constraint>>::new();
+        let mut indexes = BTreeMap::<String, Option<IndexDefinition>>::new();
+        let mut index_options =
+            BTreeMap::<String, Option<HashMap<String, serde_json::Value>>>::new();
+        let mut knowledge_policy = None;
 
         for op in &self.ops {
             match op {
+                BatchOp::PutConstraint(constraint) => {
+                    constraints.insert(constraint.name.clone(), Some(constraint.clone()));
+                }
+                BatchOp::DeleteConstraint(name) => {
+                    constraints.insert(name.clone(), None);
+                }
+                BatchOp::PutIndex(index) => {
+                    indexes.insert(index.name.clone(), Some(index.clone()));
+                }
+                BatchOp::DeleteIndex(name) => {
+                    indexes.insert(name.clone(), None);
+                }
+                BatchOp::PutIndexOptions(name, options) => {
+                    index_options.insert(name.clone(), Some(options.clone()));
+                }
+                BatchOp::DeleteIndexOptions(name) => {
+                    index_options.insert(name.clone(), None);
+                }
+                BatchOp::PutKnowledgePolicyCatalog(catalog) => {
+                    knowledge_policy = Some(catalog.clone());
+                }
                 BatchOp::PutNode(node) => {
                     let entry = nodes
                         .entry(node.id.clone())
@@ -5446,6 +5968,39 @@ impl<'a> BatchWriter<'a> {
                 }
             }
         }
+
+        let mut effective_indexes = self
+            .engine
+            .load_index_definitions()?
+            .into_iter()
+            .map(|index| (index.name.clone(), index))
+            .collect::<BTreeMap<_, _>>();
+        for (name, index) in &indexes {
+            match index {
+                Some(index) => {
+                    effective_indexes.insert(name.clone(), index.clone());
+                }
+                None => {
+                    effective_indexes.remove(name);
+                }
+            }
+        }
+        let effective_indexes = effective_indexes.into_values().collect::<Vec<_>>();
+        let node_property_indexes = effective_indexes
+            .iter()
+            .filter(|index| is_node_property_index(index))
+            .cloned()
+            .collect::<Vec<_>>();
+        let node_fulltext_indexes = effective_indexes
+            .iter()
+            .filter(|index| is_node_fulltext_index(index))
+            .cloned()
+            .collect::<Vec<_>>();
+        let edge_property_indexes = effective_indexes
+            .iter()
+            .filter(|index| is_relationship_property_index(index))
+            .cloned()
+            .collect::<Vec<_>>();
 
         let mutations = nodes
             .iter()
@@ -5478,7 +6033,54 @@ impl<'a> BatchWriter<'a> {
             .engine
             .mvcc
             .staged_record_batch_state(mutations.clone())?;
-        let mut wal_records = nodes
+        let mut wal_records = knowledge_policy
+            .iter()
+            .map(|catalog| {
+                Ok(WALTransactionRecord {
+                    op: "put_knowledge_policy_catalog".to_string(),
+                    key: String::new(),
+                    payload: rmp_serde::to_vec(catalog)?,
+                })
+            })
+            .chain(constraints
+            .iter()
+            .map(|(name, constraint)| match constraint {
+                Some(constraint) => Ok(WALTransactionRecord {
+                    op: "put_constraint".to_string(),
+                    key: name.clone(),
+                    payload: rmp_serde::to_vec(constraint)?,
+                }),
+                None => Ok(WALTransactionRecord {
+                    op: "delete_constraint".to_string(),
+                    key: name.clone(),
+                    payload: Vec::new(),
+                }),
+            }))
+            .chain(indexes.iter().map(|(name, index)| match index {
+                Some(index) => Ok(WALTransactionRecord {
+                    op: "put_index".to_string(),
+                    key: name.clone(),
+                    payload: rmp_serde::to_vec(index)?,
+                }),
+                None => Ok(WALTransactionRecord {
+                    op: "delete_index".to_string(),
+                    key: name.clone(),
+                    payload: Vec::new(),
+                }),
+            }))
+            .chain(index_options.iter().map(|(name, options)| match options {
+                Some(options) => Ok(WALTransactionRecord {
+                    op: "put_index_options".to_string(),
+                    key: name.clone(),
+                    payload: rmp_serde::to_vec(options)?,
+                }),
+                None => Ok(WALTransactionRecord {
+                    op: "delete_index_options".to_string(),
+                    key: name.clone(),
+                    payload: Vec::new(),
+                }),
+            }))
+            .chain(nodes
             .iter()
             .filter(|(_, (old, new))| old.is_some() || new.is_some())
             .map(|(id, (_, new))| match new {
@@ -5506,7 +6108,7 @@ impl<'a> BatchWriter<'a> {
                     payload: Vec::new(),
                 }),
             },
-            ))
+            )))
             .collect::<Result<Vec<_>, rmp_serde::encode::Error>>()?;
         wal_records.sort_by(|left, right| left.op.cmp(&right.op).then(left.key.cmp(&right.key)));
         let wal_sequence = match replay_sequence {
@@ -5524,6 +6126,69 @@ impl<'a> BatchWriter<'a> {
 
         let mut batch = self.engine.db.batch();
         let mut counter_deltas = HashMap::<Vec<u8>, i64>::new();
+        for (name, constraint) in constraints {
+            let key = [META_SCHEMA_CONSTRAINT_PREFIX, name.as_bytes()].concat();
+            match constraint {
+                Some(constraint) => {
+                    batch.insert(&self.engine.meta, key, rmp_serde::to_vec(&constraint)?);
+                }
+                None => batch.remove(&self.engine.meta, key),
+            }
+        }
+        for (name, index) in &indexes {
+            let key = [META_SCHEMA_INDEX_PREFIX, name.as_bytes()].concat();
+            match index {
+                Some(index) => {
+                    if let Some(existing) = self
+                        .engine
+                        .load_index_definitions()?
+                        .into_iter()
+                        .find(|existing| existing.name == *name)
+                    {
+                        for (key, _) in self.stage_index_cleanup(&existing)? {
+                            batch.remove(&self.engine.indexes, key);
+                        }
+                    }
+                    batch.insert(&self.engine.meta, key, rmp_serde::to_vec(index)?);
+                    for (key, value) in self.stage_index_rebuild(index, &nodes, &edges)? {
+                        match value {
+                            Some(value) => batch.insert(&self.engine.indexes, key, value),
+                            None => batch.remove(&self.engine.indexes, key),
+                        }
+                    }
+                }
+                None => {
+                    batch.remove(&self.engine.meta, key);
+                    if let Some(index) = self
+                        .engine
+                        .load_index_definitions()?
+                        .into_iter()
+                        .find(|existing| existing.name == *name)
+                    {
+                        for (key, _) in self.stage_index_cleanup(&index)? {
+                            batch.remove(&self.engine.indexes, key);
+                        }
+                    }
+                }
+            }
+        }
+        for (name, options) in index_options {
+            let key = [META_INDEX_OPTIONS_PREFIX, name.as_bytes()].concat();
+            match options {
+                Some(options) => {
+                    batch.insert(&self.engine.meta, key, rmp_serde::to_vec(&options)?);
+                }
+                None => batch.remove(&self.engine.meta, key),
+            }
+        }
+        if let Some(catalog) = knowledge_policy {
+            for (key, value) in self.stage_knowledge_policy_catalog(&catalog)? {
+                match value {
+                    Some(value) => batch.insert(&self.engine.meta, key, value),
+                    None => batch.remove(&self.engine.meta, key),
+                }
+            }
+        }
         for (id, (old, new)) in &nodes {
             if let Some(old) = old {
                 stage_node_indexes!(
@@ -5655,6 +6320,166 @@ impl<'a> BatchWriter<'a> {
 
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
+    }
+
+    fn stage_index_rebuild(
+        &self,
+        index: &IndexDefinition,
+        nodes: &HashMap<String, (Option<NodeRecord>, Option<NodeRecord>)>,
+        edges: &HashMap<String, (Option<EdgeRecord>, Option<EdgeRecord>)>,
+    ) -> Result<Batch, StorageError> {
+        let mut changes = Batch::new();
+        if is_node_property_index(index) {
+            for node in self.final_nodes(nodes)? {
+                if node.labels.iter().any(|label| label == &index.label) {
+                    if let Some(key) = node_property_index_key_for_node(index, &node) {
+                        changes.push((key.into_bytes(), Some(Vec::new())));
+                    }
+                }
+            }
+        } else if is_node_fulltext_index(index) {
+            for node in self.final_nodes(nodes)? {
+                if node.labels.iter().any(|label| label == &index.label) {
+                    for property in &index.properties {
+                        let Some(value) = node.properties.get(property) else {
+                            continue;
+                        };
+                        for token in fulltext_tokens_for_value(value) {
+                            changes.push((
+                                node_fulltext_index_key(&index.label, property, &token, &node.id)
+                                    .into_bytes(),
+                                Some(Vec::new()),
+                            ));
+                        }
+                    }
+                }
+            }
+        } else if is_relationship_property_index(index) {
+            for edge in self.final_edges(edges)? {
+                if edge.edge_type == index.label {
+                    if let Some(key) = relationship_property_index_key_for_edge(index, &edge) {
+                        changes.push((key.into_bytes(), Some(Vec::new())));
+                    }
+                }
+            }
+        }
+        Ok(changes)
+    }
+
+    fn stage_knowledge_policy_catalog(
+        &self,
+        catalog: &KnowledgePolicyCatalog,
+    ) -> Result<Batch, StorageError> {
+        let mut changes = Batch::new();
+        for prefix in [
+            META_KP_DECAY_PROFILE_PREFIX,
+            META_KP_DECAY_BINDING_PREFIX,
+            META_KP_PROMOTION_PROFILE_PREFIX,
+            META_KP_PROMOTION_POLICY_PREFIX,
+        ] {
+            for entry in self.engine.meta.scan_prefix(prefix) {
+                let (key, _) = entry?;
+                changes.push((key, None));
+            }
+        }
+        for profile in &catalog.decay_profiles {
+            changes.push((
+                [META_KP_DECAY_PROFILE_PREFIX, profile.name.as_bytes()].concat(),
+                Some(rmp_serde::to_vec(profile)?),
+            ));
+        }
+        for binding in &catalog.decay_bindings {
+            changes.push((
+                [META_KP_DECAY_BINDING_PREFIX, binding.name.as_bytes()].concat(),
+                Some(rmp_serde::to_vec(binding)?),
+            ));
+        }
+        for profile in &catalog.promotion_profiles {
+            changes.push((
+                [META_KP_PROMOTION_PROFILE_PREFIX, profile.name.as_bytes()].concat(),
+                Some(rmp_serde::to_vec(profile)?),
+            ));
+        }
+        for policy in &catalog.promotion_policies {
+            changes.push((
+                [META_KP_PROMOTION_POLICY_PREFIX, policy.name.as_bytes()].concat(),
+                Some(rmp_serde::to_vec(policy)?),
+            ));
+        }
+        Ok(changes)
+    }
+
+    fn stage_index_cleanup(
+        &self,
+        index: &IndexDefinition,
+    ) -> Result<Batch, StorageError> {
+        let mut changes = Batch::new();
+        let prefixes = if is_node_property_index(index) {
+            vec![node_property_index_definition_prefix(&index.label, &index.properties)]
+        } else if is_node_fulltext_index(index) {
+            index
+                .properties
+                .iter()
+                .map(|property| node_fulltext_property_prefix(&index.label, property))
+                .collect()
+        } else if is_relationship_property_index(index) {
+            vec![edge_property_index_definition_prefix(&index.label, &index.properties)]
+        } else {
+            Vec::new()
+        };
+        for prefix in prefixes {
+            for entry in self.engine.indexes.scan_prefix(prefix.as_bytes()) {
+                let (key, _) = entry?;
+                changes.push((key, None));
+            }
+        }
+        Ok(changes)
+    }
+
+    fn final_nodes(
+        &self,
+        nodes: &HashMap<String, (Option<NodeRecord>, Option<NodeRecord>)>,
+    ) -> Result<Vec<NodeRecord>, StorageError> {
+        let mut final_nodes = self
+            .engine
+            .all_node_records()?
+            .into_iter()
+            .map(|node| (node.id.clone(), node))
+            .collect::<BTreeMap<_, _>>();
+        for (id, (_, node)) in nodes {
+            match node {
+                Some(node) => {
+                    final_nodes.insert(id.clone(), node.clone());
+                }
+                None => {
+                    final_nodes.remove(id);
+                }
+            }
+        }
+        Ok(final_nodes.into_values().collect())
+    }
+
+    fn final_edges(
+        &self,
+        edges: &HashMap<String, (Option<EdgeRecord>, Option<EdgeRecord>)>,
+    ) -> Result<Vec<EdgeRecord>, StorageError> {
+        let mut final_edges = self
+            .engine
+            .all_edges()?
+            .into_iter()
+            .map(|edge| (edge.id.clone(), edge))
+            .collect::<BTreeMap<_, _>>();
+        for (id, (_, edge)) in edges {
+            match edge {
+                Some(edge) => {
+                    final_edges.insert(id.clone(), edge.clone());
+                }
+                None => {
+                    final_edges.remove(id);
+                }
+            }
+        }
+        Ok(final_edges.into_values().collect())
     }
 }
 

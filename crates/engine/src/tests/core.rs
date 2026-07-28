@@ -44,7 +44,7 @@ fn test_begin_transaction_exposes_effective_read_fence() {
 #[test]
 fn test_begin_storage_transaction_uses_owned_storage_context() {
     let db = CopperDb::open_temporary().unwrap();
-    let mut transaction = db.begin_storage_transaction();
+    let mut transaction = db.begin_storage_transaction().unwrap();
     transaction.put_node_record(NodeRecord {
         id: "n1".to_string(),
         labels: vec!["Person".to_string()],

@@ -402,8 +402,10 @@ impl CopperDb {
     }
 
     /// Begin an owned storage transaction that can span protocol requests.
-    pub fn begin_storage_transaction(&self) -> copperdb_storage::StorageTransaction<'static> {
-        self.storage.begin_owned_transaction()
+    pub fn begin_storage_transaction(
+        &self,
+    ) -> Result<copperdb_storage::StorageTransaction<'static>, CopperDbError> {
+        self.storage.begin_owned_transaction().map_err(Into::into)
     }
 
     /// Execute a Cypher statement against an explicit transaction's private

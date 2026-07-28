@@ -1415,7 +1415,7 @@ fn storage_transaction_keeps_writes_private_until_commit() {
     let replacement = sample_node("n1", &["Device"]);
     engine.put_node_record(&original).unwrap();
 
-    let mut transaction = engine.begin_transaction();
+    let mut transaction = engine.begin_transaction().unwrap();
     transaction.put_node_record(replacement.clone());
     assert_eq!(
         transaction.get_node_record("n1").unwrap(),
@@ -1426,7 +1426,7 @@ fn storage_transaction_keeps_writes_private_until_commit() {
 
     assert_eq!(engine.get_node_record("n1").unwrap(), Some(replacement));
 
-    let mut rolled_back = engine.begin_transaction();
+    let mut rolled_back = engine.begin_transaction().unwrap();
     rolled_back.delete_node_record("n1");
     assert!(rolled_back.get_node_record("n1").unwrap().is_none());
     rolled_back.rollback();
@@ -1435,12 +1435,216 @@ fn storage_transaction_keeps_writes_private_until_commit() {
 }
 
 #[test]
+fn storage_transaction_rolls_back_staged_constraints() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let constraint = Constraint {
+        name: "person_email_unique".to_string(),
+        constraint_type: ConstraintType::Unique,
+        entity_type: ConstraintEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["email".to_string()],
+        type_name: None,
+        allowed_values: Vec::new(),
+    };
+
+    let mut transaction = engine.begin_transaction().unwrap();
+    transaction.put_constraint(constraint.clone());
+    assert_eq!(transaction.constraints_with_writes(), vec![constraint]);
+    assert!(engine.load_constraints().unwrap().is_empty());
+    transaction.rollback();
+
+    assert!(engine.load_constraints().unwrap().is_empty());
+}
+
+#[test]
+fn storage_transaction_commits_index_catalog_and_derived_entries_together() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let mut node = sample_node("n1", &["Person"]);
+    node.properties.insert("email".to_string(), json!("a@example.com"));
+    engine.put_node_record(&node).unwrap();
+    let index = IndexDefinition {
+        name: "person_email_idx".to_string(),
+        entity_type: IndexEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["email".to_string()],
+        kind: IndexKind::Range,
+    };
+
+    let mut transaction = engine.begin_transaction().unwrap();
+    transaction.put_index_definition(index.clone());
+    assert_eq!(transaction.index_definitions_with_writes(), vec![index.clone()]);
+    assert!(engine.load_index_definitions().unwrap().is_empty());
+    transaction.commit().unwrap();
+
+    assert_eq!(engine.load_index_definitions().unwrap(), vec![index]);
+    assert_eq!(
+        engine
+            .get_nodes_by_property("Person", "email", &json!("a@example.com"))
+            .unwrap(),
+        vec![node]
+    );
+}
+
+#[test]
+fn storage_transaction_drops_index_catalog_and_derived_entries_together() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let mut node = sample_node("n1", &["Person"]);
+    node.properties.insert("email".to_string(), json!("a@example.com"));
+    engine.put_node_record(&node).unwrap();
+    let index = IndexDefinition {
+        name: "person_email_idx".to_string(),
+        entity_type: IndexEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["email".to_string()],
+        kind: IndexKind::Range,
+    };
+    engine.persist_index_definition(&index).unwrap();
+    assert_eq!(
+        engine
+            .get_nodes_by_property("Person", "email", &json!("a@example.com"))
+            .unwrap(),
+        vec![node]
+    );
+
+    let mut transaction = engine.begin_transaction().unwrap();
+    transaction.delete_index_definition("person_email_idx");
+    transaction.commit().unwrap();
+
+    assert!(engine.load_index_definitions().unwrap().is_empty());
+    assert!(engine
+        .get_nodes_by_property("Person", "email", &json!("a@example.com"))
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn storage_transaction_commits_vector_index_options_with_its_definition() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let index = IndexDefinition {
+        name: "person_embedding_idx".to_string(),
+        entity_type: IndexEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["embedding".to_string()],
+        kind: IndexKind::Vector,
+    };
+    let options = HashMap::from([("vector.dimensions".to_string(), json!(1536))]);
+
+    let mut transaction = engine.begin_transaction().unwrap();
+    transaction.put_index_definition(index.clone());
+    transaction.put_index_options(index.name.clone(), options.clone());
+    assert!(engine.load_index_definitions().unwrap().is_empty());
+    assert!(engine.load_index_options(&index.name).unwrap().is_none());
+    transaction.commit().unwrap();
+
+    assert_eq!(engine.load_index_definitions().unwrap(), vec![index.clone()]);
+    assert_eq!(engine.load_index_options(&index.name).unwrap(), Some(options));
+}
+
+#[test]
+fn storage_transaction_commits_knowledge_policy_catalog_atomically() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let profile = DecayProfileSchema {
+        name: "slow_decay".to_string(),
+        half_life_seconds: 60,
+        visibility_threshold: 0.1,
+        score_floor: 0.0,
+        function: "exponential".to_string(),
+        scope: "NODE".to_string(),
+        decay_enabled: true,
+        score_from: "CREATED".to_string(),
+        score_from_property: None,
+        enabled: true,
+    };
+    let binding = DecayProfileBindingSchema {
+        name: "memory_binding".to_string(),
+        target_labels: vec!["MemoryEpisode".to_string()],
+        target_edge_type: None,
+        is_wildcard: false,
+        is_edge: false,
+        profile_ref: Some(profile.name.clone()),
+        no_decay: false,
+        visibility_threshold: None,
+        order: 1,
+    };
+
+    let mut transaction = engine.begin_transaction().unwrap();
+    transaction.put_decay_profile(profile.clone()).unwrap();
+    transaction.put_decay_binding(binding.clone()).unwrap();
+    assert!(engine.load_decay_profile_schemas().unwrap().is_empty());
+    assert!(engine.load_decay_profile_binding_schemas().unwrap().is_empty());
+    transaction.commit().unwrap();
+
+    assert_eq!(engine.load_decay_profile_schemas().unwrap(), vec![profile]);
+    assert_eq!(
+        engine.load_decay_profile_binding_schemas().unwrap(),
+        vec![binding]
+    );
+}
+
+#[test]
+fn storage_transaction_rolls_back_knowledge_policy_catalog() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let profile = DecayProfileSchema {
+        name: "slow_decay".to_string(),
+        half_life_seconds: 60,
+        visibility_threshold: 0.1,
+        score_floor: 0.0,
+        function: "exponential".to_string(),
+        scope: "NODE".to_string(),
+        decay_enabled: true,
+        score_from: "CREATED".to_string(),
+        score_from_property: None,
+        enabled: true,
+    };
+
+    let mut transaction = engine.begin_transaction().unwrap();
+    transaction.put_decay_profile(profile).unwrap();
+    transaction.rollback();
+
+    assert!(engine.load_decay_profile_schemas().unwrap().is_empty());
+}
+
+#[test]
+fn storage_transaction_rejects_a_knowledge_policy_catalog_changed_after_begin() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let external_profile = DecayProfileSchema {
+        name: "external_decay".to_string(),
+        half_life_seconds: 60,
+        visibility_threshold: 0.1,
+        score_floor: 0.0,
+        function: "exponential".to_string(),
+        scope: "NODE".to_string(),
+        decay_enabled: true,
+        score_from: "CREATED".to_string(),
+        score_from_property: None,
+        enabled: true,
+    };
+    let staged_profile = DecayProfileSchema {
+        name: "staged_decay".to_string(),
+        ..external_profile.clone()
+    };
+
+    let mut transaction = engine.begin_transaction().unwrap();
+    transaction.put_decay_profile(staged_profile).unwrap();
+    engine.persist_decay_profile_schema(&external_profile).unwrap();
+
+    assert!(matches!(
+        transaction.commit(),
+        Err(StorageError::TransactionConflict { logical_key, .. }) if logical_key == "knowledge_policy_catalog"
+    ));
+    assert_eq!(
+        engine.load_decay_profile_schemas().unwrap(),
+        vec![external_profile]
+    );
+}
+
+#[test]
 fn storage_transaction_persists_its_mvcc_boundary_across_reopen() {
     let test_dir = tempfile::tempdir().unwrap();
     let before_commit = {
         let engine = StorageEngine::open(test_dir.path()).unwrap();
         let snapshot = engine.begin_mvcc_snapshot();
-        let mut transaction = engine.begin_transaction();
+        let mut transaction = engine.begin_transaction().unwrap();
         transaction.put_node_record(sample_node("source", &["Node"]));
         transaction.put_node_record(sample_node("target", &["Node"]));
         transaction.put_edge_record(sample_edge("edge", "LINK", "source", "target"));
@@ -1474,7 +1678,7 @@ fn storage_transaction_persists_wal_frame_and_applied_marker_across_reopen() {
     let test_dir = tempfile::tempdir().unwrap();
     let applied_sequence = {
         let engine = StorageEngine::open(test_dir.path()).unwrap();
-        let mut transaction = engine.begin_transaction();
+        let mut transaction = engine.begin_transaction().unwrap();
         transaction.put_node_record(sample_node("source", &["Node"]));
         transaction.put_node_record(sample_node("target", &["Node"]));
         transaction.put_edge_record(sample_edge("edge", "LINK", "source", "target"));
@@ -1590,6 +1794,93 @@ fn storage_open_replays_unapplied_wal_transaction_frame_once() {
     assert_eq!(reopened.get_node_record(&node.id).unwrap(), Some(node));
     assert_eq!(reopened.wal_applied_sequence().unwrap(), sequence);
     assert_eq!(reopened.wal_stats().entries, 1);
+}
+
+#[test]
+fn storage_open_replays_unapplied_index_wal_transaction_frame_once() {
+    let test_dir = tempfile::tempdir().unwrap();
+    StorageEngine::open(test_dir.path()).unwrap();
+    let index = IndexDefinition {
+        name: "person_email_idx".to_string(),
+        entity_type: IndexEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["email".to_string()],
+        kind: IndexKind::Range,
+    };
+    let wal = WAL::open(
+        test_dir.path().join(STORAGE_WAL_FILENAME),
+        WALConfig::default(),
+    )
+    .unwrap();
+    let sequence = wal
+        .append_transaction(
+            "index-recovery-test",
+            vec![WALTransactionRecord {
+                op: "put_index".to_string(),
+                key: index.name.clone(),
+                payload: rmp_serde::to_vec(&index).unwrap(),
+            }],
+        )
+        .unwrap()
+        .seq;
+    drop(wal);
+
+    let recovered = StorageEngine::open(test_dir.path()).unwrap();
+    assert_eq!(recovered.load_index_definitions().unwrap(), vec![index.clone()]);
+    assert_eq!(recovered.wal_applied_sequence().unwrap(), sequence);
+    drop(recovered);
+
+    let reopened = StorageEngine::open(test_dir.path()).unwrap();
+    assert_eq!(reopened.load_index_definitions().unwrap(), vec![index]);
+    assert_eq!(reopened.wal_applied_sequence().unwrap(), sequence);
+}
+
+#[test]
+fn storage_open_replays_unapplied_knowledge_policy_catalog_wal_frame_once() {
+    let test_dir = tempfile::tempdir().unwrap();
+    StorageEngine::open(test_dir.path()).unwrap();
+    let profile = DecayProfileSchema {
+        name: "recovered_decay".to_string(),
+        half_life_seconds: 60,
+        visibility_threshold: 0.1,
+        score_floor: 0.0,
+        function: "exponential".to_string(),
+        scope: "NODE".to_string(),
+        decay_enabled: true,
+        score_from: "CREATED".to_string(),
+        score_from_property: None,
+        enabled: true,
+    };
+    let catalog = KnowledgePolicyCatalog {
+        decay_profiles: vec![profile.clone()],
+        ..KnowledgePolicyCatalog::default()
+    };
+    let wal = WAL::open(
+        test_dir.path().join(STORAGE_WAL_FILENAME),
+        WALConfig::default(),
+    )
+    .unwrap();
+    let sequence = wal
+        .append_transaction(
+            "policy-recovery-test",
+            vec![WALTransactionRecord {
+                op: "put_knowledge_policy_catalog".to_string(),
+                key: String::new(),
+                payload: rmp_serde::to_vec(&catalog).unwrap(),
+            }],
+        )
+        .unwrap()
+        .seq;
+    drop(wal);
+
+    let recovered = StorageEngine::open(test_dir.path()).unwrap();
+    assert_eq!(recovered.load_decay_profile_schemas().unwrap(), vec![profile.clone()]);
+    assert_eq!(recovered.wal_applied_sequence().unwrap(), sequence);
+    drop(recovered);
+
+    let reopened = StorageEngine::open(test_dir.path()).unwrap();
+    assert_eq!(reopened.load_decay_profile_schemas().unwrap(), vec![profile]);
+    assert_eq!(reopened.wal_applied_sequence().unwrap(), sequence);
 }
 
 #[test]
@@ -1781,7 +2072,7 @@ fn storage_open_discards_interrupted_wal_replacement_file() {
     let node = sample_node("durable", &["Node"]);
     {
         let engine = StorageEngine::open(test_dir.path()).unwrap();
-        let mut transaction = engine.begin_transaction();
+        let mut transaction = engine.begin_transaction().unwrap();
         transaction.put_node_record(node.clone());
         transaction.commit().unwrap();
     }
@@ -1924,7 +2215,7 @@ fn storage_inspects_healthy_checksum_corrupt_and_malformed_wals_without_repairin
 #[test]
 fn owned_storage_transaction_keeps_the_engine_alive_until_commit() {
     let engine = Arc::new(StorageEngine::open_temporary().unwrap());
-    let mut transaction = engine.begin_owned_transaction();
+    let mut transaction = engine.begin_owned_transaction().unwrap();
     transaction.put_node_record(sample_node("n1", &["Person"]));
     drop(engine);
 
@@ -1942,7 +2233,7 @@ fn storage_transaction_merges_writes_into_label_and_type_scans() {
         .put_edge_record(&sample_edge("old-edge", "KNOWS", "old", "old"))
         .unwrap();
 
-    let mut transaction = engine.begin_transaction();
+    let mut transaction = engine.begin_transaction().unwrap();
     transaction.put_node_record(sample_node("new", &["Person"]));
     transaction.put_node_record(sample_node("old", &["Device"]));
     transaction.put_edge_record(sample_edge("new-edge", "KNOWS", "new", "new"));
@@ -1982,7 +2273,7 @@ fn storage_transaction_merges_writes_into_full_and_adjacency_scans() {
         .put_edge_record(&sample_edge("old", "LINK", "source", "target"))
         .unwrap();
 
-    let mut transaction = engine.begin_transaction();
+    let mut transaction = engine.begin_transaction().unwrap();
     transaction.delete_node_record("target");
     transaction.delete_edge_record("old");
     transaction.put_node_record(sample_node("replacement", &["Node"]));
@@ -2016,7 +2307,7 @@ fn storage_transaction_rejects_a_write_newer_than_its_snapshot() {
         .put_node_record(&sample_node("n1", &["Person"]))
         .unwrap();
 
-    let mut transaction = engine.begin_transaction();
+    let mut transaction = engine.begin_transaction().unwrap();
     transaction.put_node_record(sample_node("n1", &["Device"]));
     engine
         .put_node_record(&sample_node("n1", &["Server"]))
@@ -2030,6 +2321,70 @@ fn storage_transaction_rejects_a_write_newer_than_its_snapshot() {
         engine.get_node_record("n1").unwrap(),
         Some(sample_node("n1", &["Server"]))
     );
+}
+
+#[test]
+fn storage_transaction_rejects_a_constraint_changed_after_begin() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let original = Constraint {
+        name: "person_email_unique".to_string(),
+        constraint_type: ConstraintType::Unique,
+        entity_type: ConstraintEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["email".to_string()],
+        type_name: None,
+        allowed_values: Vec::new(),
+    };
+    let replacement = Constraint {
+        properties: vec!["username".to_string()],
+        ..original.clone()
+    };
+
+    let mut transaction = engine.begin_transaction().unwrap();
+    transaction.put_constraint(original);
+    engine
+        .batch_write(|writer| {
+            writer.put_constraint(&replacement);
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+
+    assert!(matches!(
+        transaction.commit(),
+        Err(StorageError::TransactionConflict { logical_key, .. }) if logical_key == "constraint:person_email_unique"
+    ));
+    assert_eq!(engine.load_constraints().unwrap(), vec![replacement]);
+}
+
+#[test]
+fn storage_transaction_rejects_an_index_changed_after_begin() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let original = IndexDefinition {
+        name: "person_email_idx".to_string(),
+        entity_type: IndexEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["email".to_string()],
+        kind: IndexKind::Range,
+    };
+    let replacement = IndexDefinition {
+        properties: vec!["username".to_string()],
+        ..original.clone()
+    };
+
+    let mut transaction = engine.begin_transaction().unwrap();
+    transaction.put_index_definition(original);
+    engine
+        .batch_write(|writer| {
+            writer.put_index_definition(&replacement);
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+
+    assert!(matches!(
+        transaction.commit(),
+        Err(StorageError::TransactionConflict { logical_key, .. }) if logical_key == "index:person_email_idx"
+    ));
+    assert_eq!(engine.load_index_definitions().unwrap(), vec![replacement]);
 }
 
 #[test]
