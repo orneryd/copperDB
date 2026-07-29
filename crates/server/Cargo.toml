@@ -49,6 +49,7 @@ copperdb-storage = { workspace = true }
 rust-embed = "8"
 
 [dev-dependencies]
+bytes.workspace = true
 copperdb-compliance = { workspace = true }
 tempfile.workspace = true
 tonic.workspace = true

@@ -50,7 +50,7 @@ use copperdb_search::{
 use copperdb_security::{
     RequestTarget, RequestViolation, SecurityConfig, SecurityMiddleware, SecurityRequest,
 };
-use copperdb_storage::{StorageEngine, StorageTransaction};
+use copperdb_storage::{StorageEngine, StorageError, StorageTransaction};
 
 mod ui_assets;
 use copperdb_topology::{
@@ -1894,9 +1894,19 @@ impl QueryExecutor for AppStateBoltExecutor {
             .ok_or_else(|| {
                 BoltTransactionError::from("Bolt storage transaction is no longer active")
             })?;
-        storage_transaction
-            .commit()
-            .map_err(BoltTransactionError::from_error)?;
+        if let Err(error) = storage_transaction.commit() {
+            let is_conflict = matches!(&error, StorageError::TransactionConflict { .. });
+            storage_transactions.remove(&transaction_id);
+            drop(storage_transactions);
+            let _ = engine.tx_manager().rollback(transaction_id);
+            if is_conflict {
+                let _ = self
+                    .state
+                    .telemetry
+                    .record_counter("nornicdb_cypher_transaction_conflicts_total", &[]);
+            }
+            return Err(BoltTransactionError::from_error(error));
+        }
         storage_transactions.remove(&transaction_id);
         drop(storage_transactions);
         engine

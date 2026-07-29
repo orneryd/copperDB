@@ -2324,6 +2324,145 @@ fn storage_transaction_rejects_a_write_newer_than_its_snapshot() {
 }
 
 #[test]
+fn storage_transaction_rejects_an_edge_write_newer_than_its_snapshot() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let original = sample_edge("e1", "KNOWS", "n1", "n2");
+    engine.put_edge_record(&original).unwrap();
+
+    let mut transaction = engine.begin_transaction().unwrap();
+    let staged = EdgeRecord {
+        edge_type: "LIKES".to_string(),
+        ..original.clone()
+    };
+    transaction.put_edge_record(staged);
+    let external = EdgeRecord {
+        edge_type: "FOLLOWS".to_string(),
+        ..original.clone()
+    };
+    engine.put_edge_record(&external).unwrap();
+
+    assert!(matches!(
+        transaction.commit(),
+        Err(StorageError::TransactionConflict { logical_key, .. }) if logical_key == "edge:e1"
+    ));
+    assert_eq!(engine.get_edge_record("e1").unwrap(), Some(external));
+}
+
+#[test]
+fn storage_transaction_can_retry_an_edge_write_from_a_fresh_snapshot() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let original = sample_edge("e1", "KNOWS", "n1", "n2");
+    engine.put_edge_record(&original).unwrap();
+
+    let mut stale = engine.begin_transaction().unwrap();
+    stale.put_edge_record(EdgeRecord {
+        edge_type: "LIKES".to_string(),
+        ..original.clone()
+    });
+    let winner = EdgeRecord {
+        edge_type: "FOLLOWS".to_string(),
+        ..original.clone()
+    };
+    engine.put_edge_record(&winner).unwrap();
+    assert!(matches!(
+        stale.commit(),
+        Err(StorageError::TransactionConflict { logical_key, .. }) if logical_key == "edge:e1"
+    ));
+
+    let mut retry = engine.begin_transaction().unwrap();
+    let retried = EdgeRecord {
+        edge_type: "LIKES".to_string(),
+        ..winner.clone()
+    };
+    retry.put_edge_record(retried.clone());
+    retry.commit().unwrap();
+    assert_eq!(engine.get_edge_record("e1").unwrap(), Some(retried));
+}
+
+#[test]
+fn storage_transaction_allows_concurrent_edge_updates_with_identical_content() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let original = sample_edge("e1", "KNOWS", "n1", "n2");
+    engine.put_edge_record(&original).unwrap();
+
+    let mut transaction = engine.begin_transaction().unwrap();
+    let converged = EdgeRecord {
+        edge_type: "LIKES".to_string(),
+        ..original.clone()
+    };
+    transaction.put_edge_record(converged.clone());
+    engine.put_edge_record(&converged).unwrap();
+    let version_after_winner = engine.mvcc.head().head;
+
+    transaction.commit().unwrap();
+    assert_eq!(engine.mvcc.head().head, version_after_winner);
+    assert_eq!(engine.get_edge_record("e1").unwrap(), Some(converged));
+}
+
+#[test]
+fn storage_transaction_reports_not_found_when_a_snapshot_edge_was_deleted() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let edge = sample_edge("e1", "KNOWS", "n1", "n2");
+    engine.put_edge_record(&edge).unwrap();
+
+    let mut transaction = engine.begin_transaction().unwrap();
+    transaction.put_edge_record(EdgeRecord {
+        edge_type: "LIKES".to_string(),
+        ..edge
+    });
+    engine.delete_edge_record("e1").unwrap();
+
+    assert!(matches!(
+        transaction.commit(),
+        Err(StorageError::NotFound(message)) if message == "edge:e1"
+    ));
+    assert!(engine.get_edge_record("e1").unwrap().is_none());
+}
+
+#[test]
+fn storage_transaction_allows_independent_edge_writes_after_its_snapshot() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let first = sample_edge("e1", "KNOWS", "n1", "n2");
+    let second = sample_edge("e2", "KNOWS", "n2", "n3");
+    engine.put_edge_record(&first).unwrap();
+    engine.put_edge_record(&second).unwrap();
+
+    let mut transaction = engine.begin_transaction().unwrap();
+    let staged = EdgeRecord {
+        edge_type: "LIKES".to_string(),
+        ..first.clone()
+    };
+    transaction.put_edge_record(staged.clone());
+    let external = EdgeRecord {
+        edge_type: "FOLLOWS".to_string(),
+        ..second.clone()
+    };
+    engine.put_edge_record(&external).unwrap();
+
+    transaction.commit().unwrap();
+    assert_eq!(engine.get_edge_record("e1").unwrap(), Some(staged));
+    assert_eq!(engine.get_edge_record("e2").unwrap(), Some(external));
+}
+
+#[test]
+fn storage_transaction_allows_read_only_snapshot_after_edge_changes() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let edge = sample_edge("e1", "KNOWS", "n1", "n2");
+    engine.put_edge_record(&edge).unwrap();
+
+    let mut transaction = engine.begin_transaction().unwrap();
+    assert_eq!(transaction.get_edge_record("e1").unwrap(), Some(edge.clone()));
+    engine
+        .put_edge_record(&EdgeRecord {
+            edge_type: "LIKES".to_string(),
+            ..edge
+        })
+        .unwrap();
+
+    transaction.commit().unwrap();
+}
+
+#[test]
 fn storage_transaction_rejects_a_constraint_changed_after_begin() {
     let engine = StorageEngine::open_temporary().unwrap();
     let original = Constraint {

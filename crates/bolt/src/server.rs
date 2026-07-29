@@ -377,7 +377,11 @@ impl BoltServer {
         self.serve_listener(listener).await
     }
 
-    async fn serve_listener(&self, listener: TcpListener) -> Result<(), BoltError> {
+    /// Serve connections from a pre-bound listener.
+    ///
+    /// This supports hosts that own socket binding and integration tests that
+    /// need an ephemeral port without a bind/connect race.
+    pub async fn serve_listener(&self, listener: TcpListener) -> Result<(), BoltError> {
         loop {
             let (stream, peer_addr) = listener.accept().await?;
             let mut peek_buf = [0u8; 4];

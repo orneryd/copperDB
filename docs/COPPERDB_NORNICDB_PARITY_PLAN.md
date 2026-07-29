@@ -54,11 +54,11 @@ The first work must close verified audit findings. New feature expansion should 
    - Required behavior: validate `HELLO`/`LOGON`, carry principal and per-database roles, reject unauthenticated `RUN`, bind explicit transactions to their connection/session, implement rollback and commit semantics, support `PULL`/`DISCARD` pagination, and map transaction errors to Neo4j-compatible codes.
    - Exit tests: Bolt driver authentication, denied role access, commit visibility, rollback invisibility, disconnect cleanup, pagination, bookmark flow, and retryable error mapping.
 
-3. **Classify post-snapshot edge updates as retryable conflicts.**
+3. **Complete: classify post-snapshot edge updates as retryable conflicts.**
    - Upstream: commit `36f2e532`; `pkg/storage/badger_transaction.go`, `pkg/storage/badger_transaction_edge_update_snapshot_conflict_test.go`, and the Bolt E2E regression.
    - Copper targets: [crates/storage/src/lib.rs](../crates/storage/src/lib.rs), [crates/storage/src/mvcc.rs](../crates/storage/src/mvcc.rs), [crates/errors/src/lib.rs](../crates/errors/src/lib.rs), [crates/txsession/src/lib.rs](../crates/txsession/src/lib.rs), and Bolt error encoding.
-   - Required behavior: an edge changed after a transaction snapshot cannot be silently overwritten; commit detects the latest committed version and returns `Neo.TransientError.Transaction.Outdated` or the shared equivalent.
-   - Exit tests: storage conflict, Cypher `MERGE ... SET` conflict, Bolt E2E retry classification, and a non-conflicting control.
+   - Delivered behavior: edge conflict validation and commit share one serialized storage boundary; a post-snapshot edge change returns the typed `StorageError::TransactionConflict`, which maps to `Neo.TransientError.Transaction.Outdated`. Snapshot-visible deleted edges remain `NotFound`, while identical logical updates converge as timestamp-insensitive no-ops.
+   - Validated: storage stale/fresh/deleted/no-op and non-conflicting controls, an explicit Cypher `MERGE ... ON MATCH SET` race through the production executor, and a live TCP Bolt `FAILURE` response carrying `Neo.TransientError.Transaction.Outdated`.
 
 4. **Port NornicDB's Lucene-classic full-text query behavior.**
    - Upstream: commit `e090df01`; `pkg/cypher/fulltext_query.go`, `fulltext_query_test.go`, and `call_fulltext_parser_test.go`.
@@ -169,7 +169,7 @@ This ledger prevents recent NornicDB fixes from disappearing into broad package 
 
 | Upstream commit/family | Behavior | Copper disposition |
 | --- | --- | --- |
-| `36f2e532` | Retryable post-snapshot edge update conflict | P0, missing |
+| `36f2e532` | Retryable post-snapshot edge update conflict | P0, complete; storage, Cypher, and live Bolt regressions |
 | `20215f13`, `1837c8c7` | Auth defaults on and explicit precedence | P0, complete |
 | `e090df01` | Lucene-classic fulltext grammar | P0, missing |
 | `e4b84afe`, `883065cd` | Generalized OPTIONAL MATCH projection/aggregate behavior | P0, partial; exact tests required |

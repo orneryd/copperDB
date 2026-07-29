@@ -2,6 +2,45 @@
 
 use super::*;
 
+fn encode_bolt_message(signature: u8, fields: &[copperdb_bolt::packstream::Value]) -> Vec<u8> {
+    use bytes::BytesMut;
+
+    let mut bytes = BytesMut::new();
+    copperdb_bolt::packstream::encode_struct_header(&mut bytes, fields.len(), signature);
+    for field in fields {
+        copperdb_bolt::packstream::encode_value(&mut bytes, field);
+    }
+    bytes.to_vec()
+}
+
+fn encode_bolt_chunks(message: &[u8]) -> Vec<u8> {
+    let mut chunks = Vec::with_capacity(message.len() + 4);
+    chunks.extend_from_slice(&(message.len() as u16).to_be_bytes());
+    chunks.extend_from_slice(message);
+    chunks.extend_from_slice(&0u16.to_be_bytes());
+    chunks
+}
+
+async fn read_bolt_message(stream: &mut tokio::net::TcpStream) -> copperdb_bolt::packstream::Value {
+    use tokio::io::AsyncReadExt;
+
+    let mut message = Vec::new();
+    loop {
+        let mut header = [0u8; 2];
+        stream.read_exact(&mut header).await.unwrap();
+        let length = u16::from_be_bytes(header) as usize;
+        if length == 0 {
+            break;
+        }
+        let start = message.len();
+        message.resize(start + length, 0);
+        stream.read_exact(&mut message[start..]).await.unwrap();
+    }
+    copperdb_bolt::packstream::decode(&message)
+        .expect("Bolt response should be valid PackStream")
+        .0
+}
+
 #[test]
 fn open_engine_maps_storage_sync_writes_to_immediate_wal_durability() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -4351,6 +4390,161 @@ fn appstate_bolt_executor_discards_storage_context_on_rollback() {
 
     executor.rollback_transaction(&transaction).unwrap();
     assert!(executor.storage_transactions.lock().is_empty());
+}
+
+#[test]
+fn appstate_bolt_executor_reports_and_counts_edge_snapshot_conflicts() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(Arc::clone(&state));
+    let empty = HashMap::new();
+    executor
+        .execute_on_database(
+            Some("copperdb"),
+            "CREATE (:TxEdgeConflict {id: 'a'})-[:LINKS {value: 0}]->(:TxEdgeConflict {id: 'b'})",
+            &empty,
+        )
+        .expect("seed relationship should be created");
+
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .expect("BEGIN should create a transaction context");
+    executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "MATCH (a:TxEdgeConflict {id: 'a'}), (b:TxEdgeConflict {id: 'b'}) MERGE (a)-[r:LINKS]->(b) ON MATCH SET r.value = 1",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .expect("transactional relationship MERGE should stage an edge update");
+    executor
+        .execute_on_database(
+            Some("copperdb"),
+            "MATCH (:TxEdgeConflict {id: 'a'})-[r:LINKS]->(:TxEdgeConflict {id: 'b'}) SET r.value = 2",
+            &empty,
+        )
+        .expect("external relationship update should win the race");
+
+    let error = executor
+        .commit_transaction(&transaction)
+        .expect_err("stale relationship update must fail at commit");
+    assert!(error.to_string().contains("transaction conflict on edge:"));
+    assert!(
+        executor.storage_transactions.lock().is_empty(),
+        "a failed commit must discard its storage transaction context"
+    );
+    assert_eq!(
+        state
+            .telemetry
+            .snapshot_metric("nornicdb_cypher_transaction_conflicts_total")
+            .unwrap(),
+        vec![copperdb_otel::MetricSample {
+            labels: Vec::new(),
+            value: copperdb_otel::MetricValue::Counter(1.0),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn bolt_tcp_reports_outdated_for_a_live_edge_snapshot_conflict() {
+    use copperdb_bolt::packstream::Value;
+    use copperdb_bolt::server::{BoltServer, QueryExecutor};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = Arc::new(AppStateBoltExecutor::new(Arc::clone(&state)));
+    let empty = HashMap::new();
+    executor
+        .execute_on_database(
+            Some("copperdb"),
+            "CREATE (:BoltEdgeConflict {id: 'a'})-[:LINKS {value: 0}]->(:BoltEdgeConflict {id: 'b'})",
+            &empty,
+        )
+        .expect("seed relationship should be created");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = BoltServer::new(
+        address.to_string(),
+        Arc::clone(&state.telemetry),
+        Arc::clone(&executor) as Arc<dyn QueryExecutor>,
+    )
+    .with_auth_enabled(false);
+    let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    client
+        .write_all(&[
+            0x60, 0x60, 0xB0, 0x17, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x04, 0x03, 0x00,
+            0x00, 0x04, 0x02, 0x00, 0x00, 0x04, 0x01,
+        ])
+        .await
+        .unwrap();
+    let mut version = [0u8; 4];
+    client.read_exact(&mut version).await.unwrap();
+    assert_eq!(version, [0x00, 0x00, 0x04, 0x04]);
+
+    for (signature, fields) in [
+        (
+            0x01,
+            vec![Value::Map(vec![ (
+                "user_agent".into(),
+                Value::String("copperdb-edge-conflict-test".into()),
+            )])],
+        ),
+        (0x11, vec![Value::Map(vec![])]),
+        (
+            0x10,
+            vec![
+                Value::String(
+                    "MATCH (a:BoltEdgeConflict {id: 'a'}), (b:BoltEdgeConflict {id: 'b'}) MERGE (a)-[r:LINKS]->(b) ON MATCH SET r.value = 1".into(),
+                ),
+                Value::Map(vec![]),
+                Value::Map(vec![]),
+            ],
+        ),
+    ] {
+        client
+            .write_all(&encode_bolt_chunks(&encode_bolt_message(signature, &fields)))
+            .await
+            .unwrap();
+        let Value::Struct { signature, .. } = read_bolt_message(&mut client).await else {
+            panic!("expected Bolt SUCCESS response");
+        };
+        assert_eq!(signature, 0x70);
+    }
+
+    executor
+        .execute_on_database(
+            Some("copperdb"),
+            "MATCH (:BoltEdgeConflict {id: 'a'})-[r:LINKS]->(:BoltEdgeConflict {id: 'b'}) SET r.value = 2",
+            &empty,
+        )
+        .expect("external relationship update should win the race");
+
+    client
+        .write_all(&encode_bolt_chunks(&encode_bolt_message(0x12, &[])))
+        .await
+        .unwrap();
+    let Value::Struct { signature, fields } = read_bolt_message(&mut client).await else {
+        panic!("expected Bolt FAILURE response");
+    };
+    assert_eq!(signature, 0x7F);
+    let [Value::Map(metadata)] = fields.as_slice() else {
+        panic!("expected Bolt FAILURE metadata");
+    };
+    assert_eq!(
+        metadata.iter().find_map(|(key, value)| {
+            (key == "code").then_some(value)
+        }),
+        Some(&Value::String(
+            "Neo.TransientError.Transaction.Outdated".into()
+        ))
+    );
+
+    server_task.abort();
 }
 
 #[test]

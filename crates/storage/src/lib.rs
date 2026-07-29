@@ -2264,12 +2264,13 @@ fn install_storage_snapshot_entries(
         F: FnOnce(&mut BatchWriter<'_>) -> Result<(), E>,
         E: From<StorageError>,
     {
+        let _commit_guard = self.batch_commit_lock.lock();
         let mut writer = BatchWriter {
             engine: self,
             ops: Vec::new(),
         };
         f(&mut writer)?;
-        writer.commit()?;
+        writer.commit_locked(None)?;
         Ok(())
     }
 
@@ -5735,6 +5736,7 @@ impl<'a> StorageTransaction<'a> {
     }
 
     pub fn commit(&mut self) -> Result<(), StorageError> {
+        self.discard_noop_edge_writes()?;
         self.ensure_no_write_conflicts()?;
         self.engine().batch_write(|batch| {
             for (name, constraint) in &self.constraint_writes {
@@ -5780,6 +5782,24 @@ impl<'a> StorageTransaction<'a> {
         self.index_option_writes.clear();
         self.node_writes.clear();
         self.edge_writes.clear();
+        Ok(())
+    }
+
+    fn discard_noop_edge_writes(&mut self) -> Result<(), StorageError> {
+        let mut no_op_ids = Vec::new();
+        for (id, staged) in &self.edge_writes {
+            let Some(staged) = staged else {
+                continue;
+            };
+            if let Some(current) = self.engine().get_edge_record(id)? {
+                if edge_content_matches(staged, &current) {
+                    no_op_ids.push(id.clone());
+                }
+            }
+        }
+        for id in no_op_ids {
+            self.edge_writes.remove(&id);
+        }
         Ok(())
     }
 
@@ -5829,7 +5849,16 @@ impl<'a> StorageTransaction<'a> {
         for id in self.node_writes.keys() {
             self.ensure_key_is_unmodified_since_snapshot(&format!("node:{id}"))?;
         }
-        for id in self.edge_writes.keys() {
+        for (id, edge) in &self.edge_writes {
+            if edge.is_some()
+                && self
+                    .engine()
+                    .get_edge_record_visible_at(self.snapshot.snapshot(), id)?
+                    .is_some()
+                && self.engine().get_edge_record(id)?.is_none()
+            {
+                return Err(StorageError::NotFound(format!("edge:{id}")));
+            }
             self.ensure_key_is_unmodified_since_snapshot(&format!("edge:{id}"))?;
         }
         Ok(())
@@ -5852,6 +5881,14 @@ impl<'a> StorageTransaction<'a> {
         }
         Ok(())
     }
+}
+
+fn edge_content_matches(left: &EdgeRecord, right: &EdgeRecord) -> bool {
+    left.id == right.id
+        && left.start_node == right.start_node
+        && left.end_node == right.end_node
+        && left.edge_type == right.edge_type
+        && left.properties == right.properties
 }
 
 impl<'a> BatchWriter<'a> {
@@ -5906,11 +5943,16 @@ impl<'a> BatchWriter<'a> {
     }
 
     fn commit(&self) -> Result<(), StorageError> {
-        self.commit_with_wal_sequence(None)
+        let _commit_guard = self.engine.batch_commit_lock.lock();
+        self.commit_locked(None)
     }
 
     fn commit_with_wal_sequence(&self, replay_sequence: Option<u64>) -> Result<(), StorageError> {
         let _commit_guard = self.engine.batch_commit_lock.lock();
+        self.commit_locked(replay_sequence)
+    }
+
+    fn commit_locked(&self, replay_sequence: Option<u64>) -> Result<(), StorageError> {
         let mut nodes = HashMap::<String, (Option<NodeRecord>, Option<NodeRecord>)>::new();
         let mut edges = HashMap::<String, (Option<EdgeRecord>, Option<EdgeRecord>)>::new();
         let mut constraints = BTreeMap::<String, Option<Constraint>>::new();
