@@ -22,5 +22,9 @@ parking_lot.workspace = true
 time = { workspace = true, features = ["formatting", "parsing"] }
 copperdb-auth = { workspace = true }
 copperdb-eval = { workspace = true }
+copperdb-errors = { workspace = true }
 copperdb-util = { workspace = true }
 copperdb-otel = { workspace = true }
+
+[dev-dependencies]
+neo4rs = "0.9.0-rc.10"

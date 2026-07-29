@@ -1,6 +1,6 @@
 # 02: Bolt Authentication And Explicit Transactions
 
-Status: in progress. Priority: P0. Owners: `bolt`, `server`, `auth`, `engine`, `txsession`, `storage`, `errors`.
+Status: complete. Priority: P0. Owners: `bolt`, `server`, `auth`, `engine`, `txsession`, `storage`, `errors`.
 
 ## Objective
 
@@ -35,7 +35,9 @@ Bolt 4 `HELLO` and Bolt 5 `LOGON` authenticate against the shared authenticator.
 - Complete: `RUN` carries the active transaction handle through the executor boundary and is pinned to the database selected at `BEGIN`; an attempt to switch databases during a transaction fails without executing the query.
 - Complete: Phase 3. `AppStateBoltExecutor` owns an `Arc`-backed `StorageTransaction` for each Bolt transaction, routes transactional `RUN` through the private storage overlay, commits that overlay before issuing the engine bookmark, and discards it on rollback. Server regressions prove read-your-writes, private node and relationship visibility, durable commit publication, and rollback invisibility.
 - Complete: Phase 4. `RESET`, `LOGOFF`, TCP and WebSocket teardown, transport and handler errors, idle receive timeouts, and failed transactional `RUN` all roll back an active explicit transaction through one idempotent cleanup path. Durable commit removes the active handle before its logical bookmark commit, so later cleanup cannot report a rollback after the storage commit decision. Regressions cover disconnect, timeout, and failed-query cleanup.
-- In progress: Phase 5. `RUN` assigns bounded per-session result cursors and returns `qid`; `PULL` and `DISCARD` honor both `n` and `qid`, emit `has_more` only when rows remain, support `qid: -1` for the latest cursor, and reject unknown cursors. Terminal summaries include engine-backed Neo4j mutation counters and the most recent explicit-commit bookmark. Explicit `BEGIN` and implicit `RUN` both validate supplied bookmarks through the transaction-manager read fence before execution. Regressions cover partial pull, discard, invalid qid, multiple cursor selection, counter propagation, and bookmark forwarding/validation. Notifications remain.
+- Complete: Phase 5. `RUN` assigns bounded per-session result cursors and returns `qid`; `PULL` and `DISCARD` honor both `n` and `qid`, emit `has_more` only when rows remain, support `qid: -1` for the latest cursor, and reject unknown cursors. Terminal summaries include engine-backed Neo4j mutation counters, the most recent explicit-commit bookmark, and structured notifications supplied by query executors; the current engine emits an empty notification list when it has no diagnostics. Explicit `BEGIN` and implicit `RUN` both validate supplied bookmarks through the transaction-manager read fence before execution. Regressions cover partial pull, discard, invalid qid, multiple cursor selection, counter propagation, bookmark forwarding/validation, and notification encoding.
+- Complete: Phase 6. Bolt commit failures use `copperdb-errors` to classify typed transaction failures before they cross the protocol boundary. A durable `StorageError::TransactionConflict` is encoded as the Neo4j retryable status `Neo.TransientError.Transaction.Outdated`; ordinary commit failures retain `Neo.ClientError.Transaction.TransactionCommitFailed`. The Bolt regression exercises the driver-facing failure metadata.
+- Complete: driver E2E covers both transports. The `neo4rs` TCP integration test connects to an ephemeral Bolt listener, executes `RETURN 1`, and decodes records. The browser-channel `neo4j-driver` test uses the UI dependency through WebSocket, forces one-record pagination, and completes an explicit `BEGIN`/`RUN`/`COMMIT` transaction. These tests exposed and fixed required TCP Bolt chunk framing for both requests and responses.
 
 ## Tests
 
@@ -46,7 +48,7 @@ Bolt 4 `HELLO` and Bolt 5 `LOGON` authenticate against the shared authenticator.
 - Bookmark chaining and retryable error status.
 - Driver E2E tests over TCP and WebSocket.
 
-Run `cargo test -p copperdb-bolt --lib`, `cargo test -p copperdb-txsession`, `cargo test -p copperdb-server bolt`, then driver integration tests.
+Run `npm ci --prefix ui`, `cargo test -p copperdb-bolt --lib`, `cargo test -p copperdb-txsession`, and `cargo test -p copperdb-server bolt`.
 
 ## Performance And Risks
 

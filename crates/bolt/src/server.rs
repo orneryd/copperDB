@@ -8,7 +8,9 @@ use crate::messages::BoltMessage;
 use crate::packstream::Value;
 use crate::wsconn;
 use crate::BoltError;
+use copperdb_errors::{map_transient_transaction_error, TransientTransactionCode};
 use copperdb_otel::Telemetry;
+use std::error::Error;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -27,6 +29,7 @@ pub struct BoltQueryResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,
     pub stats: BoltResultStats,
+    pub notifications: Vec<BoltNotification>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -39,6 +42,15 @@ pub struct BoltResultStats {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoltNotification {
+    pub code: String,
+    pub title: String,
+    pub description: String,
+    pub severity: String,
+    pub category: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoltPrincipal {
     pub username: String,
     pub roles: Vec<String>,
@@ -48,6 +60,51 @@ pub struct BoltPrincipal {
 pub struct BoltTransaction {
     pub id: String,
     pub database: String,
+}
+
+#[derive(Debug)]
+pub struct BoltTransactionError {
+    message: String,
+    transient_code: Option<TransientTransactionCode>,
+}
+
+impl BoltTransactionError {
+    pub fn from_error<E>(error: E) -> Self
+    where
+        E: Error + 'static,
+    {
+        Self {
+            message: error.to_string(),
+            transient_code: map_transient_transaction_error(&error),
+        }
+    }
+
+    fn neo4j_code(&self, fallback: &'static str) -> &'static str {
+        self.transient_code
+            .map(TransientTransactionCode::as_neo4j_code)
+            .unwrap_or(fallback)
+    }
+}
+
+impl std::fmt::Display for BoltTransactionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(formatter)
+    }
+}
+
+impl From<String> for BoltTransactionError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            transient_code: None,
+        }
+    }
+}
+
+impl From<&str> for BoltTransactionError {
+    fn from(message: &str) -> Self {
+        Self::from(message.to_owned())
+    }
 }
 
 pub trait BoltAuthProvider: Send + Sync {
@@ -127,7 +184,10 @@ pub trait QueryExecutor: Send + Sync {
         Err("explicit transactions are not supported by this executor".into())
     }
 
-    fn commit_transaction(&self, _transaction: &BoltTransaction) -> Result<String, String> {
+    fn commit_transaction(
+        &self,
+        _transaction: &BoltTransaction,
+    ) -> Result<String, BoltTransactionError> {
         Err("explicit transactions are not supported by this executor".into())
     }
 
@@ -199,6 +259,7 @@ impl QueryExecutor for NoopExecutor {
                     serde_json::json!([]),
                 ]],
                 stats: BoltResultStats::default(),
+                notifications: vec![],
             });
         }
         if upper.starts_with("CALL DBMS.CLUSTER.OVERVIEW") {
@@ -218,6 +279,7 @@ impl QueryExecutor for NoopExecutor {
                     serde_json::json!(null),
                 ]],
                 stats: BoltResultStats::default(),
+                notifications: vec![],
             });
         }
         // For MATCH ... RETURN queries, return empty rows with proper column names
@@ -227,12 +289,14 @@ impl QueryExecutor for NoopExecutor {
                 columns: vec!["n".into()],
                 rows: vec![],
                 stats: BoltResultStats::default(),
+                notifications: vec![],
             });
         }
         Ok(BoltQueryResult {
             columns: vec![],
             rows: vec![],
             stats: BoltResultStats::default(),
+            notifications: vec![],
         })
     }
 }
@@ -310,6 +374,10 @@ impl BoltServer {
 
     pub async fn serve(&self) -> Result<(), BoltError> {
         let listener = TcpListener::bind(&self.listen_addr).await?;
+        self.serve_listener(listener).await
+    }
+
+    async fn serve_listener(&self, listener: TcpListener) -> Result<(), BoltError> {
         loop {
             let (stream, peer_addr) = listener.accept().await?;
             let mut peek_buf = [0u8; 4];
@@ -484,10 +552,10 @@ async fn handle_tcp_session_with_timeout(
     info!(%peer, "bolt tcp version 4.4 sent, entering message loop");
 
     let mut session = BoltSession::new(auth_enabled);
-    let mut read_buf = Vec::with_capacity(4096);
+    let mut decoder = wsconn::BoltChunkDecoder::new();
     let mut temp_buf = [0u8; 4096];
 
-    let result = loop {
+    let result = 'session_loop: loop {
         let bytes_read = match tokio::time::timeout(receive_timeout, stream.read(&mut temp_buf)).await {
             Ok(Ok(bytes_read)) => bytes_read,
             Ok(Err(error)) => break Err(error.into()),
@@ -496,18 +564,19 @@ async fn handle_tcp_session_with_timeout(
         if bytes_read == 0 {
             break Ok(());
         }
-        read_buf.extend_from_slice(&temp_buf[..bytes_read]);
-        if let Err(error) = process_buffer(
-            &mut read_buf,
-            stream,
-            &mut session,
-            telemetry,
-            Arc::clone(&executor),
-            auth_provider.clone(),
-        )
-        .await
-        {
-            break Err(error);
+        for frame in decoder.push(&temp_buf[..bytes_read]) {
+            if let Err(error) = process_buffer(
+                &frame,
+                stream,
+                &mut session,
+                telemetry,
+                Arc::clone(&executor),
+                auth_provider.clone(),
+            )
+            .await
+            {
+                break 'session_loop Err(error);
+            }
         }
     };
     rollback_active_transaction(&mut session, executor.as_ref());
@@ -658,69 +727,64 @@ where
     result
 }
 
-/// Process buffered bytes, dispatching complete messages and writing responses.
+/// Process one decoded Bolt chunk frame and write chunk-framed responses.
 async fn process_buffer(
-    read_buf: &mut Vec<u8>,
+    frame: &[u8],
     stream: &mut TcpStream,
     session: &mut BoltSession,
     telemetry: &Telemetry,
     executor: Arc<dyn QueryExecutor>,
     auth_provider: Option<Arc<dyn BoltAuthProvider>>,
 ) -> Result<(), BoltError> {
-    loop {
-        match crate::packstream::decode(read_buf) {
-            Ok((value, consumed)) => {
-                read_buf.drain(..consumed);
-                let (op, result) = match process_message(
-                    &value,
-                    session,
-                    Arc::clone(&executor),
-                    auth_provider.clone(),
-                )
-                .await
-                {
-                    Ok(responses) => {
-                        let len = responses.len();
-                        for response_bytes in responses.iter() {
-                            info!(len = response_bytes.len(), "bolt sending response");
-                            stream.write_all(response_bytes).await?;
-                        }
-                        if len > 0 {
-                            info!("bolt TCP responses sent");
-                        }
-                        ("run", "success")
-                    }
-                    Err(e) => {
-                        let failure = BoltMessage::Failure {
-                            metadata: HashMap::from([
-                                (
-                                    "code".into(),
-                                    serde_json::json!("Neo.TransientError.General.UnknownError"),
-                                ),
-                                ("message".into(), serde_json::json!(e.to_string())),
-                            ]),
-                        };
-                        let fb = dispatch::encode_message(&failure);
-                        stream.write_all(&fb).await?;
-                        ("run", "error")
-                    }
-                };
-                let _ = telemetry.record_counter(
-                    "nornicdb_bolt_messages_total",
-                    &[("op", op), ("result", result)],
-                );
-            }
-            Err(BoltError::PackStream(ref msg))
-                if msg.contains("unexpected end") || msg.contains("truncated") =>
-            {
-                break
-            }
-            Err(e) => return Err(e),
-        }
-        if read_buf.is_empty() {
-            break;
-        }
+    let (value, consumed) = crate::packstream::decode(frame)?;
+    if consumed != frame.len() {
+        return Err(BoltError::ProtocolViolation(format!(
+            "trailing bytes after Bolt message: {}",
+            frame.len() - consumed
+        )));
     }
+    let (op, result) = match process_message(
+        &value,
+        session,
+        Arc::clone(&executor),
+        auth_provider,
+    )
+    .await
+    {
+        Ok(responses) => {
+            let len = responses.len();
+            for response_bytes in responses {
+                info!(len = response_bytes.len(), "bolt sending response");
+                stream
+                    .write_all(&wsconn::encode_bolt_chunks(&response_bytes))
+                    .await?;
+            }
+            if len > 0 {
+                info!("bolt TCP responses sent");
+            }
+            ("run", "success")
+        }
+        Err(e) => {
+            let failure = BoltMessage::Failure {
+                metadata: HashMap::from([
+                    (
+                        "code".into(),
+                        serde_json::json!("Neo.TransientError.General.UnknownError"),
+                    ),
+                    ("message".into(), serde_json::json!(e.to_string())),
+                ]),
+            };
+            let response = dispatch::encode_message(&failure);
+            stream
+                .write_all(&wsconn::encode_bolt_chunks(&response))
+                .await?;
+            ("run", "error")
+        }
+    };
+    let _ = telemetry.record_counter(
+        "nornicdb_bolt_messages_total",
+        &[("op", op), ("result", result)],
+    );
     Ok(())
 }
 
@@ -873,6 +937,7 @@ fn cursor_summary(
     database: Option<&str>,
     has_more: bool,
     stats: &BoltResultStats,
+    notifications: &[BoltNotification],
 ) -> Vec<Vec<u8>> {
     let mut metadata = HashMap::from([
         ("type".into(), serde_json::json!("r")),
@@ -901,6 +966,21 @@ fn cursor_summary(
             "properties-set": stats.properties_set,
         }),
     );
+    if !notifications.is_empty() {
+        metadata.insert(
+            "notifications".into(),
+            serde_json::json!(notifications
+                .iter()
+                .map(|notification| serde_json::json!({
+                    "code": notification.code,
+                    "title": notification.title,
+                    "description": notification.description,
+                    "severity": notification.severity,
+                    "category": notification.category,
+                }))
+                .collect::<Vec<_>>()),
+        );
+    }
     vec![dispatch::encode_message(&BoltMessage::Success { metadata })]
 }
 
@@ -1131,6 +1211,7 @@ async fn process_message(
             let has_more = cursor.index < cursor.result.rows.len();
             let database = cursor.database.clone();
             let stats = cursor.result.stats.clone();
+            let notifications = cursor.result.notifications.clone();
             if !has_more {
                 session.cursors.remove(&qid);
                 if session.last_qid == Some(qid) {
@@ -1141,7 +1222,13 @@ async fn process_message(
                 .into_iter()
                 .map(|row| dispatch::encode_message(&BoltMessage::Record { data: row }))
                 .collect();
-            responses.extend(cursor_summary(session, database.as_deref(), has_more, &stats));
+            responses.extend(cursor_summary(
+                session,
+                database.as_deref(),
+                has_more,
+                &stats,
+                &notifications,
+            ));
             Ok(responses)
         }
         BoltMessage::Begin { extra } => {
@@ -1188,9 +1275,9 @@ async fn process_message(
                         metadata: HashMap::from([("bookmark".into(), serde_json::json!(bookmark))]),
                     })])
                 }
-                Err(message) => Ok(transaction_failure_response(
-                    "Neo.ClientError.Transaction.TransactionCommitFailed",
-                    &message,
+                Err(error) => Ok(transaction_failure_response(
+                    error.neo4j_code("Neo.ClientError.Transaction.TransactionCommitFailed"),
+                    &error.to_string(),
                 )),
             }
         }
@@ -1239,6 +1326,7 @@ async fn process_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use neo4rs::{query, ConfigBuilder, Graph};
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -1317,6 +1405,8 @@ mod tests {
 
     struct MutationStatsExecutor;
 
+    struct NotificationExecutor;
+
     struct BookmarkRecordingExecutor {
         bookmarks: Arc<Mutex<Vec<String>>>,
     }
@@ -1331,6 +1421,7 @@ mod tests {
                 columns: vec![],
                 rows: vec![],
                 stats: BoltResultStats::default(),
+                notifications: vec![],
             })
         }
 
@@ -1363,6 +1454,28 @@ mod tests {
                     properties_set: 3,
                     ..BoltResultStats::default()
                 },
+                notifications: vec![],
+            })
+        }
+    }
+
+    impl QueryExecutor for NotificationExecutor {
+        fn execute(
+            &self,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+        ) -> Result<BoltQueryResult, String> {
+            Ok(BoltQueryResult {
+                columns: vec![],
+                rows: vec![],
+                stats: BoltResultStats::default(),
+                notifications: vec![BoltNotification {
+                    code: "Neo.ClientNotification.Statement.UnknownLabelWarning".into(),
+                    title: "Unknown label".into(),
+                    description: "The query references an unknown label.".into(),
+                    severity: "WARNING".into(),
+                    category: "UNRECOGNIZED".into(),
+                }],
             })
         }
     }
@@ -1381,7 +1494,38 @@ mod tests {
                     vec![serde_json::json!(3)],
                 ],
                 stats: BoltResultStats::default(),
+                notifications: vec![],
             })
+        }
+
+        fn begin_transaction(
+            &self,
+            database: &str,
+            _metadata: &HashMap<String, serde_json::Value>,
+            _principal: Option<&BoltPrincipal>,
+        ) -> Result<BoltTransaction, String> {
+            Ok(BoltTransaction {
+                id: "driver-e2e-transaction".into(),
+                database: database.into(),
+            })
+        }
+
+        fn commit_transaction(
+            &self,
+            _transaction: &BoltTransaction,
+        ) -> Result<String, BoltTransactionError> {
+            Ok("copperdb:bookmark:driver-e2e".into())
+        }
+
+        fn execute_in_transaction_with_context(
+            &self,
+            _transaction: &BoltTransaction,
+            query: &str,
+            params: &HashMap<String, serde_json::Value>,
+            _request_context: copperdb_util::RequestContext,
+            _principal: Option<&BoltPrincipal>,
+        ) -> Result<BoltQueryResult, String> {
+            self.execute(query, params)
         }
     }
 
@@ -1395,6 +1539,7 @@ mod tests {
                 columns: vec![],
                 rows: vec![],
                 stats: BoltResultStats::default(),
+                notifications: vec![],
             })
         }
 
@@ -1425,6 +1570,7 @@ mod tests {
                 columns: vec![],
                 rows: vec![],
                 stats: BoltResultStats::default(),
+                notifications: vec![],
             })
         }
 
@@ -1441,7 +1587,10 @@ mod tests {
             })
         }
 
-        fn commit_transaction(&self, _transaction: &BoltTransaction) -> Result<String, String> {
+        fn commit_transaction(
+            &self,
+            _transaction: &BoltTransaction,
+        ) -> Result<String, BoltTransactionError> {
             self.operations.lock().unwrap().push("commit");
             Ok("copperdb:bookmark:test".into())
         }
@@ -1468,6 +1617,44 @@ mod tests {
         operations: Arc<Mutex<Vec<&'static str>>>,
     }
 
+    struct ConflictingTransactionExecutor;
+
+    impl QueryExecutor for ConflictingTransactionExecutor {
+        fn execute(
+            &self,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+        ) -> Result<BoltQueryResult, String> {
+            Ok(BoltQueryResult {
+                columns: vec![],
+                rows: vec![],
+                stats: BoltResultStats::default(),
+                notifications: vec![],
+            })
+        }
+
+        fn begin_transaction(
+            &self,
+            database: &str,
+            _metadata: &HashMap<String, serde_json::Value>,
+            _principal: Option<&BoltPrincipal>,
+        ) -> Result<BoltTransaction, String> {
+            Ok(BoltTransaction {
+                id: "conflicting-transaction".into(),
+                database: database.into(),
+            })
+        }
+
+        fn commit_transaction(
+            &self,
+            _transaction: &BoltTransaction,
+        ) -> Result<String, BoltTransactionError> {
+            Err(BoltTransactionError::from_error(
+                copperdb_errors::CopperDbError::TransactionConflict,
+            ))
+        }
+    }
+
     impl QueryExecutor for FailingTransactionExecutor {
         fn execute(
             &self,
@@ -1478,6 +1665,7 @@ mod tests {
                 columns: vec![],
                 rows: vec![],
                 stats: BoltResultStats::default(),
+                notifications: vec![],
             })
         }
 
@@ -1760,6 +1948,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retryable_commit_conflicts_use_the_neo4j_outdated_status() {
+        let provider: Arc<dyn BoltAuthProvider> = Arc::new(TestAuthProvider);
+        let executor: Arc<dyn QueryExecutor> = Arc::new(ConflictingTransactionExecutor);
+        let begin = Value::Struct {
+            signature: 0x11,
+            fields: vec![Value::Map(vec![])],
+        };
+        let commit = Value::Struct {
+            signature: 0x12,
+            fields: vec![],
+        };
+        let mut session = BoltSession::new(true);
+
+        response_signature(
+            &logon_message("reader", "correct-password"),
+            &mut session,
+            Some(Arc::clone(&provider)),
+        )
+        .await;
+        assert_eq!(
+            response_signature_with_executor(
+                &begin,
+                &mut session,
+                Arc::clone(&executor),
+                Some(Arc::clone(&provider)),
+            )
+            .await,
+            0x70
+        );
+        assert_eq!(
+            failure_code_with_executor(&commit, &mut session, executor, Some(provider)).await,
+            "Neo.TransientError.Transaction.Outdated"
+        );
+    }
+
+    #[tokio::test]
     async fn transaction_run_uses_active_transaction_and_rejects_database_switches() {
         let provider: Arc<dyn BoltAuthProvider> = Arc::new(TestAuthProvider);
         let operations = Arc::new(Mutex::new(Vec::new()));
@@ -1967,6 +2191,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_result_summary_includes_notifications() {
+        let mut session = BoltSession::new(false);
+        let executor: Arc<dyn QueryExecutor> = Arc::new(NotificationExecutor);
+
+        process_message(&run_message(), &mut session, Arc::clone(&executor), None)
+            .await
+            .unwrap();
+        let pull = Value::Struct {
+            signature: 0x3F,
+            fields: vec![Value::Integer(-1), Value::Integer(-1)],
+        };
+        let responses = process_message(&pull, &mut session, executor, None)
+            .await
+            .unwrap();
+        let (summary, _) = crate::packstream::decode(&responses[0]).unwrap();
+        let Value::Struct { fields, .. } = summary else {
+            panic!("expected terminal result summary");
+        };
+        let [Value::Map(metadata)] = fields.as_slice() else {
+            panic!("expected summary metadata");
+        };
+        let notifications = metadata
+            .iter()
+            .find_map(|(key, value)| (key == "notifications").then_some(value))
+            .expect("expected notifications metadata");
+        let Value::List(notifications) = notifications else {
+            panic!("expected notifications list");
+        };
+        let [Value::Map(notification)] = notifications.as_slice() else {
+            panic!("expected one notification");
+        };
+        assert!(notification.iter().any(|(key, value)| {
+            key == "code"
+                && value
+                    == &Value::String(
+                        "Neo.ClientNotification.Statement.UnknownLabelWarning".into(),
+                    )
+        }));
+        assert!(notification.iter().any(|(key, value)| {
+            key == "severity" && value == &Value::String("WARNING".into())
+        }));
+        assert!(notification.iter().any(|(key, value)| {
+            key == "category" && value == &Value::String("UNRECOGNIZED".into())
+        }));
+    }
+
+    #[tokio::test]
     async fn implicit_run_forwards_bookmarks_to_the_executor() {
         let recorded_bookmarks = Arc::new(Mutex::new(Vec::new()));
         let executor: Arc<dyn QueryExecutor> = Arc::new(BookmarkRecordingExecutor {
@@ -2086,7 +2357,7 @@ mod tests {
                 ("scheme".into(), Value::String("none".into())),
             ])],
         );
-        client.write_all(&hello_bytes).await.unwrap();
+        client.write_all(&chunk_encode(&hello_bytes)).await.unwrap();
 
         // Read SUCCESS response
         let mut resp_buf = Vec::new();
@@ -2095,7 +2366,8 @@ mod tests {
         assert!(n > 0, "should receive SUCCESS response for HELLO");
         resp_buf.extend_from_slice(&tmp[..n]);
 
-        let (value, _consumed) = crate::packstream::decode(&resp_buf).unwrap();
+        let response = chunk_decode(&resp_buf);
+        let (value, _consumed) = crate::packstream::decode(&response).unwrap();
         match value {
             Value::Struct { signature, fields } => {
                 assert_eq!(
@@ -2124,14 +2396,15 @@ mod tests {
                 Value::Map(vec![]),
             ],
         );
-        client.write_all(&run_bytes).await.unwrap();
+        client.write_all(&chunk_encode(&run_bytes)).await.unwrap();
 
         // Read SUCCESS for RUN
         resp_buf.clear();
         let n = client.read(&mut tmp).await.unwrap();
         assert!(n > 0, "should receive SUCCESS for RUN");
         resp_buf.extend_from_slice(&tmp[..n]);
-        let (value, _) = crate::packstream::decode(&resp_buf).unwrap();
+        let response = chunk_decode(&resp_buf);
+        let (value, _) = crate::packstream::decode(&response).unwrap();
         match value {
             Value::Struct { signature, .. } => {
                 assert_eq!(
@@ -2144,14 +2417,15 @@ mod tests {
 
         // Step 4: Send PULL (Bolt 4.x: two direct integer fields)
         let pull_bytes = encode_bolt_struct(0x3F, &[Value::Integer(-1), Value::Integer(-1)]);
-        client.write_all(&pull_bytes).await.unwrap();
+        client.write_all(&chunk_encode(&pull_bytes)).await.unwrap();
 
         // Read SUCCESS for PULL (stream done)
         resp_buf.clear();
         let n = client.read(&mut tmp).await.unwrap();
         assert!(n > 0, "should receive SUCCESS for PULL");
         resp_buf.extend_from_slice(&tmp[..n]);
-        let (value, _) = crate::packstream::decode(&resp_buf).unwrap();
+        let response = chunk_decode(&resp_buf);
+        let (value, _) = crate::packstream::decode(&response).unwrap();
         match value {
             Value::Struct { signature, .. } => {
                 assert_eq!(
@@ -2256,7 +2530,7 @@ mod tests {
         client.read_exact(&mut version).await.unwrap();
 
         let begin = encode_bolt_struct(0x11, &[Value::Map(vec![])]);
-        client.write_all(&begin).await.unwrap();
+        client.write_all(&chunk_encode(&begin)).await.unwrap();
         let mut response = [0u8; 128];
         assert!(client.read(&mut response).await.unwrap() > 0);
         drop(client);
@@ -2302,7 +2576,7 @@ mod tests {
         client.read_exact(&mut version).await.unwrap();
 
         let begin = encode_bolt_struct(0x11, &[Value::Map(vec![])]);
-        client.write_all(&begin).await.unwrap();
+        client.write_all(&chunk_encode(&begin)).await.unwrap();
         let mut response = [0u8; 128];
         assert!(client.read(&mut response).await.unwrap() > 0);
 
@@ -2464,5 +2738,88 @@ mod tests {
             } => {}
             other => panic!("expected SUCCESS for PULL, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn neo4rs_driver_executes_a_query_over_bolt_tcp() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let telemetry = Arc::new(Telemetry::new());
+        telemetry.seed_zero_catalog_metrics();
+        let server = BoltServer::new(
+            address.to_string(),
+            telemetry,
+            Arc::new(MultiRowExecutor),
+        )
+        .with_auth_enabled(false);
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+        let graph = Graph::connect(
+            ConfigBuilder::new()
+                .uri(format!("bolt://{address}"))
+                .user("neo4j")
+                .password("password")
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut result = tokio::time::timeout(
+            Duration::from_secs(3),
+            graph.execute(query("RETURN 1 AS value")),
+        )
+        .await
+        .expect("Neo4rs query should not time out")
+        .expect("Neo4rs query should succeed");
+        let first: i64 = result
+            .next()
+            .await
+            .expect("Neo4rs should return a record")
+            .expect("Neo4rs result stream should succeed")
+            .get("value")
+            .expect("Bolt result should expose the value column");
+        assert_eq!(first, 1);
+        assert!(result
+            .next()
+            .await
+            .expect("Neo4rs result stream should succeed")
+            .is_some());
+
+        drop(result);
+        drop(graph);
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn browser_neo4j_driver_executes_a_query_over_bolt_websocket() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let telemetry = Arc::new(Telemetry::new());
+        telemetry.seed_zero_catalog_metrics();
+        let server = BoltServer::new(
+            address.to_string(),
+            telemetry,
+            Arc::new(MultiRowExecutor),
+        )
+        .with_auth_enabled(false);
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../ui/scripts/bolt-websocket-driver-e2e.mjs");
+        let output = tokio::time::timeout(
+            Duration::from_secs(10),
+            tokio::process::Command::new("node")
+                .arg(script)
+                .arg(format!("bolt://{address}"))
+                .output(),
+        )
+        .await
+        .expect("browser Neo4j driver should not time out")
+        .expect("browser Neo4j driver process should start");
+
+        server_task.abort();
+        assert!(
+            output.status.success(),
+            "browser Neo4j driver failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

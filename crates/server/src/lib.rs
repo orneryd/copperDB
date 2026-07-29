@@ -19,7 +19,7 @@ use copperdb_auth::{
 };
 use copperdb_bolt::server::{
     BoltAuthProvider, BoltPrincipal, BoltQueryResult, BoltResultStats, BoltTransaction,
-    QueryExecutor,
+    BoltTransactionError, QueryExecutor,
 };
 use copperdb_buildinfo::{display_version, server_announcement, version};
 use copperdb_config::Config as RuntimeConfig;
@@ -1776,6 +1776,7 @@ impl QueryExecutor for AppStateBoltExecutor {
             columns: result.columns,
             rows: result.data.into_iter().map(|row| row.row).collect(),
             stats: bolt_result_stats(result.stats),
+            notifications: Vec::new(),
         })
     }
 
@@ -1808,6 +1809,7 @@ impl QueryExecutor for AppStateBoltExecutor {
             columns: result.columns,
             rows: result.data.into_iter().map(|row| row.row).collect(),
             stats: bolt_result_stats(result.stats),
+            notifications: Vec::new(),
         })
     }
 
@@ -1878,23 +1880,29 @@ impl QueryExecutor for AppStateBoltExecutor {
         })
     }
 
-    fn commit_transaction(&self, transaction: &BoltTransaction) -> Result<String, String> {
+    fn commit_transaction(
+        &self,
+        transaction: &BoltTransaction,
+    ) -> Result<String, BoltTransactionError> {
         let transaction_id = uuid::Uuid::parse_str(&transaction.id)
-            .map_err(|_| "invalid Bolt transaction identifier".to_owned())?;
-        let engine = open_engine(&self.state, &transaction.database)?;
+            .map_err(|_| BoltTransactionError::from("invalid Bolt transaction identifier"))?;
+        let engine =
+            open_engine(&self.state, &transaction.database).map_err(BoltTransactionError::from)?;
         let mut storage_transactions = self.storage_transactions.lock();
         let storage_transaction = storage_transactions
             .get_mut(&transaction_id)
-            .ok_or_else(|| "Bolt storage transaction is no longer active".to_owned())?;
+            .ok_or_else(|| {
+                BoltTransactionError::from("Bolt storage transaction is no longer active")
+            })?;
         storage_transaction
             .commit()
-            .map_err(|error| error.to_string())?;
+            .map_err(BoltTransactionError::from_error)?;
         storage_transactions.remove(&transaction_id);
         drop(storage_transactions);
         engine
             .tx_manager()
             .commit_with_bookmark(transaction_id)
-            .map_err(|error| error.to_string())
+            .map_err(|error| BoltTransactionError::from(error.to_string()))
     }
 
     fn rollback_transaction(&self, transaction: &BoltTransaction) -> Result<(), String> {
@@ -1955,6 +1963,7 @@ impl QueryExecutor for AppStateBoltExecutor {
             columns: result.columns,
             rows: result.data.into_iter().map(|row| row.row).collect(),
             stats: bolt_result_stats(result.stats),
+            notifications: Vec::new(),
         })
     }
 }
