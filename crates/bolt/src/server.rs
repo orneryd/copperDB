@@ -100,6 +100,24 @@ pub trait QueryExecutor: Send + Sync {
         self.execute_on_database_with_context(database, query, params, request_context)
     }
 
+    fn execute_as_on_database_with_context_and_bookmarks(
+        &self,
+        database: &str,
+        query: &str,
+        params: &HashMap<String, serde_json::Value>,
+        request_context: copperdb_util::RequestContext,
+        principal: Option<&BoltPrincipal>,
+        _bookmarks: &[String],
+    ) -> Result<BoltQueryResult, String> {
+        self.execute_as_on_database_with_context(
+            database,
+            query,
+            params,
+            request_context,
+            principal,
+        )
+    }
+
     fn begin_transaction(
         &self,
         _database: &str,
@@ -754,6 +772,19 @@ fn database_from_metadata(metadata: &HashMap<String, serde_json::Value>) -> Opti
         .map(str::to_owned)
 }
 
+fn bookmarks_from_metadata(metadata: &HashMap<String, serde_json::Value>) -> Vec<String> {
+    metadata
+        .get("bookmarks")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn credentials_from_hello(
     metadata: &HashMap<String, serde_json::Value>,
 ) -> Option<(String, String)> {
@@ -995,6 +1026,7 @@ async fn process_message(
             let execution_parameters = parameters.clone();
             let principal = session.principal.clone();
             let transaction = session.transaction.clone();
+            let bookmarks = bookmarks_from_metadata(&extra);
             let execution_executor = Arc::clone(&executor);
 
             // Create request context OUTSIDE spawn_blocking so the guard
@@ -1012,12 +1044,13 @@ async fn process_message(
                         request_context,
                         principal.as_ref(),
                     ),
-                    None => execution_executor.execute_as_on_database_with_context(
+                    None => execution_executor.execute_as_on_database_with_context_and_bookmarks(
                         execution_database.as_deref().unwrap_or("copperdb"),
                         &execution_query,
                         &execution_parameters,
                         request_context,
                         principal.as_ref(),
+                        &bookmarks,
                     ),
                 })
                 .await
@@ -1283,6 +1316,37 @@ mod tests {
     struct MultiRowExecutor;
 
     struct MutationStatsExecutor;
+
+    struct BookmarkRecordingExecutor {
+        bookmarks: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl QueryExecutor for BookmarkRecordingExecutor {
+        fn execute(
+            &self,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+        ) -> Result<BoltQueryResult, String> {
+            Ok(BoltQueryResult {
+                columns: vec![],
+                rows: vec![],
+                stats: BoltResultStats::default(),
+            })
+        }
+
+        fn execute_as_on_database_with_context_and_bookmarks(
+            &self,
+            _database: &str,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+            _request_context: copperdb_util::RequestContext,
+            _principal: Option<&BoltPrincipal>,
+            bookmarks: &[String],
+        ) -> Result<BoltQueryResult, String> {
+            *self.bookmarks.lock().unwrap() = bookmarks.to_vec();
+            self.execute("", &HashMap::new())
+        }
+    }
 
     impl QueryExecutor for MutationStatsExecutor {
         fn execute(
@@ -1900,6 +1964,32 @@ mod tests {
         assert!(counters.iter().any(|(key, value)| {
             key == "properties-set" && value == &Value::Integer(3)
         }));
+    }
+
+    #[tokio::test]
+    async fn implicit_run_forwards_bookmarks_to_the_executor() {
+        let recorded_bookmarks = Arc::new(Mutex::new(Vec::new()));
+        let executor: Arc<dyn QueryExecutor> = Arc::new(BookmarkRecordingExecutor {
+            bookmarks: Arc::clone(&recorded_bookmarks),
+        });
+        let mut session = BoltSession::new(false);
+        let run = Value::Struct {
+            signature: 0x10,
+            fields: vec![
+                Value::String("RETURN 1".into()),
+                Value::Map(vec![]),
+                Value::Map(vec![(
+                    "bookmarks".into(),
+                    Value::List(vec![Value::String("7:2a:9".into())]),
+                )]),
+            ],
+        };
+
+        assert_eq!(
+            response_signature_with_executor(&run, &mut session, executor, None).await,
+            0x70
+        );
+        assert_eq!(*recorded_bookmarks.lock().unwrap(), vec!["7:2a:9"]);
     }
 
     #[tokio::test]

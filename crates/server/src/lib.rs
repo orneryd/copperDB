@@ -1811,6 +1811,27 @@ impl QueryExecutor for AppStateBoltExecutor {
         })
     }
 
+    fn execute_as_on_database_with_context_and_bookmarks(
+        &self,
+        database: &str,
+        query: &str,
+        params: &HashMap<String, serde_json::Value>,
+        request_context: RequestContext,
+        principal: Option<&BoltPrincipal>,
+        bookmarks: &[String],
+    ) -> Result<BoltQueryResult, String> {
+        if !bookmarks.is_empty() {
+            derive_distributed_read_fence(&self.state, database, bookmarks)?;
+        }
+        self.execute_as_on_database_with_context(
+            database,
+            query,
+            params,
+            request_context,
+            principal,
+        )
+    }
+
     fn begin_transaction(
         &self,
         database: &str,

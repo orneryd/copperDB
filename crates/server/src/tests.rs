@@ -4354,6 +4354,40 @@ fn appstate_bolt_executor_discards_storage_context_on_rollback() {
 }
 
 #[test]
+fn appstate_bolt_executor_validates_implicit_run_bookmarks() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+    let bookmark = executor.commit_transaction(&transaction).unwrap();
+
+    let result = executor
+        .execute_as_on_database_with_context_and_bookmarks(
+            "copperdb",
+            "RETURN 1 AS value",
+            &empty,
+            RequestContext::detached(),
+            None,
+            &[bookmark],
+        )
+        .expect("a valid implicit RUN bookmark should be accepted");
+    assert_eq!(result.rows, vec![vec![serde_json::json!(1)]]);
+
+    let invalid = executor
+        .execute_as_on_database_with_context_and_bookmarks(
+            "copperdb",
+            "RETURN 1 AS value",
+            &empty,
+            RequestContext::detached(),
+            None,
+            &["not-a-bookmark".into()],
+        )
+        .expect_err("an invalid implicit RUN bookmark must fail before execution");
+    assert!(invalid.contains("invalid bookmark"));
+}
+
+#[test]
 fn appstate_bolt_executor_keeps_run_writes_private_until_commit() {
     let temp_dir = tempfile::tempdir().unwrap();
     let state = demo_temp_appstate_with_catalog(&temp_dir);
