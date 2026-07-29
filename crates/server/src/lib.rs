@@ -18,11 +18,12 @@ use copperdb_auth::{
     AuthConfig, AuthError, Authenticator, Claims, DatabaseAccessMode, TokenManager,
 };
 use copperdb_bolt::server::{
-    BoltAuthProvider, BoltPrincipal, BoltQueryResult, BoltTransaction, QueryExecutor,
+    BoltAuthProvider, BoltPrincipal, BoltQueryResult, BoltResultStats, BoltTransaction,
+    QueryExecutor,
 };
 use copperdb_buildinfo::{display_version, server_announcement, version};
 use copperdb_config::Config as RuntimeConfig;
-use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig};
+use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig, ResultStats};
 use copperdb_envutil::{get as env_get, get_bool_loose};
 use copperdb_fabric::{FabricReadRequest, FabricReadScope};
 use copperdb_graphql::GraphQlSchema;
@@ -1229,6 +1230,8 @@ struct Neo4jCommitResponse {
 struct Neo4jResult {
     columns: Vec<String>,
     data: Vec<Neo4jRow>,
+    #[serde(skip)]
+    stats: ResultStats,
 }
 
 #[derive(Serialize)]
@@ -1772,6 +1775,7 @@ impl QueryExecutor for AppStateBoltExecutor {
         Ok(BoltQueryResult {
             columns: result.columns,
             rows: result.data.into_iter().map(|row| row.row).collect(),
+            stats: bolt_result_stats(result.stats),
         })
     }
 
@@ -1803,6 +1807,7 @@ impl QueryExecutor for AppStateBoltExecutor {
         Ok(BoltQueryResult {
             columns: result.columns,
             rows: result.data.into_iter().map(|row| row.row).collect(),
+            stats: bolt_result_stats(result.stats),
         })
     }
 
@@ -1928,6 +1933,7 @@ impl QueryExecutor for AppStateBoltExecutor {
         Ok(BoltQueryResult {
             columns: result.columns,
             rows: result.data.into_iter().map(|row| row.row).collect(),
+            stats: bolt_result_stats(result.stats),
         })
     }
 }
@@ -1984,7 +1990,21 @@ fn convert_engine_result(result: copperdb_engine::QueryResult) -> Neo4jResult {
             meta: vec![],
         })
         .collect();
-    Neo4jResult { columns, data }
+    Neo4jResult {
+        columns,
+        data,
+        stats: result.stats,
+    }
+}
+
+fn bolt_result_stats(stats: ResultStats) -> BoltResultStats {
+    BoltResultStats {
+        nodes_created: stats.nodes_created,
+        nodes_deleted: stats.nodes_deleted,
+        relationships_created: stats.relationships_created,
+        relationships_deleted: stats.relationships_deleted,
+        properties_set: stats.properties_set,
+    }
 }
 
 fn show_databases_result(state: &AppState) -> Neo4jResult {
@@ -2019,13 +2039,18 @@ fn show_databases_result(state: &AppState) -> Neo4jResult {
             meta: vec![],
         })
         .collect();
-    Neo4jResult { columns, data }
+    Neo4jResult {
+        columns,
+        data,
+        stats: ResultStats::default(),
+    }
 }
 
 fn empty_neo4j_result() -> Neo4jResult {
     Neo4jResult {
         columns: vec![],
         data: vec![],
+        stats: ResultStats::default(),
     }
 }
 

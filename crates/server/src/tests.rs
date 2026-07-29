@@ -4303,6 +4303,8 @@ fn appstate_bolt_executor_routes_system_and_named_database_queries() {
         .expect("Bolt executor should write to selected database");
     assert_eq!(write.columns, vec!["id"]);
     assert_eq!(write.rows[0][0], serde_json::json!("s0-16"));
+    assert_eq!(write.stats.nodes_created, 1);
+    assert!(write.stats.properties_set >= 1);
 
     let count = executor
         .execute_on_database(

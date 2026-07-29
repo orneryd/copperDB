@@ -26,6 +26,16 @@ const MAX_BOLT_CURSORS: usize = 64;
 pub struct BoltQueryResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,
+    pub stats: BoltResultStats,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BoltResultStats {
+    pub nodes_created: usize,
+    pub nodes_deleted: usize,
+    pub relationships_created: usize,
+    pub relationships_deleted: usize,
+    pub properties_set: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +180,7 @@ impl QueryExecutor for NoopExecutor {
                     serde_json::json!(true),
                     serde_json::json!([]),
                 ]],
+                stats: BoltResultStats::default(),
             });
         }
         if upper.starts_with("CALL DBMS.CLUSTER.OVERVIEW") {
@@ -188,6 +199,7 @@ impl QueryExecutor for NoopExecutor {
                     serde_json::json!("copperdb"),
                     serde_json::json!(null),
                 ]],
+                stats: BoltResultStats::default(),
             });
         }
         // For MATCH ... RETURN queries, return empty rows with proper column names
@@ -196,11 +208,13 @@ impl QueryExecutor for NoopExecutor {
             return Ok(BoltQueryResult {
                 columns: vec!["n".into()],
                 rows: vec![],
+                stats: BoltResultStats::default(),
             });
         }
         Ok(BoltQueryResult {
             columns: vec![],
             rows: vec![],
+            stats: BoltResultStats::default(),
         })
     }
 }
@@ -823,7 +837,12 @@ fn cursor_limit(n: i64, remaining: usize) -> usize {
     }
 }
 
-fn cursor_summary(session: &BoltSession, database: Option<&str>, has_more: bool) -> Vec<Vec<u8>> {
+fn cursor_summary(
+    session: &BoltSession,
+    database: Option<&str>,
+    has_more: bool,
+    stats: &BoltResultStats,
+) -> Vec<Vec<u8>> {
     let mut metadata = HashMap::from([
         ("type".into(), serde_json::json!("r")),
         ("t_last".into(), serde_json::json!(0)),
@@ -841,6 +860,16 @@ fn cursor_summary(session: &BoltSession, database: Option<&str>, has_more: bool)
     if let Some(bookmark) = &session.last_bookmark {
         metadata.insert("bookmark".into(), serde_json::json!(bookmark));
     }
+    metadata.insert(
+        "stats".into(),
+        serde_json::json!({
+            "nodes-created": stats.nodes_created,
+            "nodes-deleted": stats.nodes_deleted,
+            "relationships-created": stats.relationships_created,
+            "relationships-deleted": stats.relationships_deleted,
+            "properties-set": stats.properties_set,
+        }),
+    );
     vec![dispatch::encode_message(&BoltMessage::Success { metadata })]
 }
 
@@ -1068,6 +1097,7 @@ async fn process_message(
             cursor.index = end;
             let has_more = cursor.index < cursor.result.rows.len();
             let database = cursor.database.clone();
+            let stats = cursor.result.stats.clone();
             if !has_more {
                 session.cursors.remove(&qid);
                 if session.last_qid == Some(qid) {
@@ -1078,7 +1108,7 @@ async fn process_message(
                 .into_iter()
                 .map(|row| dispatch::encode_message(&BoltMessage::Record { data: row }))
                 .collect();
-            responses.extend(cursor_summary(session, database.as_deref(), has_more));
+            responses.extend(cursor_summary(session, database.as_deref(), has_more, &stats));
             Ok(responses)
         }
         BoltMessage::Begin { extra } => {
@@ -1252,6 +1282,27 @@ mod tests {
 
     struct MultiRowExecutor;
 
+    struct MutationStatsExecutor;
+
+    impl QueryExecutor for MutationStatsExecutor {
+        fn execute(
+            &self,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+        ) -> Result<BoltQueryResult, String> {
+            Ok(BoltQueryResult {
+                columns: vec![],
+                rows: vec![],
+                stats: BoltResultStats {
+                    nodes_created: 2,
+                    relationships_created: 1,
+                    properties_set: 3,
+                    ..BoltResultStats::default()
+                },
+            })
+        }
+    }
+
     impl QueryExecutor for MultiRowExecutor {
         fn execute(
             &self,
@@ -1265,6 +1316,7 @@ mod tests {
                     vec![serde_json::json!(2)],
                     vec![serde_json::json!(3)],
                 ],
+                stats: BoltResultStats::default(),
             })
         }
     }
@@ -1278,6 +1330,7 @@ mod tests {
             Ok(BoltQueryResult {
                 columns: vec![],
                 rows: vec![],
+                stats: BoltResultStats::default(),
             })
         }
 
@@ -1307,6 +1360,7 @@ mod tests {
             Ok(BoltQueryResult {
                 columns: vec![],
                 rows: vec![],
+                stats: BoltResultStats::default(),
             })
         }
 
@@ -1359,6 +1413,7 @@ mod tests {
             Ok(BoltQueryResult {
                 columns: vec![],
                 rows: vec![],
+                stats: BoltResultStats::default(),
             })
         }
 
@@ -1805,6 +1860,46 @@ mod tests {
         assert!(session.cursors.contains_key(&0));
         assert!(!session.cursors.contains_key(&1));
         assert_eq!(session.last_qid, Some(0));
+    }
+
+    #[tokio::test]
+    async fn terminal_result_summary_includes_mutation_counters() {
+        let mut session = BoltSession::new(false);
+        let executor: Arc<dyn QueryExecutor> = Arc::new(MutationStatsExecutor);
+
+        process_message(&run_message(), &mut session, Arc::clone(&executor), None)
+            .await
+            .unwrap();
+        let pull = Value::Struct {
+            signature: 0x3F,
+            fields: vec![Value::Integer(-1), Value::Integer(-1)],
+        };
+        let responses = process_message(&pull, &mut session, executor, None)
+            .await
+            .unwrap();
+        let (summary, _) = crate::packstream::decode(&responses[0]).unwrap();
+        let Value::Struct { fields, .. } = summary else {
+            panic!("expected terminal result summary");
+        };
+        let [Value::Map(metadata)] = fields.as_slice() else {
+            panic!("expected summary metadata");
+        };
+        let stats = metadata
+            .iter()
+            .find_map(|(key, value)| (key == "stats").then_some(value))
+            .expect("expected stats metadata");
+        let Value::Map(counters) = stats else {
+            panic!("expected stats map");
+        };
+        assert!(counters.iter().any(|(key, value)| {
+            key == "nodes-created" && value == &Value::Integer(2)
+        }));
+        assert!(counters.iter().any(|(key, value)| {
+            key == "relationships-created" && value == &Value::Integer(1)
+        }));
+        assert!(counters.iter().any(|(key, value)| {
+            key == "properties-set" && value == &Value::Integer(3)
+        }));
     }
 
     #[tokio::test]
