@@ -1455,6 +1455,7 @@ mod tests {
                 stats: BoltResultStats {
                     nodes_created: 2,
                     relationships_created: 1,
+                    relationships_deleted: 1,
                     properties_set: 3,
                     ..BoltResultStats::default()
                 },
@@ -2188,6 +2189,9 @@ mod tests {
         }));
         assert!(counters.iter().any(|(key, value)| {
             key == "relationships-created" && value == &Value::Integer(1)
+        }));
+        assert!(counters.iter().any(|(key, value)| {
+            key == "relationships-deleted" && value == &Value::Integer(1)
         }));
         assert!(counters.iter().any(|(key, value)| {
             key == "properties-set" && value == &Value::Integer(3)

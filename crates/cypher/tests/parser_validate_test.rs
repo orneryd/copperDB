@@ -101,3 +101,19 @@ fn validate_and_parse_with_order_skip_limit() {
     );
     assert!(with_clause.where_clause.is_some());
 }
+
+#[test]
+fn parse_map_literal_preserves_colon_in_quoted_key() {
+    let parser = Parser::new();
+    let query = parser
+        .parse("RETURN {'key:key': 'value'} AS map")
+        .expect("quoted map key should parse");
+
+    let Clause::Return(return_clause) = &query.clauses[0] else {
+        panic!("expected RETURN clause");
+    };
+    let Expression::MapLiteral(entries) = &return_clause.items[0].expression else {
+        panic!("expected map literal");
+    };
+    assert_eq!(entries[0].key, "key:key");
+}

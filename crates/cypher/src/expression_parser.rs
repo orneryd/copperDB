@@ -452,7 +452,11 @@ impl<'a> ParseContext<'a> {
             return None;
         }
         self.advance();
-        let target_variable = self.advance_identifier().ok()?;
+        let target_variable = if self.peek() == Some(")") {
+            String::new()
+        } else {
+            self.advance_identifier().ok()?
+        };
         if self.peek() == Some(":") {
             self.advance();
             self.advance_identifier().ok()?;
@@ -721,7 +725,7 @@ impl<'a> ParseContext<'a> {
         let mut entries = Vec::new();
         if self.peek() != Some("}") {
             loop {
-                let key = self.advance_identifier()?;
+                let key = self.advance_map_key()?;
                 self.expect(":")?;
                 entries.push(PropertyEntry {
                     key,

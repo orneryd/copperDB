@@ -199,7 +199,7 @@ impl<'a> ParseContext<'a> {
     fn parse_properties_map(&mut self) -> Result<Vec<PropertyEntry>, CypherError> {
         let mut entries = Vec::new();
         while self.peek() != Some("}") && self.peek().is_some() {
-            let key = self.advance_identifier()?;
+            let key = self.advance_map_key()?;
             self.expect(":")?;
             let val = self.parse_expression_item(&[",", "}"])?;
             entries.push(PropertyEntry { key, value: val });

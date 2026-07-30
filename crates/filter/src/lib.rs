@@ -523,7 +523,7 @@ fn eval_function(
                 if matches!(v, Value::Null) { 0 } else { 1 }.into(),
             ))
         }
-        "avg" | "sum" | "min" | "max" => {
+        "avg" | "sum" | "min" | "max" | "stdev" | "stdevp" => {
             // Aggregation functions: return the argument value per-row.
             // Actual aggregation is applied as post-processing by the eval engine.
             if args.is_empty() {

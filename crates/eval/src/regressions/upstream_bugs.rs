@@ -46,6 +46,273 @@
         assert_eq!(result.stats.nodes_deleted, 1);
     }
 
+    /// Mirrors NornicDB `TestDeleteConnectedNodeWithoutDetach_Errors`.
+    #[test]
+    fn test_delete_connected_node_without_detach_preserves_graph() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for statement in [
+            "CREATE (:Item {name: 'connected'})",
+            "CREATE (:Item {name: 'peer'})",
+            "MATCH (a:Item {name: 'connected'}), (b:Item {name: 'peer'}) CREATE (a)-[:CONTAINS]->(b)",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let error = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Item {name: 'connected'}) DELETE n")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("still has relationships"));
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Item) RETURN n.name AS name ORDER BY name")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 2);
+
+        let edges = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:Item {name: 'connected'})-[r:CONTAINS]->(:Item {name: 'peer'}) RETURN count(r) AS count")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(edges.rows[0].get("count"), Some(&Value::from(1)));
+    }
+
+    /// Mirrors NornicDB `TestDeleteNodeAndItsOwnEdgeTogether_Succeeds`.
+    #[test]
+    fn test_delete_node_and_its_own_edge_together_succeeds() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for statement in [
+            "CREATE (:Item {name: 'connected'})",
+            "CREATE (:Item {name: 'peer'})",
+            "MATCH (a:Item {name: 'connected'}), (b:Item {name: 'peer'}) CREATE (a)-[:CONTAINS]->(b)",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Item {name: 'connected'})-[r:CONTAINS]->(:Item {name: 'peer'}) DELETE a, r")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.stats.nodes_deleted, 1);
+        assert_eq!(result.stats.relationships_deleted, 1);
+
+        let remaining = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Item) RETURN n.name AS name")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(remaining.rows.len(), 1);
+        assert_eq!(
+            remaining.rows[0].get("name"),
+            Some(&Value::String("peer".to_string()))
+        );
+    }
+
+    /// Mirrors NornicDB `TestDeleteOrphanNodeWithoutDetach_Succeeds`.
+    #[test]
+    fn test_delete_orphan_node_without_detach_succeeds() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        engine
+            .execute(
+                &parser.parse("CREATE (:Item {name: 'orphan'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let deleted = engine
+            .execute(
+                &parser
+                    .parse("MATCH (node:Item {name: 'orphan'}) DELETE node")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(deleted.stats.nodes_deleted, 1);
+        let remaining = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:Item {name: 'orphan'}) RETURN count(*) AS count")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(remaining.rows[0].get("count"), Some(&Value::from(0)));
+    }
+
+    /// Mirrors NornicDB `TestDetachDeleteConnectedNode_Succeeds`.
+    #[test]
+    fn test_detach_delete_connected_node_succeeds() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:Item {name: 'connected'})-[:CONTAINS]->(:Item {name: 'peer'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let deleted = engine
+            .execute(
+                &parser
+                    .parse("MATCH (node:Item {name: 'connected'}) DETACH DELETE node")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(deleted.stats.nodes_deleted, 1);
+        assert_eq!(deleted.stats.relationships_deleted, 1);
+        let remaining = engine
+            .execute(
+                &parser
+                    .parse("MATCH (node:Item) RETURN node.name AS name")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(remaining.rows, vec![HashMap::from([("name".into(), Value::from("peer"))])]);
+    }
+
+    /// Mirrors NornicDB `TestDeleteMultiRowOneConnected_ErrorsAndDeletesNothing`.
+    #[test]
+    fn test_multi_row_delete_with_connected_node_is_atomic() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        for statement in [
+            "CREATE (:Item {name: 'orphan'})",
+            "CREATE (:Item {name: 'orphan2'})",
+            "CREATE (:Item {name: 'connected'})-[:CONTAINS]->(:Item {name: 'peer'})",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let error = engine
+            .execute(
+                &parser
+                    .parse("MATCH (node:Item) WHERE node.name IN ['orphan', 'orphan2', 'connected'] DELETE node")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("still has relationships"));
+
+        let survivors = engine
+            .execute(
+                &parser
+                    .parse("MATCH (node:Item) RETURN node.name AS name ORDER BY name")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(survivors.rows.len(), 4);
+        assert_eq!(survivors.rows[0].get("name"), Some(&Value::from("connected")));
+        assert_eq!(survivors.rows[1].get("name"), Some(&Value::from("orphan")));
+        assert_eq!(survivors.rows[2].get("name"), Some(&Value::from("orphan2")));
+        assert_eq!(survivors.rows[3].get("name"), Some(&Value::from("peer")));
+    }
+
+    /// Mirrors NornicDB `TestDeleteConnectedNodeParameterizedWhere_Errors`.
+    #[test]
+    fn test_parameterized_connected_node_delete_is_rejected() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:Item {name: 'connected'})-[:CONTAINS]->(:Item {name: 'peer'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let params = HashMap::from([("name".to_string(), Value::from("connected"))]);
+        let error = engine
+            .execute(
+                &parser
+                    .parse("MATCH (node:Item) WHERE node.name = $name DELETE node")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("still has relationships"));
+        let remaining = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:Item {name: 'connected'}) RETURN count(*) AS count")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(remaining.rows[0].get("count"), Some(&Value::from(1)));
+    }
+
+    /// Mirrors NornicDB `TestDeleteMultipleNodesWithSurvivingEdge_Errors`.
+    #[test]
+    fn test_delete_connected_endpoints_without_edge_is_rejected() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:Item {name: 'connected'})-[:CONTAINS]->(:Item {name: 'peer'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let error = engine
+            .execute(
+                &parser
+                    .parse("MATCH (start:Item {name: 'connected'}), (end:Item {name: 'peer'}) DELETE start, end")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("still has relationships"));
+        let remaining = engine
+            .execute(
+                &parser
+                    .parse("MATCH (node:Item) RETURN node.name AS name ORDER BY name")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(remaining.rows.len(), 2);
+        assert_eq!(remaining.rows[0].get("name"), Some(&Value::from("connected")));
+        assert_eq!(remaining.rows[1].get("name"), Some(&Value::from("peer")));
+    }
+
     /// Mirrors NornicDB `TestMatchRelationshipWithLimitReturnsBoundRows`.
     #[test]
     fn test_match_relationship_with_limit_returns_bound_rows() {
@@ -273,6 +540,810 @@
         assert_eq!(result.rows[2].get("newer_title"), Some(&Value::Null));
     }
 
+    /// Mirrors NornicDB `TestFix_TrailingOptionalMatch_UnmatchedOptionalYieldsNullRow`.
+    #[test]
+    fn test_trailing_optional_match_preserves_prior_relationship_function_projection() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for statement in [
+            "CREATE (:OMClass {uid: 'service', name: 'ServiceDog'})",
+            "CREATE (:OMClass {uid: 'dog', name: 'Dog'})",
+            "CREATE (:OMClass {uid: 'orphan', name: 'Orphan'})",
+            "CREATE (:OMFile {uid: 'file', relative_path: 'svc.py'})",
+            "MATCH (source:OMClass {uid: 'service'}), (dog:OMClass {uid: 'dog'}) CREATE (source)-[:INHERITS]->(dog)",
+            "MATCH (source:OMClass {uid: 'service'}), (orphan:OMClass {uid: 'orphan'}) CREATE (source)-[:INHERITS]->(orphan)",
+            "MATCH (file:OMFile {uid: 'file'}), (dog:OMClass {uid: 'dog'}) CREATE (file)-[:CONTAINS]->(dog)",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "MATCH (source:OMClass {uid: 'service'})-[rel:INHERITS]->(target) \
+                         OPTIONAL MATCH (target)<-[:CONTAINS]-(file:OMFile) \
+                         RETURN type(rel) AS rel_type, target.name AS target_name, file.relative_path AS file_path \
+                         ORDER BY target_name",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(
+            result.rows[0].get("target_name"),
+            Some(&Value::String("Dog".to_string()))
+        );
+        assert_eq!(
+            result.rows[0].get("rel_type"),
+            Some(&Value::String("INHERITS".to_string()))
+        );
+        assert_eq!(
+            result.rows[0].get("file_path"),
+            Some(&Value::String("svc.py".to_string()))
+        );
+        assert_eq!(
+            result.rows[1].get("target_name"),
+            Some(&Value::String("Orphan".to_string()))
+        );
+        assert_eq!(
+            result.rows[1].get("rel_type"),
+            Some(&Value::String("INHERITS".to_string()))
+        );
+        assert_eq!(result.rows[1].get("file_path"), Some(&Value::Null));
+    }
+
+    /// Mirrors NornicDB `TestFix_TrailingOptionalMatch_GroupedAggregate`.
+    #[test]
+    fn test_trailing_optional_match_groups_file_aggregate_by_target() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for statement in [
+            "CREATE (:OMClass {uid: 'service', name: 'ServiceDog'})",
+            "CREATE (:OMClass {uid: 'dog', name: 'Dog'})",
+            "CREATE (:OMFile {uid: 'first', relative_path: 'svc.py'})",
+            "CREATE (:OMFile {uid: 'second', relative_path: 'extra.py'})",
+            "MATCH (source:OMClass {uid: 'service'}), (dog:OMClass {uid: 'dog'}) CREATE (source)-[:INHERITS]->(dog)",
+            "MATCH (file:OMFile {uid: 'first'}), (dog:OMClass {uid: 'dog'}) CREATE (file)-[:CONTAINS]->(dog)",
+            "MATCH (file:OMFile {uid: 'second'}), (dog:OMClass {uid: 'dog'}) CREATE (file)-[:CONTAINS]->(dog)",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "MATCH (source:OMClass {uid: 'service'})-[:INHERITS]->(target) \
+                         OPTIONAL MATCH (target)<-[:CONTAINS]-(file:OMFile) \
+                         RETURN target.name AS target_name, count(file) AS file_count",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get("target_name"),
+            Some(&Value::String("Dog".to_string()))
+        );
+        assert_eq!(result.rows[0].get("file_count"), Some(&Value::from(2)));
+    }
+
+    /// Mirrors NornicDB `TestFix_TrailingOptionalMatch_WhereOnOptionalClause`.
+    #[test]
+    fn test_trailing_optional_match_where_null_extends_rejected_candidate() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for statement in [
+            "CREATE (:OMClass {uid: 'service', name: 'ServiceDog'})",
+            "CREATE (:OMClass {uid: 'dog', name: 'Dog'})",
+            "CREATE (:OMFile {uid: 'file', relative_path: 'svc.py', language: 'python'})",
+            "MATCH (source:OMClass {uid: 'service'}), (dog:OMClass {uid: 'dog'}) CREATE (source)-[:INHERITS]->(dog)",
+            "MATCH (file:OMFile {uid: 'file'}), (dog:OMClass {uid: 'dog'}) CREATE (file)-[:CONTAINS]->(dog)",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "MATCH (:OMClass {uid: 'service'})-[:INHERITS]->(target) \
+                         OPTIONAL MATCH (target)<-[:CONTAINS]-(file:OMFile) WHERE file.language = 'go' \
+                         RETURN target.name AS target_name, file.relative_path AS file_path",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("target_name"), Some(&Value::from("Dog")));
+        assert_eq!(result.rows[0].get("file_path"), Some(&Value::Null));
+    }
+
+    /// Mirrors NornicDB `TestBug_TrailingOptionalMatch_RelVarDropped`.
+    #[test]
+    fn test_trailing_optional_match_preserves_relationship_property_projection() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for statement in [
+            "CREATE (:OMClass {uid: 'service'})-[:INHERITS {weight: 2}]->(:OMClass {uid: 'dog', name: 'Dog'})",
+            "MATCH (dog:OMClass {uid: 'dog'}) CREATE (:OMFile {relative_path: 'svc.py'})-[:CONTAINS]->(dog)",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "MATCH (:OMClass {uid: 'service'})-[rel:INHERITS]->(target) \
+                         OPTIONAL MATCH (target)<-[:CONTAINS]-(file:OMFile) \
+                         RETURN rel.weight AS weight, target.name AS target_name",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("target_name"), Some(&Value::from("Dog")));
+        assert_eq!(result.rows[0].get("weight"), Some(&Value::from(2)));
+    }
+
+    /// Mirrors NornicDB `TestBug_TrailingOptionalMatch_ChainedOptionalBindingUnbound`.
+    #[test]
+    fn test_chained_optional_match_projects_second_optional_binding() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for statement in [
+            "CREATE (:OMClass {uid: 'service'})-[:INHERITS]->(:OMClass {uid: 'dog', name: 'Dog'})",
+            "MATCH (dog:OMClass {uid: 'dog'}) CREATE (:OMFile {uid: 'file'})-[:CONTAINS]->(dog)",
+            "MATCH (file:OMFile {uid: 'file'}) CREATE (:OMRepo {id: 'repo:1'})-[:REPO_CONTAINS]->(file)",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "MATCH (:OMClass {uid: 'service'})-[:INHERITS]->(target) \
+                         OPTIONAL MATCH (target)<-[:CONTAINS]-(file:OMFile) \
+                         OPTIONAL MATCH (repo:OMRepo)-[:REPO_CONTAINS]->(file) \
+                         RETURN target.name AS target_name, repo.id AS repo_id",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("target_name"), Some(&Value::from("Dog")));
+        assert_eq!(result.rows[0].get("repo_id"), Some(&Value::from("repo:1")));
+    }
+
+    /// Mirrors NornicDB `TestFix_TrailingOptionalMatch_OrderByLimit`.
+    #[test]
+    fn test_trailing_optional_match_applies_order_before_limit() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for statement in [
+            "CREATE (:OMClass {uid: 'service'})-[:INHERITS]->(:OMClass {uid: 'dog', name: 'Dog'})",
+            "CREATE (:OMClass {uid: 'mixin', name: 'AMixin'})",
+            "MATCH (service:OMClass {uid: 'service'}), (mixin:OMClass {uid: 'mixin'}) CREATE (service)-[:INHERITS]->(mixin)",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "MATCH (:OMClass {uid: 'service'})-[:INHERITS]->(target) \
+                         OPTIONAL MATCH (target)<-[:CONTAINS]-(file:OMFile) \
+                         RETURN target.name AS target_name ORDER BY target_name LIMIT 1",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("target_name"), Some(&Value::from("AMixin")));
+    }
+
+    /// Mirrors NornicDB `TestControl_NoOptionalMatch_FunctionProjectionCorrect`.
+    #[test]
+    fn test_relationship_function_projection_without_optional_match() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:OMClass {uid: 'service'})-[:INHERITS]->(:OMClass {name: 'Dog'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse(
+                        "MATCH (:OMClass {uid: 'service'})-[rel:INHERITS]->(target) \
+                         RETURN type(rel) AS relationship_type, target.name AS target_name",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("relationship_type"), Some(&Value::from("INHERITS")));
+        assert_eq!(result.rows[0].get("target_name"), Some(&Value::from("Dog")));
+    }
+
+    /// Mirrors NornicDB `TestBug_MultiMatchRelationshipBindingRebinding`.
+    #[test]
+    fn test_multi_match_relationship_rebinding_requires_same_edge() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for statement in [
+            "CREATE (:Node {name: 'a'})-[:LINKS {kind: 'left'}]->(:Node {name: 'b'})",
+            "CREATE (:Node {name: 'a'})-[:LINKS {kind: 'right'}]->(:Node {name: 'c'})",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let same_edge = engine
+            .execute(
+                &parser
+                    .parse(
+                        "MATCH (a:Node {name: 'a'})-[r]->(b) \
+                         MATCH (a)-[r]->(c) \
+                         RETURN count(*) AS count",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(same_edge.rows[0].get("count"), Some(&Value::from(2)));
+
+        let conflicting_edge = engine
+            .execute(
+                &parser
+                    .parse(
+                        "MATCH (a:Node {name: 'a'})-[r]->(b) \
+                         MATCH (a)-[r]->(c) \
+                         WHERE b.name <> c.name \
+                         RETURN b.name AS b_name, c.name AS c_name",
+                    )
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert!(conflicting_edge.rows.is_empty());
+    }
+
+    /// Mirrors NornicDB `TestBug_InListStartNodeDoesNotIndexSeed_NoLabelScan`.
+    #[test]
+    fn test_relationship_match_in_list_seeds_from_property_index() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE INDEX resource_uid_idx IF NOT EXISTS FOR (n:CloudResource) ON (n.uid)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        for uid in ["selected-a", "selected-b", "other"] {
+            engine
+                .execute(
+                    &parser
+                        .parse(&format!("CREATE (:CloudResource {{uid: '{uid}'}})-[:LINKS]->(:Target {{uid: '{uid}'}})"))
+                        .unwrap(),
+                    &HashMap::new(),
+                )
+                .unwrap();
+        }
+
+        let mut params = HashMap::new();
+        params.insert(
+            "uids".to_string(),
+            Value::Array(vec![Value::from("selected-a"), Value::from("selected-b")]),
+        );
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (s:CloudResource)-[rel]->(target) WHERE s.uid IN $uids RETURN s.uid AS uid, target.uid AS target_uid ORDER BY uid")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0].get("uid"), Some(&Value::from("selected-a")));
+        assert_eq!(result.rows[0].get("target_uid"), Some(&Value::from("selected-a")));
+        assert_eq!(result.rows[1].get("uid"), Some(&Value::from("selected-b")));
+        assert_eq!(result.rows[1].get("target_uid"), Some(&Value::from("selected-b")));
+        assert!(engine
+            .hot_path_trace_snapshot()
+            .traversal_start_seed_property_in);
+    }
+
+    /// Mirrors NornicDB `TestBug_InListStartNodeDoesNotIndexSeed_DeleteVariant`.
+    #[test]
+    fn test_relationship_delete_with_in_list_start_node() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        for statement in [
+            "CREATE (:CloudResource {uid: 'selected-a'})-[:LINKS {evidence_source: 'reducer'}]->(:Target)",
+            "CREATE (:CloudResource {uid: 'selected-b'})-[:LINKS {evidence_source: 'manual'}]->(:Target)",
+            "CREATE (:CloudResource {uid: 'other'})-[:LINKS {evidence_source: 'reducer'}]->(:Target)",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let mut params = HashMap::new();
+        params.insert(
+            "uids".to_string(),
+            Value::Array(vec![Value::from("selected-a"), Value::from("selected-b")]),
+        );
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (s:CloudResource)-[rel]->() WHERE s.uid IN $uids AND rel.evidence_source = 'reducer' DELETE rel")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+
+        let remaining = engine
+            .execute(
+                &parser
+                    .parse("MATCH (s:CloudResource)-[rel]->() RETURN s.uid AS uid ORDER BY uid")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(remaining.rows.len(), 2);
+        assert_eq!(remaining.rows[0].get("uid"), Some(&Value::from("other")));
+        assert_eq!(remaining.rows[1].get("uid"), Some(&Value::from("selected-b")));
+    }
+
+    /// Mirrors NornicDB `TestBug_MultiMatchRelationshipBindingLost`.
+    #[test]
+    fn test_multi_match_retains_later_relationship_binding() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        for statement in [
+            "CREATE (:CloudResource {uid: 'u1'})-[:LINKS {evidence_source: 'reducer'}]->(:CloudResource {uid: 'u2'})",
+            "CREATE (:CloudResource {uid: 'u2'})-[:LINKS {evidence_source: 'reducer'}]->(:CloudResource {uid: 'u3'})",
+            "CREATE (:CloudResource {uid: 'u3'})-[:LINKS {evidence_source: 'manual'}]->(:CloudResource {uid: 'u1'})",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let mut params = HashMap::new();
+        params.insert(
+            "uids".to_string(),
+            Value::Array(vec![Value::from("u1"), Value::from("u2"), Value::from("u3")]),
+        );
+        params.insert("source".to_string(), Value::from("reducer"));
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (s:CloudResource) WHERE s.uid IN $uids MATCH (s)-[rel]->(target) WHERE rel.evidence_source = $source RETURN count(rel) AS count")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+        assert_eq!(result.rows[0].get("count"), Some(&Value::from(2)));
+
+        let projection = engine
+            .execute(
+                &parser
+                    .parse("MATCH (s:CloudResource) WHERE s.uid IN $uids MATCH (s)-[rel]->(target) WHERE rel.evidence_source = $source RETURN rel.evidence_source AS source")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+        assert_eq!(projection.rows.len(), 2);
+        assert!(projection
+            .rows
+            .iter()
+            .all(|row| row.get("source") == Some(&Value::from("reducer"))));
+
+        let deletion = engine
+            .execute(
+                &parser
+                    .parse("MATCH (s:CloudResource) WHERE s.uid IN $uids MATCH (s)-[rel]->() WHERE rel.evidence_source = $source DELETE rel")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+        assert_eq!(deletion.stats.relationships_deleted, 2);
+        let remaining = engine
+            .execute(
+                &parser
+                    .parse("MATCH ()-[rel:LINKS]->() RETURN rel.evidence_source AS source")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(remaining.rows.len(), 1);
+        assert_eq!(remaining.rows[0].get("source"), Some(&Value::from("manual")));
+    }
+
+    /// Mirrors the three-clause case in NornicDB
+    /// `TestBug_MultiMatchRelationshipBindingLost_Variations`.
+    #[test]
+    fn test_multi_match_carries_multiple_relationship_bindings() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        for statement in [
+            "CREATE (:CloudResource {uid: 'u1'})-[:LINKS {evidence_source: 'reducer'}]->(:CloudResource {uid: 'u2'})",
+            "MATCH (b:CloudResource {uid: 'u2'}) CREATE (b)-[:LINKS {evidence_source: 'reducer'}]->(:CloudResource {uid: 'u3'})",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:CloudResource) WHERE a.uid = 'u1' MATCH (a)-[r1]->(b) MATCH (b)-[r2]->(c) WHERE r1.evidence_source = 'reducer' AND r2.evidence_source = 'reducer' RETURN count(r1) AS first_count, count(r2) AS second_count, b.uid AS b_uid, c.uid AS c_uid")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("first_count"), Some(&Value::from(1)));
+        assert_eq!(result.rows[0].get("second_count"), Some(&Value::from(1)));
+        assert_eq!(result.rows[0].get("b_uid"), Some(&Value::from("u2")));
+        assert_eq!(result.rows[0].get("c_uid"), Some(&Value::from("u3")));
+    }
+
+    /// Mirrors NornicDB `TestRegression_RemoveRelationshipPropertyIsScopedToRelationship`.
+    #[test]
+    fn test_remove_relationship_property_is_scoped_to_relationship() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (a:Item {id: 'a', flag: true})-[:LINK {flag: true, keep: 'edge-only'}]->(b:Item {id: 'b', flag: true})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Item {id: 'a'})-[r:LINK]->(b:Item {id: 'b'}) REMOVE r.flag")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Item {id: 'a'})-[r:LINK]->(b:Item {id: 'b'}) RETURN a.flag AS source_flag, r.flag AS relationship_flag, b.flag AS target_flag, r.keep AS keep")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("source_flag"), Some(&Value::Bool(true)));
+        assert_eq!(result.rows[0].get("relationship_flag"), Some(&Value::Null));
+        assert_eq!(result.rows[0].get("target_flag"), Some(&Value::Bool(true)));
+        assert_eq!(result.rows[0].get("keep"), Some(&Value::from("edge-only")));
+    }
+
+    /// Mirrors the WHERE-pattern case in NornicDB
+    /// `TestRegression_TypedUndirectedRelationshipExistenceRespectsRelationshipType`.
+    #[test]
+    fn test_typed_undirected_relationship_existence_respects_type() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        for statement in [
+            "CREATE (:Item {name: 'orphan'})",
+            "CREATE (:Item {name: 'contains-start'})-[:CONTAINS]->(:Item {name: 'contains-end'})",
+            "CREATE (:Item {name: 'likes-start'})-[:LIKES]->(:Item {name: 'likes-end'})",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Item) WHERE (n)-[:CONTAINS]-() RETURN n.name AS name ORDER BY name")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 2);
+        assert_eq!(result.rows[0].get("name"), Some(&Value::from("contains-end")));
+        assert_eq!(result.rows[1].get("name"), Some(&Value::from("contains-start")));
+    }
+
+    /// Mirrors NornicDB
+    /// `TestRegression_ExecuteMatchEmbeddedOptionalMatchProjectsRelationshipVariable`.
+    #[test]
+    fn test_optional_match_projects_relationship_and_node_variables() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (n:Node {id: 'parent-node-id'})-[:HAS_CHUNK {index: 0}]->(chunk:NodeChunk:Node {id: 'chunk-1'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (n:Node {id: 'parent-node-id'}) OPTIONAL MATCH (n)-[r:HAS_CHUNK]->(chunk:NodeChunk) RETURN r, chunk")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        let relationship = result.rows[0].get("r").and_then(Value::as_object).unwrap();
+        assert_eq!(relationship.get("_type"), Some(&Value::from("HAS_CHUNK")));
+        assert_eq!(relationship.get("index"), Some(&Value::from(0)));
+        let chunk = result.rows[0]
+            .get("chunk")
+            .and_then(Value::as_object)
+            .unwrap();
+        assert_eq!(chunk.get("id"), Some(&Value::from("chunk-1")));
+    }
+
+    /// Mirrors NornicDB `TestSupport_DisconnectedSingleNodeOptionalMatch`.
+    #[test]
+    fn test_disconnected_optional_node_match_joins_or_null_fills() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        for statement in [
+            "CREATE (:OMClass {uid: 'service', name: 'ServiceDog'})-[:INHERITS]->(:OMClass {uid: 'dog', name: 'Dog'})",
+            "CREATE (:OMRepo {id: 'repo:1'})",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let matching = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:OMClass {uid: 'service'})-[rel:INHERITS]->(target) OPTIONAL MATCH (repo:OMRepo) RETURN type(rel) AS relationship_type, target.name AS target_name, repo.id AS repo_id")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(matching.rows.len(), 1);
+        assert_eq!(matching.rows[0].get("relationship_type"), Some(&Value::from("INHERITS")));
+        assert_eq!(matching.rows[0].get("target_name"), Some(&Value::from("Dog")));
+        assert_eq!(matching.rows[0].get("repo_id"), Some(&Value::from("repo:1")));
+
+        let unmatched = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:OMClass {uid: 'service'})-[:INHERITS]->(target) OPTIONAL MATCH (ghost:OMGhost) RETURN target.name AS target_name, ghost.id AS ghost_id")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(unmatched.rows.len(), 1);
+        assert_eq!(unmatched.rows[0].get("target_name"), Some(&Value::from("Dog")));
+        assert_eq!(unmatched.rows[0].get("ghost_id"), Some(&Value::Null));
+    }
+
+    /// Mirrors NornicDB `TestSupport_DisconnectedRelationshipOptionalMatch`.
+    #[test]
+    fn test_disconnected_optional_relationship_match_joins_independently() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        for statement in [
+            "CREATE (:OMClass {uid: 'service'})-[:INHERITS]->(:OMClass {uid: 'dog', name: 'Dog'})",
+            "CREATE (:OMRepo {id: 'repo:1'})-[:REPO_CONTAINS]->(:OMFile {relative_path: 'svc.py'})",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:OMClass {uid: 'service'})-[rel:INHERITS]->(target) OPTIONAL MATCH (repo:OMRepo)-[rc:REPO_CONTAINS]->(file:OMFile) RETURN target.name AS target_name, repo.id AS repo_id, type(rc) AS relationship_type, file.relative_path AS file_path")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("target_name"), Some(&Value::from("Dog")));
+        assert_eq!(result.rows[0].get("repo_id"), Some(&Value::from("repo:1")));
+        assert_eq!(result.rows[0].get("relationship_type"), Some(&Value::from("REPO_CONTAINS")));
+        assert_eq!(result.rows[0].get("file_path"), Some(&Value::from("svc.py")));
+    }
+
+    /// Mirrors NornicDB `TestSupport_BoundSingleNodeOptionalMatchIsRowPreserving`.
+    #[test]
+    fn test_bound_optional_node_match_preserves_existing_binding() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:OMClass {uid: 'service'})-[:INHERITS]->(:OMClass {uid: 'dog', name: 'Dog'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:OMClass {uid: 'service'})-[:INHERITS]->(target) OPTIONAL MATCH (target:OMNoSuchLabel) RETURN target.name AS target_name")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("target_name"), Some(&Value::from("Dog")));
+    }
+
+    /// Mirrors NornicDB `TestSupport_MultiHopChainOptionalMatch`.
+    #[test]
+    fn test_multi_hop_optional_match_binds_every_chain_variable() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        for statement in [
+            "CREATE (:OMClass {uid: 'service'})-[:INHERITS]->(:OMClass {uid: 'dog', name: 'Dog'})",
+            "MATCH (target:OMClass {uid: 'dog'}) CREATE (:OMFile {relative_path: 'svc.py'})-[:CONTAINS]->(target)",
+            "MATCH (file:OMFile {relative_path: 'svc.py'}) CREATE (:OMRepo {id: 'repo:1'})-[:REPO_CONTAINS]->(file)",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:OMClass {uid: 'service'})-[:INHERITS]->(target) OPTIONAL MATCH (target)<-[:CONTAINS]-(file:OMFile)<-[:REPO_CONTAINS]-(repo:OMRepo) RETURN target.name AS target_name, file.relative_path AS file_path, repo.id AS repo_id")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("target_name"), Some(&Value::from("Dog")));
+        assert_eq!(result.rows[0].get("file_path"), Some(&Value::from("svc.py")));
+        assert_eq!(result.rows[0].get("repo_id"), Some(&Value::from("repo:1")));
+    }
+
+    /// Mirrors NornicDB `TestSupport_MixedAggregateExpression`.
+    #[test]
+    fn test_optional_match_mixed_aggregate_expressions() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        for statement in [
+            "CREATE (:OMClass {uid: 'service'})-[:INHERITS {weight: 2}]->(:OMClass {uid: 'dog', name: 'Dog'})",
+            "MATCH (target:OMClass {uid: 'dog'}) CREATE (:OMFile {relative_path: 'svc.py'})-[:CONTAINS]->(target)",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:OMClass {uid: 'service'})-[rel:INHERITS]->(target) OPTIONAL MATCH (target)<-[:CONTAINS]-(file:OMFile) RETURN target.name AS target_name, count(file) + 1 AS bumped, coalesce(sum(rel.weight), 0) AS weight_sum")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].get("target_name"), Some(&Value::from("Dog")));
+        assert_eq!(result.rows[0].get("bumped"), Some(&Value::from(2)));
+        assert_eq!(result.rows[0].get("weight_sum"), Some(&Value::from(2)));
+    }
+
+    /// Mirrors NornicDB `TestSupport_StdevAggregate`.
+    #[test]
+    fn test_optional_match_stdev_and_stdevp_aggregates() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        for statement in [
+            "CREATE (:OMClass {uid: 'service'})-[:INHERITS {weight: 2}]->(:OMClass {uid: 'dog'})",
+            "MATCH (service:OMClass {uid: 'service'}) CREATE (service)-[:INHERITS {weight: 6}]->(:OMClass {uid: 'extra'})",
+            "MATCH (target:OMClass {uid: 'dog'}) CREATE (:OMFile)-[:CONTAINS]->(target)",
+        ] {
+            engine
+                .execute(&parser.parse(statement).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:OMClass {uid: 'service'})-[rel:INHERITS]->(target) OPTIONAL MATCH (target)<-[:CONTAINS]-(file:OMFile) RETURN stdev(rel.weight) AS sample, stdevp(rel.weight) AS population")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        let sample = result.rows[0].get("sample").and_then(Value::as_f64).unwrap();
+        let population = result.rows[0]
+            .get("population")
+            .and_then(Value::as_f64)
+            .unwrap();
+        assert!((sample - 2.8284).abs() < 0.001);
+        assert!((population - 2.0).abs() < 0.001);
+
+        let single_value = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:OMClass {uid: 'service'})-[rel:INHERITS]->(:OMClass {uid: 'dog'}) RETURN stdev(rel.weight) AS sample, stdevp(rel.weight) AS population")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(single_value.rows[0].get("sample"), Some(&Value::from(0.0)));
+        assert_eq!(single_value.rows[0].get("population"), Some(&Value::from(0.0)));
+
+        let empty = engine
+            .execute(
+                &parser
+                    .parse("MATCH (:NoSuchLabel) RETURN stdev(1) AS sample, stdevp(1) AS population")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(empty.rows[0].get("sample"), Some(&Value::Null));
+        assert_eq!(empty.rows[0].get("population"), Some(&Value::Null));
+    }
+
     /// Diagnostic: single MERGE with UNWIND inline list, no relationship MERGE.
     #[test]
     fn test_unwind_merge_single_node_inline_list() {
@@ -485,6 +1556,32 @@
         assert_eq!(p.get("uuid"), Some(&Value::String("n1".to_string())));
         assert_eq!(p.get("name"), Some(&Value::String("Ada".to_string())));
         assert_eq!(p.get("group_id"), Some(&Value::String("g".to_string())));
+    }
+
+    /// Mirrors NornicDB `TestE2E_Set_MapPropertyWithColonInQuotedKey`.
+    #[test]
+    fn test_set_map_property_with_colon_in_quoted_key() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MERGE (n:Test {id: 0}) SET n.my_property = {'key:key': 'value'} RETURN n.my_property AS my_property")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let property = result.rows[0]
+            .get("my_property")
+            .and_then(Value::as_object)
+            .expect("expected map property");
+        assert_eq!(
+            property.get("key:key"),
+            Some(&Value::String("value".to_string()))
+        );
+        assert!(!property.contains_key("'key:key'"));
     }
 
     /// Mirrors NornicDB `TestParamMapPropertyAccess_ReturnShapes`.

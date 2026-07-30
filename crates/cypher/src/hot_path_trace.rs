@@ -27,6 +27,8 @@ pub struct HotPathTrace {
     pub traversal_start_seed_top_k: bool,
     /// Traversal used a seeded top-k on the end node.
     pub traversal_end_seed_top_k: bool,
+    /// Traversal seeded its start node from an indexed property IN-list.
+    pub traversal_start_seed_property_in: bool,
     /// An UNWIND simple-merge batch path was used.
     pub unwind_simple_merge_batch: bool,
     /// An UNWIND fixed-chain link-batch path was used.
@@ -49,6 +51,7 @@ impl HotPathTrace {
             || self.compound_query_fast_path
             || self.traversal_start_seed_top_k
             || self.traversal_end_seed_top_k
+            || self.traversal_start_seed_property_in
             || self.unwind_simple_merge_batch
             || self.unwind_fixed_chain_link_batch
             || self.unwind_multi_match_relationship_batch
@@ -70,6 +73,7 @@ pub struct HotPathTraceState {
     compound_query_fast_path: AtomicBool,
     traversal_start_seed_top_k: AtomicBool,
     traversal_end_seed_top_k: AtomicBool,
+    traversal_start_seed_property_in: AtomicBool,
     unwind_simple_merge_batch: AtomicBool,
     unwind_fixed_chain_link_batch: AtomicBool,
     unwind_multi_match_relationship_batch: AtomicBool,
@@ -98,6 +102,8 @@ impl HotPathTraceState {
             .store(false, Ordering::Relaxed);
         self.traversal_end_seed_top_k
             .store(false, Ordering::Relaxed);
+        self.traversal_start_seed_property_in
+            .store(false, Ordering::Relaxed);
         self.unwind_simple_merge_batch
             .store(false, Ordering::Relaxed);
         self.unwind_fixed_chain_link_batch
@@ -122,6 +128,9 @@ impl HotPathTraceState {
             compound_query_fast_path: self.compound_query_fast_path.load(Ordering::Relaxed),
             traversal_start_seed_top_k: self.traversal_start_seed_top_k.load(Ordering::Relaxed),
             traversal_end_seed_top_k: self.traversal_end_seed_top_k.load(Ordering::Relaxed),
+            traversal_start_seed_property_in: self
+                .traversal_start_seed_property_in
+                .load(Ordering::Relaxed),
             unwind_simple_merge_batch: self.unwind_simple_merge_batch.load(Ordering::Relaxed),
             unwind_fixed_chain_link_batch: self
                 .unwind_fixed_chain_link_batch
@@ -168,6 +177,11 @@ impl HotPathTraceState {
 
     pub fn mark_traversal_end_seed_top_k(&self) {
         self.traversal_end_seed_top_k.store(true, Ordering::Relaxed);
+    }
+
+    pub fn mark_traversal_start_seed_property_in(&self) {
+        self.traversal_start_seed_property_in
+            .store(true, Ordering::Relaxed);
     }
 
     pub fn mark_unwind_simple_merge_batch(&self) {

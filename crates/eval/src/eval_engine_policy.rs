@@ -2528,6 +2528,18 @@ fn builtin_function_rows() -> Vec<Row> {
             "Aggregating",
         ),
         (
+            "stdev",
+            "stdev(input :: NUMBER) :: FLOAT",
+            "Returns the sample standard deviation of numeric values",
+            "Aggregating",
+        ),
+        (
+            "stdevp",
+            "stdevp(input :: NUMBER) :: FLOAT",
+            "Returns the population standard deviation of numeric values",
+            "Aggregating",
+        ),
+        (
             "ceil",
             "ceil(input :: NUMBER) :: NUMBER",
             "Returns the smallest integer greater than or equal to the input",

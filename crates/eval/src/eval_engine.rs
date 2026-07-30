@@ -300,13 +300,25 @@ impl EvalEngine {
         right_var: &str,
     ) -> Result<bool, EvalError> {
         let left_props = row.get(left_var).and_then(Value::as_object);
-        let right_props = row.get(right_var).and_then(Value::as_object);
-        let (Some(left), Some(right)) = (left_props, right_props) else {
+        let Some(left) = left_props else {
             return Ok(false);
         };
-        let left_id = left.get("_id").and_then(Value::as_str);
+        let Some(left_id) = left.get("_id").and_then(Value::as_str) else {
+            return Ok(false);
+        };
+        if right_var.is_empty() {
+            return Ok(self
+                .storage
+                .get_edges_by_type(rel_type)?
+                .iter()
+                .any(|edge| edge.start_node == left_id || edge.end_node == left_id));
+        }
+        let right_props = row.get(right_var).and_then(Value::as_object);
+        let Some(right) = right_props else {
+            return Ok(false);
+        };
         let right_id = right.get("_id").and_then(Value::as_str);
-        let (Some(left_id), Some(right_id)) = (left_id, right_id) else {
+        let Some(right_id) = right_id else {
             return Ok(false);
         };
         let edges = self.storage.get_edges_by_type(rel_type)?;
@@ -498,6 +510,7 @@ impl EvalEngine {
                         transaction,
                         &mut current_rows,
                         &remove_clause.items,
+                        &mut stats,
                     )?;
                 }
                 Clause::Merge(merge_clause) => {
@@ -510,6 +523,12 @@ impl EvalEngine {
                     )?;
                 }
                 Clause::Delete(delete_clause) => {
+                    self.validate_storage_transaction_delete_clause(
+                        transaction,
+                        &current_rows,
+                        &delete_clause.variables,
+                        delete_clause.detach,
+                    )?;
                     for row in &current_rows {
                         for variable in &delete_clause.variables {
                             self.delete_storage_transaction_bound_value(
@@ -1644,6 +1663,7 @@ impl EvalEngine {
         transaction: &mut StorageTransaction<'_>,
         rows: &mut [Row],
         items: &[RemoveItem],
+        stats: &mut QueryStats,
     ) -> Result<(), EvalError> {
         for row in rows {
             for item in items {
@@ -1657,7 +1677,9 @@ impl EvalEngine {
                         let Some(Value::Object(properties)) = row.get_mut(variable) else {
                             continue;
                         };
-                        properties.remove(property);
+                        if properties.remove(property).is_some() {
+                            stats.properties_set += 1;
+                        }
                         self.stage_storage_transaction_bound_props(
                             transaction,
                             &properties.clone().into_iter().collect(),
@@ -1930,6 +1952,59 @@ impl EvalEngine {
         if transaction.get_node_record(id)?.is_some() {
             transaction.delete_node_record(id);
             stats.nodes_deleted += 1;
+        }
+        Ok(())
+    }
+
+    fn validate_storage_transaction_delete_clause(
+        &self,
+        transaction: &StorageTransaction<'_>,
+        rows: &[Row],
+        variables: &[String],
+        detach: bool,
+    ) -> Result<(), EvalError> {
+        if detach {
+            return Ok(());
+        }
+        let deleted_edge_ids = rows
+            .iter()
+            .flat_map(|row| variables.iter().filter_map(|variable| row.get(variable)))
+            .filter_map(|value| {
+                let Value::Object(properties) = value else {
+                    return None;
+                };
+                (properties.contains_key("_type")
+                    && properties.contains_key("_start")
+                    && properties.contains_key("_end"))
+                .then(|| properties.get("_id").and_then(Value::as_str).map(str::to_owned))
+                .flatten()
+            })
+            .collect::<HashSet<_>>();
+
+        for row in rows {
+            for variable in variables {
+                let Some(Value::Object(properties)) = row.get(variable) else {
+                    continue;
+                };
+                if properties.contains_key("_type")
+                    || properties.contains_key("_start")
+                    || properties.contains_key("_end")
+                {
+                    continue;
+                }
+                let Some(node_id) = properties.get("_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let has_remaining_edge = transaction
+                    .get_adjacent_edges(node_id, EdgeAdjacencyDirection::Both, None)?
+                    .into_iter()
+                    .any(|edge| !deleted_edge_ids.contains(&edge.id));
+                if has_remaining_edge {
+                    return Err(EvalError::ExecutionError(format!(
+                        "cannot delete node {node_id}: it still has relationships"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -2590,7 +2665,11 @@ impl EvalEngine {
                         &current_rows,
                         &match_clause.pattern,
                         params,
+                        next_where_expression,
                     )?;
+                    if next_where_expression.is_some() {
+                        clause_index += 1;
+                    }
                 }
 
                 Clause::Where(where_clause) => {
@@ -4144,7 +4223,11 @@ impl EvalEngine {
                         &current_rows,
                         &match_clause.pattern,
                         params,
+                        next_where_expression,
                     )?;
+                    if next_where_expression.is_some() {
+                        clause_index += 1;
+                    }
                 }
                 Clause::Where(where_clause) => {
                     let mut filtered = pooled_binding_rows();
@@ -4587,6 +4670,49 @@ impl EvalEngine {
         stats: &mut QueryStats,
     ) -> Result<Vec<Row>, EvalError> {
         self.invalidate_node_lookup_cache();
+        if !detach {
+            let deleted_edge_ids = base_rows
+                .iter()
+                .flat_map(|row| variables.iter().filter_map(|variable| row.get(variable)))
+                .filter_map(|value| {
+                    let Value::Object(properties) = value else {
+                        return None;
+                    };
+                    (properties.contains_key("_type")
+                        && properties.contains_key("_start")
+                        && properties.contains_key("_end"))
+                    .then(|| properties.get("_id").and_then(Value::as_str).map(str::to_owned))
+                    .flatten()
+                })
+                .collect::<HashSet<_>>();
+
+            for row in base_rows {
+                for variable in variables {
+                    let Some(Value::Object(properties)) = row.get(variable) else {
+                        continue;
+                    };
+                    if properties.contains_key("_type")
+                        || properties.contains_key("_start")
+                        || properties.contains_key("_end")
+                    {
+                        continue;
+                    }
+                    let Some(node_id) = properties.get("_id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let has_remaining_edge = self
+                        .storage
+                        .get_adjacent_edges(node_id, EdgeAdjacencyDirection::Both, None)?
+                        .into_iter()
+                        .any(|edge| !deleted_edge_ids.contains(&edge.id));
+                    if has_remaining_edge {
+                        return Err(EvalError::ExecutionError(format!(
+                            "cannot delete node {node_id}: it still has relationships"
+                        )));
+                    }
+                }
+            }
+        }
         let mut remaining_rows = pooled_binding_rows();
 
         for row in base_rows {
@@ -4831,6 +4957,7 @@ impl EvalEngine {
         base_rows: &[Row],
         pattern: &Pattern,
         params: &HashMap<String, Value>,
+        where_expression: Option<&Expression>,
     ) -> Result<Vec<Row>, EvalError> {
         if !pattern.edges.is_empty() {
             let mut optional_rows = pooled_binding_rows();
@@ -4839,7 +4966,7 @@ impl EvalEngine {
                     std::slice::from_ref(base_row),
                     pattern,
                     params,
-                    None,
+                    where_expression,
                 )?;
                 if matched.is_empty() {
                     let mut row = base_row.clone();
@@ -4855,9 +4982,14 @@ impl EvalEngine {
         let mut current_rows = base_rows.to_vec();
         for node_pat in &pattern.nodes {
             let mut new_rows = pooled_binding_rows();
-            let mut found_any = false;
             for base_row in &current_rows {
-                for props in self.matching_node_props(node_pat, base_row, params)? {
+                let is_bound = node_pat
+                    .variable
+                    .as_ref()
+                    .is_some_and(|variable| base_row.contains_key(variable));
+                let matches = self.bound_or_matching_node_props(base_row, node_pat, params)?;
+                let mut found_match = false;
+                for props in matches {
                     let node_val = serde_json::to_value(&props)
                         .map_err(|e| EvalError::SerializationError(e.to_string()))?;
                     let mut row = base_row.clone();
@@ -4865,17 +4997,22 @@ impl EvalEngine {
                         row.insert(var.clone(), node_val.clone());
                     }
                     bind_single_node_path_variable(&mut row, pattern, node_val);
-                    new_rows.push(row);
-                    found_any = true;
-                }
-            }
-            if !found_any {
-                for base_row in &current_rows {
-                    let mut row = base_row.clone();
-                    if let Some(var) = &node_pat.variable {
-                        row.insert(var.clone(), Value::Null);
+                    if let Some(expression) = where_expression {
+                        if !self.eval_where_predicate(expression, &row, params)? {
+                            continue;
+                        }
                     }
-                    bind_optional_pattern_nulls(&mut row, pattern);
+                    found_match = true;
+                    new_rows.push(row);
+                }
+                if !found_match {
+                    let mut row = base_row.clone();
+                    if !is_bound {
+                        if let Some(var) = &node_pat.variable {
+                            row.insert(var.clone(), Value::Null);
+                        }
+                        bind_optional_pattern_nulls(&mut row, pattern);
+                    }
                     new_rows.push(row);
                 }
             }
@@ -6113,8 +6250,12 @@ impl EvalEngine {
         let mut rows = pooled_binding_rows();
         let start_pattern = &pattern.nodes[0];
         for base_row in base_rows {
-            let start_candidates =
-                self.bound_or_matching_node_props(base_row, start_pattern, params)?;
+            let start_candidates = self.bound_or_matching_node_props_with_where(
+                base_row,
+                start_pattern,
+                params,
+                where_expression,
+            )?;
             for start_props in start_candidates {
                 let start_value = serde_json::to_value(&start_props)
                     .map_err(|e| EvalError::SerializationError(e.to_string()))?;
@@ -6179,6 +6320,11 @@ impl EvalEngine {
             let mut final_row = row;
             if let Some(path_var) = &pattern.path_variable {
                 final_row.insert(path_var.clone(), path_value(node_values, edge_values));
+            }
+            if let Some(expression) = where_expression {
+                if !self.eval_where_predicate(expression, &final_row, params)? {
+                    return Ok(());
+                }
             }
             rows.push(RelationshipMatchRow {
                 row: final_row,
@@ -6462,6 +6608,16 @@ impl EvalEngine {
         where_expression: Option<&Expression>,
     ) -> Result<Vec<HashMap<String, Value>>, EvalError> {
         let expected_props = evaluate_pattern_properties(&pattern.properties, row, params)?;
+        if let Some(in_list_predicate) =
+            extract_node_in_list_predicate(pattern, where_expression, row, params)?
+        {
+            return self.lookup_matching_node_props_by_in_list(
+                &pattern.labels,
+                &expected_props,
+                &in_list_predicate.property,
+                &in_list_predicate.values,
+            );
+        }
         if let Some(range_predicate) =
             extract_node_range_predicate(pattern, where_expression, row, params)?
         {
@@ -6523,6 +6679,42 @@ impl EvalEngine {
         Ok(out)
     }
 
+    fn lookup_matching_node_props_by_in_list(
+        &self,
+        labels: &[String],
+        expected_props: &HashMap<String, Value>,
+        property: &str,
+        values: &[Value],
+    ) -> Result<Vec<HashMap<String, Value>>, EvalError> {
+        let catalog = IndexCatalog::new(self.storage.as_ref());
+        let mut lookup_props = expected_props.clone();
+        lookup_props.insert(property.to_string(), Value::Null);
+        if !catalog.has_preferred_node_lookup_index(labels, &lookup_props)? {
+            return self.lookup_matching_node_props(labels, expected_props);
+        }
+
+        self.hot_path_trace.mark_traversal_start_seed_property_in();
+        let resolver = self.knowledge_policy_resolver()?;
+        let mut seen_ids = HashSet::new();
+        let mut out = Vec::new();
+        for value in values {
+            lookup_props.insert(property.to_string(), value.clone());
+            for node in catalog.lookup_nodes(labels, &lookup_props)? {
+                if !seen_ids.insert(node.id.clone())
+                    || !self.node_visible_under_policy(&node, &resolver)?
+                {
+                    continue;
+                }
+                let props = node_record_to_props(&node);
+                if node_matches_pattern(&props, labels, expected_props) {
+                    self.apply_on_access_for_node(&node, &resolver)?;
+                    out.push(props);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn bound_or_matching_node_props(
         &self,
         row: &Row,
@@ -6540,6 +6732,25 @@ impl EvalEngine {
         }
 
         self.matching_node_props(pattern, row, params)
+    }
+
+    fn bound_or_matching_node_props_with_where(
+        &self,
+        row: &Row,
+        pattern: &NodePattern,
+        params: &HashMap<String, Value>,
+        where_expression: Option<&Expression>,
+    ) -> Result<Vec<HashMap<String, Value>>, EvalError> {
+        let expected_props = evaluate_pattern_properties(&pattern.properties, row, params)?;
+        if let Some(variable) = &pattern.variable {
+            if let Some(bound_props) = bound_row_object_props(row, variable) {
+                if node_matches_pattern(&bound_props, &pattern.labels, &expected_props) {
+                    return Ok(vec![bound_props]);
+                }
+                return Ok(Vec::new());
+            }
+        }
+        self.matching_node_props_with_where(pattern, row, params, where_expression)
     }
 
     fn node_props_by_id(&self, node_id: &str) -> Result<Option<HashMap<String, Value>>, EvalError> {
@@ -6685,6 +6896,52 @@ struct NodeRangePredicate {
     value: Value,
 }
 
+struct NodeInListPredicate {
+    property: String,
+    values: Vec<Value>,
+}
+
+fn extract_node_in_list_predicate(
+    pattern: &NodePattern,
+    where_expression: Option<&Expression>,
+    row: &Row,
+    params: &HashMap<String, Value>,
+) -> Result<Option<NodeInListPredicate>, EvalError> {
+    let Some(variable) = pattern.variable.as_deref() else {
+        return Ok(None);
+    };
+    let Some(expression) = where_expression else {
+        return Ok(None);
+    };
+
+    let mut expressions = vec![expression];
+    while let Some(expression) = expressions.pop() {
+        if let Expression::And(operands) = expression {
+            expressions.push(&operands.left);
+            expressions.push(&operands.right);
+            continue;
+        }
+        if let Expression::InList { operands, .. } = expression {
+            if let Expression::PropertyAccess {
+                variable: property_variable,
+                property,
+            } = &operands.left
+            {
+                if property_variable == variable {
+                    let value = copperdb_filter::eval_expression(&operands.right, row, params)?;
+                    if let Value::Array(values) = value {
+                        return Ok(Some(NodeInListPredicate {
+                            property: property.clone(),
+                            values,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn extract_node_range_predicate(
     pattern: &NodePattern,
     where_expression: Option<&Expression>,
@@ -6782,7 +7039,7 @@ fn is_agg_function(expr: &Expression) -> bool {
             let lower = name.to_ascii_lowercase();
             matches!(
                 lower.as_str(),
-                "avg" | "sum" | "min" | "max" | "count" | "collect"
+                "avg" | "sum" | "min" | "max" | "stdev" | "stdevp" | "count" | "collect"
             )
         }
         _ => false,
@@ -7163,7 +7420,7 @@ fn agg_func_info(expr: &Expression) -> Option<(&str, Option<&Expression>)> {
 }
 
 /// Build a single row with identity values for aggregation on empty input.
-/// count→0, sum→0, avg→null, min→null, max→null
+/// count→0, sum→0, collect→[], and numeric statistical aggregates→null.
 fn aggregate_identity_row(
     items: &[ReturnItem],
     _params: &HashMap<String, Value>,
@@ -7176,7 +7433,7 @@ fn aggregate_identity_row(
                 "count" => Value::from(0),
                 "sum" => Value::from(0),
                 "collect" => Value::Array(Vec::new()),
-                "avg" | "min" | "max" => Value::Null,
+                "avg" | "min" | "max" | "stdev" | "stdevp" => Value::Null,
                 _ => Value::Null,
             },
             _ => Value::Null,
@@ -7321,6 +7578,36 @@ fn compute_agg(
                 Ok(Value::from(
                     values.iter().sum::<f64>() / values.len() as f64,
                 ))
+            }
+        }
+        "stdev" | "stdevp" => {
+            let arg = arg.ok_or_else(|| {
+                EvalError::ExecutionError(format!("{fn_name}() requires an argument"))
+            })?;
+            let mut count = 0_u64;
+            let mut mean = 0.0_f64;
+            let mut sum_squared_deviation = 0.0_f64;
+            for value in rows.iter().filter_map(|row| {
+                copperdb_filter::eval_expression(arg, row, params)
+                    .ok()?
+                    .as_f64()
+            }) {
+                count += 1;
+                let delta = value - mean;
+                mean += delta / count as f64;
+                sum_squared_deviation += delta * (value - mean);
+            }
+            if count == 0 {
+                Ok(Value::Null)
+            } else if count == 1 {
+                Ok(Value::from(0.0))
+            } else {
+                let divisor = if fn_name.eq_ignore_ascii_case("stdevp") {
+                    count as f64
+                } else {
+                    (count - 1) as f64
+                };
+                Ok(Value::from((sum_squared_deviation / divisor).sqrt()))
             }
         }
         "min" => {

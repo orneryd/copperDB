@@ -62,4 +62,19 @@ impl<'a> ParseContext<'a> {
             }
         })
     }
+
+    pub(crate) fn advance_map_key(&mut self) -> Result<String, CypherError> {
+        self.expect_identifier().map(|key| {
+            let quoted = key.len() >= 2
+                && matches!(
+                    (key.as_bytes()[0], key.as_bytes()[key.len() - 1]),
+                    (b'`', b'`') | (b'\'', b'\'') | (b'"', b'"')
+                );
+            if quoted {
+                key[1..key.len() - 1].to_string()
+            } else {
+                key.to_string()
+            }
+        })
+    }
 }

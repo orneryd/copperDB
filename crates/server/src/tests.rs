@@ -5426,6 +5426,8 @@ fn appstate_bolt_executor_unwinds_staged_transaction_rows() {
         created.rows,
         vec![vec![serde_json::json!("a")], vec![serde_json::json!("b")]]
     );
+    assert_eq!(created.stats.nodes_created, 2);
+    assert_eq!(created.stats.properties_set, 2);
     let inside = executor
         .execute_in_transaction_with_context(
             &transaction,
@@ -5444,6 +5446,224 @@ fn appstate_bolt_executor_unwinds_staged_transaction_rows() {
         )
         .expect("outside query should execute normally");
     assert_eq!(outside.rows, vec![vec![serde_json::json!(0)]]);
+}
+
+#[test]
+fn appstate_bolt_executor_unwind_match_with_mutations_aggregate_counters() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    executor
+        .execute_on_database(
+            Some("copperdb"),
+            "CREATE (:TxWithMutation {uid: 'a', legacy: true}), (:TxWithMutation {uid: 'b', legacy: true})",
+            &empty,
+        )
+        .unwrap();
+    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+
+    let marked = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "UNWIND ['a', 'b'] AS uid MATCH (node:TxWithMutation {uid: uid}) WITH node SET node.marked = true",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(marked.stats.properties_set, 2);
+    let marked_count = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "MATCH (node:TxWithMutation {marked: true}) RETURN count(node) AS count",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(marked_count.rows, vec![vec![serde_json::json!(2)]]);
+
+    let removed = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "UNWIND ['a', 'b'] AS uid MATCH (node:TxWithMutation {uid: uid}) WITH node REMOVE node.legacy",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(removed.stats.properties_set, 2);
+    let legacy_count = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "MATCH (node:TxWithMutation {legacy: true}) RETURN count(node) AS count",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(legacy_count.rows, vec![vec![serde_json::json!(0)]]);
+
+    let deleted = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "UNWIND ['a', 'b'] AS uid MATCH (node:TxWithMutation {uid: uid}) WITH node DETACH DELETE node",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(deleted.stats.nodes_deleted, 2);
+    executor.commit_transaction(&transaction).unwrap();
+
+    let remaining = executor
+        .execute_on_database(
+            Some("copperdb"),
+            "MATCH (:TxWithMutation) RETURN count(*) AS count",
+            &empty,
+        )
+        .unwrap();
+    assert_eq!(remaining.rows, vec![vec![serde_json::json!(0)]]);
+}
+
+#[test]
+fn appstate_bolt_executor_unwind_relationship_delete_commits_or_rolls_back() {
+    for (commit, expected_remaining) in [(true, 0), (false, 1)] {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = demo_temp_appstate_with_catalog(&temp_dir);
+        let executor = AppStateBoltExecutor::new(state);
+        let empty = HashMap::new();
+        executor
+            .execute_on_database(
+                Some("copperdb"),
+                "CREATE (:Function {uid: 'source'}), (:Function {uid: 'target'})",
+                &empty,
+            )
+            .unwrap();
+        executor
+            .execute_on_database(
+                Some("copperdb"),
+                "MATCH (source:Function {uid: 'source'}), (target:Function {uid: 'target'}) CREATE (source)-[:TAINT_FLOWS_TO {evidence_source: 'wanted'}]->(target)",
+                &empty,
+            )
+            .unwrap();
+
+        let transaction = executor
+            .begin_transaction("copperdb", &empty, None)
+            .unwrap();
+        let params = HashMap::from([
+            (
+                "uids".to_string(),
+                serde_json::json!(["source", "missing", "source"]),
+            ),
+            ("evidence_source".to_string(), serde_json::json!("wanted")),
+        ]);
+        let deleted = executor
+            .execute_in_transaction_with_context(
+                &transaction,
+                "UNWIND $uids AS source_uid MATCH (source:Function {uid: source_uid})-[rel:TAINT_FLOWS_TO]->() WHERE rel.evidence_source = $evidence_source DELETE rel",
+                &params,
+                RequestContext::detached(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(deleted.stats.relationships_deleted, 1);
+
+        if commit {
+            executor.commit_transaction(&transaction).unwrap();
+        } else {
+            executor.rollback_transaction(&transaction).unwrap();
+        }
+
+        let remaining = executor
+            .execute_on_database(
+                Some("copperdb"),
+                "MATCH (:Function {uid: 'source'})-[rel:TAINT_FLOWS_TO]->(:Function {uid: 'target'}) RETURN count(rel) AS count",
+                &empty,
+            )
+            .unwrap();
+        assert_eq!(remaining.rows, vec![vec![serde_json::json!(expected_remaining)]]);
+    }
+}
+
+#[test]
+fn appstate_bolt_executor_unwind_relationship_delete_empty_input_is_noop() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    executor
+        .execute_on_database(
+            Some("copperdb"),
+            "CREATE (:Function {uid: 'source'})-[:TAINT_FLOWS_TO]->(:Function {uid: 'target'})",
+            &empty,
+        )
+        .unwrap();
+
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .unwrap();
+    let params = HashMap::from([("uids".to_string(), serde_json::json!([]))]);
+    let deleted = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "UNWIND $uids AS source_uid MATCH (source:Function {uid: source_uid})-[rel:TAINT_FLOWS_TO]->() DELETE rel",
+            &params,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(deleted.stats.relationships_deleted, 0);
+    executor.commit_transaction(&transaction).unwrap();
+
+    let remaining = executor
+        .execute_on_database(
+            Some("copperdb"),
+            "MATCH (:Function {uid: 'source'})-[rel:TAINT_FLOWS_TO]->(:Function {uid: 'target'}) RETURN count(rel) AS count",
+            &empty,
+        )
+        .unwrap();
+    assert_eq!(remaining.rows, vec![vec![serde_json::json!(1)]]);
+}
+
+#[test]
+fn appstate_bolt_executor_rejects_connected_node_delete_in_transaction() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    executor
+        .execute_on_database(
+            Some("copperdb"),
+            "CREATE (:TxDeleteGuard {id: 'connected'})-[:LINKS]->(:TxDeleteGuard {id: 'peer'})",
+            &empty,
+        )
+        .unwrap();
+
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .unwrap();
+    let error = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "MATCH (node:TxDeleteGuard {id: 'connected'}) DELETE node",
+            &empty,
+            RequestContext::detached(),
+            None,
+        )
+        .unwrap_err();
+    assert!(error.contains("still has relationships"));
+    executor.rollback_transaction(&transaction).unwrap();
+
+    let remaining = executor
+        .execute_on_database(
+            Some("copperdb"),
+            "MATCH (:TxDeleteGuard {id: 'connected'})-[:LINKS]->(:TxDeleteGuard {id: 'peer'}) RETURN count(*) AS count",
+            &empty,
+        )
+        .unwrap();
+    assert_eq!(remaining.rows, vec![vec![serde_json::json!(1)]]);
 }
 
 #[test]
