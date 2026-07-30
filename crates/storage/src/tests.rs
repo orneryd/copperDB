@@ -2527,6 +2527,39 @@ fn storage_transaction_rejects_an_index_changed_after_begin() {
 }
 
 #[test]
+fn index_schema_generation_tracks_direct_and_atomic_index_ddl() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let index = IndexDefinition {
+        name: "person_email_idx".to_string(),
+        entity_type: IndexEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["email".to_string()],
+        kind: IndexKind::Range,
+    };
+
+    assert_eq!(engine.index_schema_generation(), 0);
+    engine.persist_index_definition(&index).unwrap();
+    assert_eq!(engine.index_schema_generation(), 1);
+    assert!(engine.delete_index_definition(&index.name).unwrap());
+    assert_eq!(engine.index_schema_generation(), 2);
+
+    engine
+        .batch_write(|writer| {
+            writer.put_index_definition(&index);
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+    assert_eq!(engine.index_schema_generation(), 3);
+    engine
+        .batch_write(|writer| {
+            writer.delete_index_definition(&index.name);
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+    assert_eq!(engine.index_schema_generation(), 4);
+}
+
+#[test]
 fn topology_metadata_round_trip_builds_valid_registry() {
     use copperdb_topology::{
         DistributedWriteMode, HyperscalerProfile as TopologyHyperscalerProfile, MeshPeer,
@@ -5511,6 +5544,19 @@ fn fulltext_index_rebuilds_and_tracks_mutations() {
     assert_eq!(results[0].0.id, "db:n1");
     assert!(results[0].1 > 0.0);
 
+    let cancelled = RequestCancellation::new();
+    cancelled.cancel();
+    assert!(matches!(
+        engine.search_fulltext_nodes_by_properties_with_cancellation(
+            "Person",
+            &["bio".into()],
+            "graph engineer",
+            10,
+            &cancelled,
+        ),
+        Err(StorageError::RequestCancelled(_))
+    ));
+
     alice
         .properties
         .insert("bio".into(), json!("Updated biography about storage"));
@@ -5530,6 +5576,149 @@ fn fulltext_index_rebuilds_and_tracks_mutations() {
     engine.delete_node_record("db:n1").unwrap();
     assert!(engine
         .search_fulltext_nodes_by_properties("Person", &["bio".into()], "updated biography", 10)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn fulltext_vocabulary_is_bounded_deterministic_and_cancellable() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let mut alice = sample_node("db:n1", &["Person"]);
+    alice
+        .properties
+        .insert("bio".into(), json!("Rust graph database engineer"));
+    let mut bob = sample_node("db:n2", &["Person"]);
+    bob.properties
+        .insert("bio".into(), json!("Storage systems specialist"));
+    engine.put_node_record(&alice).unwrap();
+    engine.put_node_record(&bob).unwrap();
+    engine
+        .persist_index_definition(&IndexDefinition {
+            name: "person_bio_fulltext_idx".to_string(),
+            entity_type: IndexEntityType::Node,
+            kind: IndexKind::FullText,
+            label: "Person".to_string(),
+            properties: vec!["bio".to_string()],
+        })
+        .unwrap();
+
+    let cancel = RequestCancellation::new();
+    let vocabulary = engine
+        .fulltext_node_vocabulary_with_cancellation(
+            "Person",
+            &["bio".into()],
+            32,
+            32,
+            &cancel,
+        )
+        .unwrap();
+    assert_eq!(
+        vocabulary.terms,
+        vec!["database", "engineer", "graph", "rust", "specialist", "storage", "systems"]
+    );
+    assert!(!vocabulary.truncated);
+
+    let limited = engine
+        .fulltext_node_vocabulary_with_cancellation(
+            "Person",
+            &["bio".into()],
+            2,
+            32,
+            &cancel,
+        )
+        .unwrap();
+    assert_eq!(limited.terms.len(), 2);
+    assert!(limited.truncated);
+
+    cancel.cancel();
+    assert!(matches!(
+        engine.fulltext_node_vocabulary_with_cancellation(
+            "Person",
+            &["bio".into()],
+            32,
+            32,
+            &cancel,
+        ),
+        Err(StorageError::RequestCancelled(_))
+    ));
+}
+
+#[test]
+fn relationship_fulltext_index_rebuilds_and_tracks_mutations() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let mut edge = sample_edge("e1", "RELATES", "a", "b");
+    edge.properties
+        .insert("fact".into(), json!("CloudTrail audit logging"));
+    engine.put_edge_record(&edge).unwrap();
+    engine
+        .persist_index_definition(&IndexDefinition {
+            name: "rel_fact_fulltext_idx".to_string(),
+            entity_type: IndexEntityType::Relationship,
+            kind: IndexKind::FullText,
+            label: "RELATES".to_string(),
+            properties: vec!["fact".to_string()],
+        })
+        .unwrap();
+
+    let terms = vec!["cloudtrail".to_string(), "audit".to_string()];
+    let hits = engine
+        .search_fulltext_relationships_by_properties("RELATES", &["fact".into()], &terms)
+        .unwrap();
+    assert_eq!(hits.iter().map(|edge| &edge.id).collect::<Vec<_>>(), vec!["e1"]);
+    let vocabulary = engine
+        .fulltext_relationship_vocabulary_with_cancellation(
+            "RELATES",
+            &["fact".into()],
+            32,
+            32,
+            &RequestCancellation::new(),
+        )
+        .unwrap();
+    assert_eq!(vocabulary.terms, vec!["audit", "cloudtrail", "logging"]);
+    assert!(!vocabulary.truncated);
+
+    let cancelled = RequestCancellation::new();
+    cancelled.cancel();
+    assert!(matches!(
+        engine.search_fulltext_relationships_by_properties_with_cancellation(
+            "RELATES",
+            &["fact".into()],
+            &["cloudtrail".into()],
+            &cancelled,
+        ),
+        Err(StorageError::RequestCancelled(_))
+    ));
+
+    edge.properties
+        .insert("fact".into(), json!("Redis cache replication"));
+    engine.put_edge_record(&edge).unwrap();
+    assert!(engine
+        .search_fulltext_relationships_by_properties(
+            "RELATES",
+            &["fact".into()],
+            &["cloudtrail".into()],
+        )
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        engine
+            .search_fulltext_relationships_by_properties(
+                "RELATES",
+                &["fact".into()],
+                &["redis".into()],
+            )
+            .unwrap()
+            .len(),
+        1
+    );
+
+    engine.delete_edge_record("e1").unwrap();
+    assert!(engine
+        .search_fulltext_relationships_by_properties(
+            "RELATES",
+            &["fact".into()],
+            &["redis".into()],
+        )
         .unwrap()
         .is_empty());
 }

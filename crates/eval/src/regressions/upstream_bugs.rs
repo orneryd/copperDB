@@ -1659,6 +1659,196 @@
         assert!(!result.rows.is_empty(), "should find authentication relationship");
     }
 
+    #[test]
+    fn test_fulltext_query_relationships_honors_lucene_field_boolean_and_phrase_queries() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE FULLTEXT INDEX rel_lucene_ft FOR ()-[r:RELATES_TO]-() ON EACH [r.group_id, r.fact]")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:Entity {id: 'a'}), (:Entity {id: 'b'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Entity {id: 'a'}), (b:Entity {id: 'b'}) CREATE (a)-[:RELATES_TO {group_id: 'ft_repro', fact: 'CloudTrail audit logging'}]->(b)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("MATCH (a:Entity {id: 'a'}), (b:Entity {id: 'b'}) CREATE (a)-[:RELATES_TO {group_id: 'other', fact: 'CloudTrail audit logging'}]->(b)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.fulltext.queryRelationships('rel_lucene_ft', 'group_id:ft_repro AND \"CloudTrail audit\"') YIELD relationship RETURN relationship.group_id AS group_id")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get("group_id"),
+            Some(&Value::String("ft_repro".into()))
+        );
+
+        let wildcard_result = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.fulltext.queryRelationships('rel_lucene_ft', 'fact:*trail') YIELD relationship RETURN relationship.group_id AS group_id")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(wildcard_result.rows.len(), 2);
+
+        let negative_result = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.fulltext.queryRelationships('rel_lucene_ft', 'NOT group_id:ft_repro') YIELD relationship RETURN relationship.group_id AS group_id")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(negative_result.rows.len(), 1);
+        assert_eq!(
+            negative_result.rows[0].get("group_id"),
+            Some(&Value::String("other".into()))
+        );
+    }
+
+    #[test]
+    fn test_fulltext_query_relationships_honors_options_map() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE FULLTEXT INDEX rel_options_ft FOR ()-[r:RELATES_TO]-() ON (r.fact)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:Entity {id: 'a'}), (:Entity {id: 'b'}), (:Entity {id: 'c'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        for query in [
+            "MATCH (a:Entity {id: 'a'}), (b:Entity {id: 'b'}) CREATE (a)-[:RELATES_TO {fact: 'authentication flow'}]->(b)",
+            "MATCH (a:Entity {id: 'a'}), (c:Entity {id: 'c'}) CREATE (a)-[:RELATES_TO {fact: 'authentication audit'}]->(c)",
+        ] {
+            engine.execute(&parser.parse(query).unwrap(), &HashMap::new()).unwrap();
+        }
+
+        let paginated = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.fulltext.queryRelationships('rel_options_ft', 'authentication', {skip: 1, limit: 1}) YIELD relationship RETURN relationship.fact AS fact")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(paginated.rows.len(), 1);
+
+        let error = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.fulltext.queryRelationships('rel_options_ft', 'authentication', 5)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("MAP"));
+    }
+
+    #[test]
+    fn test_fulltext_query_relationships_honors_match_all_and_field_presence() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE FULLTEXT INDEX rel_presence_ft FOR ()-[r:RELATES_TO]-() ON EACH [r.title, r.fact]")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:Entity {id: 'a'}), (:Entity {id: 'b'}), (:Entity {id: 'c'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        for query in [
+            "MATCH (a:Entity {id: 'a'}), (b:Entity {id: 'b'}) CREATE (a)-[:RELATES_TO {title: 'First relationship', fact: 'alpha'}]->(b)",
+            "MATCH (a:Entity {id: 'a'}), (c:Entity {id: 'c'}) CREATE (a)-[:RELATES_TO {fact: 'beta'}]->(c)",
+        ] {
+            engine.execute(&parser.parse(query).unwrap(), &HashMap::new()).unwrap();
+        }
+
+        let all = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.fulltext.queryRelationships('rel_presence_ft', '*') YIELD relationship RETURN relationship.fact AS fact")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(all.rows.len(), 2);
+
+        let present = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.fulltext.queryRelationships('rel_presence_ft', 'title:*') YIELD relationship RETURN relationship.fact AS fact")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(present.rows.len(), 1);
+        assert_eq!(
+            present.rows[0].get("fact"),
+            Some(&Value::String("alpha".into()))
+        );
+
+        let empty = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.fulltext.queryRelationships('rel_presence_ft', '   ') YIELD relationship RETURN relationship")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert!(empty.rows.is_empty());
+    }
+
     /// Mirrors NornicDB `TestGraphitiExactShape_Search_EdgeFulltext_TemporalFilterUsesCallTailFastPath` —
     /// verifies edge fulltext search with grouped temporal WHERE: ((e.invalid_at IS NULL) OR (e.invalid_at > $dt)) AND e.group_id IN $group_ids.
     #[test]

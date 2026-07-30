@@ -13,9 +13,7 @@
 mod e2e_tests {
     use crate::{CachedEmbedder, Embedder, EmbedError, Embedding, LocalGgufEmbedder};
     use std::path::PathBuf;
-    use std::sync::Arc;
     use std::time::{Duration, Instant};
-    use async_trait::async_trait;
 
     /// Returns the path to a GGUF model, or None if not available.
     fn find_model() -> Option<PathBuf> {

@@ -1635,6 +1635,7 @@ fn execute_statement(
 ) -> Result<Neo4jResult, String> {
     let normalized = statement.trim();
     let upper = normalized.to_ascii_uppercase();
+    let fulltext_started = is_fulltext_procedure_call(&upper).then(std::time::Instant::now);
 
     if database == "system" {
         if upper == "SHOW DATABASES" {
@@ -1657,47 +1658,86 @@ fn execute_statement(
         return Err(format!("database not found: {database}"));
     }
 
-    let engine = open_engine(&state, &database)?;
-    let result = if distributed {
-        let placement = PlacementKey::default_for_database(&database);
-        let consistency = ConsistencyLevel::Quorum;
-        let request_region = request_region.as_deref();
-        let transport = build_local_replica_transport(
-            &state,
-            &engine,
-            &placement,
-            consistency,
-            request_region,
-            caller_auth_token.as_deref(),
-            statement_requires_write(normalized),
-        )?;
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| error.to_string())?
-            .block_on(async {
-                engine
-                    .execute_distributed_with_read_fence_as_with_context(
-                        &request_context,
-                        normalized,
-                        parameters,
-                        &roles,
-                        &placement,
-                        consistency,
-                        request_region,
-                        distributed_read_fence,
-                        transport,
-                    )
-                    .await
-                    .map(|outcome| outcome.result)
-                    .map_err(|error| error.to_string())
-            })?
-    } else {
-        engine
-            .execute_as_with_context(&request_context, normalized, parameters, &roles)
-            .map_err(|error| error.to_string())?
+    let result = (|| -> Result<copperdb_engine::QueryResult, String> {
+        let engine = open_engine(&state, &database)?;
+        if distributed {
+            let placement = PlacementKey::default_for_database(&database);
+            let consistency = ConsistencyLevel::Quorum;
+            let request_region = request_region.as_deref();
+            let transport = build_local_replica_transport(
+                &state,
+                &engine,
+                &placement,
+                consistency,
+                request_region,
+                caller_auth_token.as_deref(),
+                statement_requires_write(normalized),
+            )?;
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?
+                .block_on(async {
+                    engine
+                        .execute_distributed_with_read_fence_as_with_context(
+                            &request_context,
+                            normalized,
+                            parameters,
+                            &roles,
+                            &placement,
+                            consistency,
+                            request_region,
+                            distributed_read_fence,
+                            transport,
+                        )
+                        .await
+                        .map(|outcome| outcome.result)
+                        .map_err(|error| error.to_string())
+                })
+        } else {
+            engine
+                .execute_as_with_context(&request_context, normalized, parameters, &roles)
+                .map_err(|error| error.to_string())
+        }
+    })();
+
+    if let Some(started) = fulltext_started {
+        observe_fulltext_procedure(&state, started, result.as_ref().ok().map(|result| result.rows.len()));
+    }
+    result.map(convert_engine_result)
+}
+
+fn is_fulltext_procedure_call(upper_statement: &str) -> bool {
+    upper_statement.starts_with("CALL DB.INDEX.FULLTEXT.QUERYNODES")
+        || upper_statement.starts_with("CALL DB.INDEX.FULLTEXT.QUERYRELATIONSHIPS")
+}
+
+fn observe_fulltext_procedure(
+    state: &AppState,
+    started: std::time::Instant,
+    candidate_count: Option<usize>,
+) {
+    let result = match candidate_count {
+        Some(0) => "no_results",
+        Some(_) => "success",
+        None => "error",
     };
-    Ok(convert_engine_result(result))
+    let _ = state.telemetry.record_counter(
+        "nornicdb_search_requests_total",
+        &[("mode", "bm25"), ("result", result)],
+    );
+    let _ = state.telemetry.observe_histogram(
+        "nornicdb_search_duration_seconds",
+        &[("mode", "bm25"), ("stage", "index")],
+        started.elapsed().as_secs_f64(),
+    );
+    if let Some(candidate_count) = candidate_count {
+        let _ = state.telemetry.set_gauge(
+            "nornicdb_search_candidates_rows",
+            &[],
+            candidate_count as f64,
+        );
+    }
 }
 
 #[derive(Clone)]

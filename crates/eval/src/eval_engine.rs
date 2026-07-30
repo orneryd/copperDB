@@ -10,6 +10,7 @@ impl EvalEngine {
         Self {
             storage,
             node_lookup_cache: Arc::new(Mutex::new(HashMap::new())),
+            fulltext_query_cache: Arc::new(Mutex::new(HashMap::new())),
             access_flusher: Arc::new(AccessFlusher::new()),
             hot_path_trace: HotPathTraceState::new(),
         }
@@ -230,6 +231,32 @@ impl EvalEngine {
         if let Ok(mut cache) = self.node_lookup_cache.lock() {
             cache.clear();
         }
+    }
+
+    fn parse_fulltext_query_cached(
+        &self,
+        query_text: &str,
+    ) -> Result<copperdb_search::lucene::FulltextQuery, EvalError> {
+        const MAX_CACHED_FULLTEXT_QUERIES: usize = 256;
+
+        let generation = self.storage.index_schema_generation();
+        let key = (generation, query_text.to_string());
+        if let Ok(cache) = self.fulltext_query_cache.lock() {
+            if let Some(query) = cache.get(&key) {
+                return Ok(query.clone());
+            }
+        }
+
+        let query = copperdb_search::lucene::parse_fulltext_query(query_text)
+            .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
+        if let Ok(mut cache) = self.fulltext_query_cache.lock() {
+            cache.retain(|(cached_generation, _), _| *cached_generation == generation);
+            if cache.len() >= MAX_CACHED_FULLTEXT_QUERIES {
+                cache.clear();
+            }
+            cache.insert(key, query.clone());
+        }
+        Ok(query)
     }
 
     /// Evaluate a WHERE predicate, handling PatternExists against storage.
@@ -1966,7 +1993,8 @@ impl EvalEngine {
                     });
             match clause {
                 Clause::Call(call) => {
-                    let mut call_result = self.execute_call_clause(call, params, &current_rows)?;
+                    let mut call_result =
+                        self.execute_call_clause(request_context, call, params, &current_rows)?;
                     // Apply YIELD projection — restrict columns to those requested.
                     // YIELD * (Variable("*")) means passthrough all columns.
                     if !call.yield_items.is_empty() {

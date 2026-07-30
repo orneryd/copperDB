@@ -142,6 +142,7 @@ wide = "1.3.0"
 tantivy = "0.26.0"
 regex = "1.12.2"
 rand = "0.8"
+criterion = "0.5.1"
 
 # Bytes / encoding utilities
 bytes = "1.11.1"

@@ -2331,7 +2331,7 @@
     fn prof_bfs_mesh_cost_breakdown() {
         let iters = 5usize;
 
-        for round in 0..iters {
+        for _round in 0..iters {
             let engine = make_engine();
             let storage = engine.storage.clone();
 

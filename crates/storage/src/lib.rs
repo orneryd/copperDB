@@ -225,6 +225,7 @@ const IDX_EDGE_START_PREFIX: &str = "edge_start";
 const IDX_EDGE_END_PREFIX: &str = "edge_end";
 const IDX_NODE_PROPERTY_PREFIX: &str = "node_property";
 const IDX_NODE_FULLTEXT_PREFIX: &str = "node_fulltext";
+const IDX_EDGE_FULLTEXT_PREFIX: &str = "edge_fulltext";
 pub(crate) const IDX_EDGE_PROPERTY_PREFIX: &str = "edge_property";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -291,6 +292,8 @@ pub enum StorageError {
     RequestCancelled(#[from] RequestCancelled),
     #[error("invalid utf8 in key")]
     InvalidUtf8,
+    #[error("invalid fulltext index key: {0}")]
+    InvalidFulltextIndexKey(String),
     #[error("mvcc rebuild is blocked by {active_readers} active reader(s)")]
     MvccRebuildBlocked { active_readers: u64 },
     #[error("mvcc head truncated: {0} bytes")]
@@ -1242,6 +1245,14 @@ pub struct NodeRecord {
     pub updated_at_unix_ms: i64,
 }
 
+/// A bounded vocabulary snapshot from declared node full-text postings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FulltextVocabulary {
+    pub terms: Vec<String>,
+    /// True when either configured scan limit stopped enumeration early.
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct NodeEmbeddingMetadata {
     #[serde(default)]
@@ -1396,6 +1407,7 @@ pub struct StorageEngine {
     mvcc: MvccStore,
     wal: WAL,
     batch_commit_lock: Mutex<()>,
+    index_schema_generation: AtomicU64,
     encryption: Option<StorageEncryption>,
     temp_dir: Option<tempfile::TempDir>,
     // Event callbacks
@@ -1794,6 +1806,7 @@ fn install_storage_snapshot_entries(
             mvcc: MvccStore::new(),
             wal: WAL::new(WALConfig::default()),
             batch_commit_lock: Mutex::new(()),
+            index_schema_generation: AtomicU64::new(0),
             encryption: None,
             temp_dir: Some(temp_dir),
             on_node_created_cb: RwLock::new(None),
@@ -1836,6 +1849,7 @@ fn install_storage_snapshot_entries(
             mvcc: MvccStore::new(),
             wal,
             batch_commit_lock: Mutex::new(()),
+            index_schema_generation: AtomicU64::new(0),
             encryption,
             temp_dir: None,
             on_node_created_cb: RwLock::new(None),
@@ -2844,6 +2858,24 @@ fn install_storage_snapshot_entries(
         query: &str,
         limit: usize,
     ) -> Result<Vec<(NodeRecord, f64)>, StorageError> {
+        self.search_fulltext_nodes_by_properties_with_cancellation(
+            label,
+            properties,
+            query,
+            limit,
+            &RequestCancellation::new(),
+        )
+    }
+
+    pub fn search_fulltext_nodes_by_properties_with_cancellation(
+        &self,
+        label: &str,
+        properties: &[String],
+        query: &str,
+        limit: usize,
+        cancel: &RequestCancellation,
+    ) -> Result<Vec<(NodeRecord, f64)>, StorageError> {
+        cancel.check_cancelled()?;
         let tokens = tokenize_fulltext(query);
         if tokens.is_empty() || properties.is_empty() {
             return Ok(Vec::new());
@@ -2859,6 +2891,7 @@ fn install_storage_snapshot_entries(
         let mut doc_scores: HashMap<String, f64> = HashMap::new();
         let mut doc_lengths: HashMap<String, usize> = HashMap::new();
 
+        let mut scanned_entries = 0usize;
         for token in &tokens {
             let mut df: HashMap<String, usize> = HashMap::new();
             // Collect per-document term frequency across all properties
@@ -2866,6 +2899,10 @@ fn install_storage_snapshot_entries(
                 let token_prefix = node_fulltext_token_prefix(label, property, token);
                 for entry in self.indexes.scan_prefix(token_prefix.as_bytes()) {
                     let (key, _) = entry?;
+                    scanned_entries += 1;
+                    if scanned_entries % 256 == 0 {
+                        cancel.check_cancelled()?;
+                    }
                     let key_str =
                         std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
                     if let Some(node_id) = key_str.rsplit('/').next() {
@@ -2915,12 +2952,176 @@ fn install_storage_snapshot_entries(
         });
 
         let mut nodes = Vec::new();
-        for (node_id, score) in ranked.into_iter().take(limit) {
+        for (position, (node_id, score)) in ranked.into_iter().take(limit).enumerate() {
+            if position % 256 == 0 {
+                cancel.check_cancelled()?;
+            }
             if let Some(node) = self.get_node_record(&node_id)? {
                 nodes.push((node, score));
             }
         }
         Ok(nodes)
+    }
+
+    /// Enumerate normalized vocabulary terms from maintained full-text postings.
+    ///
+    /// Both limits are required to keep wildcard-like query expansion bounded:
+    /// a term cap alone would still allow an arbitrarily large posting list to
+    /// be scanned before a second distinct term is reached.
+    pub fn fulltext_node_vocabulary_with_cancellation(
+        &self,
+        label: &str,
+        properties: &[String],
+        max_terms: usize,
+        max_entries: usize,
+        cancel: &RequestCancellation,
+    ) -> Result<FulltextVocabulary, StorageError> {
+        if max_terms == 0 || max_entries == 0 || properties.is_empty() {
+            return Ok(FulltextVocabulary {
+                terms: Vec::new(),
+                truncated: !properties.is_empty(),
+            });
+        }
+
+        cancel.check_cancelled()?;
+        let mut terms = BTreeSet::new();
+        let mut scanned_entries = 0usize;
+        for property in properties {
+            cancel.check_cancelled()?;
+            let prefix = node_fulltext_property_prefix(label, property);
+            for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
+                if scanned_entries == max_entries || terms.len() == max_terms {
+                    return Ok(FulltextVocabulary {
+                        terms: terms.into_iter().collect(),
+                        truncated: true,
+                    });
+                }
+                let (key, _) = entry?;
+                scanned_entries += 1;
+                if scanned_entries % 256 == 0 {
+                    cancel.check_cancelled()?;
+                }
+                let key = std::str::from_utf8(&key).map_err(|_| StorageError::InvalidUtf8)?;
+                let Some(suffix) = key.strip_prefix(&prefix) else {
+                    continue;
+                };
+                let Some((encoded_term, _node_id)) = suffix.split_once('/') else {
+                    continue;
+                };
+                let term = hex::decode(encoded_term)
+                    .map_err(|error| StorageError::InvalidFulltextIndexKey(error.to_string()))?;
+                let term = String::from_utf8(term).map_err(|_| StorageError::InvalidUtf8)?;
+                terms.insert(term);
+            }
+        }
+
+        Ok(FulltextVocabulary {
+            terms: terms.into_iter().collect(),
+            truncated: false,
+        })
+    }
+
+    /// Enumerate normalized vocabulary terms from maintained relationship
+    /// full-text postings with the same bounded scan contract as node indexes.
+    pub fn fulltext_relationship_vocabulary_with_cancellation(
+        &self,
+        edge_type: &str,
+        properties: &[String],
+        max_terms: usize,
+        max_entries: usize,
+        cancel: &RequestCancellation,
+    ) -> Result<FulltextVocabulary, StorageError> {
+        if max_terms == 0 || max_entries == 0 || properties.is_empty() {
+            return Ok(FulltextVocabulary {
+                terms: Vec::new(),
+                truncated: !properties.is_empty(),
+            });
+        }
+
+        cancel.check_cancelled()?;
+        let mut terms = BTreeSet::new();
+        let mut scanned_entries = 0usize;
+        for property in properties {
+            cancel.check_cancelled()?;
+            let prefix = edge_fulltext_property_prefix(edge_type, property);
+            for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
+                if scanned_entries == max_entries || terms.len() == max_terms {
+                    return Ok(FulltextVocabulary {
+                        terms: terms.into_iter().collect(),
+                        truncated: true,
+                    });
+                }
+                let (key, _) = entry?;
+                scanned_entries += 1;
+                if scanned_entries % 256 == 0 {
+                    cancel.check_cancelled()?;
+                }
+                let key = std::str::from_utf8(&key).map_err(|_| StorageError::InvalidUtf8)?;
+                let Some(suffix) = key.strip_prefix(&prefix) else {
+                    continue;
+                };
+                let Some((encoded_term, _edge_id)) = suffix.split_once('/') else {
+                    continue;
+                };
+                let term = hex::decode(encoded_term)
+                    .map_err(|error| StorageError::InvalidFulltextIndexKey(error.to_string()))?;
+                let term = String::from_utf8(term).map_err(|_| StorageError::InvalidUtf8)?;
+                terms.insert(term);
+            }
+        }
+
+        Ok(FulltextVocabulary {
+            terms: terms.into_iter().collect(),
+            truncated: false,
+        })
+    }
+
+    /// Load relationship candidates from declared full-text postings only.
+    pub fn search_fulltext_relationships_by_properties(
+        &self,
+        edge_type: &str,
+        properties: &[String],
+        terms: &[String],
+    ) -> Result<Vec<EdgeRecord>, StorageError> {
+        self.search_fulltext_relationships_by_properties_with_cancellation(
+            edge_type,
+            properties,
+            terms,
+            &RequestCancellation::new(),
+        )
+    }
+
+    pub fn search_fulltext_relationships_by_properties_with_cancellation(
+        &self,
+        edge_type: &str,
+        properties: &[String],
+        terms: &[String],
+        cancel: &RequestCancellation,
+    ) -> Result<Vec<EdgeRecord>, StorageError> {
+        cancel.check_cancelled()?;
+        let mut edges = BTreeMap::new();
+        let mut scanned_entries = 0usize;
+        for term in terms {
+            let term = term.to_ascii_lowercase();
+            for property in properties {
+                let prefix = edge_fulltext_token_prefix(edge_type, property, &term);
+                for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
+                    let (key, _) = entry?;
+                    scanned_entries += 1;
+                    if scanned_entries % 256 == 0 {
+                        cancel.check_cancelled()?;
+                    }
+                    let key = std::str::from_utf8(&key).map_err(|_| StorageError::InvalidUtf8)?;
+                    let Some(edge_id) = key.rsplit('/').next() else {
+                        continue;
+                    };
+                    if let Some(edge) = self.get_edge_record(edge_id)? {
+                        edges.entry(edge.id.clone()).or_insert(edge);
+                    }
+                }
+            }
+        }
+        Ok(edges.into_values().collect())
     }
 
     /// Return high-IDF documents for HNSW seeding (matches NornicDB's `LexicalSeedDocIDs`).
@@ -3577,10 +3778,18 @@ fn install_storage_snapshot_entries(
             self.rebuild_node_property_index_with_cancellation(index, cancel)?;
         } else if is_node_fulltext_index(index) {
             self.rebuild_node_fulltext_index_with_cancellation(index, cancel)?;
+        } else if is_relationship_fulltext_index(index) {
+            self.rebuild_relationship_fulltext_index_with_cancellation(index, cancel)?;
         } else if is_relationship_property_index(index) {
             self.rebuild_relationship_property_index_with_cancellation(index, cancel)?;
         }
+        self.index_schema_generation.fetch_add(1, Ordering::Release);
         Ok(())
+    }
+
+    /// Monotonic generation for invalidating query plans derived from the index schema.
+    pub fn index_schema_generation(&self) -> u64 {
+        self.index_schema_generation.load(Ordering::Acquire)
     }
 
     /// Persist vector index options (separate from the main index definition to avoid
@@ -3634,6 +3843,9 @@ fn install_storage_snapshot_entries(
             } else if is_node_fulltext_index(index) {
                 self.rebuild_node_fulltext_index(index)?;
                 node_fulltext += 1;
+            } else if is_relationship_fulltext_index(index) {
+                self.rebuild_relationship_fulltext_index(index)?;
+                rel_prop += 1;
             } else if is_relationship_property_index(index) {
                 self.rebuild_relationship_property_index(index)?;
                 rel_prop += 1;
@@ -3697,10 +3909,16 @@ fn install_storage_snapshot_entries(
                     self.delete_node_property_index_entries(&index)?;
                 } else if is_node_fulltext_index(&index) {
                     self.delete_node_fulltext_index_entries(&index)?;
+                } else if is_relationship_fulltext_index(&index) {
+                    self.delete_relationship_fulltext_index_entries_with_cancellation(
+                        &index,
+                        &RequestCancellation::new(),
+                    )?;
                 } else if is_relationship_property_index(&index) {
                     self.delete_relationship_property_index_entries(&index)?;
                 }
             }
+            self.index_schema_generation.fetch_add(1, Ordering::Release);
         }
         Ok(deleted)
     }
@@ -4159,6 +4377,77 @@ fn install_storage_snapshot_entries(
         Ok(())
     }
 
+    fn rebuild_relationship_fulltext_index(
+        &self,
+        index: &IndexDefinition,
+    ) -> Result<(), StorageError> {
+        self.rebuild_relationship_fulltext_index_with_cancellation(
+            index,
+            &RequestCancellation::new(),
+        )
+    }
+
+    fn rebuild_relationship_fulltext_index_with_cancellation(
+        &self,
+        index: &IndexDefinition,
+        cancel: &RequestCancellation,
+    ) -> Result<(), StorageError> {
+        self.delete_relationship_fulltext_index_entries_with_cancellation(index, cancel)?;
+        let mut batch = Batch::new();
+        let mut pending = 0usize;
+        for edge in self.get_edges_by_type(&index.label)? {
+            cancel.check_cancelled()?;
+            for property in &index.properties {
+                let Some(value) = edge.properties.get(property) else {
+                    continue;
+                };
+                for token in fulltext_tokens_for_value(value) {
+                    batch.push((
+                        edge_fulltext_index_key(&index.label, property, &token, &edge.id)
+                            .into_bytes(),
+                        Some(Vec::new()),
+                    ));
+                    pending += 1;
+                    if pending >= 4096 {
+                        self.indexes.fjall_apply_batch(&std::mem::take(&mut batch))?;
+                        pending = 0;
+                    }
+                }
+            }
+        }
+        if pending > 0 {
+            self.indexes.fjall_apply_batch(&batch)?;
+        }
+        Ok(())
+    }
+
+    fn delete_relationship_fulltext_index_entries_with_cancellation(
+        &self,
+        index: &IndexDefinition,
+        cancel: &RequestCancellation,
+    ) -> Result<(), StorageError> {
+        for property in &index.properties {
+            cancel.check_cancelled()?;
+            let prefix = edge_fulltext_property_prefix(&index.label, property);
+            let mut batch = Batch::new();
+            let mut pending = 0usize;
+            for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
+                let (key, _) = entry?;
+                batch.push((key, None));
+                pending += 1;
+                if pending >= 4096 {
+                    self.indexes.fjall_apply_batch(&std::mem::take(&mut batch))?;
+                    pending = 0;
+                    cancel.check_cancelled()?;
+                }
+            }
+            if pending > 0 {
+                self.indexes.fjall_apply_batch(&batch)?;
+            }
+        }
+        Ok(())
+    }
+
     fn delete_node_property_index_entries(
         &self,
         index: &IndexDefinition,
@@ -4530,6 +4819,12 @@ fn is_node_fulltext_index(index: &IndexDefinition) -> bool {
         && !index.properties.is_empty()
 }
 
+fn is_relationship_fulltext_index(index: &IndexDefinition) -> bool {
+    index.entity_type == IndexEntityType::Relationship
+        && index.kind == IndexKind::FullText
+        && !index.properties.is_empty()
+}
+
 fn is_property_backed_index_kind(kind: IndexKind) -> bool {
     matches!(kind, IndexKind::Range | IndexKind::Temporal)
 }
@@ -4563,6 +4858,30 @@ fn node_fulltext_index_key(label: &str, property: &str, token: &str, node_id: &s
         "{}{}",
         node_fulltext_token_prefix(label, property, token),
         node_id
+    )
+}
+
+fn edge_fulltext_property_prefix(edge_type: &str, property: &str) -> String {
+    format!(
+        "{IDX_EDGE_FULLTEXT_PREFIX}/{}/{}/",
+        escape_index_component(edge_type),
+        escape_index_component(property)
+    )
+}
+
+fn edge_fulltext_token_prefix(edge_type: &str, property: &str, token: &str) -> String {
+    format!(
+        "{}{}/",
+        edge_fulltext_property_prefix(edge_type, property),
+        escape_index_component(token)
+    )
+}
+
+fn edge_fulltext_index_key(edge_type: &str, property: &str, token: &str, edge_id: &str) -> String {
+    format!(
+        "{}{}",
+        edge_fulltext_token_prefix(edge_type, property, token),
+        edge_id
     )
 }
 
@@ -5214,7 +5533,7 @@ macro_rules! stage_node_indexes {
 }
 
 macro_rules! stage_edge_indexes {
-    ($batch:expr, $indexes:expr, $edge:expr, $property_indexes:expr, $insert:expr) => {{
+    ($batch:expr, $indexes:expr, $edge:expr, $property_indexes:expr, $fulltext_indexes:expr, $insert:expr) => {{
         stage_index_key!(
             $batch,
             $indexes,
@@ -5237,6 +5556,23 @@ macro_rules! stage_edge_indexes {
             if index.label == $edge.edge_type {
                 if let Some(key) = relationship_property_index_key_for_edge(index, $edge) {
                     stage_index_key!($batch, $indexes, key, $insert);
+                }
+            }
+        }
+        for index in &$fulltext_indexes {
+            if index.label != $edge.edge_type {
+                continue;
+            }
+            for property in &index.properties {
+                if let Some(value) = $edge.properties.get(property) {
+                    for token in fulltext_tokens_for_value(value) {
+                        stage_index_key!(
+                            $batch,
+                            $indexes,
+                            edge_fulltext_index_key(&index.label, property, &token, &$edge.id),
+                            $insert
+                        );
+                    }
                 }
             }
         }
@@ -6043,6 +6379,11 @@ impl<'a> BatchWriter<'a> {
             .filter(|index| is_relationship_property_index(index))
             .cloned()
             .collect::<Vec<_>>();
+        let edge_fulltext_indexes = effective_indexes
+            .iter()
+            .filter(|index| is_relationship_fulltext_index(index))
+            .cloned()
+            .collect::<Vec<_>>();
 
         let mutations = nodes
             .iter()
@@ -6278,6 +6619,7 @@ impl<'a> BatchWriter<'a> {
                     self.engine.indexes,
                     old,
                     edge_property_indexes,
+                    edge_fulltext_indexes,
                     false
                 );
                 stage_edge_counter_deltas(&mut counter_deltas, old, -1);
@@ -6294,6 +6636,7 @@ impl<'a> BatchWriter<'a> {
                         self.engine.indexes,
                         new,
                         edge_property_indexes,
+                        edge_fulltext_indexes,
                         true
                     );
                     stage_edge_counter_deltas(&mut counter_deltas, new, 1);
@@ -6327,6 +6670,11 @@ impl<'a> BatchWriter<'a> {
             );
         }
         batch.commit()?;
+        if !indexes.is_empty() {
+            self.engine
+                .index_schema_generation
+                .fetch_add(1, Ordering::Release);
+        }
         if self.engine.wal.sync_mode() == WALSyncMode::Immediate {
             self.engine.db.persist(fjall::PersistMode::SyncAll)?;
         } else if self.engine.wal.batch_sync_due() {
@@ -6393,6 +6741,24 @@ impl<'a> BatchWriter<'a> {
                                 Some(Vec::new()),
                             ));
                         }
+                    }
+                }
+            }
+        } else if is_relationship_fulltext_index(index) {
+            for edge in self.final_edges(edges)? {
+                if edge.edge_type != index.label {
+                    continue;
+                }
+                for property in &index.properties {
+                    let Some(value) = edge.properties.get(property) else {
+                        continue;
+                    };
+                    for token in fulltext_tokens_for_value(value) {
+                        changes.push((
+                            edge_fulltext_index_key(&index.label, property, &token, &edge.id)
+                                .into_bytes(),
+                            Some(Vec::new()),
+                        ));
                     }
                 }
             }
@@ -6463,6 +6829,12 @@ impl<'a> BatchWriter<'a> {
                 .properties
                 .iter()
                 .map(|property| node_fulltext_property_prefix(&index.label, property))
+                .collect()
+        } else if is_relationship_fulltext_index(index) {
+            index
+                .properties
+                .iter()
+                .map(|property| edge_fulltext_property_prefix(&index.label, property))
                 .collect()
         } else if is_relationship_property_index(index) {
             vec![edge_property_index_definition_prefix(&index.label, &index.properties)]

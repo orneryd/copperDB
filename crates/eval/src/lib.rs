@@ -219,6 +219,7 @@ pub struct EvalEngine {
     /// Invalidated on any write operation (CREATE / SET / DELETE) and on query error
     /// to prevent stale entries from masking newly created or deleted nodes.
     node_lookup_cache: Arc<Mutex<HashMap<String, Value>>>,
+    fulltext_query_cache: Arc<Mutex<HashMap<(u64, String), copperdb_search::lucene::FulltextQuery>>>,
     access_flusher: Arc<AccessFlusher>,
     hot_path_trace: Arc<HotPathTraceState>,
 }

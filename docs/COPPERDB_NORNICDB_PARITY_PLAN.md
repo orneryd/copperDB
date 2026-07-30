@@ -60,12 +60,11 @@ The first work must close verified audit findings. New feature expansion should 
    - Delivered behavior: edge conflict validation and commit share one serialized storage boundary; a post-snapshot edge change returns the typed `StorageError::TransactionConflict`, which maps to `Neo.TransientError.Transaction.Outdated`. Snapshot-visible deleted edges remain `NotFound`, while identical logical updates converge as timestamp-insensitive no-ops.
    - Validated: storage stale/fresh/deleted/no-op and non-conflicting controls, an explicit Cypher `MERGE ... ON MATCH SET` race through the production executor, and a live TCP Bolt `FAILURE` response carrying `Neo.TransientError.Transaction.Outdated`.
 
-4. **Port NornicDB's Lucene-classic full-text query behavior.**
+4. **Complete: port NornicDB's Lucene-classic full-text query behavior.**
    - Upstream: commit `e090df01`; `pkg/cypher/fulltext_query.go`, `fulltext_query_test.go`, and `call_fulltext_parser_test.go`.
    - Copper targets: [crates/search/src/lib.rs](../crates/search/src/lib.rs), [crates/eval/src/eval_engine_policy.rs](../crates/eval/src/eval_engine_policy.rs), storage full-text indexes, and procedure tests.
-   - Current gap: local full-text execution is primarily token/bag-of-words based and does not implement the upstream query grammar.
-   - Required behavior: Boolean groups, required/prohibited clauses, field scopes, phrases/proximity, fuzzy terms, ranges, boosts, wildcards including leading wildcards, regex, and Lucene escape handling for node and relationship procedures.
-   - Exit tests: mirror the upstream parser table and procedure scenarios while retaining deterministic BM25 scoring and malformed-query errors.
+   - Delivered behavior: one typed parser/evaluator supports Boolean groups, required/prohibited clauses, field scopes, phrases/proximity, fuzzy terms, ranges, boosts, wildcard variants including leading wildcards, regex, match-all/presence, empty input, and Lucene escapes for node and relationship procedures. Candidate planning uses maintained node and relationship postings with bounded cancellable vocabulary expansion; full-text result ties are ordered by score then entity ID.
+   - Validated: the shared upstream parser/evaluator truth-table mirror, node and relationship procedure regressions for options, parameters, cancellation, match-all/presence, pure-negative queries, deterministic ordering, schema-cache invalidation, and Criterion benchmarks for the five required query classes.
 
 5. **Close the July Cypher correctness regression set.**
    - Upstream families: OPTIONAL MATCH function projection and aggregate identity (`e4b84afe`, `883065cd`), connected-node delete guard and relationship existence/scoping (`4f35ea92`, `8775bf1c`), relationship rebinding and IN-list indexed traversal (`98f6b4c1`, `2959060f`), colon-containing property keys (`ce1973e6`), and explicit-transaction UNWIND mutation statistics (`b46ceb1f`, `389fb2e6`).
@@ -171,7 +170,7 @@ This ledger prevents recent NornicDB fixes from disappearing into broad package 
 | --- | --- | --- |
 | `36f2e532` | Retryable post-snapshot edge update conflict | P0, complete; storage, Cypher, and live Bolt regressions |
 | `20215f13`, `1837c8c7` | Auth defaults on and explicit precedence | P0, complete |
-| `e090df01` | Lucene-classic fulltext grammar | P0, missing |
+| `e090df01` | Lucene-classic fulltext grammar | P0, complete; shared truth-table mirror, public node/relationship regressions, maintained postings, and Criterion benchmarks |
 | `e4b84afe`, `883065cd` | Generalized OPTIONAL MATCH projection/aggregate behavior | P0, partial; exact tests required |
 | `4f35ea92`, `8775bf1c` | Relationship existence/scoping and connected-node delete guard | P0, partial; guard proof missing |
 | `b46ceb1f`, `389fb2e6` | Explicit-transaction UNWIND mutations and summary counters | P0/P1, blocked by real Bolt transactions |

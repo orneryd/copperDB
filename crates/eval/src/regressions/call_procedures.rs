@@ -1405,6 +1405,336 @@
     }
 
     #[test]
+    fn test_call_fulltext_query_nodes_honors_lucene_field_boolean_and_phrase_queries() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for query in [
+            "CREATE (:Doc {group_id: 'ft_repro', content: 'CloudTrail audit logging', rank: 'm'})",
+            "CREATE (:Doc {group_id: 'other', content: 'CloudTrail audit logging', rank: 'n'})",
+        ] {
+            engine.execute(&parser.parse(query).unwrap(), &HashMap::new()).unwrap();
+        }
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE FULLTEXT INDEX node_lucene_ft FOR (n:Doc) ON EACH [n.group_id, n.content, n.rank]")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.fulltext.queryNodes('node_lucene_ft', 'group_id:ft_repro AND \"CloudTrail audit\"') YIELD node RETURN node.group_id AS group_id")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get("group_id"),
+            Some(&Value::String("ft_repro".into()))
+        );
+
+        let symbolic_result = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.fulltext.queryNodes('node_lucene_ft', 'group_id:ft_repro && content:cloudtrail') YIELD node RETURN node.group_id AS group_id")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(symbolic_result.rows.len(), 1);
+        assert_eq!(
+            symbolic_result.rows[0].get("group_id"),
+            Some(&Value::String("ft_repro".into()))
+        );
+
+        for query in [
+            "content:*trail",
+            "content:cloudtrai~1",
+            "content:/cloud.*/",
+            "rank:[a TO z]",
+            "content:\"cloudtrail logging\"~1",
+        ] {
+            let result = engine
+                .execute(
+                    &parser
+                        .parse(&format!("CALL db.index.fulltext.queryNodes('node_lucene_ft', '{query}') YIELD node RETURN node.group_id AS group_id"))
+                        .unwrap(),
+                    &HashMap::new(),
+                )
+                .unwrap();
+            assert_eq!(result.rows.len(), 2, "query={query}");
+        }
+    }
+
+    #[test]
+    fn test_call_fulltext_query_nodes_observes_request_cancellation() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:Doc {content: 'CloudTrail audit logging'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE FULLTEXT INDEX node_cancel_ft FOR (n:Doc) ON (n.content)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let request_context = RequestContext::detached();
+        request_context.cancel();
+        let error = engine
+            .execute_with_context(
+                &request_context,
+                &parser
+                    .parse("CALL db.index.fulltext.queryNodes('node_cancel_ft', 'content:*trail')")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("request cancelled"));
+    }
+
+    #[test]
+    fn test_call_fulltext_query_nodes_honors_pure_negative_lucene_queries() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for query in [
+            "CREATE (:Doc {id: 'contains-beta', content: 'alpha beta'})",
+            "CREATE (:Doc {id: 'without-beta', content: 'alpha gamma'})",
+        ] {
+            engine.execute(&parser.parse(query).unwrap(), &HashMap::new()).unwrap();
+        }
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE FULLTEXT INDEX node_negative_ft FOR (n:Doc) ON (n.content)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.fulltext.queryNodes('node_negative_ft', 'NOT beta') YIELD node RETURN node.id AS id")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(
+            result.rows[0].get("id"),
+            Some(&Value::String("without-beta".into()))
+        );
+    }
+
+    #[test]
+    fn test_call_fulltext_query_nodes_honors_match_all_and_field_presence() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for query in [
+            "CREATE (:Doc {id: 'first', title: 'First document', content: 'alpha'})",
+            "CREATE (:Doc {id: 'second', content: 'beta'})",
+            "CREATE (:Other {id: 'outside', title: 'Outside index', content: 'gamma'})",
+        ] {
+            engine.execute(&parser.parse(query).unwrap(), &HashMap::new()).unwrap();
+        }
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE FULLTEXT INDEX node_presence_ft FOR (n:Doc) ON EACH [n.title, n.content]")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let all = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.fulltext.queryNodes('node_presence_ft', '*') YIELD node RETURN node.id AS id")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(all.rows.len(), 2);
+        assert!(all.rows.iter().all(|row| row.get("id") != Some(&Value::String("outside".into()))));
+
+        let present = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.fulltext.queryNodes('node_presence_ft', 'title:*') YIELD node RETURN node.id AS id")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            present.rows[0].get("id"),
+            Some(&Value::String("first".into()))
+        );
+        assert_eq!(present.rows.len(), 1);
+    }
+
+    #[test]
+    fn test_call_fulltext_query_nodes_returns_empty_results_for_empty_query() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser.parse("CREATE (:Doc {content: 'alpha'})").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE FULLTEXT INDEX node_empty_ft FOR (n:Doc) ON (n.content)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        for query in ["", "   "] {
+            let result = engine
+                .execute(
+                    &parser
+                        .parse(&format!(
+                            "CALL db.index.fulltext.queryNodes('node_empty_ft', '{query}') YIELD node RETURN node"
+                        ))
+                        .unwrap(),
+                    &HashMap::new(),
+                )
+                .unwrap();
+            assert!(result.rows.is_empty(), "query={query:?}");
+        }
+    }
+
+    #[test]
+    fn test_call_fulltext_query_nodes_accepts_parameters_and_sorts_equal_scores_by_id() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        for (id, title) in [
+            ("doc-a", "CloudTrail first"),
+            ("doc-b", "CloudTrail second"),
+        ] {
+            engine
+                .storage
+                .put_node_record(&NodeRecord {
+                    id: id.into(),
+                    labels: vec!["Doc".into()],
+                    properties: BTreeMap::from([("title".into(), Value::String(title.into()))]),
+                    named_embeddings: BTreeMap::new(),
+                    chunk_embeddings: Vec::new(),
+                    embed_meta: Default::default(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE FULLTEXT INDEX node_order_ft FOR (n:Doc) ON (n.title)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let params = HashMap::from([
+            ("index_name".to_string(), Value::String("node_order_ft".into())),
+            ("query".to_string(), Value::String("Cloud\\Trail".into())),
+        ]);
+        let result = engine
+            .execute(
+                &parser
+                    .parse("CALL db.index.fulltext.queryNodes($index_name, $query) YIELD node RETURN node._id AS id")
+                    .unwrap(),
+                &params,
+            )
+            .unwrap();
+
+        let ids = result
+            .rows
+            .iter()
+            .map(|row| row.get("id"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                Some(&Value::String("doc-a".into())),
+                Some(&Value::String("doc-b".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_call_fulltext_query_nodes_cache_invalidates_after_index_ddl() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:Doc {content: 'CloudTrail audit logging'})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE FULLTEXT INDEX node_cache_ft FOR (n:Doc) ON (n.content)")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let query = parser
+            .parse("CALL db.index.fulltext.queryNodes('node_cache_ft', 'content:cloudtrail')")
+            .unwrap();
+        engine.execute(&query, &HashMap::new()).unwrap();
+        let first_generation = engine.storage.index_schema_generation();
+        assert!(engine
+            .fulltext_query_cache
+            .lock()
+            .unwrap()
+            .contains_key(&(first_generation, "content:cloudtrail".to_string())));
+
+        engine
+            .execute(
+                &parser.parse("DROP INDEX node_cache_ft").unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        assert!(engine.execute(&query, &HashMap::new()).is_err());
+
+        let current_generation = engine.storage.index_schema_generation();
+        let cache = engine.fulltext_query_cache.lock().unwrap();
+        assert_ne!(first_generation, current_generation);
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key(&(current_generation, "content:cloudtrail".to_string())));
+    }
+
+    #[test]
     fn test_call_nornicdb_knowledgepolicy_profiles_yields_bundles_and_bindings() {
         let engine = make_engine();
         let parser = Parser::new();

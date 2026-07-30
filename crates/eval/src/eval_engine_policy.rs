@@ -1,8 +1,12 @@
 use super::*;
 
+const MAX_FULLTEXT_VOCABULARY_TERMS: usize = 2_048;
+const MAX_FULLTEXT_VOCABULARY_ENTRIES: usize = 16_384;
+
 impl EvalEngine {
     pub(crate) fn execute_call_clause(
         &self,
+        request_context: &copperdb_util::RequestContext,
         call: &copperdb_cypher::CallClause,
         params: &HashMap<String, Value>,
         rows: &[Row],
@@ -85,12 +89,12 @@ impl EvalEngine {
             .procedure
             .eq_ignore_ascii_case("db.index.fulltext.queryNodes")
         {
-            self.execute_fulltext_query_nodes_call(call, params)
+            self.execute_fulltext_query_nodes_call(request_context, call, params)
         } else if call
             .procedure
             .eq_ignore_ascii_case("db.index.fulltext.queryRelationships")
         {
-            self.execute_fulltext_query_relationships_call(call, params)
+            self.execute_fulltext_query_relationships_call(request_context, call, params)
         } else if call
             .procedure
             .eq_ignore_ascii_case("db.index.vector.queryNodes")
@@ -1443,6 +1447,7 @@ impl EvalEngine {
 
     fn execute_fulltext_query_nodes_call(
         &self,
+        request_context: &copperdb_util::RequestContext,
         call: &copperdb_cypher::CallClause,
         params: &HashMap<String, Value>,
     ) -> Result<EvalResult, EvalError> {
@@ -1465,45 +1470,88 @@ impl EvalEngine {
         let index_name = call_arg_string(&index_name, "indexName")?;
         let query_text = call_arg_string(&query_text, "queryString")?;
         let options = call_arg_fulltext_options(options.as_ref())?;
+        let query = self.parse_fulltext_query_cached(&query_text)?;
 
         let indexes = resolve_fulltext_node_indexes(self.storage.as_ref(), &index_name)?;
 
-        let fetch_limit = options
-            .limit
-            .map(|limit| options.skip.saturating_add(limit))
-            .unwrap_or(usize::MAX);
+        let fetch_limit = usize::MAX;
 
-        let mut merged: HashMap<String, (NodeRecord, f64, usize)> = HashMap::new();
-        let mut ordinal = 0usize;
+        let mut merged: HashMap<String, (NodeRecord, f64)> = HashMap::new();
         for index in indexes {
-            for (node, score) in self.storage.search_fulltext_nodes_by_properties(
+            let candidate_terms = match query.primary_terms() {
+                Some(terms) => terms,
+                None => {
+                    let vocabulary = self.storage.fulltext_node_vocabulary_with_cancellation(
+                        &index.label,
+                        &index.properties,
+                        MAX_FULLTEXT_VOCABULARY_TERMS,
+                        MAX_FULLTEXT_VOCABULARY_ENTRIES,
+                        request_context.cancellation(),
+                    )?;
+                    if vocabulary.truncated {
+                        return Err(EvalError::ExecutionError(
+                            "Lucene query vocabulary expansion exceeded the configured limit"
+                                .to_string(),
+                        ));
+                    }
+                    query
+                        .expand_candidate_terms(&vocabulary.terms)
+                        .map_err(|error| EvalError::ExecutionError(error.to_string()))?
+                }
+            };
+            if candidate_terms.is_empty() {
+                continue;
+            }
+            let candidate_query = candidate_terms.join(" ");
+            for (position, (node, score)) in self
+                .storage
+                .search_fulltext_nodes_by_properties_with_cancellation(
                 &index.label,
                 &index.properties,
-                &query_text,
+                &candidate_query,
                 fetch_limit,
-            )? {
-                let first_seen = ordinal;
-                ordinal = ordinal.saturating_add(1);
+                request_context.cancellation(),
+            )?
+                .into_iter()
+                .enumerate()
+            {
+                if position % 256 == 0 {
+                    request_context.check_active()?;
+                }
+                let document = copperdb_search::lucene::FulltextDocument::from_fields(
+                    index.properties.iter().filter_map(|property| {
+                        node.properties.get(property).map(|value| {
+                            let text = match value {
+                                Value::String(value) => value.clone(),
+                                other => other.to_string(),
+                            };
+                            (property.clone(), text)
+                        })
+                    }),
+                );
+                if copperdb_search::lucene::evaluate_fulltext_query(&query, &document)
+                    .map_err(|error| EvalError::ExecutionError(error.to_string()))?
+                    .is_none()
+                {
+                    continue;
+                }
                 merged
                     .entry(node.id.clone())
-                    .and_modify(|(_, existing_score, existing_ordinal)| {
+                    .and_modify(|(_, existing_score)| {
                         *existing_score += score;
-                        *existing_ordinal = (*existing_ordinal).min(first_seen);
                     })
-                    .or_insert((node, score, first_seen));
+                    .or_insert((node, score));
             }
         }
 
-    let mut ranked: Vec<(NodeRecord, f64, usize)> = merged.into_values().collect();
-        ranked.sort_by(
-            |(left_node, left_score, left_ordinal), (right_node, right_score, right_ordinal)| {
-                right_score
-                    .partial_cmp(left_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then(left_ordinal.cmp(right_ordinal))
-                    .then(left_node.id.cmp(&right_node.id))
-            },
-        );
+        request_context.check_active()?;
+        let mut ranked: Vec<(NodeRecord, f64)> = merged.into_values().collect();
+        ranked.sort_by(|(left_node, left_score), (right_node, right_score)| {
+            right_score
+                .total_cmp(left_score)
+                .then(left_node.id.cmp(&right_node.id))
+        });
+        request_context.check_active()?;
 
         if options.skip > 0 {
             ranked = ranked.into_iter().skip(options.skip).collect();
@@ -1514,16 +1562,20 @@ impl EvalEngine {
 
         let rows = ranked
             .into_iter()
-            .map(|(node, score, _)| {
+            .enumerate()
+            .map(|(position, (node, score))| {
+                if position % 256 == 0 {
+                    request_context.check_active()?;
+                }
                 let mut row = Row::new();
                 row.insert(
                     "node".to_string(),
                     Value::Object(node_record_to_props(&node).into_iter().collect()),
                 );
                 row.insert("score".to_string(), Value::from(score as f64));
-                row
+                Ok(row)
             })
-            .collect();
+            .collect::<Result<Vec<_>, EvalError>>()?;
 
         Ok(EvalResult {
             columns: vec!["node".to_string(), "score".to_string()],
@@ -1534,6 +1586,7 @@ impl EvalEngine {
 
     fn execute_fulltext_query_relationships_call(
         &self,
+        request_context: &copperdb_util::RequestContext,
         call: &copperdb_cypher::CallClause,
         params: &HashMap<String, Value>,
     ) -> Result<EvalResult, EvalError> {
@@ -1574,39 +1627,78 @@ impl EvalEngine {
             )));
         }
 
-        let query_lower = query_text.to_lowercase();
-        let tokens: Vec<&str> = query_lower.split_whitespace().collect();
-        let mut results: Vec<(EdgeRecord, usize)> = Vec::new();
+        let query = self.parse_fulltext_query_cached(&query_text)?;
+        let mut results: HashMap<String, (EdgeRecord, f64)> = HashMap::new();
 
         for index in &rel_indexes {
-            let edges = if index.label.is_empty() {
-                self.storage.all_edges()?
-            } else {
-                self.storage.get_edges_by_type(&index.label)?
-            };
-            for edge in edges {
-                let mut score = 0usize;
-                for prop in &index.properties {
-                    if let Some(val) = edge.properties.get(prop) {
-                        let text: String = match val {
-                            Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        };
-                        let lower = text.to_lowercase();
-                        for tok in &tokens {
-                            if lower.contains(tok) {
-                                score += 1;
-                            }
-                        }
+            let candidate_terms = match query.primary_terms() {
+                Some(terms) => terms,
+                None => {
+                    let vocabulary = self
+                        .storage
+                        .fulltext_relationship_vocabulary_with_cancellation(
+                            &index.label,
+                            &index.properties,
+                            MAX_FULLTEXT_VOCABULARY_TERMS,
+                            MAX_FULLTEXT_VOCABULARY_ENTRIES,
+                            request_context.cancellation(),
+                        )?;
+                    if vocabulary.truncated {
+                        return Err(EvalError::ExecutionError(
+                            "Lucene query vocabulary expansion exceeded the configured limit"
+                                .to_string(),
+                        ));
                     }
+                    query
+                        .expand_candidate_terms(&vocabulary.terms)
+                        .map_err(|error| EvalError::ExecutionError(error.to_string()))?
                 }
-                if score > 0 {
-                    results.push((edge, score));
+            };
+            if candidate_terms.is_empty() {
+                continue;
+            }
+            for (position, edge) in self
+                .storage
+                .search_fulltext_relationships_by_properties_with_cancellation(
+                &index.label,
+                &index.properties,
+                &candidate_terms,
+                request_context.cancellation(),
+            )?
+                .into_iter()
+                .enumerate()
+            {
+                if position % 256 == 0 {
+                    request_context.check_active()?;
+                }
+                let document = copperdb_search::lucene::FulltextDocument::from_fields(
+                    index.properties.iter().filter_map(|property| {
+                        edge.properties.get(property).map(|value| {
+                            let text = match value {
+                                Value::String(value) => value.clone(),
+                                other => other.to_string(),
+                            };
+                            (property.clone(), text)
+                        })
+                    }),
+                );
+                let score = copperdb_search::lucene::evaluate_fulltext_query(&query, &document)
+                    .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
+                if let Some(score) = score {
+                    results
+                        .entry(edge.id.clone())
+                        .and_modify(|(_, existing_score)| *existing_score = existing_score.max(score))
+                        .or_insert((edge, score));
                 }
             }
         }
 
-        results.sort_by(|(a, a_score), (b, b_score)| b_score.cmp(a_score).then(a.id.cmp(&b.id)));
+        request_context.check_active()?;
+        let mut results: Vec<(EdgeRecord, f64)> = results.into_values().collect();
+        results.sort_by(|(a, a_score), (b, b_score)| {
+            b_score.total_cmp(a_score).then(a.id.cmp(&b.id))
+        });
+        request_context.check_active()?;
 
         if options.skip > 0 {
             results = results.into_iter().skip(options.skip).collect();
@@ -1617,7 +1709,11 @@ impl EvalEngine {
 
         let rows = results
             .into_iter()
-            .map(|(edge, score)| {
+            .enumerate()
+            .map(|(position, (edge, score))| {
+                if position % 256 == 0 {
+                    request_context.check_active()?;
+                }
                 let mut row = Row::new();
                 let mut props: HashMap<String, Value> =
                     edge.properties.clone().into_iter().collect();
@@ -1628,9 +1724,9 @@ impl EvalEngine {
                     Value::Object(props.into_iter().collect()),
                 );
                 row.insert("score".to_string(), Value::from(score as f64));
-                row
+                Ok(row)
             })
-            .collect();
+            .collect::<Result<Vec<_>, EvalError>>()?;
 
         Ok(EvalResult {
             columns: vec!["relationship".to_string(), "score".to_string()],

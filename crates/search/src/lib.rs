@@ -4,6 +4,8 @@
 //! Combines in-memory inverted-index full-text search with optional
 //! vector similarity search via copperdb-vectorspace.
 
+pub mod lucene;
+
 use async_trait::async_trait;
 use copperdb_util::{RequestCancelled, RequestContext};
 use serde::{Deserialize, Serialize};

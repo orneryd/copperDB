@@ -4362,6 +4362,75 @@ fn appstate_bolt_executor_routes_system_and_named_database_queries() {
 }
 
 #[test]
+fn appstate_bolt_executor_records_fulltext_procedure_metrics() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(Arc::clone(&state));
+    let empty = HashMap::new();
+
+    executor
+        .execute_on_database(
+            Some("copperdb"),
+            "CREATE (:Doc {content: 'CloudTrail audit logging'})",
+            &empty,
+        )
+        .unwrap();
+    executor
+        .execute_on_database(
+            Some("copperdb"),
+            "CREATE FULLTEXT INDEX doc_content_ft FOR (n:Doc) ON (n.content)",
+            &empty,
+        )
+        .unwrap();
+    let result = executor
+        .execute_on_database(
+            Some("copperdb"),
+            "CALL db.index.fulltext.queryNodes('doc_content_ft', 'cloudtrail')",
+            &empty,
+        )
+        .unwrap();
+    assert_eq!(result.rows.len(), 1);
+
+    assert_eq!(
+        state
+            .telemetry
+            .snapshot_metric("nornicdb_search_requests_total")
+            .unwrap(),
+        vec![copperdb_otel::MetricSample {
+            labels: vec![
+                ("mode".to_string(), "bm25".to_string()),
+                ("result".to_string(), "success".to_string()),
+            ],
+            value: copperdb_otel::MetricValue::Counter(1.0),
+        }]
+    );
+    assert_eq!(
+        state
+            .telemetry
+            .snapshot_metric("nornicdb_search_candidates_rows")
+            .unwrap(),
+        vec![copperdb_otel::MetricSample {
+            labels: Vec::new(),
+            value: copperdb_otel::MetricValue::Gauge(1.0),
+        }]
+    );
+    let duration = state
+        .telemetry
+        .snapshot_metric("nornicdb_search_duration_seconds")
+        .unwrap();
+    assert!(matches!(
+        duration.as_slice(),
+        [copperdb_otel::MetricSample {
+            labels,
+            value: copperdb_otel::MetricValue::Histogram(values),
+        }] if labels == &vec![
+            ("mode".to_string(), "bm25".to_string()),
+            ("stage".to_string(), "index".to_string()),
+        ] && values.len() == 1
+    ));
+}
+
+#[test]
 fn appstate_bolt_executor_retains_storage_context_until_commit() {
     let temp_dir = tempfile::tempdir().unwrap();
     let state = demo_temp_appstate_with_catalog(&temp_dir);
