@@ -1,6 +1,6 @@
 # 06: Bounded Embedding Cache Capacity
 
-Status: planned. Priority: P0. Owner: `embed`.
+Status: complete. Priority: P0. Owner: `embed`.
 
 ## Objective
 
@@ -39,3 +39,15 @@ Measure hit/miss latency and 1/8/32-thread same-key/disjoint throughput. Memory 
 ## Definition Of Done
 
 The cache cannot hang at capacity, performs one base call per identical miss wave, remains bounded under stress, and preserves the public `Embedder` API and configured default capacity behavior.
+
+## Delivered
+
+- LRU eviction decrements live capacity and reuses vacant entry slots; the cache exposes bounded live-entry, capacity, hit, miss, eviction, and active-flight statistics.
+- Same-key concurrent misses share a per-key flight and receive the same success or error result; unrelated keys continue embedding concurrently.
+- `CachedEmbedder` implements `Embedder`, routes batch calls through the scalar cache, and clears all stored entries deterministically.
+- Regressions cover capacity-one replacement, LRU promotion, 100x-capacity churn, clear, success/error single-flight waves, distinct-key concurrency, and batch reuse.
+
+## Validation
+
+- `cargo test -p copperdb-embed --lib`: 10 passed, 1 ignored (model-dependent E2E).
+- `cargo check --workspace --all-targets`: passed warning-free.

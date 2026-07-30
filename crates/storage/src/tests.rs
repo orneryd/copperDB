@@ -588,6 +588,78 @@ fn namespace_scoped_schema_is_isolated_from_global_catalog() {
 }
 
 #[test]
+fn namespace_scoped_unique_constraints_enforce_only_their_namespace() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    engine
+        .persist_constraint_for_namespace(
+            "alpha",
+            &Constraint {
+                name: "person_email_unique".to_string(),
+                constraint_type: ConstraintType::Unique,
+                entity_type: ConstraintEntityType::Node,
+                label: "Person".to_string(),
+                properties: vec!["email".to_string()],
+                type_name: None,
+                allowed_values: Vec::new(),
+            },
+        )
+        .unwrap();
+
+    let mut alpha_first = sample_node("alpha:first", &["Person"]);
+    alpha_first
+        .properties
+        .insert("email".to_string(), json!("alice@example.com"));
+    let mut alpha_duplicate = sample_node("alpha:duplicate", &["Person"]);
+    alpha_duplicate
+        .properties
+        .insert("email".to_string(), json!("alice@example.com"));
+    let mut beta_same_value = sample_node("beta:first", &["Person"]);
+    beta_same_value
+        .properties
+        .insert("email".to_string(), json!("alice@example.com"));
+
+    engine.put_node_record(&alpha_first).unwrap();
+    assert!(matches!(
+        engine.put_node_record(&alpha_duplicate),
+        Err(StorageError::UniqueConstraintViolation { .. })
+    ));
+    engine.put_node_record(&beta_same_value).unwrap();
+
+    engine.delete_node_record("alpha:first").unwrap();
+    engine.put_node_record(&alpha_duplicate).unwrap();
+}
+
+#[test]
+fn namespace_constraint_ddl_rejects_existing_duplicates_without_persisting() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let mut first = sample_node("alpha:first", &["Person"]);
+    first
+        .properties
+        .insert("email".to_string(), json!("alice@example.com"));
+    let mut duplicate = sample_node("alpha:duplicate", &["Person"]);
+    duplicate
+        .properties
+        .insert("email".to_string(), json!("alice@example.com"));
+    engine.put_node_record(&first).unwrap();
+    engine.put_node_record(&duplicate).unwrap();
+
+    let result = engine.persist_constraint_for_namespace(
+        "alpha",
+        &Constraint {
+            name: "person_email_unique".to_string(),
+            constraint_type: ConstraintType::Unique,
+            entity_type: ConstraintEntityType::Node,
+            label: "Person".to_string(),
+            properties: vec!["email".to_string()],
+            type_name: None,
+            allowed_values: Vec::new(),
+        },
+    );
+    assert!(matches!(result, Err(StorageError::UniqueConstraintViolation { .. })));
+    assert!(engine.load_constraints_for_namespace("alpha").unwrap().is_empty());
+}
+
+#[test]
 fn delete_by_prefix_removes_namespace_records_indexes_stats_and_schema() {
     let engine = StorageEngine::open_temporary().unwrap();
 
@@ -1454,6 +1526,40 @@ fn storage_transaction_rolls_back_staged_constraints() {
     transaction.rollback();
 
     assert!(engine.load_constraints().unwrap().is_empty());
+}
+
+#[test]
+fn storage_transaction_rejects_invalid_constraint_ddl_with_staged_nodes() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let constraint = Constraint {
+        name: "person_email_unique".to_string(),
+        constraint_type: ConstraintType::Unique,
+        entity_type: ConstraintEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["email".to_string()],
+        type_name: None,
+        allowed_values: Vec::new(),
+    };
+    let mut first = sample_node("first", &["Person"]);
+    first
+        .properties
+        .insert("email".to_string(), json!("alice@example.com"));
+    let mut duplicate = sample_node("duplicate", &["Person"]);
+    duplicate
+        .properties
+        .insert("email".to_string(), json!("alice@example.com"));
+
+    let mut transaction = engine.begin_transaction().unwrap();
+    transaction.put_constraint(constraint);
+    transaction.put_node_record(first);
+    transaction.put_node_record(duplicate);
+    assert!(matches!(
+        transaction.commit(),
+        Err(StorageError::UniqueConstraintViolation { .. })
+    ));
+    assert!(engine.load_constraints().unwrap().is_empty());
+    assert!(engine.get_node_record("first").unwrap().is_none());
+    assert!(engine.get_node_record("duplicate").unwrap().is_none());
 }
 
 #[test]
@@ -5385,6 +5491,13 @@ fn schema_constraints_validate_and_persist() {
         StorageError::ConstraintMissingProperty { .. }
     ));
 
+    let null_value = BTreeMap::from([("email".to_string(), Value::Null)]);
+    let err = schema.validate_node("n1", "Person", &null_value).unwrap_err();
+    assert!(matches!(
+        err,
+        StorageError::ConstraintMissingProperty { .. }
+    ));
+
     let mut alice = BTreeMap::new();
     alice.insert("email".to_string(), json!("alice@example.com"));
     schema.validate_node("n1", "Person", &alice).unwrap();
@@ -5416,6 +5529,410 @@ fn schema_constraints_validate_and_persist() {
     assert_eq!(loaded.len(), 2);
     assert_eq!(loaded[0].name, "person_email_exists");
     assert_eq!(loaded[1].name, "person_email_unique");
+}
+
+#[test]
+fn schema_unique_constraints_serialize_only_colliding_values() {
+    let schema = Arc::new(SchemaManager::new());
+    schema
+        .add_constraint(Constraint {
+            name: "person_email_unique".to_string(),
+            constraint_type: ConstraintType::Unique,
+            entity_type: ConstraintEntityType::Node,
+            label: "Person".to_string(),
+            properties: vec!["email".to_string()],
+            type_name: None,
+            allowed_values: Vec::new(),
+        })
+        .unwrap();
+
+    let barrier = Arc::new(std::sync::Barrier::new(9));
+    let contenders = (0..8)
+        .map(|index| {
+            let schema = Arc::clone(&schema);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                let properties = BTreeMap::from([("email".to_string(), json!("shared@example.com"))]);
+                barrier.wait();
+                schema.validate_node(&format!("node-{index}"), "Person", &properties)
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+
+    let results = contenders
+        .into_iter()
+        .map(|thread| thread.join().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert!(results.iter().filter(|result| result.is_err()).all(|result| {
+        matches!(result, Err(StorageError::UniqueConstraintViolation { .. }))
+    }));
+
+    let typed_string = BTreeMap::from([("email".to_string(), json!("1"))]);
+    let typed_number = BTreeMap::from([("email".to_string(), json!(1))]);
+    schema
+        .validate_node("typed-string", "Person", &typed_string)
+        .unwrap();
+    schema
+        .validate_node("typed-number", "Person", &typed_number)
+        .unwrap();
+}
+
+#[test]
+fn schema_unique_constraints_allow_disjoint_concurrent_values() {
+    let schema = Arc::new(SchemaManager::new());
+    schema
+        .add_constraint(Constraint {
+            name: "person_email_unique".to_string(),
+            constraint_type: ConstraintType::Unique,
+            entity_type: ConstraintEntityType::Node,
+            label: "Person".to_string(),
+            properties: vec!["email".to_string()],
+            type_name: None,
+            allowed_values: Vec::new(),
+        })
+        .unwrap();
+
+    let barrier = Arc::new(std::sync::Barrier::new(9));
+    let writers = (0..8)
+        .map(|index| {
+            let schema = Arc::clone(&schema);
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                let properties = BTreeMap::from([("email".to_string(), json!(format!("{index}@example.com")))]);
+                barrier.wait();
+                schema.validate_node(&format!("node-{index}"), "Person", &properties)
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait();
+
+    for writer in writers {
+        writer.join().unwrap().unwrap();
+    }
+}
+
+#[test]
+fn schema_constraint_registries_retire_idle_entries() {
+    let schema = SchemaManager::new();
+    schema
+        .add_constraint(Constraint {
+            name: "person_email_unique".to_string(),
+            constraint_type: ConstraintType::Unique,
+            entity_type: ConstraintEntityType::Node,
+            label: "Person".to_string(),
+            properties: vec!["email".to_string()],
+            type_name: None,
+            allowed_values: Vec::new(),
+        })
+        .unwrap();
+
+    let first = BTreeMap::from([("email".to_string(), json!("first@example.com"))]);
+    let replacement = BTreeMap::from([("email".to_string(), json!("next@example.com"))]);
+    schema.validate_node("node", "Person", &first).unwrap();
+    assert!(schema.node_locks.lock().is_empty());
+    assert_eq!(schema.unique_values.lock().len(), 1);
+
+    schema
+        .validate_node("node", "Person", &replacement)
+        .unwrap();
+    assert!(schema.node_locks.lock().is_empty());
+    assert_eq!(schema.unique_values.lock().len(), 1);
+
+    schema.remove_node("node", "Person");
+    assert!(schema.node_unique_keys.lock().is_empty());
+    assert!(schema.unique_values.lock().is_empty());
+
+    schema
+        .add_constraint(Constraint {
+            name: "knows_since_key".to_string(),
+            constraint_type: ConstraintType::Relationship,
+            entity_type: ConstraintEntityType::Relationship,
+            label: "KNOWS".to_string(),
+            properties: vec!["since".to_string()],
+            type_name: None,
+            allowed_values: Vec::new(),
+        })
+        .unwrap();
+    let edge_props = BTreeMap::from([("since".to_string(), json!(2020))]);
+    schema
+        .validate_edge("edge", "KNOWS", "start", "end", &edge_props)
+        .unwrap();
+    assert!(schema.edge_locks.lock().is_empty());
+    assert_eq!(schema.unique_values.lock().len(), 1);
+
+    schema.remove_edge("edge", "KNOWS");
+    assert!(schema.edge_unique_keys.lock().is_empty());
+    assert!(schema.unique_values.lock().is_empty());
+}
+
+#[test]
+fn schema_node_lock_retirement_waits_for_active_participants() {
+    let schema = Arc::new(SchemaManager::new());
+    let key = ("Person".to_string(), "node".to_string());
+    let first = schema.node_lock_for(&key);
+    let first_guard = first.state.lock.lock();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+    let waiting_schema = Arc::clone(&schema);
+    let waiting_key = key.clone();
+    let waiter = thread::spawn(move || {
+        let second = waiting_schema.node_lock_for(&waiting_key);
+        ready_tx.send(()).unwrap();
+        continue_rx.recv().unwrap();
+        let _second_guard = second.state.lock.lock();
+    });
+
+    ready_rx.recv().unwrap();
+    drop(first_guard);
+    drop(first);
+    assert!(schema.node_locks.lock().contains_key(&key));
+
+    continue_tx.send(()).unwrap();
+    waiter.join().unwrap();
+    assert!(schema.node_locks.lock().is_empty());
+}
+
+#[test]
+fn schema_unique_value_retirement_waits_for_active_participants() {
+    let schema = Arc::new(SchemaManager::new());
+    let key = UniqueValueKey {
+        scope: "node".to_string(),
+        label: "Person".to_string(),
+        properties: vec!["email".to_string()],
+        values: vec!["\"alice@example.com\"".to_string()],
+    };
+    let first = schema.unique_state_for(key.clone());
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+    let waiting_schema = Arc::clone(&schema);
+    let waiting_key = key.clone();
+    let waiter = thread::spawn(move || {
+        let _second = waiting_schema.unique_state_for(waiting_key);
+        ready_tx.send(()).unwrap();
+        continue_rx.recv().unwrap();
+    });
+
+    ready_rx.recv().unwrap();
+    drop(first);
+    assert!(schema.unique_values.lock().contains_key(&key));
+
+    continue_tx.send(()).unwrap();
+    waiter.join().unwrap();
+    assert!(schema.unique_values.lock().is_empty());
+}
+
+#[test]
+fn schema_composite_unique_and_node_key_constraints_use_ordered_values() {
+    let schema = SchemaManager::new();
+    for (name, constraint_type) in [
+        ("person_name_unique", ConstraintType::Unique),
+        ("person_tenant_key", ConstraintType::NodeKey),
+    ] {
+        schema
+            .add_constraint(Constraint {
+                name: name.to_string(),
+                constraint_type,
+                entity_type: ConstraintEntityType::Node,
+                label: "Person".to_string(),
+                properties: vec!["tenant".to_string(), "email".to_string()],
+                type_name: None,
+                allowed_values: Vec::new(),
+            })
+            .unwrap();
+    }
+
+    let first = BTreeMap::from([
+        ("tenant".to_string(), json!("one")),
+        ("email".to_string(), json!("alice@example.com")),
+    ]);
+    let other_tenant = BTreeMap::from([
+        ("tenant".to_string(), json!("two")),
+        ("email".to_string(), json!("alice@example.com")),
+    ]);
+    schema.validate_node("first", "Person", &first).unwrap();
+    schema
+        .validate_node("other-tenant", "Person", &other_tenant)
+        .unwrap();
+    assert!(matches!(
+        schema.validate_node("duplicate", "Person", &first),
+        Err(StorageError::UniqueConstraintViolation { .. })
+    ));
+
+    let missing_key_value = BTreeMap::from([("tenant".to_string(), json!("one"))]);
+    assert!(matches!(
+        schema.validate_node("missing", "Person", &missing_key_value),
+        Err(StorageError::ConstraintMissingProperty { .. })
+    ));
+
+    let replacement = BTreeMap::from([
+        ("tenant".to_string(), json!("one")),
+        ("email".to_string(), json!("new@example.com")),
+    ]);
+    schema.validate_node("first", "Person", &replacement).unwrap();
+    schema.validate_node("reused", "Person", &first).unwrap();
+}
+
+#[test]
+fn storage_engine_enforces_persisted_unique_constraints_on_writes() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    engine
+        .persist_constraint(&Constraint {
+            name: "person_email_unique".to_string(),
+            constraint_type: ConstraintType::Unique,
+            entity_type: ConstraintEntityType::Node,
+            label: "Person".to_string(),
+            properties: vec!["email".to_string()],
+            type_name: None,
+            allowed_values: Vec::new(),
+        })
+        .unwrap();
+
+    let mut first = sample_node("first", &["Person"]);
+    first
+        .properties
+        .insert("email".to_string(), json!("alice@example.com"));
+    let mut duplicate = sample_node("duplicate", &["Person"]);
+    duplicate
+        .properties
+        .insert("email".to_string(), json!("alice@example.com"));
+    engine.put_node_record(&first).unwrap();
+    assert!(matches!(
+        engine.put_node_record(&duplicate),
+        Err(StorageError::UniqueConstraintViolation { .. })
+    ));
+
+    first
+        .properties
+        .insert("email".to_string(), json!("alice+new@example.com"));
+    engine.put_node_record(&first).unwrap();
+    engine.put_node_record(&duplicate).unwrap();
+    engine.delete_node_record("duplicate").unwrap();
+
+    let mut replacement = sample_node("replacement", &["Person"]);
+    replacement
+        .properties
+        .insert("email".to_string(), json!("alice@example.com"));
+    engine.put_node_record(&replacement).unwrap();
+}
+
+#[test]
+fn storage_engine_enforces_endpoint_scoped_relationship_keys() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    engine
+        .persist_constraint(&Constraint {
+            name: "knows_since_key".to_string(),
+            constraint_type: ConstraintType::Relationship,
+            entity_type: ConstraintEntityType::Relationship,
+            label: "KNOWS".to_string(),
+            properties: vec!["since".to_string()],
+            type_name: None,
+            allowed_values: Vec::new(),
+        })
+        .unwrap();
+
+    let mut first = sample_edge("first", "KNOWS", "alice", "bob");
+    first.properties.insert("since".to_string(), json!(2020));
+    let mut duplicate = sample_edge("duplicate", "KNOWS", "alice", "bob");
+    duplicate.properties.insert("since".to_string(), json!(2020));
+    let mut other_endpoints = sample_edge("other", "KNOWS", "carol", "dave");
+    other_endpoints
+        .properties
+        .insert("since".to_string(), json!(2020));
+
+    engine.put_edge_record(&first).unwrap();
+    assert!(matches!(
+        engine.put_edge_record(&duplicate),
+        Err(StorageError::UniqueConstraintViolation { .. })
+    ));
+    engine.put_edge_record(&other_endpoints).unwrap();
+
+    first.properties.insert("since".to_string(), json!(2021));
+    engine.put_edge_record(&first).unwrap();
+    engine.put_edge_record(&duplicate).unwrap();
+    engine.delete_edge_record("duplicate").unwrap();
+
+    let mut replacement = sample_edge("replacement", "KNOWS", "alice", "bob");
+    replacement
+        .properties
+        .insert("since".to_string(), json!(2020));
+    engine.put_edge_record(&replacement).unwrap();
+}
+
+#[test]
+fn storage_batch_writer_enforces_persisted_unique_constraints() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    engine
+        .persist_constraint(&Constraint {
+            name: "person_email_unique".to_string(),
+            constraint_type: ConstraintType::Unique,
+            entity_type: ConstraintEntityType::Node,
+            label: "Person".to_string(),
+            properties: vec!["email".to_string()],
+            type_name: None,
+            allowed_values: Vec::new(),
+        })
+        .unwrap();
+
+    let mut first = sample_node("first", &["Person"]);
+    first
+        .properties
+        .insert("email".to_string(), json!("alice@example.com"));
+    let mut duplicate = sample_node("duplicate", &["Person"]);
+    duplicate
+        .properties
+        .insert("email".to_string(), json!("alice@example.com"));
+    let result: Result<(), StorageError> = engine.batch_write(|batch| {
+        batch.put_node_record(&first);
+        batch.put_node_record(&duplicate);
+        Ok(())
+    });
+    assert!(matches!(result, Err(StorageError::UniqueConstraintViolation { .. })));
+    assert!(engine.get_node_record("first").unwrap().is_none());
+    assert!(engine.get_node_record("duplicate").unwrap().is_none());
+}
+
+#[test]
+fn storage_transaction_enforces_persisted_unique_constraints_at_commit() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    engine
+        .persist_constraint(&Constraint {
+            name: "person_email_unique".to_string(),
+            constraint_type: ConstraintType::Unique,
+            entity_type: ConstraintEntityType::Node,
+            label: "Person".to_string(),
+            properties: vec!["email".to_string()],
+            type_name: None,
+            allowed_values: Vec::new(),
+        })
+        .unwrap();
+    let mut existing = sample_node("existing", &["Person"]);
+    existing
+        .properties
+        .insert("email".to_string(), json!("alice@example.com"));
+    engine.put_node_record(&existing).unwrap();
+
+    let mut duplicate = sample_node("duplicate", &["Person"]);
+    duplicate
+        .properties
+        .insert("email".to_string(), json!("alice@example.com"));
+    let mut transaction = engine.begin_transaction().unwrap();
+    transaction.put_node_record(duplicate);
+    assert!(matches!(
+        transaction.commit(),
+        Err(StorageError::UniqueConstraintViolation { .. })
+    ));
+    assert!(engine.get_node_record("duplicate").unwrap().is_none());
+
+    let mut replacement = sample_node("replacement", &["Person"]);
+    replacement
+        .properties
+        .insert("email".to_string(), json!("new@example.com"));
+    let mut transaction = engine.begin_transaction().unwrap();
+    transaction.put_node_record(replacement);
+    transaction.commit().unwrap();
+    assert!(engine.get_node_record("replacement").unwrap().is_some());
 }
 
 #[test]

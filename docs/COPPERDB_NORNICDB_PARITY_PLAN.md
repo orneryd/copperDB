@@ -80,10 +80,11 @@ The first work must close verified audit findings. New feature expansion should 
 
 ### P1: Single-Node Runtime Parity And Performance
 
-7. **Make unique-constraint synchronization key-granular.**
+7. **Complete: make unique-constraint synchronization key-granular.**
    - Upstream: commit `6362a50` and unique-lock concurrency tests.
    - Copper target: storage schema/unique-value synchronization.
-   - Replace global write-lock and full-map cleanup behavior with sharded or key-scoped synchronization. Prove unrelated unique keys progress concurrently and conflicts remain serialized.
+   - Delivered behavior: canonical node and endpoint-scoped relationship keys cover composite values, namespace isolation, updates, deletes, `UNIQUE`, `NODE KEY`, and `RELATIONSHIP KEY`. Per-entity and per-value registries retire only after their final holder/waiter releases; no full-map cleanup or evaluator duplicate scan remains for storage-owned collision classes.
+   - Validated: concurrent same-key winner/disjoint-key success, composite and typed values, update/delete release, node/relationship direct and transactional writes, namespace isolation, `MERGE ... ON CREATE SET`, and registry retirement-race regressions. Durable whole-batch serialization is provided by completed item 8.
 
 8. **Finish durable transaction semantics, MVCC history, and WAL integration.**
    - Progress: `StorageEngine::batch_write` now commits primary records and maintained derived state through one cross-keyspace Fjall batch, with MVCC mirrors and callbacks applied only after storage commit. Transaction-local writes, persistent history, and WAL authority remain open.
@@ -176,7 +177,7 @@ This ledger prevents recent NornicDB fixes from disappearing into broad package 
 | `b46ceb1f`, `389fb2e6` | Explicit-transaction UNWIND mutations and summary counters | P0/P1, blocked by real Bolt transactions |
 | `98f6b4c1`, `2959060f` | Multi-MATCH relationship rebinding and IN-list index seeding | P0/P1, exact regressions missing |
 | `ce1973e6` | Preserve property keys containing `:` | P1, unproven |
-| `6362a50` | Remove unique-lock false sharing | P1, missing equivalent optimization |
+| `6362a50` | Remove unique-lock false sharing | P1, complete; key-granular node/relationship ownership, namespace isolation, and retirement-safe registries |
 | `f065645b`, `214729d2`, `72876f17` | Vector readiness differs from serviceability; no query warming | P1, missing runtime |
 | `31ce0546`, `ec0de01a`, `a10fe13a` | Passive vector behavior and opt-in CPU fallback | P1, missing strategy gate |
 | `53b4234b` | Stop background vector work after shutdown | P1, pending runtime |

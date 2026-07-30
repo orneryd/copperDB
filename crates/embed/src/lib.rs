@@ -16,7 +16,7 @@ pub use local_gguf::{EmbedStats, LocalGgufEmbedder};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum EmbedError {
     #[error("HTTP error: {0}")]
     Http(String),

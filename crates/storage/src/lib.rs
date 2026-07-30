@@ -16,7 +16,7 @@ use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -1109,10 +1109,64 @@ pub struct KnowledgePolicyCatalog {
     pub promotion_policies: Vec<PromotionPolicySchema>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct UniqueValueKey {
+    scope: String,
+    label: String,
+    properties: Vec<String>,
+    values: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct UniqueValueState {
+    owner: Mutex<Option<String>>,
+    users: AtomicUsize,
+}
+
+#[derive(Debug, Default)]
+struct EntityLockState {
+    lock: Mutex<()>,
+    users: AtomicUsize,
+}
+
 #[derive(Debug, Default)]
 pub struct SchemaManager {
     constraints: RwLock<BTreeMap<String, Constraint>>,
-    unique_values: RwLock<BTreeMap<(String, String, String), String>>,
+    namespace_constraints: RwLock<BTreeMap<(String, String), Constraint>>,
+    unique_values: Mutex<HashMap<UniqueValueKey, Arc<UniqueValueState>>>,
+    node_locks: Mutex<HashMap<(String, String), Arc<EntityLockState>>>,
+    node_unique_keys: Mutex<HashMap<(String, String), BTreeSet<UniqueValueKey>>>,
+    edge_locks: Mutex<HashMap<(String, String), Arc<EntityLockState>>>,
+    edge_unique_keys: Mutex<HashMap<(String, String), BTreeSet<UniqueValueKey>>>,
+}
+
+struct UniqueValueLease<'a> {
+    manager: &'a SchemaManager,
+    key: UniqueValueKey,
+    state: Arc<UniqueValueState>,
+}
+
+impl Drop for UniqueValueLease<'_> {
+    fn drop(&mut self) {
+        self.manager.release_unique_state(&self.key, &self.state);
+    }
+}
+
+struct EntityLockLease<'a> {
+    manager: &'a SchemaManager,
+    key: (String, String),
+    state: Arc<EntityLockState>,
+    is_node: bool,
+}
+
+impl Drop for EntityLockLease<'_> {
+    fn drop(&mut self) {
+        if self.is_node {
+            self.manager.release_node_lock(&self.key, &self.state);
+        } else {
+            self.manager.release_edge_lock(&self.key, &self.state);
+        }
+    }
 }
 
 impl SchemaManager {
@@ -1129,6 +1183,20 @@ impl SchemaManager {
         Ok(())
     }
 
+    pub fn add_constraint_for_namespace(
+        &self,
+        namespace: &str,
+        constraint: Constraint,
+    ) -> Result<(), StorageError> {
+        let mut guard = self.namespace_constraints.write();
+        let key = (namespace.to_string(), constraint.name.clone());
+        if guard.contains_key(&key) {
+            return Err(StorageError::ConstraintAlreadyExists(constraint.name));
+        }
+        guard.insert(key, constraint);
+        Ok(())
+    }
+
     pub fn remove_constraint(&self, name: &str) -> Result<(), StorageError> {
         let mut guard = self.constraints.write();
         guard
@@ -1141,6 +1209,22 @@ impl SchemaManager {
         self.constraints.read().values().cloned().collect()
     }
 
+    fn remove_node(&self, node_id: &str, label: &str) {
+        let node_key = (label.to_string(), node_id.to_string());
+        let previous_unique_keys = self
+            .node_unique_keys
+            .lock()
+            .remove(&node_key)
+            .unwrap_or_default();
+        for key in previous_unique_keys {
+            let state = self.unique_state_for(key);
+            let mut owner = state.state.owner.lock();
+            if owner.as_deref() == Some(node_id) {
+                *owner = None;
+            }
+        }
+    }
+
     pub fn validate_node(
         &self,
         node_id: &str,
@@ -1148,11 +1232,22 @@ impl SchemaManager {
         properties: &BTreeMap<String, serde_json::Value>,
     ) -> Result<(), StorageError> {
         let constraints = self.constraints.read();
-        for constraint in constraints.values().filter(|c| c.label == label) {
+        let namespace_constraints = self.namespace_constraints.read();
+        let namespace = namespace_from_str(node_id);
+        let mut next_unique_keys = BTreeSet::new();
+        let applicable = constraints
+            .values()
+            .map(|constraint| (None, constraint))
+            .chain(namespace_constraints.iter().filter_map(|((scope, _), constraint)| {
+                (Some(scope.as_str()) == namespace).then_some((Some(scope.as_str()), constraint))
+            }));
+        for (constraint_namespace, constraint) in applicable.filter(|(_, constraint)| {
+            constraint.entity_type == ConstraintEntityType::Node && constraint.label == label
+        }) {
             match constraint.constraint_type {
-                ConstraintType::Exists | ConstraintType::NodeKey => {
+                ConstraintType::Exists => {
                     for property in &constraint.properties {
-                        if !properties.contains_key(property) {
+                        if !properties.get(property).is_some_and(|value| !value.is_null()) {
                             return Err(StorageError::ConstraintMissingProperty {
                                 constraint: constraint.name.clone(),
                                 property: property.clone(),
@@ -1160,31 +1255,32 @@ impl SchemaManager {
                         }
                     }
                 }
-                ConstraintType::Unique => {
+                ConstraintType::Unique | ConstraintType::NodeKey => {
+                    let mut values = Vec::with_capacity(constraint.properties.len());
                     for property in &constraint.properties {
-                        if let Some(value) = properties.get(property) {
-                            let value_key = value.to_string();
-                            let key = (label.to_string(), property.clone(), value_key.clone());
-                            let mut unique = self.unique_values.write();
-                            cleanup_stale_unique_values_for_node(
-                                &mut unique,
-                                label,
-                                property,
-                                &value_key,
-                                node_id,
-                            );
-                            if let Some(existing) = unique.get(&key) {
-                                if existing != node_id {
-                                    return Err(StorageError::UniqueConstraintViolation {
-                                        label: label.to_string(),
-                                        property: property.clone(),
-                                        value: value_key,
-                                    });
-                                }
-                            } else {
-                                unique.insert(key, node_id.to_string());
+                        match properties.get(property) {
+                            Some(value) if !value.is_null() => values.push(value.to_string()),
+                            _ if constraint.constraint_type == ConstraintType::NodeKey => {
+                                return Err(StorageError::ConstraintMissingProperty {
+                                    constraint: constraint.name.clone(),
+                                    property: property.clone(),
+                                });
+                            }
+                            _ => {
+                                values.clear();
+                                break;
                             }
                         }
+                    }
+                    if values.len() == constraint.properties.len() {
+                        next_unique_keys.insert(UniqueValueKey {
+                            scope: constraint_namespace
+                                .map(|scope| format!("namespace:{scope}:node"))
+                                .unwrap_or_else(|| "node".to_string()),
+                            label: label.to_string(),
+                            properties: constraint.properties.clone(),
+                            values,
+                        });
                     }
                 }
                 ConstraintType::Type
@@ -1193,25 +1289,275 @@ impl SchemaManager {
                 | ConstraintType::Domain => {}
             }
         }
+        drop(namespace_constraints);
+        drop(constraints);
+
+        let node_key = (label.to_string(), node_id.to_string());
+        let node_lock = self.node_lock_for(&node_key);
+        let _node_guard = node_lock.state.lock.lock();
+        let previous_unique_keys = self
+            .node_unique_keys
+            .lock()
+            .get(&node_key)
+            .cloned()
+            .unwrap_or_default();
+        let all_keys = previous_unique_keys
+            .union(&next_unique_keys)
+            .cloned()
+            .collect::<Vec<_>>();
+        let states = all_keys
+            .iter()
+            .cloned()
+            .map(|key| self.unique_state_for(key))
+            .collect::<Vec<_>>();
+        let mut owners = states
+            .iter()
+            .map(|state| state.state.owner.lock())
+            .collect::<Vec<_>>();
+
+        for (state, owner) in states.iter().zip(owners.iter()) {
+            if next_unique_keys.contains(&state.key) {
+                if let Some(existing) = owner.as_deref() {
+                    if existing != node_id {
+                        return Err(StorageError::UniqueConstraintViolation {
+                            label: state.key.label.clone(),
+                            property: state.key.properties.join(", "),
+                            value: state.key.values.join(", "),
+                        });
+                    }
+                }
+            }
+        }
+        for (state, owner) in states.iter().zip(owners.iter_mut()) {
+            if next_unique_keys.contains(&state.key) {
+                **owner = Some(node_id.to_string());
+            } else if owner.as_deref() == Some(node_id) {
+                **owner = None;
+            }
+        }
+        self.node_unique_keys
+            .lock()
+            .insert(node_key, next_unique_keys);
         Ok(())
     }
-}
 
-fn cleanup_stale_unique_values_for_node(
-    unique: &mut BTreeMap<(String, String, String), String>,
-    label: &str,
-    property: &str,
-    new_value: &str,
-    node_id: &str,
-) {
-    unique.retain(
-        |(existing_label, existing_property, existing_value), existing_node| {
-            !(existing_label == label
-                && existing_property == property
-                && existing_value != new_value
-                && existing_node == node_id)
-        },
-    );
+    pub fn validate_edge(
+        &self,
+        edge_id: &str,
+        edge_type: &str,
+        start_node: &str,
+        end_node: &str,
+        properties: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<(), StorageError> {
+        let constraints = self.constraints.read();
+        let namespace_constraints = self.namespace_constraints.read();
+        let namespace = namespace_from_str(edge_id);
+        let mut next_unique_keys = BTreeSet::new();
+        let applicable = constraints
+            .values()
+            .map(|constraint| (None, constraint))
+            .chain(namespace_constraints.iter().filter_map(|((scope, _), constraint)| {
+                (Some(scope.as_str()) == namespace).then_some((Some(scope.as_str()), constraint))
+            }));
+        for (constraint_namespace, constraint) in applicable.filter(|(_, constraint)| {
+            constraint.entity_type == ConstraintEntityType::Relationship
+                && constraint.label == edge_type
+        }) {
+            match constraint.constraint_type {
+                ConstraintType::Exists => {
+                    for property in &constraint.properties {
+                        if !properties.get(property).is_some_and(|value| !value.is_null()) {
+                            return Err(StorageError::ConstraintMissingProperty {
+                                constraint: constraint.name.clone(),
+                                property: property.clone(),
+                            });
+                        }
+                    }
+                }
+                ConstraintType::Unique | ConstraintType::Relationship => {
+                    let mut values = Vec::with_capacity(constraint.properties.len());
+                    for property in &constraint.properties {
+                        match properties.get(property) {
+                            Some(value) if !value.is_null() => values.push(value.to_string()),
+                            _ if constraint.constraint_type == ConstraintType::Relationship => {
+                                return Err(StorageError::ConstraintMissingProperty {
+                                    constraint: constraint.name.clone(),
+                                    property: property.clone(),
+                                });
+                            }
+                            _ => {
+                                values.clear();
+                                break;
+                            }
+                        }
+                    }
+                    if values.len() == constraint.properties.len() {
+                        next_unique_keys.insert(UniqueValueKey {
+                            scope: constraint_namespace
+                                .map(|scope| {
+                                    format!("namespace:{scope}:relationship:{start_node}:{end_node}")
+                                })
+                                .unwrap_or_else(|| {
+                                    format!("relationship:{start_node}:{end_node}")
+                                }),
+                            label: edge_type.to_string(),
+                            properties: constraint.properties.clone(),
+                            values,
+                        });
+                    }
+                }
+                ConstraintType::NodeKey
+                | ConstraintType::Type
+                | ConstraintType::Temporal
+                | ConstraintType::Domain => {}
+            }
+        }
+        drop(namespace_constraints);
+        drop(constraints);
+
+        let edge_key = (edge_type.to_string(), edge_id.to_string());
+        let edge_lock = self.edge_lock_for(&edge_key);
+        let _edge_guard = edge_lock.state.lock.lock();
+        let previous_unique_keys = self
+            .edge_unique_keys
+            .lock()
+            .get(&edge_key)
+            .cloned()
+            .unwrap_or_default();
+        let all_keys = previous_unique_keys
+            .union(&next_unique_keys)
+            .cloned()
+            .collect::<Vec<_>>();
+        let states = all_keys
+            .iter()
+            .cloned()
+            .map(|key| self.unique_state_for(key))
+            .collect::<Vec<_>>();
+        let mut owners = states
+            .iter()
+            .map(|state| state.state.owner.lock())
+            .collect::<Vec<_>>();
+        for (state, owner) in states.iter().zip(owners.iter()) {
+            if next_unique_keys.contains(&state.key) {
+                if let Some(existing) = owner.as_deref() {
+                    if existing != edge_id {
+                        return Err(StorageError::UniqueConstraintViolation {
+                            label: state.key.label.clone(),
+                            property: state.key.properties.join(", "),
+                            value: state.key.values.join(", "),
+                        });
+                    }
+                }
+            }
+        }
+        for (state, owner) in states.iter().zip(owners.iter_mut()) {
+            if next_unique_keys.contains(&state.key) {
+                **owner = Some(edge_id.to_string());
+            } else if owner.as_deref() == Some(edge_id) {
+                **owner = None;
+            }
+        }
+        self.edge_unique_keys.lock().insert(edge_key, next_unique_keys);
+        Ok(())
+    }
+
+    fn unique_state_for(&self, key: UniqueValueKey) -> UniqueValueLease<'_> {
+        let mut states = self.unique_values.lock();
+        let state = Arc::clone(
+            states
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(UniqueValueState::default())),
+        );
+        state.users.fetch_add(1, Ordering::Acquire);
+        UniqueValueLease {
+            manager: self,
+            key,
+            state,
+        }
+    }
+
+    fn node_lock_for(&self, node_key: &(String, String)) -> EntityLockLease<'_> {
+        let mut locks = self.node_locks.lock();
+        let state = Arc::clone(
+            locks.entry(node_key.clone())
+                .or_insert_with(|| Arc::new(EntityLockState::default())),
+        );
+        state.users.fetch_add(1, Ordering::Acquire);
+        EntityLockLease {
+            manager: self,
+            key: node_key.clone(),
+            state,
+            is_node: true,
+        }
+    }
+
+    fn remove_edge(&self, edge_id: &str, edge_type: &str) {
+        let edge_key = (edge_type.to_string(), edge_id.to_string());
+        let previous_unique_keys = self
+            .edge_unique_keys
+            .lock()
+            .remove(&edge_key)
+            .unwrap_or_default();
+        for key in previous_unique_keys {
+            let state = self.unique_state_for(key);
+            let mut owner = state.state.owner.lock();
+            if owner.as_deref() == Some(edge_id) {
+                *owner = None;
+            }
+        }
+    }
+
+    fn edge_lock_for(&self, edge_key: &(String, String)) -> EntityLockLease<'_> {
+        let mut locks = self.edge_locks.lock();
+        let state = Arc::clone(
+            locks.entry(edge_key.clone())
+                .or_insert_with(|| Arc::new(EntityLockState::default())),
+        );
+        state.users.fetch_add(1, Ordering::Acquire);
+        EntityLockLease {
+            manager: self,
+            key: edge_key.clone(),
+            state,
+            is_node: false,
+        }
+    }
+
+    fn release_unique_state(&self, key: &UniqueValueKey, state: &Arc<UniqueValueState>) {
+        if state.users.fetch_sub(1, Ordering::Release) != 1 {
+            return;
+        }
+        let mut states = self.unique_values.lock();
+        if state.users.load(Ordering::Acquire) == 0
+            && state.owner.lock().is_none()
+            && states.get(key).is_some_and(|current| Arc::ptr_eq(current, state))
+        {
+            states.remove(key);
+        }
+    }
+
+    fn release_node_lock(&self, key: &(String, String), state: &Arc<EntityLockState>) {
+        Self::release_entity_lock(&self.node_locks, key, state);
+    }
+
+    fn release_edge_lock(&self, key: &(String, String), state: &Arc<EntityLockState>) {
+        Self::release_entity_lock(&self.edge_locks, key, state);
+    }
+
+    fn release_entity_lock(
+        registry: &Mutex<HashMap<(String, String), Arc<EntityLockState>>>,
+        key: &(String, String),
+        state: &Arc<EntityLockState>,
+    ) {
+        if state.users.fetch_sub(1, Ordering::Release) != 1 {
+            return;
+        }
+        let mut entries = registry.lock();
+        if state.users.load(Ordering::Acquire) == 0
+            && entries.get(key).is_some_and(|current| Arc::ptr_eq(current, state))
+        {
+            entries.remove(key);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1407,6 +1753,7 @@ pub struct StorageEngine {
     mvcc: MvccStore,
     wal: WAL,
     batch_commit_lock: Mutex<()>,
+    schema_manager: RwLock<Arc<SchemaManager>>,
     index_schema_generation: AtomicU64,
     encryption: Option<StorageEncryption>,
     temp_dir: Option<tempfile::TempDir>,
@@ -1806,6 +2153,7 @@ fn install_storage_snapshot_entries(
             mvcc: MvccStore::new(),
             wal: WAL::new(WALConfig::default()),
             batch_commit_lock: Mutex::new(()),
+            schema_manager: RwLock::new(Arc::new(SchemaManager::new())),
             index_schema_generation: AtomicU64::new(0),
             encryption: None,
             temp_dir: Some(temp_dir),
@@ -1819,6 +2167,7 @@ fn install_storage_snapshot_entries(
         engine.ensure_layout_manifest()?;
         engine.ensure_encryption_manifest()?;
         engine.restore_or_bootstrap_mvcc()?;
+        engine.rebuild_schema_manager()?;
         Ok(engine)
     }
 
@@ -1849,6 +2198,7 @@ fn install_storage_snapshot_entries(
             mvcc: MvccStore::new(),
             wal,
             batch_commit_lock: Mutex::new(()),
+            schema_manager: RwLock::new(Arc::new(SchemaManager::new())),
             index_schema_generation: AtomicU64::new(0),
             encryption,
             temp_dir: None,
@@ -1865,6 +2215,7 @@ fn install_storage_snapshot_entries(
             engine.restore_or_bootstrap_mvcc()?;
             engine.recover_wal_transactions()?;
         }
+        engine.rebuild_schema_manager()?;
         Ok(engine)
     }
 
@@ -2812,6 +3163,7 @@ fn install_storage_snapshot_entries(
             }
             Ok(())
         })
+
         .or_else(Self::swallow_iteration_stopped)?;
 
         if !stop_requested && !chunk.is_empty() {
@@ -2823,6 +3175,129 @@ fn install_storage_snapshot_entries(
         }
 
         Ok(streamed)
+    }
+
+    fn rebuild_schema_manager(&self) -> Result<(), StorageError> {
+        let constraints = self.load_constraints()?;
+        self.replace_schema_manager(&constraints)
+    }
+
+    fn replace_schema_manager(&self, constraints: &[Constraint]) -> Result<(), StorageError> {
+        let manager = SchemaManager::new();
+        for constraint in constraints {
+            manager.add_constraint(constraint.clone())?;
+        }
+        self.add_namespace_constraints_to_manager(&manager)?;
+        for node in self.all_node_records()? {
+            for label in &node.labels {
+                manager.validate_node(&node.id, label, &node.properties)?;
+            }
+        }
+        for edge in self.all_edges()? {
+            manager.validate_edge(
+                &edge.id,
+                &edge.edge_type,
+                &edge.start_node,
+                &edge.end_node,
+                &edge.properties,
+            )?;
+        }
+        *self.schema_manager.write() = Arc::new(manager);
+        Ok(())
+    }
+
+    fn add_namespace_constraints_to_manager(
+        &self,
+        manager: &SchemaManager,
+    ) -> Result<(), StorageError> {
+        for namespace in self.namespaces_with_schema_constraints()? {
+            for constraint in self.load_constraints_for_namespace(&namespace)? {
+                manager.add_constraint_for_namespace(&namespace, constraint)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn namespaces_with_schema_constraints(&self) -> Result<Vec<String>, StorageError> {
+        let mut namespaces = BTreeSet::new();
+        for entry in self.meta.scan_prefix(META_SCHEMA_NAMESPACE_CONSTRAINT_PREFIX) {
+            let (key, _) = entry?;
+            let Some(encoded) = key
+                .as_slice()
+                .strip_prefix(META_SCHEMA_NAMESPACE_CONSTRAINT_PREFIX)
+                .and_then(|suffix| suffix.split(|byte| *byte == b'/').next())
+            else {
+                continue;
+            };
+            let Ok(decoded) = hex::decode(encoded) else {
+                continue;
+            };
+            let Ok(namespace) = String::from_utf8(decoded) else {
+                continue;
+            };
+            namespaces.insert(namespace);
+        }
+        Ok(namespaces.into_iter().collect())
+    }
+
+    fn apply_node_constraint_update(
+        &self,
+        old: Option<&NodeRecord>,
+        new: Option<&NodeRecord>,
+    ) -> Result<(), StorageError> {
+        let manager = Arc::clone(&self.schema_manager.read());
+        let result = (|| {
+            if let Some(node) = new {
+                for label in &node.labels {
+                    manager.validate_node(&node.id, label, &node.properties)?;
+                }
+            }
+            if let Some(old) = old {
+                let new_labels = new
+                    .map(|node| node.labels.iter().collect::<BTreeSet<_>>())
+                    .unwrap_or_default();
+                for label in &old.labels {
+                    if !new_labels.contains(label) {
+                        manager.remove_node(&old.id, label);
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.rebuild_schema_manager()?;
+        }
+        result
+    }
+
+    fn apply_edge_constraint_update(
+        &self,
+        old: Option<&EdgeRecord>,
+        new: Option<&EdgeRecord>,
+    ) -> Result<(), StorageError> {
+        let manager = Arc::clone(&self.schema_manager.read());
+        let result = (|| {
+            if let Some(edge) = new {
+                manager.validate_edge(
+                    &edge.id,
+                    &edge.edge_type,
+                    &edge.start_node,
+                    &edge.end_node,
+                    &edge.properties,
+                )?;
+            }
+            if let Some(old) = old {
+                let replaces_old_type = new.is_some_and(|edge| edge.edge_type != old.edge_type);
+                if new.is_none() || replaces_old_type {
+                    manager.remove_edge(&old.id, &old.edge_type);
+                }
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.rebuild_schema_manager()?;
+        }
+        result
     }
 
     pub fn get_nodes_by_property(
@@ -3708,6 +4183,10 @@ fn install_storage_snapshot_entries(
     }
 
     pub fn persist_constraint(&self, constraint: &Constraint) -> Result<(), StorageError> {
+        let mut constraints = self.load_constraints()?;
+        constraints.retain(|existing| existing.name != constraint.name);
+        constraints.push(constraint.clone());
+        self.replace_schema_manager(&constraints)?;
         let key = [META_SCHEMA_CONSTRAINT_PREFIX, constraint.name.as_bytes()].concat();
         self.meta
             .fjall_insert(key, rmp_serde::to_vec(constraint)?)?;
@@ -3720,8 +4199,19 @@ fn install_storage_snapshot_entries(
         constraint: &Constraint,
     ) -> Result<(), StorageError> {
         let key = namespace_schema_constraint_key(namespace, &constraint.name);
-        self.meta
-            .fjall_insert(key, rmp_serde::to_vec(constraint)?)?;
+        let previous = self.meta.fjall_get(&key)?;
+        self.meta.fjall_insert(&key, rmp_serde::to_vec(constraint)?)?;
+        if let Err(error) = self.rebuild_schema_manager() {
+            match previous {
+                Some(previous) => {
+                    self.meta.fjall_insert(&key, previous)?;
+                }
+                None => {
+                    self.meta.fjall_remove(&key)?;
+                }
+            }
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -3750,6 +4240,9 @@ fn install_storage_snapshot_entries(
     }
 
     pub fn delete_constraint(&self, name: &str) -> Result<bool, StorageError> {
+        let mut constraints = self.load_constraints()?;
+        constraints.retain(|constraint| constraint.name != name);
+        self.replace_schema_manager(&constraints)?;
         let key = [META_SCHEMA_CONSTRAINT_PREFIX, name.as_bytes()].concat();
         Ok(self.meta.fjall_remove(key)?.is_some())
     }
@@ -3760,7 +4253,14 @@ fn install_storage_snapshot_entries(
         name: &str,
     ) -> Result<bool, StorageError> {
         let key = namespace_schema_constraint_key(namespace, name);
-        Ok(self.meta.fjall_remove(key)?.is_some())
+        let previous = self.meta.fjall_remove(&key)?;
+        if let Err(error) = self.rebuild_schema_manager() {
+            if let Some(previous) = previous.as_ref() {
+                self.meta.fjall_insert(&key, previous)?;
+            }
+            return Err(error);
+        }
+        Ok(previous.is_some())
     }
 
     pub fn persist_index_definition(&self, index: &IndexDefinition) -> Result<(), StorageError> {
@@ -6074,7 +6574,8 @@ impl<'a> StorageTransaction<'a> {
     pub fn commit(&mut self) -> Result<(), StorageError> {
         self.discard_noop_edge_writes()?;
         self.ensure_no_write_conflicts()?;
-        self.engine().batch_write(|batch| {
+        let has_constraint_writes = !self.constraint_writes.is_empty();
+        let result = self.engine().batch_write(|batch| {
             for (name, constraint) in &self.constraint_writes {
                 match constraint {
                     Some(constraint) => batch.put_constraint(constraint),
@@ -6109,7 +6610,14 @@ impl<'a> StorageTransaction<'a> {
                 }
             }
             Ok::<_, StorageError>(())
-        })?;
+        });
+        if let Err(error) = result {
+            self.engine().rebuild_schema_manager()?;
+            return Err(error);
+        }
+        if has_constraint_writes {
+            self.engine().rebuild_schema_manager()?;
+        }
         self.constraints = self.constraints_with_writes();
         self.indexes = self.index_definitions_with_writes();
         self.initial_knowledge_policy = self.knowledge_policy.clone();
@@ -6384,6 +6892,57 @@ impl<'a> BatchWriter<'a> {
             .filter(|index| is_relationship_fulltext_index(index))
             .cloned()
             .collect::<Vec<_>>();
+
+        let replacement_schema_manager = if constraints.is_empty() {
+            None
+        } else {
+            let mut effective_constraints = self
+                .engine
+                .load_constraints()?
+                .into_iter()
+                .map(|constraint| (constraint.name.clone(), constraint))
+                .collect::<BTreeMap<_, _>>();
+            for (name, constraint) in &constraints {
+                match constraint {
+                    Some(constraint) => {
+                        effective_constraints.insert(name.clone(), constraint.clone());
+                    }
+                    None => {
+                        effective_constraints.remove(name);
+                    }
+                }
+            }
+            let manager = SchemaManager::new();
+            for constraint in effective_constraints.into_values() {
+                manager.add_constraint(constraint)?;
+            }
+            self.engine.add_namespace_constraints_to_manager(&manager)?;
+            for node in self.final_nodes(&nodes)? {
+                for label in &node.labels {
+                    manager.validate_node(&node.id, label, &node.properties)?;
+                }
+            }
+            for edge in self.final_edges(&edges)? {
+                manager.validate_edge(
+                    &edge.id,
+                    &edge.edge_type,
+                    &edge.start_node,
+                    &edge.end_node,
+                    &edge.properties,
+                )?;
+            }
+            Some(Arc::new(manager))
+        };
+        if replacement_schema_manager.is_none() {
+            for (old, new) in nodes.values() {
+                self.engine
+                    .apply_node_constraint_update(old.as_ref(), new.as_ref())?;
+            }
+            for (old, new) in edges.values() {
+                self.engine
+                    .apply_edge_constraint_update(old.as_ref(), new.as_ref())?;
+            }
+        }
 
         let mutations = nodes
             .iter()
@@ -6669,7 +7228,15 @@ impl<'a> BatchWriter<'a> {
                 rmp_serde::to_vec(&wal_sequence)?,
             );
         }
-        batch.commit()?;
+        if let Err(error) = batch.commit() {
+            if replacement_schema_manager.is_none() && (!nodes.is_empty() || !edges.is_empty()) {
+                self.engine.rebuild_schema_manager()?;
+            }
+            return Err(error.into());
+        }
+        if let Some(manager) = replacement_schema_manager {
+            *self.engine.schema_manager.write() = manager;
+        }
         if !indexes.is_empty() {
             self.engine
                 .index_schema_generation

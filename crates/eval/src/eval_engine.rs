@@ -5203,26 +5203,7 @@ impl EvalEngine {
                 continue;
             }
             match c.constraint_type {
-                ConstraintType::Unique => {
-                    let Some(prop) = c.properties.first() else {
-                        continue;
-                    };
-                    let val = match props.get(prop) {
-                        None | Some(Value::Null) => continue,
-                        Some(v) => v,
-                    };
-                    // Scan nodes with matching label to find duplicate
-                    if let Ok(nodes) = self.storage.get_nodes_by_label(&c.label) {
-                        for node in &nodes {
-                            if node.properties.get(prop) == Some(val) {
-                                return Err(EvalError::ExecutionError(format!(
-                                    "Node already exists with label `{}` and property `{}` = {:?}",
-                                    c.label, prop, val
-                                )));
-                            }
-                        }
-                    }
-                }
+                ConstraintType::Unique => {}
                 ConstraintType::Exists => {
                     for prop in &c.properties {
                         match props.get(prop) {
@@ -5237,8 +5218,6 @@ impl EvalEngine {
                     }
                 }
                 ConstraintType::NodeKey => {
-                    // All key properties must be non-null
-                    let mut key_vals: Vec<(&String, &Value)> = Vec::new();
                     for prop in &c.properties {
                         match props.get(prop) {
                             None | Some(Value::Null) => {
@@ -5247,28 +5226,8 @@ impl EvalEngine {
                                     prop, c.label
                                 )));
                             }
-                            Some(v) => key_vals.push((prop, v)),
+                            Some(_) => {}
                         };
-                    }
-                    // Scan for existing node with all matching key properties
-                    if let Ok(nodes) = self.storage.get_nodes_by_label(&c.label) {
-                        for node in &nodes {
-                            let all_match = c
-                                .properties
-                                .iter()
-                                .all(|prop| node.properties.get(prop) == props.get(prop));
-                            if all_match {
-                                return Err(EvalError::ExecutionError(format!(
-                                    "Node already exists with label `{}` and key {:?}",
-                                    c.label,
-                                    c.properties
-                                        .iter()
-                                        .map(|p| format!("{}={:?}", p, props.get(p)))
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                )));
-                            }
-                        }
                     }
                 }
                 ConstraintType::Type => {
@@ -5360,8 +5319,8 @@ impl EvalEngine {
         &self,
         rel_type: &str,
         props: &HashMap<String, Value>,
-        start_id: &str,
-        end_id: &str,
+        _start_id: &str,
+        _end_id: &str,
     ) -> Result<(), EvalError> {
         let constraints = self.storage.load_constraints()?;
         for c in &constraints {
@@ -5372,28 +5331,7 @@ impl EvalEngine {
                 continue;
             }
             match c.constraint_type {
-                ConstraintType::Unique => {
-                    let Some(prop) = c.properties.first() else {
-                        continue;
-                    };
-                    let val = match props.get(prop) {
-                        None | Some(Value::Null) => continue,
-                        Some(v) => v,
-                    };
-                    if let Ok(edges) = self.storage.get_edges_by_type(rel_type) {
-                        for edge in &edges {
-                            if edge.start_node == start_id
-                                && edge.end_node == end_id
-                                && edge.properties.get(prop) == Some(val)
-                            {
-                                return Err(EvalError::ExecutionError(format!(
-                                    "Relationship already exists with type `{}` and property `{}` = {:?}",
-                                    rel_type, prop, val
-                                )));
-                            }
-                        }
-                    }
-                }
+                ConstraintType::Unique => {}
                 ConstraintType::Exists => {
                     for prop in &c.properties {
                         match props.get(prop) {
@@ -5408,7 +5346,6 @@ impl EvalEngine {
                     }
                 }
                 ConstraintType::Relationship => {
-                    // Relationship key: all key properties must be non-null
                     for prop in &c.properties {
                         match props.get(prop) {
                             None | Some(Value::Null) => {
@@ -5419,27 +5356,6 @@ impl EvalEngine {
                             }
                             _ => {}
                         };
-                    }
-                    // Check for existing relationship with matching key
-                    if let Ok(edges) = self.storage.get_edges_by_type(rel_type) {
-                        for edge in &edges {
-                            if edge.start_node == start_id
-                                && edge.end_node == end_id
-                                && c.properties
-                                    .iter()
-                                    .all(|prop| edge.properties.get(prop) == props.get(prop))
-                            {
-                                return Err(EvalError::ExecutionError(format!(
-                                    "Relationship already exists with type `{}` and key {:?}",
-                                    rel_type,
-                                    c.properties
-                                        .iter()
-                                        .map(|p| format!("{}={:?}", p, props.get(p)))
-                                        .collect::<Vec<_>>()
-                                        .join(", ")
-                                )));
-                            }
-                        }
                     }
                 }
                 ConstraintType::Type => {
@@ -5973,7 +5889,6 @@ impl EvalEngine {
                         // ON CREATE SET items — defer constraint check and persistence
                         // until after SET has run, since SET may add required properties.
                         if !merge.on_create.is_empty() {
-                            self.persist_node_props(&props)?;
                             stats.nodes_created += 1;
                             stats.properties_set += node_pat.properties.len();
                             let mut created = serde_json::to_value(&props)
@@ -5998,6 +5913,10 @@ impl EvalEngine {
                                     self.persist_node_props(&persisted)?;
                                     created = Value::Object(updated_props.clone());
                                 }
+                            }
+                            if node_pat.variable.is_none() {
+                                self.check_node_constraints(labels, &props)?;
+                                self.persist_node_props(&props)?;
                             }
                             self.cache_merge_node(labels, &merge_props, &created);
                             created
@@ -6075,7 +5994,7 @@ impl EvalEngine {
                     )
                 } else {
                     let id = format!("edge:{}", Uuid::new_v4());
-                    let edge_record = self.persist_edge_record(EdgeRecord {
+                    let edge_record = EdgeRecord {
                         id,
                         start_node: start_id.clone(),
                         end_node: end_id.clone(),
@@ -6083,7 +6002,10 @@ impl EvalEngine {
                         properties: expected_edge_props.clone().into_iter().collect(),
                         created_at_unix_ms: 0,
                         updated_at_unix_ms: 0,
-                    })?;
+                    };
+                    if merge.on_create.is_empty() || edge_pat.variable.is_none() {
+                        self.persist_edge_record(edge_record.clone())?;
+                    }
                     stats.relationships_created += 1;
                     stats.properties_set += expected_edge_props.len();
                     let mut props: HashMap<String, Value> =
