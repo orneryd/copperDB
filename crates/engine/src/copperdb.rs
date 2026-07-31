@@ -248,9 +248,10 @@ impl CopperDb {
         config: DatabaseConfig,
     ) -> Result<Self, CopperDbError> {
         let vector_indexes = Arc::new(VectorIndexManager::build(storage.as_ref())?);
-        let eval = EvalEngine::new_with_vector_indexes(
+        let eval = EvalEngine::new_with_vector_indexes_and_artifact_refresh(
             Arc::clone(&storage),
             Some(vector_indexes.registry()),
+            Some(vector_indexes.artifact_refresh_callback(&storage)),
         );
         vector_indexes.enable_persistence(&storage);
         let audit_log = Arc::new(AuditLog::new(Arc::clone(&storage), AuditConfig::default())?);

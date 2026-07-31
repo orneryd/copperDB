@@ -215,6 +215,7 @@ impl KnowledgePolicyInspection {
 pub struct EvalEngine {
     storage: Arc<StorageEngine>,
     vector_indexes: Option<Arc<HnswRegistry>>,
+    vector_index_artifact_refresh: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Cache for MERGE node lookups: merge_cache_key(labels, prop, val) → node JSON Value.
     ///
     /// Mirrors NornicDB v1.0.42's `nodeLookupCache` on `StorageExecutor`.

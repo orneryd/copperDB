@@ -1443,6 +1443,15 @@
             .unwrap();
         assert!(vector.rows.is_empty());
 
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE VECTOR INDEX person_embedding_idx FOR (n:Person) ON (n.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 3}}")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
         let err = match engine.execute(
             &parser.parse("DROP INDEX person_seen_at_idx").unwrap(),
             &HashMap::new(),

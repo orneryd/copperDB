@@ -130,6 +130,20 @@ impl VectorIndexManager {
         }));
     }
 
+    pub(crate) fn artifact_refresh_callback(
+        self: &Arc<Self>,
+        storage: &Arc<StorageEngine>,
+    ) -> Arc<dyn Fn() + Send + Sync> {
+        let manager = Arc::downgrade(self);
+        let storage = Arc::downgrade(storage);
+        Arc::new(move || {
+            let (Some(manager), Some(storage)) = (manager.upgrade(), storage.upgrade()) else {
+                return;
+            };
+            manager.persist_artifact(&storage);
+        })
+    }
+
     fn persist_artifact(&self, storage: &StorageEngine) {
         let Some(path) = self.artifact_path.as_ref() else {
             return;
@@ -222,6 +236,7 @@ fn vector_error(error: VectorSpaceError) -> CopperDbError {
 mod tests {
     use super::*;
     use copperdb_storage::{IndexDefinition, NodeEmbeddingMetadata};
+    use copperdb_vectorspace::HnswRegistry;
     use std::collections::BTreeMap;
 
     fn vector_index_definition() -> IndexDefinition {
@@ -395,6 +410,36 @@ mod tests {
                 .0[0]
                 .0,
             "new"
+        );
+    }
+
+    #[test]
+    fn vector_ddl_refreshes_the_persisted_registry_artifact() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path().join("vector-db");
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: data_dir.to_string_lossy().into_owned(),
+            ..DatabaseConfig::default()
+        })
+        .unwrap();
+        let create = "CREATE VECTOR INDEX document_embedding FOR (n:Document) ON (n.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 2}}";
+        db.execute(create, HashMap::new()).unwrap();
+
+        let artifact = data_dir.join(VECTOR_REGISTRY_ARTIFACT_FILE);
+        let loaded = HnswRegistry::load_artifact_with_source_generation(&artifact).unwrap();
+        assert_eq!(loaded.registry.index_names(), vec!["document_embedding"]);
+        assert_eq!(
+            loaded.source_generation,
+            db.storage().wal_applied_sequence().unwrap()
+        );
+
+        db.execute("DROP INDEX document_embedding", HashMap::new())
+            .unwrap();
+        let loaded = HnswRegistry::load_artifact_with_source_generation(&artifact).unwrap();
+        assert!(loaded.registry.index_names().is_empty());
+        assert_eq!(
+            loaded.source_generation,
+            db.storage().wal_applied_sequence().unwrap()
         );
     }
 }

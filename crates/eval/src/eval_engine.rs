@@ -15,6 +15,14 @@ impl EvalEngine {
         storage: Arc<StorageEngine>,
         vector_indexes: Option<Arc<HnswRegistry>>,
     ) -> Self {
+        Self::new_with_vector_indexes_and_artifact_refresh(storage, vector_indexes, None)
+    }
+
+    pub fn new_with_vector_indexes_and_artifact_refresh(
+        storage: Arc<StorageEngine>,
+        vector_indexes: Option<Arc<HnswRegistry>>,
+        vector_index_artifact_refresh: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Self {
         let vector_indexes = vector_indexes.unwrap_or_else(|| Arc::new(HnswRegistry::new()));
         let created_storage = Arc::downgrade(&storage);
         let created_indexes = Arc::clone(&vector_indexes);
@@ -40,6 +48,7 @@ impl EvalEngine {
         Self {
             storage,
             vector_indexes: Some(vector_indexes),
+            vector_index_artifact_refresh,
             node_lookup_cache: Arc::new(Mutex::new(HashMap::new())),
             fulltext_query_cache: Arc::new(Mutex::new(HashMap::new())),
             access_flusher: Arc::new(AccessFlusher::new()),
@@ -154,6 +163,12 @@ impl EvalEngine {
                 .put_knowledge_policy_access_metadata(&entity_id, &metadata)?;
         }
         Ok(())
+    }
+
+    fn refresh_vector_index_artifact(&self) {
+        if let Some(refresh) = &self.vector_index_artifact_refresh {
+            refresh();
+        }
     }
 
     pub fn knowledge_policy_resolver(&self) -> Result<Resolver, EvalError> {
@@ -2316,6 +2331,7 @@ impl EvalEngine {
 
                 Clause::DropIndex(drop) => {
                     let catalog = IndexCatalog::new(self.storage.as_ref());
+                    let definition = catalog.get(&drop.name)?;
                     if drop.if_exists {
                         catalog.drop_if_present(&drop.name)?;
                     } else {
@@ -2323,6 +2339,15 @@ impl EvalEngine {
                     }
                     // Clean up any associated index options
                     self.storage.delete_index_options(&drop.name)?;
+                    if matches!(
+                        definition,
+                        Some(ref definition)
+                            if definition.kind == copperdb_indexing::CatalogIndexKind::Vector
+                                && definition.entity_type
+                                    == copperdb_indexing::CatalogIndexEntityType::Node
+                    ) {
+                        self.unregister_vector_index(&drop.name)?;
+                    }
                 }
 
                 Clause::ShowIndexes(show) => {
@@ -2981,7 +3006,22 @@ impl EvalEngine {
                     .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
             }
         }
+        self.refresh_vector_index_artifact();
         Ok(())
+    }
+
+    fn unregister_vector_index(&self, index_name: &str) -> Result<(), EvalError> {
+        let Some(vector_indexes) = &self.vector_indexes else {
+            return Ok(());
+        };
+        match vector_indexes.drop_index(index_name) {
+            Ok(()) => {
+                self.refresh_vector_index_artifact();
+                Ok(())
+            }
+            Err(copperdb_vectorspace::VectorSpaceError::IndexNotFound(_)) => Ok(()),
+            Err(error) => Err(EvalError::ExecutionError(error.to_string())),
+        }
     }
 
     pub fn execute_with_pattern(

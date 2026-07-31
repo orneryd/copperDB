@@ -567,6 +567,16 @@ impl HnswRegistry {
         Ok(())
     }
 
+    pub fn drop_index(&self, name: &str) -> Result<(), VectorSpaceError> {
+        if self.indexes.write().remove(name).is_some() {
+            return Ok(());
+        }
+        if self.exact_euclidean_indexes.write().remove(name).is_some() {
+            return Ok(());
+        }
+        Err(VectorSpaceError::IndexNotFound(name.to_string()))
+    }
+
     pub fn status(&self, name: &str) -> Result<HnswIndexStatus, VectorSpaceError> {
         let indexes = self.indexes.read();
         if let Some(managed) = indexes.get(name) {
