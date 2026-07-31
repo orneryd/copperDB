@@ -8,10 +8,10 @@
 //! - Memory: ~4KB per cached embedding (1024 dims × 4 bytes)
 //! - 10K cache = ~40MB memory
 
+use super::{EmbedError, Embedder, Embedding};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use super::{Embedder, EmbedError, Embedding};
 
 /// An LRU ring entry for cache eviction tracking.
 struct LruEntry {
@@ -25,7 +25,7 @@ struct LruEntry {
 ///
 /// Thread-safe: all methods protected by a mutex.
 pub struct CachedEmbedder {
-    base: Box<dyn Embedder>,
+    base: Arc<dyn Embedder>,
     inner: Mutex<CacheInner>,
     hits: AtomicU64,
     misses: AtomicU64,
@@ -61,6 +61,11 @@ pub struct CacheStats {
 impl CachedEmbedder {
     /// Wrap an embedder with LRU caching.
     pub fn new(base: Box<dyn Embedder>, max_size: usize) -> Self {
+        Self::from_arc(Arc::from(base), max_size)
+    }
+
+    /// Wrap a shared embedder with LRU caching.
+    pub fn from_arc(base: Arc<dyn Embedder>, max_size: usize) -> Self {
         let max_size = if max_size == 0 { 10000 } else { max_size };
         Self {
             base,
@@ -79,8 +84,12 @@ impl CachedEmbedder {
         }
     }
 
-    pub fn hit_count(&self) -> u64 { self.hits.load(Ordering::Relaxed) }
-    pub fn miss_count(&self) -> u64 { self.misses.load(Ordering::Relaxed) }
+    pub fn hit_count(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
+    }
+    pub fn miss_count(&self) -> u64 {
+        self.misses.load(Ordering::Relaxed)
+    }
 
     pub fn stats(&self) -> CacheStats {
         let inner = self.inner.lock().unwrap();
@@ -149,10 +158,15 @@ impl CachedEmbedder {
         }
 
         // Delegate to base embedder (synchronous call from blocking thread)
-        let result = self.base.embed_batch_blocking(&[text.to_string()]).and_then(|embeddings| {
-            embeddings.into_iter().next()
-                .ok_or_else(|| EmbedError::LocalModel("no embedding returned".into()))
-        });
+        let result = self
+            .base
+            .embed_batch_blocking(&[text.to_string()])
+            .and_then(|embeddings| {
+                embeddings
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| EmbedError::LocalModel("no embedding returned".into()))
+            });
 
         // Insert into cache
         if let Ok(embedding) = &result {
@@ -224,11 +238,11 @@ impl CachedEmbedder {
     }
 
     fn move_to_front(inner: &mut CacheInner, idx: usize) {
-        if inner.head == Some(idx) { return; }
+        if inner.head == Some(idx) {
+            return;
+        }
         // Remove from current position
-        let entry = inner.entries[idx]
-            .as_ref()
-            .expect("LRU entry must be live");
+        let entry = inner.entries[idx].as_ref().expect("LRU entry must be live");
         let prev = entry.prev;
         let next = entry.next;
         if let Some(p) = prev {
@@ -243,7 +257,9 @@ impl CachedEmbedder {
                 .expect("LRU next entry must be live")
                 .prev = prev;
         }
-        if inner.tail == Some(idx) { inner.tail = prev; }
+        if inner.tail == Some(idx) {
+            inner.tail = prev;
+        }
         // Insert at head
         inner.entries[idx]
             .as_mut()
@@ -260,14 +276,14 @@ impl CachedEmbedder {
                 .prev = Some(idx);
         }
         inner.head = Some(idx);
-        if inner.tail.is_none() { inner.tail = Some(idx); }
+        if inner.tail.is_none() {
+            inner.tail = Some(idx);
+        }
     }
 
     fn evict_lru(inner: &mut CacheInner) {
         if let Some(tail) = inner.tail {
-            let entry = inner.entries[tail]
-                .take()
-                .expect("LRU tail must be live");
+            let entry = inner.entries[tail].take().expect("LRU tail must be live");
             let key = entry.key;
             let prev = entry.prev;
             inner.map.remove(&key);
@@ -278,7 +294,9 @@ impl CachedEmbedder {
                     .next = None;
             }
             inner.tail = prev;
-            if inner.head == Some(tail) { inner.head = None; }
+            if inner.head == Some(tail) {
+                inner.head = None;
+            }
             inner.live_len -= 1;
         }
     }
@@ -340,22 +358,30 @@ mod tests {
             let active = self.active_calls.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak_active_calls.fetch_max(active, Ordering::SeqCst);
             thread::sleep(self.delay);
-            let embeddings = texts.iter().map(|text| Embedding {
-                text: text.clone(),
-                vector: vec![1.0],
-                model: "test".into(),
-            }).collect();
+            let embeddings = texts
+                .iter()
+                .map(|text| Embedding {
+                    text: text.clone(),
+                    vector: vec![1.0],
+                    model: "test".into(),
+                })
+                .collect();
             self.active_calls.fetch_sub(1, Ordering::SeqCst);
             Ok(embeddings)
         }
 
-        fn dimensions(&self) -> usize { 1 }
+        fn dimensions(&self) -> usize {
+            1
+        }
     }
 
     #[test]
     fn same_key_concurrent_misses_share_one_base_call() {
         let base = Arc::new(CountingEmbedder::new(Duration::from_millis(25)));
-        let cache = Arc::new(CachedEmbedder::new(Box::new(SharedCountingEmbedder(base.clone())), 2));
+        let cache = Arc::new(CachedEmbedder::new(
+            Box::new(SharedCountingEmbedder(base.clone())),
+            2,
+        ));
         let threads: Vec<_> = (0..8)
             .map(|_| {
                 let cache = Arc::clone(&cache);
@@ -374,7 +400,10 @@ mod tests {
     #[test]
     fn distinct_key_misses_make_progress_concurrently() {
         let base = Arc::new(CountingEmbedder::new(Duration::from_millis(25)));
-        let cache = Arc::new(CachedEmbedder::new(Box::new(SharedCountingEmbedder(base.clone())), 2));
+        let cache = Arc::new(CachedEmbedder::new(
+            Box::new(SharedCountingEmbedder(base.clone())),
+            2,
+        ));
         let barrier = Arc::new(std::sync::Barrier::new(3));
         let threads: Vec<_> = ["first", "second"]
             .into_iter()
@@ -408,7 +437,9 @@ mod tests {
             self.0.embed_batch_blocking(texts)
         }
 
-        fn dimensions(&self) -> usize { self.0.dimensions() }
+        fn dimensions(&self) -> usize {
+            self.0.dimensions()
+        }
     }
 
     #[async_trait::async_trait]
@@ -423,7 +454,9 @@ mod tests {
             Err(EmbedError::LocalModel("expected failure".into()))
         }
 
-        fn dimensions(&self) -> usize { 1 }
+        fn dimensions(&self) -> usize {
+            1
+        }
     }
 
     #[test]
@@ -489,7 +522,10 @@ mod tests {
             calls: AtomicUsize::new(0),
             delay: Duration::from_millis(25),
         });
-        let cache = Arc::new(CachedEmbedder::new(Box::new(SharedFailingEmbedder(base.clone())), 2));
+        let cache = Arc::new(CachedEmbedder::new(
+            Box::new(SharedFailingEmbedder(base.clone())),
+            2,
+        ));
         let threads: Vec<_> = (0..8)
             .map(|_| {
                 let cache = Arc::clone(&cache);
@@ -498,7 +534,10 @@ mod tests {
             .collect();
 
         for thread in threads {
-            assert_eq!(thread.join().unwrap(), "local model error: expected failure");
+            assert_eq!(
+                thread.join().unwrap(),
+                "local model error: expected failure"
+            );
         }
         assert_eq!(base.calls.load(Ordering::SeqCst), 1);
         assert_eq!(cache.stats().active_flights, 0);
@@ -516,6 +555,8 @@ mod tests {
             self.0.embed_batch_blocking(texts)
         }
 
-        fn dimensions(&self) -> usize { self.0.dimensions() }
+        fn dimensions(&self) -> usize {
+            self.0.dimensions()
+        }
     }
 }

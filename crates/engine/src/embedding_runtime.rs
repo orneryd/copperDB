@@ -1,6 +1,6 @@
 use crate::CopperDbError;
 use copperdb_config::EffectiveDatabaseConfig;
-use copperdb_embed::{Embedder, LocalGgufEmbedder};
+use copperdb_embed::{CachedEmbedder, Embedder, LocalGgufEmbedder};
 use copperdb_storage::{NodeRecord, StorageEngine};
 use serde_json::json;
 use std::path::Path;
@@ -20,18 +20,26 @@ pub enum EmbeddingRuntimeState {
     Stopping,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EmbeddingRuntimeStatus {
     pub state: EmbeddingRuntimeState,
     pub provider: String,
     pub model: String,
     pub dimensions: usize,
     pub backend: Option<String>,
+    pub model_load_duration_ms: Option<u64>,
     pub worker_count: usize,
     pub pending: u64,
+    pub queue_age_ms: Option<u64>,
     pub dead_lettered: u64,
     pub completed: u64,
     pub failed: u64,
+    pub batch_count: u64,
+    pub last_batch_latency_ms: Option<u64>,
+    pub average_batch_latency_ms: Option<u64>,
+    pub cache_hits: Option<u64>,
+    pub cache_misses: Option<u64>,
+    pub cache_hit_ratio: Option<f64>,
     pub last_error: Option<String>,
 }
 
@@ -46,11 +54,16 @@ pub(crate) struct EmbeddingRuntime {
     shutdown_timeout: Duration,
     provider_config: EffectiveDatabaseConfig,
     backend: Arc<Mutex<Option<String>>>,
+    cache: Arc<Mutex<Option<Arc<CachedEmbedder>>>>,
+    model_load_duration_ms: Arc<Mutex<Option<u64>>>,
     embedder: Arc<Mutex<Option<Arc<dyn Embedder>>>>,
     provider_init_lock: Arc<Mutex<()>>,
     state: Arc<Mutex<EmbeddingRuntimeState>>,
     completed: Arc<AtomicU64>,
     failed: Arc<AtomicU64>,
+    batch_count: Arc<AtomicU64>,
+    total_batch_latency_ms: Arc<AtomicU64>,
+    last_batch_latency_ms: Arc<AtomicU64>,
     last_error: Arc<Mutex<Option<String>>>,
     generation_reconciled: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -63,21 +76,39 @@ impl EmbeddingRuntime {
         storage: Arc<StorageEngine>,
         config: &EffectiveDatabaseConfig,
     ) -> Self {
-        let (embedder, backend, state, last_error) = if !config.embedding_enabled {
-            (None, None, EmbeddingRuntimeState::Disabled, None)
-        } else if config.embedding_warming == "lazy" {
-            (None, None, EmbeddingRuntimeState::Cold, None)
-        } else {
-            match build_embedder(config) {
-                Ok((embedder, backend)) => (
-                    Some(embedder),
-                    Some(backend),
-                    EmbeddingRuntimeState::Ready,
+        let (embedder, backend, cache, state, last_error, model_load_duration_ms) =
+            if !config.embedding_enabled {
+                (
                     None,
-                ),
-                Err(error) => (None, None, EmbeddingRuntimeState::Failed, Some(error)),
-            }
-        };
+                    None,
+                    None,
+                    EmbeddingRuntimeState::Disabled,
+                    None,
+                    None,
+                )
+            } else if config.embedding_warming == "lazy" {
+                (None, None, None, EmbeddingRuntimeState::Cold, None, None)
+            } else {
+                let started_at = Instant::now();
+                match build_embedder(config) {
+                    Ok((embedder, backend, cache)) => (
+                        Some(embedder),
+                        Some(backend),
+                        cache,
+                        EmbeddingRuntimeState::Ready,
+                        None,
+                        Some(started_at.elapsed().as_millis() as u64),
+                    ),
+                    Err(error) => (
+                        None,
+                        None,
+                        None,
+                        EmbeddingRuntimeState::Failed,
+                        Some(error),
+                        None,
+                    ),
+                }
+            };
         Self {
             storage,
             provider: config.embedding_provider.clone(),
@@ -88,11 +119,16 @@ impl EmbeddingRuntime {
             shutdown_timeout: Duration::from_millis(config.embedding_shutdown_timeout_ms),
             provider_config: config.clone(),
             backend: Arc::new(Mutex::new(backend)),
+            cache: Arc::new(Mutex::new(cache)),
+            model_load_duration_ms: Arc::new(Mutex::new(model_load_duration_ms)),
             embedder: Arc::new(Mutex::new(embedder)),
             provider_init_lock: Arc::new(Mutex::new(())),
             state: Arc::new(Mutex::new(state)),
             completed: Arc::new(AtomicU64::new(0)),
             failed: Arc::new(AtomicU64::new(0)),
+            batch_count: Arc::new(AtomicU64::new(0)),
+            total_batch_latency_ms: Arc::new(AtomicU64::new(0)),
+            last_batch_latency_ms: Arc::new(AtomicU64::new(0)),
             last_error: Arc::new(Mutex::new(last_error)),
             generation_reconciled: Arc::new(AtomicBool::new(false)),
             stop: Arc::new(AtomicBool::new(false)),
@@ -129,11 +165,16 @@ impl EmbeddingRuntime {
             )
             .expect("default embedding config should resolve"),
             backend: Arc::new(Mutex::new(Some("test".to_string()))),
+            cache: Arc::new(Mutex::new(None)),
+            model_load_duration_ms: Arc::new(Mutex::new(None)),
             embedder: Arc::new(Mutex::new(Some(embedder))),
             provider_init_lock: Arc::new(Mutex::new(())),
             state: Arc::new(Mutex::new(EmbeddingRuntimeState::Ready)),
             completed: Arc::new(AtomicU64::new(0)),
             failed: Arc::new(AtomicU64::new(0)),
+            batch_count: Arc::new(AtomicU64::new(0)),
+            total_batch_latency_ms: Arc::new(AtomicU64::new(0)),
+            last_batch_latency_ms: Arc::new(AtomicU64::new(0)),
             last_error: Arc::new(Mutex::new(None)),
             generation_reconciled: Arc::new(AtomicBool::new(true)),
             stop: Arc::new(AtomicBool::new(false)),
@@ -143,17 +184,41 @@ impl EmbeddingRuntime {
     }
 
     pub(crate) fn status(&self) -> Result<EmbeddingRuntimeStatus, CopperDbError> {
+        let batch_count = self.batch_count.load(Ordering::Relaxed);
+        let total_batch_latency_ms = self.total_batch_latency_ms.load(Ordering::Relaxed);
+        let cache_stats = self
+            .cache
+            .lock()
+            .expect("embedding cache lock")
+            .as_ref()
+            .map(|cache| cache.stats());
         Ok(EmbeddingRuntimeStatus {
             state: *self.state.lock().expect("embedding runtime state lock"),
             provider: self.provider.clone(),
             model: self.model.clone(),
             dimensions: self.dimensions,
             backend: self.backend.lock().expect("embedding backend lock").clone(),
+            model_load_duration_ms: *self
+                .model_load_duration_ms
+                .lock()
+                .expect("embedding model load duration lock"),
             worker_count: self.active_workers.load(Ordering::Relaxed),
             pending: self.storage.pending_embeddings_count()? as u64,
+            queue_age_ms: self.storage.pending_embedding_oldest_age_ms()?,
             dead_lettered: self.storage.embedding_dead_letter_count()? as u64,
             completed: self.completed.load(Ordering::Relaxed),
             failed: self.failed.load(Ordering::Relaxed),
+            batch_count,
+            last_batch_latency_ms: (batch_count > 0)
+                .then(|| self.last_batch_latency_ms.load(Ordering::Relaxed)),
+            average_batch_latency_ms: (batch_count > 0)
+                .then(|| total_batch_latency_ms / batch_count),
+            cache_hits: cache_stats.map(|stats| stats.hits),
+            cache_misses: cache_stats.map(|stats| stats.misses),
+            cache_hit_ratio: cache_stats.and_then(|stats| {
+                let requests = stats.hits + stats.misses;
+                (requests > 0).then(|| stats.hits as f64 / requests as f64)
+            }),
             last_error: self
                 .last_error
                 .lock()
@@ -183,6 +248,9 @@ impl EmbeddingRuntime {
             &self.state,
             &self.completed,
             &self.failed,
+            &self.batch_count,
+            &self.total_batch_latency_ms,
+            &self.last_batch_latency_ms,
             &self.last_error,
         )
     }
@@ -203,10 +271,15 @@ impl EmbeddingRuntime {
             let provider_config = self.provider_config.clone();
             let embedder = Arc::clone(&self.embedder);
             let backend = Arc::clone(&self.backend);
+            let cache = Arc::clone(&self.cache);
+            let model_load_duration_ms = Arc::clone(&self.model_load_duration_ms);
             let provider_init_lock = Arc::clone(&self.provider_init_lock);
             let state = Arc::clone(&self.state);
             let completed = Arc::clone(&self.completed);
             let failed = Arc::clone(&self.failed);
+            let batch_count = Arc::clone(&self.batch_count);
+            let total_batch_latency_ms = Arc::clone(&self.total_batch_latency_ms);
+            let last_batch_latency_ms = Arc::clone(&self.last_batch_latency_ms);
             let last_error = Arc::clone(&self.last_error);
             let generation_reconciled = Arc::clone(&self.generation_reconciled);
             let stop = Arc::clone(&self.stop);
@@ -221,6 +294,8 @@ impl EmbeddingRuntime {
                         &provider_config,
                         &embedder,
                         &backend,
+                        &cache,
+                        &model_load_duration_ms,
                         &provider_init_lock,
                         &state,
                         &last_error,
@@ -247,6 +322,9 @@ impl EmbeddingRuntime {
                         &state,
                         &completed,
                         &failed,
+                        &batch_count,
+                        &total_batch_latency_ms,
+                        &last_batch_latency_ms,
                         &last_error,
                     ) {
                         Ok(true) => {}
@@ -264,6 +342,8 @@ impl EmbeddingRuntime {
             &self.provider_config,
             &self.embedder,
             &self.backend,
+            &self.cache,
+            &self.model_load_duration_ms,
             &self.provider_init_lock,
             &self.state,
             &self.last_error,
@@ -310,6 +390,8 @@ fn ensure_embedder_with(
     config: &EffectiveDatabaseConfig,
     embedder: &Mutex<Option<Arc<dyn Embedder>>>,
     backend: &Mutex<Option<String>>,
+    cache: &Mutex<Option<Arc<CachedEmbedder>>>,
+    model_load_duration_ms: &Mutex<Option<u64>>,
     provider_init_lock: &Mutex<()>,
     state: &Mutex<EmbeddingRuntimeState>,
     last_error: &Mutex<Option<String>>,
@@ -332,9 +414,15 @@ fn ensure_embedder_with(
         }
         *runtime_state = EmbeddingRuntimeState::Warming;
     }
+    let started_at = Instant::now();
     match build_embedder(config) {
-        Ok((loaded_embedder, loaded_backend)) => {
+        Ok((loaded_embedder, loaded_backend, loaded_cache)) => {
             *backend.lock().expect("embedding backend lock") = Some(loaded_backend);
+            *cache.lock().expect("embedding cache lock") = loaded_cache;
+            *model_load_duration_ms
+                .lock()
+                .expect("embedding model load duration lock") =
+                Some(started_at.elapsed().as_millis() as u64);
             *embedder.lock().expect("embedding provider lock") = Some(Arc::clone(&loaded_embedder));
             let mut runtime_state = state.lock().expect("embedding runtime state lock");
             if *runtime_state != EmbeddingRuntimeState::Stopping {
@@ -381,6 +469,9 @@ fn drain_one_with(
     state: &Mutex<EmbeddingRuntimeState>,
     completed: &AtomicU64,
     failed: &AtomicU64,
+    batch_count: &AtomicU64,
+    total_batch_latency_ms: &AtomicU64,
+    last_batch_latency_ms: &AtomicU64,
     last_error: &Mutex<Option<String>>,
 ) -> Result<bool, CopperDbError> {
     let Some(node) = storage.claim_node_needing_embedding()? else {
@@ -397,6 +488,9 @@ fn drain_one_with(
         state,
         completed,
         failed,
+        batch_count,
+        total_batch_latency_ms,
+        last_batch_latency_ms,
         last_error,
     );
     storage.release_embedding_claim(&node_id);
@@ -413,9 +507,18 @@ fn embed_claimed_node(
     state: &Mutex<EmbeddingRuntimeState>,
     completed: &AtomicU64,
     failed: &AtomicU64,
+    batch_count: &AtomicU64,
+    total_batch_latency_ms: &AtomicU64,
+    last_batch_latency_ms: &AtomicU64,
     last_error: &Mutex<Option<String>>,
 ) -> Result<bool, CopperDbError> {
-    let embeddings = match embedder.embed_batch_blocking(&[canonical_input(&node)]) {
+    let batch_started_at = Instant::now();
+    let embeddings = embedder.embed_batch_blocking(&[canonical_input(&node)]);
+    let batch_latency_ms = batch_started_at.elapsed().as_millis() as u64;
+    batch_count.fetch_add(1, Ordering::Relaxed);
+    total_batch_latency_ms.fetch_add(batch_latency_ms, Ordering::Relaxed);
+    last_batch_latency_ms.store(batch_latency_ms, Ordering::Relaxed);
+    let embeddings = match embeddings {
         Ok(embeddings) => embeddings,
         Err(error) => {
             return Err(record_failure(
@@ -606,6 +709,7 @@ mod tests {
             EmbeddingRuntimeState::Disabled
         );
         assert_eq!(runtime.status().unwrap().worker_count, 0);
+        assert!(runtime.status().unwrap().model_load_duration_ms.is_none());
         assert!(!runtime.drain_one().unwrap());
     }
 
@@ -625,6 +729,7 @@ mod tests {
         assert_eq!(status.state, EmbeddingRuntimeState::Failed);
         assert_eq!(status.worker_count, 0);
         assert!(status.backend.is_none());
+        assert!(status.model_load_duration_ms.is_none());
         assert!(status
             .last_error
             .unwrap()
@@ -666,7 +771,11 @@ mod tests {
         );
         assert!(runtime.drain_one().unwrap());
         assert_eq!(storage.pending_embeddings_count().unwrap(), 0);
-        assert_eq!(runtime.status().unwrap().completed, 1);
+        let status = runtime.status().unwrap();
+        assert_eq!(status.completed, 1);
+        assert_eq!(status.batch_count, 1);
+        assert!(status.last_batch_latency_ms.is_some());
+        assert!(status.average_batch_latency_ms.is_some());
 
         let mut retry = node();
         retry.id = "node-2".to_string();
@@ -779,7 +888,9 @@ mod tests {
     }
 }
 
-fn build_embedder(config: &EffectiveDatabaseConfig) -> Result<(Arc<dyn Embedder>, String), String> {
+fn build_embedder(
+    config: &EffectiveDatabaseConfig,
+) -> Result<(Arc<dyn Embedder>, String, Option<Arc<CachedEmbedder>>), String> {
     if config.embedding_provider != "local_gguf" {
         return Err(format!(
             "unsupported embedding provider {:?}; supported provider: local_gguf",
@@ -804,5 +915,14 @@ fn build_embedder(config: &EffectiveDatabaseConfig) -> Result<(Arc<dyn Embedder>
     )
     .map_err(|error| error.to_string())?;
     let backend = embedder.backend().to_string();
-    Ok((Arc::new(embedder), backend))
+    let base: Arc<dyn Embedder> = Arc::new(embedder);
+    if config.embedding_cache_capacity == 0 {
+        return Ok((base, backend, None));
+    }
+    let cache = Arc::new(CachedEmbedder::from_arc(
+        base,
+        config.embedding_cache_capacity,
+    ));
+    let embedder: Arc<dyn Embedder> = Arc::clone(&cache) as Arc<dyn Embedder>;
+    Ok((embedder, backend, Some(cache)))
 }

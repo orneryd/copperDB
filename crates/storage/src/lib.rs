@@ -3115,7 +3115,8 @@ impl StorageEngine {
         };
         self.meta.fjall_remove(embedding_dead_letter_key(id))?;
         if node.needs_embedding() || self.has_forced_reembedding(id)? {
-            self.meta.fjall_insert(pending_embedding_key(id), [])?;
+            self.meta
+                .fjall_insert(pending_embedding_key(id), pending_embedding_value()?)?;
         }
         Ok(())
     }
@@ -3133,7 +3134,8 @@ impl StorageEngine {
         self.meta.fjall_insert(forced_reembedding_key(id), [])?;
         node.clear_managed_chunk_embeddings();
         self.put_node_record(&node)?;
-        self.meta.fjall_insert(pending_embedding_key(id), [])?;
+        self.meta
+            .fjall_insert(pending_embedding_key(id), pending_embedding_value()?)?;
         Ok(true)
     }
 
@@ -3243,6 +3245,19 @@ impl StorageEngine {
         Ok(count)
     }
 
+    /// Age of the oldest pending embedding request in milliseconds.
+    pub fn pending_embedding_oldest_age_ms(&self) -> Result<Option<u64>, StorageError> {
+        let now = now_unix_ms().max(0) as u64;
+        let mut oldest_enqueued_at: Option<u64> = None;
+        for entry in self.meta.scan_prefix(META_PENDING_EMBEDDING_PREFIX) {
+            let (_, value) = entry?;
+            let enqueued_at: u64 = rmp_serde::from_slice(value.as_ref())?;
+            oldest_enqueued_at =
+                Some(oldest_enqueued_at.map_or(enqueued_at, |oldest| oldest.min(enqueued_at)));
+        }
+        Ok(oldest_enqueued_at.map(|enqueued_at| now.saturating_sub(enqueued_at)))
+    }
+
     pub fn refresh_pending_embeddings_index(&self) -> Result<usize, StorageError> {
         let valid_ids = self
             .all_node_records()?
@@ -3265,7 +3280,8 @@ impl StorageEngine {
         }
         for id in &valid_ids {
             if self.embedding_dead_letter(id)?.is_none() {
-                self.meta.fjall_insert(pending_embedding_key(id), [])?;
+                self.meta
+                    .fjall_insert(pending_embedding_key(id), pending_embedding_value()?)?;
             }
         }
         for entry in self.meta.scan_prefix(META_FORCED_REEMBEDDING_PREFIX) {
@@ -3277,7 +3293,8 @@ impl StorageEngine {
                 .get_node_record(&id)?
                 .is_some_and(|node| node_record_is_embedding_eligible(&node));
             if valid && self.embedding_dead_letter(&id)?.is_none() {
-                self.meta.fjall_insert(pending_embedding_key(&id), [])?;
+                self.meta
+                    .fjall_insert(pending_embedding_key(&id), pending_embedding_value()?)?;
             } else if !valid {
                 self.meta.fjall_remove(forced_reembedding_key(&id))?;
             }
@@ -5622,6 +5639,10 @@ fn pending_embedding_key(node_id: &str) -> Vec<u8> {
     .concat()
 }
 
+fn pending_embedding_value() -> Result<Vec<u8>, StorageError> {
+    Ok(rmp_serde::to_vec(&(now_unix_ms().max(0) as u64))?)
+}
+
 fn embedding_dead_letter_key(node_id: &str) -> Vec<u8> {
     [
         META_EMBEDDING_DEAD_LETTER_PREFIX,
@@ -7589,8 +7610,15 @@ impl<'a> BatchWriter<'a> {
                     if source_changed {
                         batch.insert(&self.engine.meta, forced_reembedding_key(id), []);
                     }
-                    if source_changed || stored.needs_embedding() {
-                        batch.insert(&self.engine.meta, pending_embedding_key(id), []);
+                    if source_changed
+                        || (stored.needs_embedding()
+                            && old.as_ref().is_none_or(|old| !old.needs_embedding()))
+                    {
+                        batch.insert(
+                            &self.engine.meta,
+                            pending_embedding_key(id),
+                            pending_embedding_value()?,
+                        );
                     } else {
                         batch.remove(&self.engine.meta, pending_embedding_key(id));
                     }

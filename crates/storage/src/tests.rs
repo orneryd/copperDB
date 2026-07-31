@@ -3342,6 +3342,24 @@ fn storage_engine_pending_embeddings_index_tracks_create_mark_refresh_and_delete
 }
 
 #[test]
+fn storage_engine_reports_oldest_pending_embedding_age() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    assert_eq!(engine.pending_embedding_oldest_age_ms().unwrap(), None);
+
+    let enqueued_at = now_unix_ms().max(0) as u64 - 1_000;
+    engine
+        .meta
+        .fjall_insert(
+            pending_embedding_key("n1"),
+            rmp_serde::to_vec(&enqueued_at).unwrap(),
+        )
+        .unwrap();
+
+    let age = engine.pending_embedding_oldest_age_ms().unwrap().unwrap();
+    assert!((1_000..5_000).contains(&age));
+}
+
+#[test]
 fn storage_engine_embedding_claims_exclude_duplicate_work_and_release_for_retry() {
     let engine = StorageEngine::open_temporary().unwrap();
     let mut node = sample_node("n1", &["File"]);

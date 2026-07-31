@@ -574,6 +574,8 @@ pub struct EmbeddingConfig {
     pub warming: String,
     /// Interval between local provider warmup embeddings; zero disables periodic warmup.
     pub warmup_interval_ms: u64,
+    /// Maximum cached embeddings per database; zero disables the runtime cache.
+    pub cache_capacity: usize,
     /// Maximum concurrent embedding workers per enabled database.
     pub workers: usize,
     /// Maximum failed attempts before moving work to the embedding dead letter queue.
@@ -594,6 +596,7 @@ impl Default for EmbeddingConfig {
             dimensions: VectorSpaceConfig::default().dimensions,
             warming: "startup".into(),
             warmup_interval_ms: 0,
+            cache_capacity: 0,
             workers: 1,
             max_attempts: 3,
             retry_backoff_ms: 250,
@@ -658,6 +661,7 @@ pub struct EffectiveDatabaseConfig {
     pub embedding_dimensions: usize,
     pub embedding_warming: String,
     pub embedding_warmup_interval_ms: u64,
+    pub embedding_cache_capacity: usize,
     pub embedding_workers: usize,
     pub embedding_max_attempts: u32,
     pub embedding_retry_backoff_ms: u64,
@@ -673,7 +677,7 @@ pub struct EffectiveDatabaseConfig {
     pub effective: BTreeMap<String, String>,
 }
 
-pub const PER_DATABASE_CONFIG_KEYS: [PerDatabaseConfigKey; 19] = [
+pub const PER_DATABASE_CONFIG_KEYS: [PerDatabaseConfigKey; 20] = [
     PerDatabaseConfigKey {
         key: "COPPERDB_EMBEDDING_ENABLED",
         value_type: "boolean",
@@ -715,6 +719,12 @@ pub const PER_DATABASE_CONFIG_KEYS: [PerDatabaseConfigKey; 19] = [
         value_type: "number",
         category: "Embeddings",
         description: "Interval between local provider warmups in milliseconds. Zero disables it.",
+    },
+    PerDatabaseConfigKey {
+        key: "COPPERDB_EMBEDDING_CACHE_CAPACITY",
+        value_type: "number",
+        category: "Embeddings",
+        description: "Maximum cached embeddings for this database. Zero disables caching.",
     },
     PerDatabaseConfigKey {
         key: "COPPERDB_EMBEDDING_WORKERS",
@@ -834,6 +844,7 @@ pub fn resolve_per_database_config(
         embedding_dimensions: normalized_embedding_dimensions(global.embedding.dimensions),
         embedding_warming: normalize_warming(&global.embedding.warming),
         embedding_warmup_interval_ms: global.embedding.warmup_interval_ms,
+        embedding_cache_capacity: global.embedding.cache_capacity,
         embedding_workers: global.embedding.workers.max(1),
         embedding_max_attempts: global.embedding.max_attempts.max(1),
         embedding_retry_backoff_ms: global.embedding.retry_backoff_ms,
@@ -1082,6 +1093,10 @@ pub fn apply_env_overrides_from(config: &mut Config, env: &BTreeMap<String, Stri
         |value| config.embedding.warmup_interval_ms = value,
     );
     set_if_present(
+        parse_env_usize(env, "COPPERDB_EMBEDDING_CACHE_CAPACITY"),
+        |value| config.embedding.cache_capacity = value,
+    );
+    set_if_present(
         parse_env_usize(env, "COPPERDB_EMBEDDING_WORKERS"),
         |value| config.embedding.workers = value.max(1),
     );
@@ -1311,6 +1326,10 @@ fn effective_values_from_global(global: &Config) -> BTreeMap<String, String> {
         global.embedding.warmup_interval_ms.to_string(),
     );
     effective.insert(
+        "COPPERDB_EMBEDDING_CACHE_CAPACITY".into(),
+        global.embedding.cache_capacity.to_string(),
+    );
+    effective.insert(
         "COPPERDB_EMBEDDING_WORKERS".into(),
         global.embedding.workers.max(1).to_string(),
     );
@@ -1384,6 +1403,11 @@ fn apply_per_database_override(resolved: &mut EffectiveDatabaseConfig, key: &str
         "COPPERDB_EMBEDDING_WARMUP_INTERVAL_MS" => {
             if let Ok(parsed) = value.parse::<u64>() {
                 resolved.embedding_warmup_interval_ms = parsed;
+            }
+        }
+        "COPPERDB_EMBEDDING_CACHE_CAPACITY" => {
+            if let Ok(parsed) = value.parse::<usize>() {
+                resolved.embedding_cache_capacity = parsed;
             }
         }
         "COPPERDB_EMBEDDING_WORKERS" => {
@@ -1741,6 +1765,7 @@ auth:
             "COPPERDB_EMBEDDING_WARMUP_INTERVAL_MS".into(),
             "5000".into(),
         );
+        env.insert("COPPERDB_EMBEDDING_CACHE_CAPACITY".into(), "256".into());
         env.insert("COPPERDB_EMBEDDING_WORKERS".into(), "3".into());
         env.insert("COPPERDB_EMBEDDING_MAX_ATTEMPTS".into(), "5".into());
         env.insert("COPPERDB_EMBEDDING_RETRY_BACKOFF_MS".into(), "750".into());
@@ -1758,6 +1783,7 @@ auth:
         assert_eq!(cfg.embedding.dimensions, 1024);
         assert_eq!(cfg.embedding.warming, "lazy");
         assert_eq!(cfg.embedding.warmup_interval_ms, 5000);
+        assert_eq!(cfg.embedding.cache_capacity, 256);
         assert_eq!(cfg.embedding.workers, 3);
         assert_eq!(cfg.embedding.max_attempts, 5);
         assert_eq!(cfg.embedding.retry_backoff_ms, 750);
@@ -1783,6 +1809,7 @@ auth:
                 "COPPERDB_EMBEDDING_WARMUP_INTERVAL_MS".into(),
                 "10000".into(),
             ),
+            ("COPPERDB_EMBEDDING_CACHE_CAPACITY".into(), "128".into()),
             ("COPPERDB_EMBEDDING_WORKERS".into(), "0".into()),
             ("COPPERDB_EMBEDDING_MAX_ATTEMPTS".into(), "0".into()),
             ("COPPERDB_EMBEDDING_RETRY_BACKOFF_MS".into(), "12".into()),
@@ -1796,6 +1823,7 @@ auth:
         assert_eq!(resolved.embedding_dimensions, 2048);
         assert_eq!(resolved.embedding_warming, "startup");
         assert_eq!(resolved.embedding_warmup_interval_ms, 10000);
+        assert_eq!(resolved.embedding_cache_capacity, 128);
         assert_eq!(resolved.embedding_workers, 1);
         assert_eq!(resolved.embedding_max_attempts, 1);
         assert_eq!(resolved.embedding_retry_backoff_ms, 12);

@@ -1,6 +1,6 @@
 # 11: Per-Database Embedding Lifecycle
 
-Status: planned. Priority: P1. Owners: `config`, `multidb`, `storage`, `embed`, `localllm`, `engine`, `lifecycle`.
+Status: complete. Priority: P1. Owners: `config`, `multidb`, `storage`, `embed`, `localllm`, `engine`, `lifecycle`.
 
 ## Objective
 
@@ -27,7 +27,10 @@ Resolve enabled, `startup|lazy` warming, model, dimensions, cache capacity, work
 - Complete: `COPPERDB_EMBEDDING_WARMUP_INTERVAL_MS` is an opt-in, per-database periodic warmup interval for the local GGUF provider. Its default of zero disables periodic work; configured loops honor the requested cadence, skip recently used models, and terminate when the provider closes.
 - Complete: `cancel_node_embedding` removes only an unclaimed durable pending request and its forced re-embedding marker. It returns false for absent or worker-claimed work, preserving in-flight inference; later source updates or explicit re-embedding may queue new work.
 - Complete: storage compares labels and properties, the canonical embedding input, on committed node writes. Changed sources clear only managed chunk embeddings and queue forced re-embedding without disturbing external named vectors. After an enabled runtime has successfully loaded its provider, it performs one generation reconciliation pass that requeues managed embeddings whose durable configured model generation or nonzero requested dimensions differ.
-- Open: queue age, cache-ratio, batch-latency, and model-load-duration metrics.
+- Complete: runtime status reports `model_load_duration_ms` only after a successful eager or lazy provider initialization. Disabled, cold, and failed runtimes report no fabricated duration.
+- Complete: pending embedding records carry their durable enqueue time and runtime status reports `queue_age_ms` as the age of the oldest queued request, or no value when the queue is empty.
+- Complete: runtime status reports provider `batch_count`, `last_batch_latency_ms`, and `average_batch_latency_ms` from actual `embed_batch_blocking` calls, including failed attempts. No latency value is reported before the first provider invocation.
+- Complete: `COPPERDB_EMBEDDING_CACHE_CAPACITY` enables a bounded per-database cache only when set above zero; zero remains the default and reports no cache metrics. Enabled runtimes retain the concrete cache and status reports its hits, misses, and hit ratio from actual cache requests.
 
 ## Phases
 
