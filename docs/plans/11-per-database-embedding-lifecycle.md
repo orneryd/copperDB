@@ -14,6 +14,10 @@ Each database reports `Disabled`, `Cold`, `Warming`, `Ready`, `Degraded`, `Faile
 
 Resolve enabled, `startup|lazy` warming, model, dimensions, cache capacity, worker count, batch size, GPU layers, retry/backoff, and queue limits through effective per-database config. CLI remains a global kill switch for automatic work.
 
+## Progress
+
+- Complete: local GGUF required-symbol resolution now returns a typed loader error instead of panicking. Provider stats report the loader's CPU/GPU outcome and the latest embedding activity timestamp; warmup observes that shared timestamp rather than a startup snapshot. The per-database runtime, queue workers, and readiness state machine remain open.
+
 ## Phases
 
 1. Complete item 6; convert dynamic symbol failures to typed errors; report actual CPU/GPU fallback and current activity timestamps.

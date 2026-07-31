@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use copperdb_localllm::{GgufConfig, LocalModel};
 use crate::EmbedError;
+use copperdb_localllm::{GgufConfig, LocalModel};
 
 /// Local GGUF embedder matching NornicDB's `LocalGGUFEmbedder`.
 pub struct LocalGgufEmbedder {
@@ -29,7 +29,7 @@ pub struct LocalGgufEmbedder {
     embed_count: AtomicU64,
     error_count: AtomicU64,
     panic_count: AtomicU64,
-    last_embed_time: AtomicI64,
+    last_embed_time: Arc<AtomicI64>,
 }
 
 impl LocalGgufEmbedder {
@@ -77,7 +77,7 @@ impl LocalGgufEmbedder {
             embed_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
             panic_count: AtomicU64::new(0),
-            last_embed_time: AtomicI64::new(0),
+            last_embed_time: Arc::new(AtomicI64::new(0)),
         };
 
         // Start warmup goroutine (matching NornicDB's warmupLoop)
@@ -86,15 +86,17 @@ impl LocalGgufEmbedder {
                 let (tx, rx) = crossbeam_channel::bounded(1);
                 *embedder.stop_warmup.lock().unwrap() = Some(tx);
                 let model = Arc::clone(&embedder.model);
-                let last_embed = embedder.last_embed_time.load(Ordering::Relaxed);
+                let last_embed = Arc::clone(&embedder.last_embed_time);
                 thread::spawn(move || {
                     loop {
                         // Check stop signal
-                        if rx.try_recv().is_ok() { break; }
+                        if rx.try_recv().is_ok() {
+                            break;
+                        }
                         thread::sleep(interval.min(Duration::from_secs(60)));
 
                         // Skip warmup if recently used
-                        let last = AtomicI64::new(last_embed).load(Ordering::Relaxed);
+                        let last = last_embed.load(Ordering::Relaxed);
                         let elapsed = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap_or_default()
@@ -122,12 +124,7 @@ impl LocalGgufEmbedder {
 
     /// Backend string matching NornicDB's Backend() method.
     pub fn backend(&self) -> &str {
-        #[cfg(target_os = "macos")]
-        { "metal" }
-        #[cfg(target_os = "linux")]
-        { "cuda" }
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        { "cpu" }
+        self.model.backend().as_str()
     }
 
     /// Embed a single text with panic recovery (matching NornicDB's embedWithRecovery).
@@ -137,7 +134,8 @@ impl LocalGgufEmbedder {
             if self.closed.load(Ordering::Relaxed) {
                 return Err(EmbedError::LocalModel("embedder is closed".into()));
             }
-            self.model.embed(text)
+            self.model
+                .embed(text)
                 .map_err(|e| EmbedError::LocalModel(format!("embedding failed: {e}")))
         }));
 
@@ -145,7 +143,10 @@ impl LocalGgufEmbedder {
             Ok(Ok(embedding)) => {
                 self.embed_count.fetch_add(1, Ordering::Relaxed);
                 self.last_embed_time.store(
-                    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64,
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64,
                     Ordering::Relaxed,
                 );
                 Ok(embedding)
@@ -169,7 +170,9 @@ impl LocalGgufEmbedder {
                     text_len = text.len(),
                     "EMBEDDING PANIC RECOVERED: {msg}"
                 );
-                Err(EmbedError::LocalModel(format!("PANIC in llama.cpp (recovered): {msg}")))
+                Err(EmbedError::LocalModel(format!(
+                    "PANIC in llama.cpp (recovered): {msg}"
+                )))
             }
         }
     }
@@ -189,6 +192,10 @@ impl LocalGgufEmbedder {
             panic_count: self.panic_count.load(Ordering::Relaxed),
             dimensions: self.model.dimensions(),
             backend: self.backend().to_string(),
+            last_embed_at_unix_secs: match self.last_embed_time.load(Ordering::Relaxed) {
+                0 => None,
+                timestamp => Some(timestamp),
+            },
         }
     }
 }
@@ -200,8 +207,11 @@ pub struct EmbedStats {
     pub panic_count: u64,
     pub dimensions: usize,
     pub backend: String,
+    pub last_embed_at_unix_secs: Option<i64>,
 }
 
 impl Drop for LocalGgufEmbedder {
-    fn drop(&mut self) { self.close(); }
+    fn drop(&mut self) {
+        self.close();
+    }
 }

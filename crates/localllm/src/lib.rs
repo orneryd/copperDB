@@ -25,6 +25,26 @@ pub enum LocalLlmError {
     EmbeddingError(String),
     #[error("llama library not found: {0}")]
     LibraryNotFound(String),
+    #[error("llama library {library} is missing required symbol {symbol}")]
+    MissingRequiredSymbol {
+        library: PathBuf,
+        symbol: &'static str,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalBackend {
+    Cpu,
+    Gpu,
+}
+
+impl LocalBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Gpu => "gpu",
+        }
+    }
 }
 
 // ── Config ──────────────────────────────────────────────────────────────────
@@ -165,15 +185,25 @@ struct LlamaApi {
     backend_init: unsafe extern "C" fn(),
     model_params_default: unsafe extern "C" fn() -> LlamaModelParams,
     context_params_default: unsafe extern "C" fn() -> LlamaContextParams,
-    model_load_from_file:
-        unsafe extern "C" fn(path: *const c_char, params: *const LlamaModelParams) -> *mut LlamaModel,
+    model_load_from_file: unsafe extern "C" fn(
+        path: *const c_char,
+        params: *const LlamaModelParams,
+    ) -> *mut LlamaModel,
     model_n_ctx_train: unsafe extern "C" fn(model: *const LlamaModel) -> u32,
     model_n_embd: unsafe extern "C" fn(model: *const LlamaModel) -> i32,
-    new_context_with_model:
-        unsafe extern "C" fn(model: *const LlamaModel, params: *const LlamaContextParams) -> *mut LlamaContext,
+    new_context_with_model: unsafe extern "C" fn(
+        model: *const LlamaModel,
+        params: *const LlamaContextParams,
+    ) -> *mut LlamaContext,
     batch_init: unsafe extern "C" fn(n_tokens: i32, embd: i32, n_seq_max: i32) -> *mut LlamaBatch,
-    batch_add:
-        unsafe extern "C" fn(batch: *mut LlamaBatch, id: i32, pos: i32, seq_ids: *const i32, n_seq_ids: i32, logits: bool),
+    batch_add: unsafe extern "C" fn(
+        batch: *mut LlamaBatch,
+        id: i32,
+        pos: i32,
+        seq_ids: *const i32,
+        n_seq_ids: i32,
+        logits: bool,
+    ),
     decode: unsafe extern "C" fn(ctx: *mut LlamaContext, batch: *mut LlamaBatch) -> i32,
     get_embeddings_ith: unsafe extern "C" fn(ctx: *mut LlamaContext, i: i32) -> *mut f32,
     n_embd: unsafe extern "C" fn(ctx: *const LlamaContext) -> i32,
@@ -181,6 +211,7 @@ struct LlamaApi {
     model_free: unsafe extern "C" fn(model: *mut LlamaModel),
     context_free: unsafe extern "C" fn(ctx: *mut LlamaContext),
     batch_free: unsafe extern "C" fn(batch: *mut LlamaBatch),
+    supports_gpu_offload: Option<unsafe extern "C" fn() -> bool>,
     backend_load_all_from_path: Option<unsafe extern "C" fn(path: *const c_char)>,
 }
 
@@ -227,38 +258,101 @@ fn find_llama_library() -> Result<PathBuf, LocalLlmError> {
     )))
 }
 
-unsafe fn load_api(lib: libloading::Library) -> LlamaApi {
+unsafe fn load_api(lib: libloading::Library, library: &Path) -> Result<LlamaApi, LocalLlmError> {
     macro_rules! load_fn {
         ($lib:expr, $name:literal, $sig:ty) => {
-            *$lib.get::<$sig>(concat!($name, "\0").as_bytes()).unwrap_or_else(|_| {
-                panic!("missing symbol: {}", $name)
-            })
+            *$lib
+                .get::<$sig>(concat!($name, "\0").as_bytes())
+                .map_err(|_| LocalLlmError::MissingRequiredSymbol {
+                    library: library.to_path_buf(),
+                    symbol: $name,
+                })?
         };
     }
 
-    LlamaApi {
+    Ok(LlamaApi {
         backend_init: load_fn!(lib, "llama_backend_init", unsafe extern "C" fn()),
-        model_params_default: load_fn!(lib, "llama_model_params_default", unsafe extern "C" fn() -> LlamaModelParams),
-        context_params_default: load_fn!(lib, "llama_context_params_default", unsafe extern "C" fn() -> LlamaContextParams),
-        model_load_from_file: load_fn!(lib, "llama_model_load_from_file", unsafe extern "C" fn(*const c_char, *const LlamaModelParams) -> *mut LlamaModel),
-        model_n_ctx_train: load_fn!(lib, "llama_model_n_ctx_train", unsafe extern "C" fn(*const LlamaModel) -> u32),
-        model_n_embd: load_fn!(lib, "llama_model_n_embd", unsafe extern "C" fn(*const LlamaModel) -> i32),
-        new_context_with_model: load_fn!(lib, "llama_new_context_with_model", unsafe extern "C" fn(*const LlamaModel, *const LlamaContextParams) -> *mut LlamaContext),
-        batch_init: load_fn!(lib, "llama_batch_init", unsafe extern "C" fn(i32, i32, i32) -> *mut LlamaBatch),
-        batch_add: load_fn!(lib, "llama_batch_add", unsafe extern "C" fn(*mut LlamaBatch, i32, i32, *const i32, i32, bool)),
-        decode: load_fn!(lib, "llama_decode", unsafe extern "C" fn(*mut LlamaContext, *mut LlamaBatch) -> i32),
-        get_embeddings_ith: load_fn!(lib, "llama_get_embeddings_ith", unsafe extern "C" fn(*mut LlamaContext, i32) -> *mut f32),
-        n_embd: load_fn!(lib, "llama_n_embd", unsafe extern "C" fn(*const LlamaContext) -> i32),
-        kv_cache_clear: load_fn!(lib, "llama_kv_cache_clear", unsafe extern "C" fn(*mut LlamaContext)),
-        model_free: load_fn!(lib, "llama_free_model", unsafe extern "C" fn(*mut LlamaModel)),
+        model_params_default: load_fn!(
+            lib,
+            "llama_model_params_default",
+            unsafe extern "C" fn() -> LlamaModelParams
+        ),
+        context_params_default: load_fn!(
+            lib,
+            "llama_context_params_default",
+            unsafe extern "C" fn() -> LlamaContextParams
+        ),
+        model_load_from_file: load_fn!(
+            lib,
+            "llama_model_load_from_file",
+            unsafe extern "C" fn(*const c_char, *const LlamaModelParams) -> *mut LlamaModel
+        ),
+        model_n_ctx_train: load_fn!(
+            lib,
+            "llama_model_n_ctx_train",
+            unsafe extern "C" fn(*const LlamaModel) -> u32
+        ),
+        model_n_embd: load_fn!(
+            lib,
+            "llama_model_n_embd",
+            unsafe extern "C" fn(*const LlamaModel) -> i32
+        ),
+        new_context_with_model: load_fn!(
+            lib,
+            "llama_new_context_with_model",
+            unsafe extern "C" fn(*const LlamaModel, *const LlamaContextParams) -> *mut LlamaContext
+        ),
+        batch_init: load_fn!(
+            lib,
+            "llama_batch_init",
+            unsafe extern "C" fn(i32, i32, i32) -> *mut LlamaBatch
+        ),
+        batch_add: load_fn!(
+            lib,
+            "llama_batch_add",
+            unsafe extern "C" fn(*mut LlamaBatch, i32, i32, *const i32, i32, bool)
+        ),
+        decode: load_fn!(
+            lib,
+            "llama_decode",
+            unsafe extern "C" fn(*mut LlamaContext, *mut LlamaBatch) -> i32
+        ),
+        get_embeddings_ith: load_fn!(
+            lib,
+            "llama_get_embeddings_ith",
+            unsafe extern "C" fn(*mut LlamaContext, i32) -> *mut f32
+        ),
+        n_embd: load_fn!(
+            lib,
+            "llama_n_embd",
+            unsafe extern "C" fn(*const LlamaContext) -> i32
+        ),
+        kv_cache_clear: load_fn!(
+            lib,
+            "llama_kv_cache_clear",
+            unsafe extern "C" fn(*mut LlamaContext)
+        ),
+        model_free: load_fn!(
+            lib,
+            "llama_free_model",
+            unsafe extern "C" fn(*mut LlamaModel)
+        ),
         context_free: load_fn!(lib, "llama_free", unsafe extern "C" fn(*mut LlamaContext)),
-        batch_free: load_fn!(lib, "llama_batch_free", unsafe extern "C" fn(*mut LlamaBatch)),
+        batch_free: load_fn!(
+            lib,
+            "llama_batch_free",
+            unsafe extern "C" fn(*mut LlamaBatch)
+        ),
+        supports_gpu_offload: lib
+            .get::<unsafe extern "C" fn() -> bool>(b"llama_supports_gpu_offload\0")
+            .ok()
+            .map(|f| *f),
         backend_load_all_from_path: lib
             .get::<unsafe extern "C" fn(*const c_char)>(b"ggml_backend_load_all_from_path\0")
             .ok()
             .map(|f| *f),
         _lib: lib,
-    }
+    })
 }
 
 // ── Model ────────────────────────────────────────────────────────────────────
@@ -270,6 +364,7 @@ pub struct LocalModel {
     dimensions: usize,
     context_size: u32,
     batch_size: u32,
+    backend: LocalBackend,
 }
 
 unsafe impl Send for LocalModel {}
@@ -285,7 +380,7 @@ impl LocalModel {
         // SAFETY: we trust the llama.cpp shared library
         let lib = unsafe { libloading::Library::new(&lib_path) }
             .map_err(|e| LocalLlmError::LibraryNotFound(format!("{e}")))?;
-        let api = Arc::new(unsafe { load_api(lib) });
+        let api = Arc::new(unsafe { load_api(lib, &lib_path) }?);
 
         // Initialize backend (matches NornicDB's init_backend())
         unsafe { (api.backend_init)() };
@@ -294,20 +389,14 @@ impl LocalModel {
         #[cfg(target_os = "windows")]
         if let Some(ref load_fn) = api.backend_load_all_from_path {
             if let Some(lib_dir) = lib_path.parent() {
-                let dir_str = CString::new(lib_dir.to_string_lossy().as_bytes().to_vec())
-                    .unwrap_or_default();
+                let dir_str =
+                    CString::new(lib_dir.to_string_lossy().as_bytes().to_vec()).unwrap_or_default();
                 unsafe { load_fn(dir_str.as_ptr()) };
             }
         }
 
-        let path_cstr = CString::new(
-            config
-                .model_path
-                .to_string_lossy()
-                .as_bytes()
-                .to_vec(),
-        )
-        .map_err(|e| LocalLlmError::ModelLoad(format!("path: {e}")))?;
+        let path_cstr = CString::new(config.model_path.to_string_lossy().as_bytes().to_vec())
+            .map_err(|e| LocalLlmError::ModelLoad(format!("path: {e}")))?;
 
         let gpu_layers = if config.gpu_layers < 0 {
             i32::MAX
@@ -318,6 +407,10 @@ impl LocalModel {
         model_params.n_gpu_layers = gpu_layers;
         model_params.use_mmap = true;
         model_params.use_mlock = false;
+        let gpu_offload_supported = api
+            .supports_gpu_offload
+            .map(|supports| unsafe { supports() })
+            .unwrap_or(false);
 
         tracing::info!(
             path = %config.model_path.display(),
@@ -326,20 +419,33 @@ impl LocalModel {
         );
 
         // Try GPU-first; fall back to CPU (matches NornicDB)
-        let model = unsafe {
-            (api.model_load_from_file)(path_cstr.as_ptr(), &model_params)
-        };
+        let model = unsafe { (api.model_load_from_file)(path_cstr.as_ptr(), &model_params) };
 
-        let model = if model.is_null() && gpu_layers > 0 {
+        let (model, backend) = if model.is_null() && gpu_layers > 0 {
             tracing::warn!("GPU model load failed, falling back to CPU-only");
             model_params.n_gpu_layers = 0;
-            unsafe { (api.model_load_from_file)(path_cstr.as_ptr(), &model_params) }
+            (
+                unsafe { (api.model_load_from_file)(path_cstr.as_ptr(), &model_params) },
+                LocalBackend::Cpu,
+            )
         } else {
-            model
+            if gpu_layers > 0 && !gpu_offload_supported {
+                tracing::warn!("llama library does not report GPU offload support; using CPU");
+            }
+            (
+                model,
+                if gpu_layers > 0 && gpu_offload_supported {
+                    LocalBackend::Gpu
+                } else {
+                    LocalBackend::Cpu
+                },
+            )
         };
 
         if model.is_null() {
-            return Err(LocalLlmError::ModelLoad("model_load_from_file returned null".into()));
+            return Err(LocalLlmError::ModelLoad(
+                "model_load_from_file returned null".into(),
+            ));
         }
 
         let model_ctx_train = unsafe { (api.model_n_ctx_train)(model) };
@@ -360,15 +466,13 @@ impl LocalModel {
         .min(context_size);
         let dimensions = unsafe { (api.model_n_embd)(model) } as usize;
 
-        let actual_gpu = model_params.n_gpu_layers;
-        let backend_label = if actual_gpu > 0 { "gpu" } else { "cpu" };
         tracing::info!(
             dimensions,
             context_size,
             batch_size,
             threads = config.threads,
-            gpu_layers = actual_gpu,
-            backend = backend_label,
+            gpu_layers = model_params.n_gpu_layers,
+            backend = backend.as_str(),
             "llama model loaded"
         );
 
@@ -379,6 +483,7 @@ impl LocalModel {
             dimensions,
             context_size,
             batch_size,
+            backend,
         })
     }
 
@@ -390,6 +495,10 @@ impl LocalModel {
     }
     pub fn model_path(&self) -> &Path {
         &self.config.model_path
+    }
+
+    pub fn backend(&self) -> LocalBackend {
+        self.backend
     }
 
     pub fn embed(&self, text: &str) -> Result<Vec<f32>, LocalLlmError> {
@@ -406,12 +515,15 @@ impl LocalModel {
 
         let ctx = unsafe { (self.api.new_context_with_model)(self.model, &ctx_params) };
         if ctx.is_null() {
-            return Err(LocalLlmError::EmbeddingError("context creation failed".into()));
+            return Err(LocalLlmError::EmbeddingError(
+                "context creation failed".into(),
+            ));
         }
 
         // Tokenize (simplified: we pass text as-is; llama.cpp handles BOS)
         let n_ctx = self.context_size as usize;
-        let c_text = CString::new(text).map_err(|e| LocalLlmError::EmbeddingError(format!("text: {e}")))?;
+        let c_text =
+            CString::new(text).map_err(|e| LocalLlmError::EmbeddingError(format!("text: {e}")))?;
         // We use a minimal tokenization path: convert to tokens via model
         // For now, use a simple space-split tokenization (matches basic embedding use)
         let tokens: Vec<i32> = c_text
@@ -430,7 +542,16 @@ impl LocalModel {
         let batch = unsafe { (self.api.batch_init)(n_tokens, 0, 1) };
         for (pos, &token) in tokens.iter().enumerate() {
             let seq_ids: [i32; 1] = [0];
-            unsafe { (self.api.batch_add)(batch, token, pos as i32, seq_ids.as_ptr(), 1, pos == tokens.len() - 1) };
+            unsafe {
+                (self.api.batch_add)(
+                    batch,
+                    token,
+                    pos as i32,
+                    seq_ids.as_ptr(),
+                    1,
+                    pos == tokens.len() - 1,
+                )
+            };
         }
 
         unsafe { (self.api.kv_cache_clear)(ctx) };
@@ -440,7 +561,9 @@ impl LocalModel {
                 (self.api.batch_free)(batch);
                 (self.api.context_free)(ctx);
             }
-            return Err(LocalLlmError::EmbeddingError(format!("decode failed: {decode_ok}")));
+            return Err(LocalLlmError::EmbeddingError(format!(
+                "decode failed: {decode_ok}"
+            )));
         }
 
         let n_embd = unsafe { (self.api.n_embd)(ctx) } as usize;
@@ -506,6 +629,12 @@ mod tests {
         let mut v = vec![3.0, 4.0];
         l2_normalize(&mut v);
         assert!((v[0] - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn local_backend_reports_loader_outcome_labels() {
+        assert_eq!(LocalBackend::Cpu.as_str(), "cpu");
+        assert_eq!(LocalBackend::Gpu.as_str(), "gpu");
     }
     #[test]
     fn test_missing_library() {
