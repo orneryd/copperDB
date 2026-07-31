@@ -1,5 +1,8 @@
 use super::*;
 use copperdb_vectorspace::{HnswConfig, HnswIndexStatus, HnswRegistry, VectorSpaceError};
+use std::path::PathBuf;
+
+const VECTOR_REGISTRY_ARTIFACT_FILE: &str = "vectors.hnsw";
 
 #[derive(Debug, Clone)]
 struct VectorIndexBinding {
@@ -15,11 +18,12 @@ struct VectorIndexBinding {
 #[derive(Debug)]
 pub(crate) struct VectorIndexManager {
     registry: Arc<HnswRegistry>,
+    artifact_path: Option<PathBuf>,
 }
 
 impl VectorIndexManager {
     pub(crate) fn build(storage: &StorageEngine) -> Result<Self, CopperDbError> {
-        let registry = Arc::new(HnswRegistry::new());
+        let mut registry = Arc::new(HnswRegistry::new());
         let mut bindings = Vec::new();
 
         for definition in storage.load_index_definitions()? {
@@ -57,21 +61,53 @@ impl VectorIndexManager {
             });
         }
 
-        for node in storage.all_node_records()? {
-            for binding in &bindings {
-                let matches_label = binding.label.is_empty()
-                    || node.labels.iter().any(|label| label == &binding.label);
-                if !matches_label {
-                    continue;
+        let artifact_path = storage
+            .data_dir()
+            .map(|path| path.join(VECTOR_REGISTRY_ARTIFACT_FILE));
+        let artifact_is_current = artifact_path
+            .as_ref()
+            .filter(|path| path.exists())
+            .and_then(|path| match HnswRegistry::load_artifact_with_source_generation(path) {
+                Ok(artifact) => Some(artifact),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "ignoring invalid vector registry artifact");
+                    None
                 }
-                if let Some(vector) = node_vector_for_property(&node, &binding.property) {
-                    registry
-                        .upsert(&binding.name, &node.id, vector)
-                        .map_err(vector_error)?;
+            })
+            .filter(|artifact| {
+                match storage.wal_applied_sequence() {
+                    Ok(generation) => artifact.source_generation == generation,
+                    Err(error) => {
+                        tracing::warn!(%error, "unable to validate vector registry artifact generation");
+                        false
+                    }
+                }
+            })
+            .filter(|artifact| registry_matches_declared_indexes(&artifact.registry, &registry));
+
+        if let Some(artifact) = artifact_is_current {
+            registry = Arc::new(artifact.registry);
+        } else {
+            for node in storage.all_node_records()? {
+                for binding in &bindings {
+                    let matches_label = binding.label.is_empty()
+                        || node.labels.iter().any(|label| label == &binding.label);
+                    if !matches_label {
+                        continue;
+                    }
+                    if let Some(vector) = node_vector_for_property(&node, &binding.property) {
+                        registry
+                            .upsert(&binding.name, &node.id, vector)
+                            .map_err(vector_error)?;
+                    }
                 }
             }
         }
-        let manager = Self { registry };
+        let manager = Self {
+            registry,
+            artifact_path,
+        };
+        manager.persist_artifact(storage);
         Ok(manager)
     }
 
@@ -82,6 +118,48 @@ impl VectorIndexManager {
     pub(crate) fn registry(&self) -> Arc<HnswRegistry> {
         Arc::clone(&self.registry)
     }
+
+    pub(crate) fn enable_persistence(self: &Arc<Self>, storage: &Arc<StorageEngine>) {
+        let manager = Arc::downgrade(self);
+        let weak_storage = Arc::downgrade(storage);
+        storage.on_commit_completed(Arc::new(move || {
+            let (Some(manager), Some(storage)) = (manager.upgrade(), weak_storage.upgrade()) else {
+                return;
+            };
+            manager.persist_artifact(&storage);
+        }));
+    }
+
+    fn persist_artifact(&self, storage: &StorageEngine) {
+        let Some(path) = self.artifact_path.as_ref() else {
+            return;
+        };
+        let generation = match storage.wal_applied_sequence() {
+            Ok(generation) => generation,
+            Err(error) => {
+                tracing::warn!(%error, "unable to read vector artifact source generation");
+                return;
+            }
+        };
+        if let Err(error) = self.registry.save_artifact_at_generation(path, generation) {
+            tracing::warn!(path = %path.display(), %error, "failed to persist vector registry artifact");
+        }
+    }
+}
+
+fn registry_matches_declared_indexes(candidate: &HnswRegistry, declared: &HnswRegistry) -> bool {
+    if candidate.index_names() != declared.index_names() {
+        return false;
+    }
+    declared.index_names().into_iter().all(|name| {
+        let Ok(expected) = declared.status(&name) else {
+            return false;
+        };
+        let Ok(actual) = candidate.status(&name) else {
+            return false;
+        };
+        actual.dimensions == expected.dimensions && actual.strategy == expected.strategy
+    })
 }
 
 fn vector_index_dimensions(
@@ -260,6 +338,63 @@ mod tests {
                 .and_then(|node| node.get("_id"))
                 .and_then(serde_json::Value::as_str),
             Some("new")
+        );
+        drop(db);
+
+        let reopened = CopperDb::open(DatabaseConfig {
+            data_dir: data_dir.to_string_lossy().into_owned(),
+            ..DatabaseConfig::default()
+        })
+        .unwrap();
+        let result = reopened
+            .execute(
+                "CALL db.index.vector.queryNodes('document_embedding', 1, [0.0, 1.0]) YIELD node, score RETURN node, score",
+                HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            result.rows[0]
+                .get("node")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|node| node.get("_id"))
+                .and_then(serde_json::Value::as_str),
+            Some("new")
+        );
+    }
+
+    #[test]
+    fn stale_vector_artifact_is_rebuilt_from_committed_storage() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path().join("vector-db");
+        let storage = StorageEngine::open(&data_dir).unwrap();
+        storage
+            .persist_index_definition(&vector_index_definition())
+            .unwrap();
+        storage
+            .persist_index_options("document_embedding", &vector_options())
+            .unwrap();
+        storage
+            .put_node_record(&node("existing", vec![1.0, 0.0]))
+            .unwrap();
+
+        let manager = VectorIndexManager::build(&storage).unwrap();
+        let artifact = data_dir.join(VECTOR_REGISTRY_ARTIFACT_FILE);
+        assert!(artifact.exists());
+        assert_eq!(manager.status("document_embedding").unwrap().generation, 1);
+
+        storage
+            .put_node_record(&node("new", vec![0.0, 1.0]))
+            .unwrap();
+        let rebuilt = VectorIndexManager::build(&storage).unwrap();
+        assert_eq!(rebuilt.status("document_embedding").unwrap().generation, 2);
+        assert_eq!(
+            rebuilt
+                .registry
+                .knn("document_embedding", &[0.0, 1.0], 1)
+                .unwrap()
+                .0[0]
+                .0,
+            "new"
         );
     }
 }

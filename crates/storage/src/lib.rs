@@ -1766,7 +1766,10 @@ pub trait StorageEventNotifier {
     fn on_edge_created(&self, callback: EdgeEventCallback);
     fn on_edge_updated(&self, callback: EdgeEventCallback);
     fn on_edge_deleted(&self, callback: EdgeDeleteCallback);
+    fn on_commit_completed(&self, callback: CommitEventCallback);
 }
+
+pub type CommitEventCallback = Arc<dyn Fn() + Send + Sync>;
 
 /// A single opened copperdb storage instance.
 pub struct StorageEngine {
@@ -1781,6 +1784,7 @@ pub struct StorageEngine {
     schema_manager: RwLock<Arc<SchemaManager>>,
     index_schema_generation: AtomicU64,
     encryption: Option<StorageEncryption>,
+    data_dir: Option<PathBuf>,
     temp_dir: Option<tempfile::TempDir>,
     // Event callbacks
     on_node_created_cb: RwLock<Vec<NodeEventCallback>>,
@@ -1789,6 +1793,7 @@ pub struct StorageEngine {
     on_edge_created_cb: RwLock<Vec<EdgeEventCallback>>,
     on_edge_updated_cb: RwLock<Vec<EdgeEventCallback>>,
     on_edge_deleted_cb: RwLock<Vec<EdgeDeleteCallback>>,
+    on_commit_completed_cb: RwLock<Vec<CommitEventCallback>>,
 }
 
 /// A storage-owned transaction with snapshot reads and a private write overlay.
@@ -1982,6 +1987,7 @@ impl StorageEngine {
             db,
             None,
             WAL::open(path.join(STORAGE_WAL_FILENAME), wal_config)?,
+            Some(path.to_path_buf()),
         )
     }
 
@@ -2212,6 +2218,7 @@ impl StorageEngine {
             None,
             WAL::open(path.join(STORAGE_WAL_FILENAME), WALConfig::default())?,
             false,
+            Some(path.to_path_buf()),
         )
     }
 
@@ -2239,6 +2246,7 @@ impl StorageEngine {
             db,
             Some(encryption),
             WAL::open(path.join(STORAGE_WAL_FILENAME), wal_config)?,
+            Some(path.to_path_buf()),
         )
     }
 
@@ -2262,6 +2270,7 @@ impl StorageEngine {
             schema_manager: RwLock::new(Arc::new(SchemaManager::new())),
             index_schema_generation: AtomicU64::new(0),
             encryption: None,
+            data_dir: None,
             temp_dir: Some(temp_dir),
             on_node_created_cb: RwLock::new(Vec::new()),
             on_node_updated_cb: RwLock::new(Vec::new()),
@@ -2269,6 +2278,7 @@ impl StorageEngine {
             on_edge_created_cb: RwLock::new(Vec::new()),
             on_edge_updated_cb: RwLock::new(Vec::new()),
             on_edge_deleted_cb: RwLock::new(Vec::new()),
+            on_commit_completed_cb: RwLock::new(Vec::new()),
         };
         engine.ensure_layout_manifest()?;
         engine.ensure_encryption_manifest()?;
@@ -2281,8 +2291,9 @@ impl StorageEngine {
         db: Database,
         encryption: Option<StorageEncryption>,
         wal: WAL,
+        data_dir: Option<PathBuf>,
     ) -> Result<Self, StorageError> {
-        Self::open_with_db_options(db, encryption, wal, true)
+        Self::open_with_db_options(db, encryption, wal, true, data_dir)
     }
 
     fn open_with_db_options(
@@ -2290,6 +2301,7 @@ impl StorageEngine {
         encryption: Option<StorageEncryption>,
         wal: WAL,
         bootstrap_mvcc: bool,
+        data_dir: Option<PathBuf>,
     ) -> Result<Self, StorageError> {
         let meta = db.keyspace("meta", KeyspaceCreateOptions::default)?;
         let nodes = db.keyspace("nodes", KeyspaceCreateOptions::default)?;
@@ -2307,6 +2319,7 @@ impl StorageEngine {
             schema_manager: RwLock::new(Arc::new(SchemaManager::new())),
             index_schema_generation: AtomicU64::new(0),
             encryption,
+            data_dir,
             temp_dir: None,
             on_node_created_cb: RwLock::new(Vec::new()),
             on_node_updated_cb: RwLock::new(Vec::new()),
@@ -2314,6 +2327,7 @@ impl StorageEngine {
             on_edge_created_cb: RwLock::new(Vec::new()),
             on_edge_updated_cb: RwLock::new(Vec::new()),
             on_edge_deleted_cb: RwLock::new(Vec::new()),
+            on_commit_completed_cb: RwLock::new(Vec::new()),
         };
         engine.ensure_layout_manifest()?;
         engine.ensure_encryption_manifest()?;
@@ -2490,6 +2504,11 @@ impl StorageEngine {
 
     pub fn is_temporary(&self) -> bool {
         self.temp_dir.is_some()
+    }
+
+    /// Persistent database directory, if this is not a temporary engine.
+    pub fn data_dir(&self) -> Option<&Path> {
+        self.data_dir.as_deref()
     }
 
     pub fn is_encrypted(&self) -> bool {
@@ -2807,6 +2826,10 @@ impl StorageEngine {
         self.on_edge_deleted_cb.write().push(callback);
     }
 
+    pub fn on_commit_completed(&self, callback: CommitEventCallback) {
+        self.on_commit_completed_cb.write().push(callback);
+    }
+
     fn notify_node_created(&self, node: &NodeRecord) {
         for cb in self
             .on_node_created_cb
@@ -2840,6 +2863,18 @@ impl StorageEngine {
             .collect::<Vec<_>>()
         {
             cb(id.to_string());
+        }
+    }
+
+    fn notify_commit_completed(&self) {
+        for callback in self
+            .on_commit_completed_cb
+            .read()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            callback();
         }
     }
 
@@ -6115,6 +6150,10 @@ impl StorageEventNotifier for StorageEngine {
     fn on_edge_deleted(&self, callback: EdgeDeleteCallback) {
         StorageEngine::on_edge_deleted(self, callback);
     }
+
+    fn on_commit_completed(&self, callback: CommitEventCallback) {
+        StorageEngine::on_commit_completed(self, callback);
+    }
 }
 
 /// An operation buffered for atomic batch commit.
@@ -7420,6 +7459,7 @@ impl<'a> BatchWriter<'a> {
                 (None, None) => {}
             }
         }
+        self.engine.notify_commit_completed();
         Ok(())
     }
 

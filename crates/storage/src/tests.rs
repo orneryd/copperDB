@@ -7914,6 +7914,35 @@ fn event_notifier_fans_out_to_all_node_listeners() {
 }
 
 #[test]
+fn commit_completed_notifies_after_node_events() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let node_events = Arc::clone(&events);
+    engine.on_node_created(Arc::new(move |_| {
+        node_events.lock().unwrap().push("node");
+    }));
+    let commit_events = Arc::clone(&events);
+    engine.on_commit_completed(Arc::new(move || {
+        commit_events.lock().unwrap().push("commit");
+    }));
+
+    engine
+        .put_node_record(&NodeRecord {
+            id: "commit-n1".to_string(),
+            labels: vec![],
+            properties: BTreeMap::new(),
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: vec![],
+            embed_meta: NodeEmbeddingMetadata::default(),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+        })
+        .unwrap();
+
+    assert_eq!(*events.lock().unwrap(), vec!["node", "commit"]);
+}
+
+#[test]
 fn event_notifier_node_deleted() {
     let engine = StorageEngine::open_temporary().unwrap();
 

@@ -7,7 +7,14 @@
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
+use std::hash::Hasher;
+use std::io;
+use std::path::Path;
 use thiserror::Error;
+
+const REGISTRY_ARTIFACT_MAGIC: &[u8] = b"COPPERDB-HNSW\0";
+const REGISTRY_ARTIFACT_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Error)]
 pub enum VectorSpaceError {
@@ -25,6 +32,14 @@ pub enum VectorSpaceError {
     IndexNotFound(String),
     #[error("vector index already exists: {0}")]
     IndexAlreadyExists(String),
+    #[error("vector registry artifact is corrupt: {0}")]
+    CorruptArtifact(&'static str),
+    #[error("unsupported vector registry artifact format: expected {expected}, got {actual}")]
+    UnsupportedArtifactFormat { expected: u32, actual: u32 },
+    #[error("vector registry artifact I/O failed: {0}")]
+    ArtifactIo(#[from] io::Error),
+    #[error("vector registry artifact serialization failed: {0}")]
+    ArtifactSerialization(#[from] serde_json::Error),
 }
 
 /// A named vector space (collection of embeddings).
@@ -458,6 +473,29 @@ struct ManagedExactEuclideanIndex {
     generation: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct RegistryArtifact {
+    format_version: u32,
+    source_generation: u64,
+    hnsw_indexes: BTreeMap<String, HnswArtifactIndex>,
+    exact_euclidean_indexes: BTreeMap<String, ExactEuclideanArtifactIndex>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct HnswArtifactIndex {
+    dimensions: usize,
+    config: HnswConfig,
+    generation: u64,
+    entries: BTreeMap<String, Vec<f32>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ExactEuclideanArtifactIndex {
+    dimensions: usize,
+    generation: u64,
+    entries: BTreeMap<String, Vec<f32>>,
+}
+
 /// Thread-safe registry intended to be owned once per database by the engine.
 ///
 /// Indexes are created explicitly during lifecycle work. Querying an absent or
@@ -466,6 +504,14 @@ struct ManagedExactEuclideanIndex {
 pub struct HnswRegistry {
     indexes: RwLock<BTreeMap<String, ManagedHnswIndex>>,
     exact_euclidean_indexes: RwLock<BTreeMap<String, ManagedExactEuclideanIndex>>,
+}
+
+/// A validated registry artifact paired with the committed storage revision
+/// from which it was derived.
+#[derive(Debug)]
+pub struct LoadedRegistryArtifact {
+    pub registry: HnswRegistry,
+    pub source_generation: u64,
 }
 
 impl HnswRegistry {
@@ -623,6 +669,154 @@ impl HnswRegistry {
             },
         ))
     }
+
+    /// Persist rebuildable vector state. HNSW topology is deliberately rebuilt
+    /// from normalized active vectors during load, keeping graph storage
+    /// derived and corruption isolated from authoritative graph records.
+    pub fn save_artifact(&self, path: impl AsRef<Path>) -> Result<(), VectorSpaceError> {
+        self.save_artifact_at_generation(path, 0)
+    }
+
+    pub fn save_artifact_at_generation(
+        &self,
+        path: impl AsRef<Path>,
+        source_generation: u64,
+    ) -> Result<(), VectorSpaceError> {
+        let hnsw_indexes = self
+            .indexes
+            .read()
+            .iter()
+            .map(|(name, managed)| {
+                (
+                    name.clone(),
+                    HnswArtifactIndex {
+                        dimensions: managed.index.dimensions,
+                        config: managed.index.config,
+                        generation: managed.generation,
+                        entries: managed
+                            .index
+                            .entries
+                            .iter()
+                            .filter(|(id, _)| !managed.index.tombstones.contains(*id))
+                            .map(|(id, vector)| (id.clone(), vector.clone()))
+                            .collect(),
+                    },
+                )
+            })
+            .collect();
+        let exact_euclidean_indexes = self
+            .exact_euclidean_indexes
+            .read()
+            .iter()
+            .map(|(name, managed)| {
+                (
+                    name.clone(),
+                    ExactEuclideanArtifactIndex {
+                        dimensions: managed.dimensions,
+                        generation: managed.generation,
+                        entries: managed.entries.clone(),
+                    },
+                )
+            })
+            .collect();
+        let payload = serde_json::to_vec(&RegistryArtifact {
+            format_version: REGISTRY_ARTIFACT_FORMAT_VERSION,
+            source_generation,
+            hnsw_indexes,
+            exact_euclidean_indexes,
+        })?;
+        let mut bytes = Vec::with_capacity(REGISTRY_ARTIFACT_MAGIC.len() + payload.len() + 8);
+        bytes.extend_from_slice(REGISTRY_ARTIFACT_MAGIC);
+        bytes.extend_from_slice(&payload);
+        bytes.extend_from_slice(&artifact_checksum(&payload).to_le_bytes());
+
+        let path = path.as_ref();
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let temporary = path.with_extension("tmp");
+        fs::write(&temporary, bytes)?;
+        fs::rename(temporary, path)?;
+        Ok(())
+    }
+
+    /// Load a registry artifact without accepting partially written, corrupt,
+    /// or incompatible data. The HNSW graph is rebuilt deterministically.
+    pub fn load_artifact(path: impl AsRef<Path>) -> Result<Self, VectorSpaceError> {
+        Ok(Self::load_artifact_with_source_generation(path)?.registry)
+    }
+
+    pub fn load_artifact_with_source_generation(
+        path: impl AsRef<Path>,
+    ) -> Result<LoadedRegistryArtifact, VectorSpaceError> {
+        let bytes = fs::read(path)?;
+        if bytes.len() < REGISTRY_ARTIFACT_MAGIC.len() + 8
+            || !bytes.starts_with(REGISTRY_ARTIFACT_MAGIC)
+        {
+            return Err(VectorSpaceError::CorruptArtifact(
+                "invalid magic or truncated header",
+            ));
+        }
+        let checksum_offset = bytes.len() - 8;
+        let payload = &bytes[REGISTRY_ARTIFACT_MAGIC.len()..checksum_offset];
+        let expected_checksum = u64::from_le_bytes(
+            bytes[checksum_offset..]
+                .try_into()
+                .map_err(|_| VectorSpaceError::CorruptArtifact("invalid checksum"))?,
+        );
+        if artifact_checksum(payload) != expected_checksum {
+            return Err(VectorSpaceError::CorruptArtifact("checksum mismatch"));
+        }
+        let artifact: RegistryArtifact = serde_json::from_slice(payload)?;
+        if artifact.format_version != REGISTRY_ARTIFACT_FORMAT_VERSION {
+            return Err(VectorSpaceError::UnsupportedArtifactFormat {
+                expected: REGISTRY_ARTIFACT_FORMAT_VERSION,
+                actual: artifact.format_version,
+            });
+        }
+
+        let registry = Self::new();
+        for (name, snapshot) in artifact.hnsw_indexes {
+            registry.create_index(&name, snapshot.dimensions, snapshot.config)?;
+            for (id, vector) in snapshot.entries {
+                registry.upsert(&name, id, vector)?;
+            }
+            registry
+                .indexes
+                .write()
+                .get_mut(&name)
+                .expect("created HNSW index is present")
+                .generation = snapshot.generation;
+        }
+        for (name, snapshot) in artifact.exact_euclidean_indexes {
+            registry.create_exact_euclidean_index(&name, snapshot.dimensions)?;
+            for (id, vector) in snapshot.entries {
+                registry.upsert(&name, id, vector)?;
+            }
+            registry
+                .exact_euclidean_indexes
+                .write()
+                .get_mut(&name)
+                .expect("created exact Euclidean index is present")
+                .generation = snapshot.generation;
+        }
+        Ok(LoadedRegistryArtifact {
+            registry,
+            source_generation: artifact.source_generation,
+        })
+    }
+
+    pub fn index_names(&self) -> Vec<String> {
+        let mut names = self.indexes.read().keys().cloned().collect::<Vec<_>>();
+        names.extend(self.exact_euclidean_indexes.read().keys().cloned());
+        names.sort();
+        names
+    }
+}
+
+fn artifact_checksum(payload: &[u8]) -> u64 {
+    let mut hasher = fnv::FnvHasher::default();
+    hasher.write(payload);
+    hasher.finish()
 }
 
 fn euclidean_score(a: &[f32], b: &[f32]) -> f32 {
@@ -952,5 +1146,44 @@ mod tests {
         assert!(registry
             .upsert("documents.embedding", "invalid", vec![1.0])
             .is_err());
+    }
+
+    #[test]
+    fn registry_artifact_round_trips_and_rejects_corruption() {
+        let directory = tempfile::tempdir().unwrap();
+        let artifact = directory.path().join("vectors.artifact");
+        let registry = HnswRegistry::new();
+        registry
+            .create_index("documents.cosine", 2, HnswConfig::default())
+            .unwrap();
+        registry
+            .create_exact_euclidean_index("documents.euclidean", 2)
+            .unwrap();
+        registry
+            .upsert("documents.cosine", "one", vec![1.0, 0.0])
+            .unwrap();
+        registry
+            .upsert("documents.euclidean", "two", vec![0.0, 1.0])
+            .unwrap();
+        registry.save_artifact_at_generation(&artifact, 42).unwrap();
+
+        let loaded = HnswRegistry::load_artifact_with_source_generation(&artifact).unwrap();
+        assert_eq!(loaded.source_generation, 42);
+        let restored = loaded.registry;
+        assert_eq!(restored.status("documents.cosine").unwrap().generation, 1);
+        assert_eq!(
+            restored.knn("documents.cosine", &[1.0, 0.0], 1).unwrap().0[0].0,
+            "one"
+        );
+        assert_eq!(
+            restored.status("documents.euclidean").unwrap().strategy,
+            SimilarityMetric::ExactEuclidean
+        );
+
+        fs::write(&artifact, b"corrupt").unwrap();
+        assert!(matches!(
+            HnswRegistry::load_artifact(&artifact),
+            Err(VectorSpaceError::CorruptArtifact(_))
+        ));
     }
 }

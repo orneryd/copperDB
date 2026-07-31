@@ -1,5 +1,5 @@
 use crate::{
-    EdgeAdjacencyDirection, EdgeDeleteCallback, EdgeEventCallback, EdgeRecord,
+    CommitEventCallback, EdgeAdjacencyDirection, EdgeDeleteCallback, EdgeEventCallback, EdgeRecord,
     MvccLifecycleDebtKey, MvccLifecycleStatus, MvccPruneOptions, MvccSnapshot, MvccSnapshotLease,
     NodeDeleteCallback, NodeEventCallback, NodeRecord, StorageEngine, StorageError,
     StorageEventNotifier,
@@ -534,6 +534,9 @@ enum WorkerRequest {
     },
     PendingDeindexCount {
         reply: Sender<Result<usize, StorageError>>,
+    },
+    RegisterCommitCompleted {
+        callback: CommitEventCallback,
     },
 }
 
@@ -1531,6 +1534,10 @@ impl StorageEventNotifier for AsyncStorageEngine {
     fn on_edge_deleted(&self, callback: EdgeDeleteCallback) {
         *self.callbacks.edge_deleted.write() = Some(callback);
     }
+
+    fn on_commit_completed(&self, callback: CommitEventCallback) {
+        let _ = self.send_request(WorkerRequest::RegisterCommitCompleted { callback });
+    }
 }
 
 impl Drop for AsyncStorageEngine {
@@ -1771,6 +1778,9 @@ fn handle_request(
         }
         WorkerRequest::PendingDeindexCount { reply } => {
             let _ = reply.send(engine.pending_deindex_count());
+        }
+        WorkerRequest::RegisterCommitCompleted { callback } => {
+            engine.on_commit_completed(callback);
         }
     }
     false

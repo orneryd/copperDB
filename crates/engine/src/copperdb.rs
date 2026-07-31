@@ -252,6 +252,7 @@ impl CopperDb {
             Arc::clone(&storage),
             Some(vector_indexes.registry()),
         );
+        vector_indexes.enable_persistence(&storage);
         let audit_log = Arc::new(AuditLog::new(Arc::clone(&storage), AuditConfig::default())?);
         let compliance = Arc::new(ComplianceManager::new(Arc::clone(&storage)));
         Ok(Self {
