@@ -78,6 +78,11 @@ impl CopperDb {
         self.embedding_runtime.status()
     }
 
+    /// Queue one node for managed chunk re-embedding while preserving named vectors.
+    pub fn request_node_reembedding(&self, id: &str) -> Result<bool, CopperDbError> {
+        Ok(self.storage.request_reembedding(id)?)
+    }
+
     /// Process one pending embedding without starting a background worker.
     pub fn drain_embedding_queue_once(&self) -> Result<bool, CopperDbError> {
         self.embedding_runtime.drain_one()
@@ -262,6 +267,7 @@ impl CopperDb {
             Arc::clone(&storage),
             &config.runtime_config,
         ));
+        embedding_runtime.start_workers(config.runtime_config.embedding_workers);
         let eval = EvalEngine::new_with_vector_indexes_and_artifact_refresh(
             Arc::clone(&storage),
             Some(vector_indexes.registry()),

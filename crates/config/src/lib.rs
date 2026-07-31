@@ -570,6 +570,14 @@ pub struct EmbeddingConfig {
     pub api_url: Option<String>,
     /// Embedding vector dimensions.
     pub dimensions: usize,
+    /// Maximum concurrent embedding workers per enabled database.
+    pub workers: usize,
+    /// Maximum failed attempts before moving work to the embedding dead letter queue.
+    pub max_attempts: u32,
+    /// Delay before retrying a failed embedding operation.
+    pub retry_backoff_ms: u64,
+    /// Maximum time to wait for embedding workers during shutdown.
+    pub shutdown_timeout_ms: u64,
 }
 
 impl Default for EmbeddingConfig {
@@ -580,6 +588,10 @@ impl Default for EmbeddingConfig {
             model: String::new(),
             api_url: None,
             dimensions: VectorSpaceConfig::default().dimensions,
+            workers: 1,
+            max_attempts: 3,
+            retry_backoff_ms: 250,
+            shutdown_timeout_ms: 1_000,
         }
     }
 }
@@ -638,6 +650,10 @@ pub struct EffectiveDatabaseConfig {
     pub embedding_model: String,
     pub embedding_api_url: Option<String>,
     pub embedding_dimensions: usize,
+    pub embedding_workers: usize,
+    pub embedding_max_attempts: u32,
+    pub embedding_retry_backoff_ms: u64,
+    pub embedding_shutdown_timeout_ms: u64,
     pub search_min_similarity: f64,
     pub bm25_enabled: bool,
     pub bm25_warming: String,
@@ -649,7 +665,7 @@ pub struct EffectiveDatabaseConfig {
     pub effective: BTreeMap<String, String>,
 }
 
-pub const PER_DATABASE_CONFIG_KEYS: [PerDatabaseConfigKey; 13] = [
+pub const PER_DATABASE_CONFIG_KEYS: [PerDatabaseConfigKey; 17] = [
     PerDatabaseConfigKey {
         key: "COPPERDB_EMBEDDING_ENABLED",
         value_type: "boolean",
@@ -679,6 +695,30 @@ pub const PER_DATABASE_CONFIG_KEYS: [PerDatabaseConfigKey; 13] = [
         value_type: "number",
         category: "Embeddings",
         description: "Embedding dimensions for this database.",
+    },
+    PerDatabaseConfigKey {
+        key: "COPPERDB_EMBEDDING_WORKERS",
+        value_type: "number",
+        category: "Embeddings",
+        description: "Maximum concurrent embedding workers for this database. Default: 1.",
+    },
+    PerDatabaseConfigKey {
+        key: "COPPERDB_EMBEDDING_MAX_ATTEMPTS",
+        value_type: "number",
+        category: "Embeddings",
+        description: "Attempts before an embedding is dead-lettered. Default: 3.",
+    },
+    PerDatabaseConfigKey {
+        key: "COPPERDB_EMBEDDING_RETRY_BACKOFF_MS",
+        value_type: "number",
+        category: "Embeddings",
+        description: "Delay in milliseconds before retrying a failed embedding. Default: 250.",
+    },
+    PerDatabaseConfigKey {
+        key: "COPPERDB_EMBEDDING_SHUTDOWN_TIMEOUT_MS",
+        value_type: "number",
+        category: "Embeddings",
+        description: "Maximum wait for embedding workers during shutdown. Default: 1000.",
     },
     PerDatabaseConfigKey {
         key: "COPPERDB_SEARCH_MIN_SIMILARITY",
@@ -772,6 +812,10 @@ pub fn resolve_per_database_config(
         embedding_model: global.embedding.model.clone(),
         embedding_api_url: global.embedding.api_url.clone(),
         embedding_dimensions: normalized_embedding_dimensions(global.embedding.dimensions),
+        embedding_workers: global.embedding.workers.max(1),
+        embedding_max_attempts: global.embedding.max_attempts.max(1),
+        embedding_retry_backoff_ms: global.embedding.retry_backoff_ms,
+        embedding_shutdown_timeout_ms: global.embedding.shutdown_timeout_ms,
         search_min_similarity: global.search.min_similarity,
         bm25_enabled: global.search.bm25_enabled,
         bm25_warming: normalize_warming(&global.search.bm25_warming),
@@ -1009,6 +1053,22 @@ pub fn apply_env_overrides_from(config: &mut Config, env: &BTreeMap<String, Stri
         },
     );
     set_if_present(
+        parse_env_usize(env, "COPPERDB_EMBEDDING_WORKERS"),
+        |value| config.embedding.workers = value.max(1),
+    );
+    set_if_present(
+        parse_env_u32(env, "COPPERDB_EMBEDDING_MAX_ATTEMPTS"),
+        |value| config.embedding.max_attempts = value.max(1),
+    );
+    set_if_present(
+        parse_env_u64(env, "COPPERDB_EMBEDDING_RETRY_BACKOFF_MS"),
+        |value| config.embedding.retry_backoff_ms = value,
+    );
+    set_if_present(
+        parse_env_u64(env, "COPPERDB_EMBEDDING_SHUTDOWN_TIMEOUT_MS"),
+        |value| config.embedding.shutdown_timeout_ms = value,
+    );
+    set_if_present(
         parse_env_f64(env, "COPPERDB_SEARCH_MIN_SIMILARITY"),
         |value| config.search.min_similarity = value,
     );
@@ -1121,6 +1181,14 @@ fn parse_env_usize(env: &BTreeMap<String, String>, key: &str) -> Option<usize> {
     env.get(key)?.parse().ok()
 }
 
+fn parse_env_u32(env: &BTreeMap<String, String>, key: &str) -> Option<u32> {
+    env.get(key)?.parse().ok()
+}
+
+fn parse_env_u64(env: &BTreeMap<String, String>, key: &str) -> Option<u64> {
+    env.get(key)?.parse().ok()
+}
+
 fn parse_env_f64(env: &BTreeMap<String, String>, key: &str) -> Option<f64> {
     env.get(key)?.parse().ok()
 }
@@ -1206,6 +1274,22 @@ fn effective_values_from_global(global: &Config) -> BTreeMap<String, String> {
         normalized_embedding_dimensions(global.embedding.dimensions).to_string(),
     );
     effective.insert(
+        "COPPERDB_EMBEDDING_WORKERS".into(),
+        global.embedding.workers.max(1).to_string(),
+    );
+    effective.insert(
+        "COPPERDB_EMBEDDING_MAX_ATTEMPTS".into(),
+        global.embedding.max_attempts.max(1).to_string(),
+    );
+    effective.insert(
+        "COPPERDB_EMBEDDING_RETRY_BACKOFF_MS".into(),
+        global.embedding.retry_backoff_ms.to_string(),
+    );
+    effective.insert(
+        "COPPERDB_EMBEDDING_SHUTDOWN_TIMEOUT_MS".into(),
+        global.embedding.shutdown_timeout_ms.to_string(),
+    );
+    effective.insert(
         "COPPERDB_SEARCH_MIN_SIMILARITY".into(),
         global.search.min_similarity.to_string(),
     );
@@ -1257,6 +1341,26 @@ fn apply_per_database_override(resolved: &mut EffectiveDatabaseConfig, key: &str
         "COPPERDB_EMBEDDING_DIMENSIONS" => {
             if let Ok(parsed) = value.parse::<usize>() {
                 resolved.embedding_dimensions = normalized_embedding_dimensions(parsed);
+            }
+        }
+        "COPPERDB_EMBEDDING_WORKERS" => {
+            if let Ok(parsed) = value.parse::<usize>() {
+                resolved.embedding_workers = parsed.max(1);
+            }
+        }
+        "COPPERDB_EMBEDDING_MAX_ATTEMPTS" => {
+            if let Ok(parsed) = value.parse::<u32>() {
+                resolved.embedding_max_attempts = parsed.max(1);
+            }
+        }
+        "COPPERDB_EMBEDDING_RETRY_BACKOFF_MS" => {
+            if let Ok(parsed) = value.parse::<u64>() {
+                resolved.embedding_retry_backoff_ms = parsed;
+            }
+        }
+        "COPPERDB_EMBEDDING_SHUTDOWN_TIMEOUT_MS" => {
+            if let Ok(parsed) = value.parse::<u64>() {
+                resolved.embedding_shutdown_timeout_ms = parsed;
             }
         }
         "COPPERDB_SEARCH_MIN_SIMILARITY" => {
@@ -1583,13 +1687,19 @@ auth:
         assert!(!cfg.auth.enabled);
     }
 
-
     #[test]
     fn env_overrides_apply_default_off_search_and_embedding_settings() {
         let mut cfg = Config::default();
         let mut env = BTreeMap::new();
         env.insert("COPPERDB_EMBEDDING_ENABLED".into(), "true".into());
         env.insert("COPPERDB_EMBEDDING_DIMENSIONS".into(), "1024".into());
+        env.insert("COPPERDB_EMBEDDING_WORKERS".into(), "3".into());
+        env.insert("COPPERDB_EMBEDDING_MAX_ATTEMPTS".into(), "5".into());
+        env.insert("COPPERDB_EMBEDDING_RETRY_BACKOFF_MS".into(), "750".into());
+        env.insert(
+            "COPPERDB_EMBEDDING_SHUTDOWN_TIMEOUT_MS".into(),
+            "1500".into(),
+        );
         env.insert("COPPERDB_SEARCH_BM25_ENABLED".into(), "true".into());
         env.insert("COPPERDB_SEARCH_VECTOR_ENABLED".into(), "true".into());
         env.insert("COPPERDB_AUTO_LINKS_ENABLED".into(), "true".into());
@@ -1598,6 +1708,10 @@ auth:
 
         assert!(cfg.embedding.enabled);
         assert_eq!(cfg.embedding.dimensions, 1024);
+        assert_eq!(cfg.embedding.workers, 3);
+        assert_eq!(cfg.embedding.max_attempts, 5);
+        assert_eq!(cfg.embedding.retry_backoff_ms, 750);
+        assert_eq!(cfg.embedding.shutdown_timeout_ms, 1500);
         assert_eq!(cfg.vectorspace.dimensions, 1024);
         assert!(cfg.search.bm25_enabled);
         assert!(cfg.search.vector_enabled);
@@ -1614,6 +1728,10 @@ auth:
             ("COPPERDB_SEARCH_VECTOR_ENABLED".into(), "true".into()),
             ("COPPERDB_SEARCH_VECTOR_WARMING".into(), "startup".into()),
             ("COPPERDB_EMBEDDING_DIMENSIONS".into(), "2048".into()),
+            ("COPPERDB_EMBEDDING_WORKERS".into(), "0".into()),
+            ("COPPERDB_EMBEDDING_MAX_ATTEMPTS".into(), "0".into()),
+            ("COPPERDB_EMBEDDING_RETRY_BACKOFF_MS".into(), "12".into()),
+            ("COPPERDB_EMBEDDING_SHUTDOWN_TIMEOUT_MS".into(), "42".into()),
         ]);
 
         let resolved = resolve_per_database_config(&cfg, &overrides).unwrap();
@@ -1621,6 +1739,10 @@ auth:
         assert!(!resolved.vector_enabled);
         assert_eq!(resolved.vector_warming, "startup");
         assert_eq!(resolved.embedding_dimensions, 2048);
+        assert_eq!(resolved.embedding_workers, 1);
+        assert_eq!(resolved.embedding_max_attempts, 1);
+        assert_eq!(resolved.embedding_retry_backoff_ms, 12);
+        assert_eq!(resolved.embedding_shutdown_timeout_ms, 42);
         assert_eq!(
             resolved
                 .effective

@@ -211,6 +211,8 @@ const META_NAMESPACE_NODE_COUNT_PREFIX: &[u8] = b"namespace_node_count/";
 const META_NAMESPACE_EDGE_COUNT_PREFIX: &[u8] = b"namespace_edge_count/";
 const META_NAMESPACE_LABEL_COUNT_PREFIX: &[u8] = b"namespace_label_count/";
 const META_PENDING_EMBEDDING_PREFIX: &[u8] = b"pending_embedding/";
+const META_EMBEDDING_DEAD_LETTER_PREFIX: &[u8] = b"embedding_dead_letter/";
+const META_FORCED_REEMBEDDING_PREFIX: &[u8] = b"forced_reembedding/";
 const META_PENDING_DEINDEX_PREFIX: &[u8] = b"pending_deindex/";
 const META_INDEX_TOMBSTONE_PREFIX: &[u8] = b"index_tombstone/";
 const META_INDEX_OPTIONS_PREFIX: &[u8] = b"index_options/";
@@ -1640,6 +1642,21 @@ pub struct NodeEmbeddingMetadata {
     pub chunk_count: Option<usize>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmbeddingDeadLetter {
+    pub node_id: String,
+    pub attempts: u32,
+    pub last_error: String,
+    pub failed_at_unix_secs: u64,
+    pub dead_lettered: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddingFailureDisposition {
+    Retry,
+    DeadLettered,
+}
+
 impl NodeEmbeddingMetadata {
     pub fn is_empty(&self) -> bool {
         self.embedding_model.is_none()
@@ -1733,6 +1750,10 @@ pub type EdgeEventCallback = Arc<dyn Fn(EdgeRecord) + Send + Sync + 'static>;
 pub type EdgeDeleteCallback = Arc<dyn Fn(String) + Send + Sync + 'static>;
 
 pub fn node_record_needs_embedding(node: &NodeRecord) -> bool {
+    node_record_is_embedding_eligible(node) && !node_record_has_materialized_embedding(node)
+}
+
+fn node_record_is_embedding_eligible(node: &NodeRecord) -> bool {
     if node
         .labels
         .iter()
@@ -1741,9 +1762,6 @@ pub fn node_record_needs_embedding(node: &NodeRecord) -> bool {
         return false;
     }
     if node.properties.contains_key("embedding_skipped") {
-        return false;
-    }
-    if node_record_has_materialized_embedding(node) {
         return false;
     }
     true
@@ -1781,6 +1799,7 @@ pub struct StorageEngine {
     mvcc: MvccStore,
     wal: WAL,
     batch_commit_lock: Mutex<()>,
+    embedding_claims: Mutex<BTreeSet<String>>,
     schema_manager: RwLock<Arc<SchemaManager>>,
     index_schema_generation: AtomicU64,
     encryption: Option<StorageEncryption>,
@@ -2267,6 +2286,7 @@ impl StorageEngine {
             mvcc: MvccStore::new(),
             wal: WAL::new(WALConfig::default()),
             batch_commit_lock: Mutex::new(()),
+            embedding_claims: Mutex::new(BTreeSet::new()),
             schema_manager: RwLock::new(Arc::new(SchemaManager::new())),
             index_schema_generation: AtomicU64::new(0),
             encryption: None,
@@ -2316,6 +2336,7 @@ impl StorageEngine {
             mvcc: MvccStore::new(),
             wal,
             batch_commit_lock: Mutex::new(()),
+            embedding_claims: Mutex::new(BTreeSet::new()),
             schema_manager: RwLock::new(Arc::new(SchemaManager::new())),
             index_schema_generation: AtomicU64::new(0),
             encryption,
@@ -3030,8 +3051,45 @@ impl StorageEngine {
         Ok(None)
     }
 
+    /// Claim one pending node for embedding work within this storage process.
+    /// The pending key remains durable until its embedding write succeeds.
+    pub fn claim_node_needing_embedding(&self) -> Result<Option<NodeRecord>, StorageError> {
+        let mut claims = self.embedding_claims.lock();
+        for entry in self.meta.scan_prefix(META_PENDING_EMBEDDING_PREFIX) {
+            let (key, _) = entry?;
+            let Some(node_id) = pending_embedding_id_from_key(key.as_ref()) else {
+                continue;
+            };
+            if claims.contains(&node_id) {
+                continue;
+            }
+            if self.embedding_dead_letter(&node_id)?.is_some() {
+                self.mark_node_embedded(&node_id)?;
+                continue;
+            }
+            match self.get_node_record(&node_id)? {
+                Some(node)
+                    if node.needs_embedding()
+                        || (self.has_forced_reembedding(&node_id)?
+                            && node_record_is_embedding_eligible(&node)) =>
+                {
+                    claims.insert(node_id);
+                    return Ok(Some(node));
+                }
+                Some(_) | None => self.mark_node_embedded(&node_id)?,
+            }
+        }
+        Ok(None)
+    }
+
+    /// Release a claim without removing the durable pending queue entry.
+    pub fn release_embedding_claim(&self, id: &str) {
+        self.embedding_claims.lock().remove(id);
+    }
+
     pub fn mark_node_embedded(&self, id: &str) -> Result<(), StorageError> {
         self.meta.fjall_remove(pending_embedding_key(id))?;
+        self.meta.fjall_remove(forced_reembedding_key(id))?;
         Ok(())
     }
 
@@ -3039,7 +3097,97 @@ impl StorageEngine {
         let Some(node) = self.get_node_record(id)? else {
             return Ok(());
         };
-        self.update_pending_embedding_index(&node)
+        self.meta.fjall_remove(embedding_dead_letter_key(id))?;
+        if node.needs_embedding() || self.has_forced_reembedding(id)? {
+            self.meta.fjall_insert(pending_embedding_key(id), [])?;
+        }
+        Ok(())
+    }
+
+    /// Queue one node for CopperDB-managed re-embedding without deleting any
+    /// externally managed named vectors.
+    pub fn request_reembedding(&self, id: &str) -> Result<bool, StorageError> {
+        let Some(mut node) = self.get_node_record(id)? else {
+            return Ok(false);
+        };
+        if !node_record_is_embedding_eligible(&node) {
+            return Ok(false);
+        }
+        self.meta.fjall_remove(embedding_dead_letter_key(id))?;
+        self.meta.fjall_insert(forced_reembedding_key(id), [])?;
+        node.clear_managed_chunk_embeddings();
+        self.put_node_record(&node)?;
+        self.meta.fjall_insert(pending_embedding_key(id), [])?;
+        Ok(true)
+    }
+
+    fn has_forced_reembedding(&self, id: &str) -> Result<bool, StorageError> {
+        Ok(self.meta.fjall_get(forced_reembedding_key(id))?.is_some())
+    }
+
+    /// Record an embedding failure durably and dead-letter the node after the
+    /// configured number of attempts. Call [`add_to_pending_embeddings`] to
+    /// explicitly retry a dead-lettered node.
+    pub fn record_embedding_failure(
+        &self,
+        id: &str,
+        error: &str,
+        max_attempts: u32,
+        failed_at_unix_secs: u64,
+    ) -> Result<EmbeddingFailureDisposition, StorageError> {
+        let _commit_guard = self.batch_commit_lock.lock();
+        let key = embedding_dead_letter_key(id);
+        let attempts = self
+            .meta
+            .fjall_get(&key)?
+            .map(|raw| rmp_serde::from_slice::<EmbeddingDeadLetter>(raw.as_ref()))
+            .transpose()?
+            .map(|record| record.attempts)
+            .unwrap_or(0)
+            .saturating_add(1);
+        let record = EmbeddingDeadLetter {
+            node_id: id.to_string(),
+            attempts,
+            last_error: error.chars().take(256).collect(),
+            failed_at_unix_secs,
+            dead_lettered: attempts >= max_attempts.max(1),
+        };
+        if record.dead_lettered {
+            self.meta.fjall_insert(&key, rmp_serde::to_vec(&record)?)?;
+            self.meta.fjall_remove(pending_embedding_key(id))?;
+            self.embedding_claims.lock().remove(id);
+            return Ok(EmbeddingFailureDisposition::DeadLettered);
+        }
+        self.meta.fjall_insert(&key, rmp_serde::to_vec(&record)?)?;
+        Ok(EmbeddingFailureDisposition::Retry)
+    }
+
+    pub fn embedding_dead_letter(
+        &self,
+        id: &str,
+    ) -> Result<Option<EmbeddingDeadLetter>, StorageError> {
+        self.embedding_failure(id)
+            .map(|failure| failure.filter(|failure| failure.dead_lettered))
+    }
+
+    fn embedding_failure(&self, id: &str) -> Result<Option<EmbeddingDeadLetter>, StorageError> {
+        self.meta
+            .fjall_get(embedding_dead_letter_key(id))?
+            .map(|raw| rmp_serde::from_slice(raw.as_ref()))
+            .transpose()
+            .map_err(StorageError::from)
+    }
+
+    pub fn embedding_dead_letter_count(&self) -> Result<usize, StorageError> {
+        let mut count = 0;
+        for entry in self.meta.scan_prefix(META_EMBEDDING_DEAD_LETTER_PREFIX) {
+            let (_, value) = entry?;
+            let failure: EmbeddingDeadLetter = rmp_serde::from_slice(value.as_ref())?;
+            if failure.dead_lettered {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     pub fn pending_embeddings_count(&self) -> Result<usize, StorageError> {
@@ -3072,7 +3220,23 @@ impl StorageEngine {
             self.meta.fjall_remove(key)?;
         }
         for id in &valid_ids {
-            self.meta.fjall_insert(pending_embedding_key(id), [])?;
+            if self.embedding_dead_letter(id)?.is_none() {
+                self.meta.fjall_insert(pending_embedding_key(id), [])?;
+            }
+        }
+        for entry in self.meta.scan_prefix(META_FORCED_REEMBEDDING_PREFIX) {
+            let (key, _) = entry?;
+            let Some(id) = forced_reembedding_id_from_key(key.as_ref()) else {
+                continue;
+            };
+            let valid = self
+                .get_node_record(&id)?
+                .is_some_and(|node| node_record_is_embedding_eligible(&node));
+            if valid && self.embedding_dead_letter(&id)?.is_none() {
+                self.meta.fjall_insert(pending_embedding_key(&id), [])?;
+            } else if !valid {
+                self.meta.fjall_remove(forced_reembedding_key(&id))?;
+            }
         }
         Ok(valid_ids.len())
     }
@@ -3094,18 +3258,19 @@ impl StorageEngine {
     }
 
     pub fn clear_all_embeddings_for_prefix(&self, prefix: &str) -> Result<usize, StorageError> {
-        let nodes_to_clear = self
+        let node_ids_to_clear = self
             .all_node_records()?
             .into_iter()
             .filter(|node| prefix.is_empty() || node.id.starts_with(prefix))
             .filter(|node| node.has_materialized_chunk_embeddings())
+            .map(|node| node.id)
             .collect::<Vec<_>>();
 
         let mut cleared = 0;
-        for mut node in nodes_to_clear {
-            node.clear_managed_chunk_embeddings();
-            self.put_node_record(&node)?;
-            cleared += 1;
+        for id in node_ids_to_clear {
+            if self.request_reembedding(&id)? {
+                cleared += 1;
+            }
         }
 
         Ok(cleared)
@@ -3118,7 +3283,9 @@ impl StorageEngine {
         existing.chunk_embeddings = node.chunk_embeddings.clone();
         existing.embed_meta = node.embed_meta.clone();
         existing.updated_at_unix_ms = existing.updated_at_unix_ms.max(node.updated_at_unix_ms);
-        self.put_node_record(&existing)
+        self.put_node_record(&existing)?;
+        self.meta.fjall_remove(forced_reembedding_key(&node.id))?;
+        Ok(())
     }
 
     // ── Deindex cleanup queue ───────────────────────────────────────────────
@@ -3227,16 +3394,6 @@ impl StorageEngine {
             }
         }
         Ok(removed)
-    }
-
-    fn update_pending_embedding_index(&self, node: &NodeRecord) -> Result<(), StorageError> {
-        if node.needs_embedding() {
-            self.meta
-                .fjall_insert(pending_embedding_key(&node.id), [])?;
-        } else {
-            self.meta.fjall_remove(pending_embedding_key(&node.id))?;
-        }
-        Ok(())
     }
 
     pub fn stream_node_records<F>(&self, visit: F) -> Result<u64, StorageError>
@@ -5419,6 +5576,28 @@ fn pending_embedding_key(node_id: &str) -> Vec<u8> {
         escape_index_component(node_id).as_bytes(),
     ]
     .concat()
+}
+
+fn embedding_dead_letter_key(node_id: &str) -> Vec<u8> {
+    [
+        META_EMBEDDING_DEAD_LETTER_PREFIX,
+        escape_index_component(node_id).as_bytes(),
+    ]
+    .concat()
+}
+
+fn forced_reembedding_key(node_id: &str) -> Vec<u8> {
+    [
+        META_FORCED_REEMBEDDING_PREFIX,
+        escape_index_component(node_id).as_bytes(),
+    ]
+    .concat()
+}
+
+fn forced_reembedding_id_from_key(key: &[u8]) -> Option<String> {
+    let suffix = key.strip_prefix(META_FORCED_REEMBEDDING_PREFIX)?;
+    let decoded = hex::decode(std::str::from_utf8(suffix).ok()?).ok()?;
+    String::from_utf8(decoded).ok()
 }
 
 fn pending_embedding_id_from_key(key: &[u8]) -> Option<String> {

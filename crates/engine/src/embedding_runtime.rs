@@ -1,11 +1,13 @@
 use crate::CopperDbError;
 use copperdb_config::EffectiveDatabaseConfig;
-use copperdb_embed::Embedder;
+use copperdb_embed::{Embedder, LocalGgufEmbedder};
 use copperdb_storage::{NodeRecord, StorageEngine};
 use serde_json::json;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingRuntimeState {
@@ -13,6 +15,8 @@ pub enum EmbeddingRuntimeState {
     Cold,
     Ready,
     Degraded,
+    Failed,
+    Stopping,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,26 +25,33 @@ pub struct EmbeddingRuntimeStatus {
     pub provider: String,
     pub model: String,
     pub dimensions: usize,
+    pub backend: Option<String>,
     pub worker_count: usize,
     pub pending: u64,
+    pub dead_lettered: u64,
     pub completed: u64,
     pub failed: u64,
     pub last_error: Option<String>,
 }
 
-/// Per-database embedding lifecycle owner. This initial runtime performs at
-/// most one synchronous drain at a time; background workers come later.
+/// Per-database embedding lifecycle owner.
 pub(crate) struct EmbeddingRuntime {
     storage: Arc<StorageEngine>,
     provider: String,
     model: String,
     dimensions: usize,
+    max_attempts: u32,
+    retry_backoff: Duration,
+    shutdown_timeout: Duration,
+    backend: Option<String>,
     embedder: Option<Arc<dyn Embedder>>,
-    state: Mutex<EmbeddingRuntimeState>,
-    process_lock: Mutex<()>,
-    completed: AtomicU64,
-    failed: AtomicU64,
-    last_error: Mutex<Option<String>>,
+    state: Arc<Mutex<EmbeddingRuntimeState>>,
+    completed: Arc<AtomicU64>,
+    failed: Arc<AtomicU64>,
+    last_error: Arc<Mutex<Option<String>>>,
+    stop: Arc<AtomicBool>,
+    active_workers: Arc<AtomicUsize>,
+    workers: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl EmbeddingRuntime {
@@ -48,28 +59,51 @@ impl EmbeddingRuntime {
         storage: Arc<StorageEngine>,
         config: &EffectiveDatabaseConfig,
     ) -> Self {
+        let (embedder, backend, state, last_error) = if !config.embedding_enabled {
+            (None, None, EmbeddingRuntimeState::Disabled, None)
+        } else {
+            match build_embedder(config) {
+                Ok((embedder, backend)) => (
+                    Some(embedder),
+                    Some(backend),
+                    EmbeddingRuntimeState::Ready,
+                    None,
+                ),
+                Err(error) => (None, None, EmbeddingRuntimeState::Failed, Some(error)),
+            }
+        };
         Self {
             storage,
             provider: config.embedding_provider.clone(),
             model: config.embedding_model.clone(),
             dimensions: config.embedding_dimensions,
-            embedder: None,
-            state: Mutex::new(if config.embedding_enabled {
-                EmbeddingRuntimeState::Cold
-            } else {
-                EmbeddingRuntimeState::Disabled
-            }),
-            process_lock: Mutex::new(()),
-            completed: AtomicU64::new(0),
-            failed: AtomicU64::new(0),
-            last_error: Mutex::new(None),
+            max_attempts: config.embedding_max_attempts,
+            retry_backoff: Duration::from_millis(config.embedding_retry_backoff_ms),
+            shutdown_timeout: Duration::from_millis(config.embedding_shutdown_timeout_ms),
+            backend,
+            embedder,
+            state: Arc::new(Mutex::new(state)),
+            completed: Arc::new(AtomicU64::new(0)),
+            failed: Arc::new(AtomicU64::new(0)),
+            last_error: Arc::new(Mutex::new(last_error)),
+            stop: Arc::new(AtomicBool::new(false)),
+            active_workers: Arc::new(AtomicUsize::new(0)),
+            workers: Mutex::new(Vec::new()),
         }
     }
 
     #[cfg(test)]
-    fn ready(
+    fn ready(storage: Arc<StorageEngine>, dimensions: usize, embedder: Arc<dyn Embedder>) -> Self {
+        let mut runtime = Self::ready_with_max_attempts(storage, dimensions, 3, embedder);
+        runtime.shutdown_timeout = Duration::from_secs(1);
+        runtime
+    }
+
+    #[cfg(test)]
+    fn ready_with_max_attempts(
         storage: Arc<StorageEngine>,
         dimensions: usize,
+        max_attempts: u32,
         embedder: Arc<dyn Embedder>,
     ) -> Self {
         Self {
@@ -77,12 +111,18 @@ impl EmbeddingRuntime {
             provider: "test".to_string(),
             model: "test-model".to_string(),
             dimensions,
+            max_attempts,
+            retry_backoff: Duration::ZERO,
+            shutdown_timeout: Duration::ZERO,
+            backend: Some("test".to_string()),
             embedder: Some(embedder),
-            state: Mutex::new(EmbeddingRuntimeState::Ready),
-            process_lock: Mutex::new(()),
-            completed: AtomicU64::new(0),
-            failed: AtomicU64::new(0),
-            last_error: Mutex::new(None),
+            state: Arc::new(Mutex::new(EmbeddingRuntimeState::Ready)),
+            completed: Arc::new(AtomicU64::new(0)),
+            failed: Arc::new(AtomicU64::new(0)),
+            last_error: Arc::new(Mutex::new(None)),
+            stop: Arc::new(AtomicBool::new(false)),
+            active_workers: Arc::new(AtomicUsize::new(0)),
+            workers: Mutex::new(Vec::new()),
         }
     }
 
@@ -92,8 +132,10 @@ impl EmbeddingRuntime {
             provider: self.provider.clone(),
             model: self.model.clone(),
             dimensions: self.dimensions,
-            worker_count: 0,
+            backend: self.backend.clone(),
+            worker_count: self.active_workers.load(Ordering::Relaxed),
             pending: self.storage.pending_embeddings_count()? as u64,
+            dead_lettered: self.storage.embedding_dead_letter_count()? as u64,
             completed: self.completed.load(Ordering::Relaxed),
             failed: self.failed.load(Ordering::Relaxed),
             last_error: self
@@ -105,7 +147,6 @@ impl EmbeddingRuntime {
     }
 
     pub(crate) fn drain_one(&self) -> Result<bool, CopperDbError> {
-        let _guard = self.process_lock.lock().expect("embedding process lock");
         let Some(embedder) = self.embedder.as_ref().map(Arc::clone) else {
             if *self.state.lock().expect("embedding runtime state lock")
                 == EmbeddingRuntimeState::Disabled
@@ -116,41 +157,227 @@ impl EmbeddingRuntime {
                 "embedding runtime is enabled but no provider is loaded".to_string(),
             ));
         };
-        let Some(node) = self.storage.find_node_needing_embedding()? else {
-            return Ok(false);
-        };
-        let embeddings = match embedder.embed_batch_blocking(&[canonical_input(&node)]) {
-            Ok(embeddings) => embeddings,
-            Err(error) => return Err(self.record_failure(error.to_string())),
-        };
-        let Some(embedding) = embeddings.into_iter().next() else {
-            return Err(self.record_failure("embedding provider returned no embedding".to_string()));
-        };
-        if self.dimensions > 0 && embedding.vector.len() != self.dimensions {
-            return Err(self.record_failure(format!(
-                "embedding dimensions mismatch: expected {}, got {}",
-                self.dimensions,
-                embedding.vector.len()
-            )));
-        }
-        let mut update = node;
-        update.set_managed_chunk_embeddings(
-            vec![embedding.vector],
-            Some(embedding.model),
-            Some(current_unix_seconds().to_string()),
-        );
-        self.storage.update_node_embedding(&update)?;
-        self.completed.fetch_add(1, Ordering::Relaxed);
-        *self.state.lock().expect("embedding runtime state lock") = EmbeddingRuntimeState::Ready;
-        *self.last_error.lock().expect("embedding runtime error lock") = None;
-        Ok(true)
+        drain_one_with(
+            &self.storage,
+            self.dimensions,
+            self.max_attempts,
+            embedder,
+            &self.state,
+            &self.completed,
+            &self.failed,
+            &self.last_error,
+        )
     }
 
-    fn record_failure(&self, error: String) -> CopperDbError {
-        self.failed.fetch_add(1, Ordering::Relaxed);
-        *self.state.lock().expect("embedding runtime state lock") = EmbeddingRuntimeState::Degraded;
-        *self.last_error.lock().expect("embedding runtime error lock") = Some(error.chars().take(256).collect());
-        CopperDbError::Init("embedding generation failed".to_string())
+    pub(crate) fn start_workers(self: &Arc<Self>, worker_count: usize) {
+        if *self.state.lock().expect("embedding runtime state lock") != EmbeddingRuntimeState::Ready
+        {
+            return;
+        }
+        let Some(embedder) = self.embedder.as_ref().map(Arc::clone) else {
+            return;
+        };
+        let mut workers = self.workers.lock().expect("embedding worker handles lock");
+        if !workers.is_empty() {
+            return;
+        }
+        for _ in 0..worker_count.max(1) {
+            let storage = Arc::clone(&self.storage);
+            let embedder = Arc::clone(&embedder);
+            let state = Arc::clone(&self.state);
+            let completed = Arc::clone(&self.completed);
+            let failed = Arc::clone(&self.failed);
+            let last_error = Arc::clone(&self.last_error);
+            let stop = Arc::clone(&self.stop);
+            let active_workers = Arc::clone(&self.active_workers);
+            let dimensions = self.dimensions;
+            let max_attempts = self.max_attempts;
+            let retry_backoff = self.retry_backoff;
+            workers.push(thread::spawn(move || {
+                active_workers.fetch_add(1, Ordering::Relaxed);
+                while !stop.load(Ordering::Acquire) {
+                    match drain_one_with(
+                        &storage,
+                        dimensions,
+                        max_attempts,
+                        Arc::clone(&embedder),
+                        &state,
+                        &completed,
+                        &failed,
+                        &last_error,
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) => thread::sleep(Duration::from_millis(25)),
+                        Err(_) => thread::sleep(retry_backoff.max(Duration::from_millis(1))),
+                    }
+                }
+                active_workers.fetch_sub(1, Ordering::Relaxed);
+            }));
+        }
+    }
+
+    pub(crate) fn shutdown_workers(&self) -> bool {
+        self.stop.store(true, Ordering::Release);
+        {
+            let mut state = self.state.lock().expect("embedding runtime state lock");
+            if matches!(
+                *state,
+                EmbeddingRuntimeState::Cold
+                    | EmbeddingRuntimeState::Ready
+                    | EmbeddingRuntimeState::Degraded
+            ) {
+                *state = EmbeddingRuntimeState::Stopping;
+            }
+        }
+        let deadline = Instant::now() + self.shutdown_timeout;
+        while self.active_workers.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let workers =
+            std::mem::take(&mut *self.workers.lock().expect("embedding worker handles lock"));
+        if self.active_workers.load(Ordering::Acquire) > 0 {
+            drop(workers);
+            return false;
+        }
+        for worker in workers {
+            let _ = worker.join();
+        }
+        true
+    }
+}
+
+impl Drop for EmbeddingRuntime {
+    fn drop(&mut self) {
+        self.shutdown_workers();
+    }
+}
+
+fn drain_one_with(
+    storage: &StorageEngine,
+    dimensions: usize,
+    max_attempts: u32,
+    embedder: Arc<dyn Embedder>,
+    state: &Mutex<EmbeddingRuntimeState>,
+    completed: &AtomicU64,
+    failed: &AtomicU64,
+    last_error: &Mutex<Option<String>>,
+) -> Result<bool, CopperDbError> {
+    let Some(node) = storage.claim_node_needing_embedding()? else {
+        return Ok(false);
+    };
+    let node_id = node.id.clone();
+    let result = embed_claimed_node(
+        storage,
+        dimensions,
+        max_attempts,
+        node,
+        embedder,
+        state,
+        completed,
+        failed,
+        last_error,
+    );
+    storage.release_embedding_claim(&node_id);
+    result
+}
+
+fn embed_claimed_node(
+    storage: &StorageEngine,
+    dimensions: usize,
+    max_attempts: u32,
+    node: NodeRecord,
+    embedder: Arc<dyn Embedder>,
+    state: &Mutex<EmbeddingRuntimeState>,
+    completed: &AtomicU64,
+    failed: &AtomicU64,
+    last_error: &Mutex<Option<String>>,
+) -> Result<bool, CopperDbError> {
+    let embeddings = match embedder.embed_batch_blocking(&[canonical_input(&node)]) {
+        Ok(embeddings) => embeddings,
+        Err(error) => {
+            return Err(record_failure(
+                storage,
+                &node.id,
+                max_attempts,
+                state,
+                failed,
+                last_error,
+                error.to_string(),
+            ))
+        }
+    };
+    let Some(embedding) = embeddings.into_iter().next() else {
+        return Err(record_failure(
+            storage,
+            &node.id,
+            max_attempts,
+            state,
+            failed,
+            last_error,
+            "embedding provider returned no embedding".to_string(),
+        ));
+    };
+    if dimensions > 0 && embedding.vector.len() != dimensions {
+        return Err(record_failure(
+            storage,
+            &node.id,
+            max_attempts,
+            state,
+            failed,
+            last_error,
+            format!(
+                "embedding dimensions mismatch: expected {}, got {}",
+                dimensions,
+                embedding.vector.len()
+            ),
+        ));
+    }
+    let mut update = node;
+    update.set_managed_chunk_embeddings(
+        vec![embedding.vector],
+        Some(embedding.model),
+        Some(current_unix_seconds().to_string()),
+    );
+    storage.update_node_embedding(&update)?;
+    completed.fetch_add(1, Ordering::Relaxed);
+    let mut runtime_state = state.lock().expect("embedding runtime state lock");
+    if *runtime_state != EmbeddingRuntimeState::Stopping {
+        *runtime_state = EmbeddingRuntimeState::Ready;
+    }
+    *last_error.lock().expect("embedding runtime error lock") = None;
+    Ok(true)
+}
+
+fn record_failure(
+    storage: &StorageEngine,
+    node_id: &str,
+    max_attempts: u32,
+    state: &Mutex<EmbeddingRuntimeState>,
+    failed: &AtomicU64,
+    last_error: &Mutex<Option<String>>,
+    error: String,
+) -> CopperDbError {
+    let dead_lettered = storage
+        .record_embedding_failure(node_id, &error, max_attempts, current_unix_seconds())
+        .map(|disposition| {
+            matches!(
+                disposition,
+                copperdb_storage::EmbeddingFailureDisposition::DeadLettered
+            )
+        });
+    failed.fetch_add(1, Ordering::Relaxed);
+    let mut runtime_state = state.lock().expect("embedding runtime state lock");
+    if *runtime_state != EmbeddingRuntimeState::Stopping {
+        *runtime_state = EmbeddingRuntimeState::Degraded;
+    }
+    *last_error.lock().expect("embedding runtime error lock") =
+        Some(error.chars().take(256).collect());
+    match dead_lettered {
+        Ok(true) => {
+            CopperDbError::Init("embedding generation failed and was dead-lettered".to_string())
+        }
+        Ok(false) => CopperDbError::Init("embedding generation failed".to_string()),
+        Err(storage_error) => CopperDbError::Storage(storage_error.to_string()),
     }
 }
 
@@ -171,8 +398,14 @@ mod tests {
     use copperdb_embed::{EmbedError, Embedding};
     use copperdb_storage::{NodeEmbeddingMetadata, NodeRecord};
     use std::collections::BTreeMap;
+    use std::sync::mpsc::{self, Receiver, Sender};
 
     struct TestEmbedder(Result<Vec<f32>, EmbedError>);
+
+    struct BlockingEmbedder {
+        started: Sender<()>,
+        release: Mutex<Receiver<()>>,
+    }
 
     #[async_trait::async_trait]
     impl Embedder for TestEmbedder {
@@ -187,6 +420,30 @@ mod tests {
                 .map(|text| Embedding {
                     text: text.clone(),
                     vector: vector.clone(),
+                    model: "test-model".to_string(),
+                })
+                .collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Embedder for BlockingEmbedder {
+        async fn embed(&self, texts: &[String]) -> Result<Vec<Embedding>, EmbedError> {
+            self.embed_batch_blocking(texts)
+        }
+
+        fn embed_batch_blocking(&self, texts: &[String]) -> Result<Vec<Embedding>, EmbedError> {
+            self.started.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+            Ok(texts
+                .iter()
+                .map(|text| Embedding {
+                    text: text.clone(),
+                    vector: vec![0.25, 0.75],
                     model: "test-model".to_string(),
                 })
                 .collect())
@@ -218,10 +475,36 @@ mod tests {
             &BTreeMap::new(),
         )
         .unwrap();
-        let runtime = EmbeddingRuntime::from_config(storage, &config);
-        assert_eq!(runtime.status().unwrap().state, EmbeddingRuntimeState::Disabled);
+        let runtime = Arc::new(EmbeddingRuntime::from_config(storage, &config));
+        runtime.start_workers(4);
+        assert_eq!(
+            runtime.status().unwrap().state,
+            EmbeddingRuntimeState::Disabled
+        );
         assert_eq!(runtime.status().unwrap().worker_count, 0);
         assert!(!runtime.drain_one().unwrap());
+    }
+
+    #[test]
+    fn unsupported_enabled_provider_is_failed_without_a_fallback() {
+        let storage = Arc::new(StorageEngine::open_temporary().unwrap());
+        let mut config = copperdb_config::resolve_per_database_config(
+            &copperdb_config::Config::default(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        config.embedding_enabled = true;
+        config.embedding_provider = "mock".to_string();
+        let runtime = EmbeddingRuntime::from_config(storage, &config);
+
+        let status = runtime.status().unwrap();
+        assert_eq!(status.state, EmbeddingRuntimeState::Failed);
+        assert_eq!(status.worker_count, 0);
+        assert!(status.backend.is_none());
+        assert!(status
+            .last_error
+            .unwrap()
+            .contains("unsupported embedding provider"));
     }
 
     #[test]
@@ -243,10 +526,134 @@ mod tests {
         let failing = EmbeddingRuntime::ready(
             Arc::clone(&storage),
             2,
-            Arc::new(TestEmbedder(Err(EmbedError::LocalModel("unavailable".to_string())))),
+            Arc::new(TestEmbedder(Err(EmbedError::LocalModel(
+                "unavailable".to_string(),
+            )))),
         );
         assert!(failing.drain_one().is_err());
         assert_eq!(storage.pending_embeddings_count().unwrap(), 1);
-        assert_eq!(failing.status().unwrap().state, EmbeddingRuntimeState::Degraded);
+        assert_eq!(
+            failing.status().unwrap().state,
+            EmbeddingRuntimeState::Degraded
+        );
     }
+
+    #[test]
+    fn failed_embeddings_are_dead_lettered_after_the_configured_attempt_limit() {
+        let storage = Arc::new(StorageEngine::open_temporary().unwrap());
+        storage.put_node_record(&node()).unwrap();
+        let runtime = EmbeddingRuntime::ready_with_max_attempts(
+            Arc::clone(&storage),
+            2,
+            2,
+            Arc::new(TestEmbedder(Err(EmbedError::LocalModel(
+                "unavailable".to_string(),
+            )))),
+        );
+
+        assert!(runtime.drain_one().is_err());
+        assert_eq!(runtime.status().unwrap().pending, 1);
+        assert!(runtime.drain_one().is_err());
+        let status = runtime.status().unwrap();
+        assert_eq!(status.pending, 0);
+        assert_eq!(status.dead_lettered, 1);
+        assert_eq!(
+            storage
+                .embedding_dead_letter("node-1")
+                .unwrap()
+                .unwrap()
+                .attempts,
+            2
+        );
+    }
+
+    #[test]
+    fn ready_runtime_worker_drains_and_stops_cleanly() {
+        let storage = Arc::new(StorageEngine::open_temporary().unwrap());
+        storage.put_node_record(&node()).unwrap();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let runtime = Arc::new(EmbeddingRuntime::ready(
+            Arc::clone(&storage),
+            2,
+            Arc::new(BlockingEmbedder {
+                started: started_sender,
+                release: Mutex::new(release_receiver),
+            }),
+        ));
+
+        runtime.start_workers(1);
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("embedding worker should start");
+        assert_eq!(runtime.status().unwrap().worker_count, 1);
+        release_sender.send(()).unwrap();
+        drop(runtime);
+
+        assert_eq!(storage.pending_embeddings_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn worker_shutdown_is_bounded_while_inference_is_blocked() {
+        let storage = Arc::new(StorageEngine::open_temporary().unwrap());
+        storage.put_node_record(&node()).unwrap();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let mut runtime = EmbeddingRuntime::ready(
+            Arc::clone(&storage),
+            2,
+            Arc::new(BlockingEmbedder {
+                started: started_sender,
+                release: Mutex::new(release_receiver),
+            }),
+        );
+        runtime.shutdown_timeout = Duration::ZERO;
+        let runtime = Arc::new(runtime);
+        runtime.start_workers(1);
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("embedding worker should start");
+
+        let started_at = Instant::now();
+        assert!(!runtime.shutdown_workers());
+        assert!(started_at.elapsed() < Duration::from_millis(100));
+        assert_eq!(
+            runtime.status().unwrap().state,
+            EmbeddingRuntimeState::Stopping
+        );
+
+        release_sender.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while runtime.status().unwrap().worker_count > 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(runtime.status().unwrap().worker_count, 0);
+    }
+}
+
+fn build_embedder(config: &EffectiveDatabaseConfig) -> Result<(Arc<dyn Embedder>, String), String> {
+    if config.embedding_provider != "local_gguf" {
+        return Err(format!(
+            "unsupported embedding provider {:?}; supported provider: local_gguf",
+            config.embedding_provider
+        ));
+    }
+    if config.embedding_model.trim().is_empty() {
+        return Err("local_gguf embedding provider requires a model path".to_string());
+    }
+    let model_path = Path::new(&config.embedding_model);
+    let model_name = model_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| "local_gguf model path must name a file".to_string())?;
+    let embedder = LocalGgufEmbedder::new(
+        model_name,
+        model_path.to_path_buf(),
+        config.embedding_dimensions,
+        None,
+    )
+    .map_err(|error| error.to_string())?;
+    let backend = embedder.backend().to_string();
+    Ok((Arc::new(embedder), backend))
 }

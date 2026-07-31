@@ -18,7 +18,12 @@ Resolve enabled, `startup|lazy` warming, model, dimensions, cache capacity, work
 
 - Complete: local GGUF required-symbol resolution now returns a typed loader error instead of panicking. Provider stats report the loader's CPU/GPU outcome and the latest embedding activity timestamp; warmup observes that shared timestamp rather than a startup snapshot.
 - Complete: engine-owned `EmbeddingRuntime` is created per database and is `Disabled` by default with zero workers. It reports `Disabled`, `Cold`, `Ready`, or `Degraded` status and provides an explicit one-item drain path for injected providers. Successful inference runs outside storage locks, writes typed managed embeddings durably, and clears the pending entry; failures retain pending work for recovery.
-- Open: provider construction, bounded background workers, full readiness states, retry/backoff/dead-letter handling, cancellation, shutdown, and event-driven re-embedding.
+- Complete: `local_gguf` is the explicitly supported configured provider. It is loaded at runtime through the shared `Embedder` interface and status reports the actual backend. Unsupported providers, missing model paths, and loader/model failures enter `Failed` without a substitute provider or worker.
+- Complete: effective per-database `COPPERDB_EMBEDDING_WORKERS` is bounded to at least one and defaults to one only after embedding is explicitly enabled. Ready runtimes start that many claim-aware workers; disabled and failed runtimes start none. Each worker preserves pending work until its typed write succeeds, retries failed work after a short pause, and joins during runtime teardown.
+- Complete: per-database retry policy is configurable through `COPPERDB_EMBEDDING_MAX_ATTEMPTS` and `COPPERDB_EMBEDDING_RETRY_BACKOFF_MS`. Failure attempts are durable across restarts. Exhausted work moves to a durable dead-letter record, is excluded from automatic workers, appears in runtime status, and can only be retried through explicit pending-queue re-enqueueing.
+- Complete: `COPPERDB_EMBEDDING_SHUTDOWN_TIMEOUT_MS` bounds runtime teardown. Workers observe shutdown cooperatively between calls; completed workers join, while workers still inside an uninterruptible model call detach after the deadline so database teardown does not block indefinitely.
+- Complete: explicit `request_node_reembedding` queues a durable forced managed re-embedding operation. It preserves external named vectors, clears only CopperDB-managed chunk embeddings, survives queue refresh, and clears the force marker only after a successful typed embedding write.
+- Open: full warming behavior, cancellation of queued-but-unclaimed work, and automatic re-embedding policies for source-property or model-generation changes.
 
 ## Phases
 

@@ -3342,6 +3342,103 @@ fn storage_engine_pending_embeddings_index_tracks_create_mark_refresh_and_delete
 }
 
 #[test]
+fn storage_engine_embedding_claims_exclude_duplicate_work_and_release_for_retry() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let mut node = sample_node("n1", &["File"]);
+    node.properties
+        .insert("content".to_string(), json!("pending"));
+    engine.put_node_record(&node).unwrap();
+
+    assert_eq!(
+        engine.claim_node_needing_embedding().unwrap().unwrap().id,
+        "n1"
+    );
+    assert!(engine.claim_node_needing_embedding().unwrap().is_none());
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
+
+    engine.release_embedding_claim("n1");
+    assert_eq!(
+        engine.claim_node_needing_embedding().unwrap().unwrap().id,
+        "n1"
+    );
+}
+
+#[test]
+fn storage_engine_embedding_dead_letter_is_durable_and_explicitly_requeueable() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let mut node = sample_node("n1", &["File"]);
+    node.properties
+        .insert("content".to_string(), json!("pending"));
+    engine.put_node_record(&node).unwrap();
+
+    assert_eq!(
+        engine
+            .record_embedding_failure("n1", "transient", 2, 100)
+            .unwrap(),
+        EmbeddingFailureDisposition::Retry
+    );
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
+    assert!(engine.embedding_dead_letter("n1").unwrap().is_none());
+
+    assert_eq!(
+        engine
+            .record_embedding_failure("n1", "terminal", 2, 101)
+            .unwrap(),
+        EmbeddingFailureDisposition::DeadLettered
+    );
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 0);
+    let dead_letter = engine.embedding_dead_letter("n1").unwrap().unwrap();
+    assert_eq!(dead_letter.attempts, 2);
+    assert_eq!(dead_letter.last_error, "terminal");
+    assert_eq!(engine.embedding_dead_letter_count().unwrap(), 1);
+
+    engine.add_to_pending_embeddings("n1").unwrap();
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
+    assert!(engine.embedding_dead_letter("n1").unwrap().is_none());
+}
+
+#[test]
+fn storage_engine_request_reembedding_preserves_named_vectors_and_forces_queueing() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let mut node = sample_node("n1", &["File"]);
+    node.properties
+        .insert("content".to_string(), json!("pending"));
+    node.named_embeddings
+        .insert("external".to_string(), vec![0.1, 0.2]);
+    node.set_managed_chunk_embeddings(
+        vec![vec![0.3, 0.4]],
+        Some("old-model".to_string()),
+        Some("1".to_string()),
+    );
+    engine.put_node_record(&node).unwrap();
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 0);
+
+    assert!(engine.request_reembedding("n1").unwrap());
+    let queued = engine.get_node_record("n1").unwrap().unwrap();
+    assert!(queued.chunk_embeddings.is_empty());
+    assert_eq!(
+        queued.named_embeddings.get("external"),
+        Some(&vec![0.1, 0.2])
+    );
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
+    assert_eq!(
+        engine.claim_node_needing_embedding().unwrap().unwrap().id,
+        "n1"
+    );
+
+    let mut update = queued;
+    update.set_managed_chunk_embeddings(
+        vec![vec![0.5, 0.6]],
+        Some("new-model".to_string()),
+        Some("2".to_string()),
+    );
+    engine.update_node_embedding(&update).unwrap();
+    engine.release_embedding_claim("n1");
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 0);
+    assert!(engine.claim_node_needing_embedding().unwrap().is_none());
+}
+
+#[test]
 fn storage_engine_add_to_pending_embeddings_skips_embedded_or_missing_nodes() {
     let engine = StorageEngine::open_temporary().unwrap();
 
@@ -3391,7 +3488,7 @@ fn storage_engine_clear_all_embeddings_requeues_nodes_for_regeneration() {
 
     let cleared = engine.clear_all_embeddings().unwrap();
     assert_eq!(cleared, 2);
-    assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 2);
 
     let first_after = engine.get_node_record("n1").unwrap().unwrap();
     assert_eq!(

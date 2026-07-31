@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::EmbedError;
+use crate::{EmbedError, Embedder, Embedding};
 use copperdb_localllm::{GgufConfig, LocalModel};
 
 /// Local GGUF embedder matching NornicDB's `LocalGGUFEmbedder`.
@@ -213,5 +213,29 @@ pub struct EmbedStats {
 impl Drop for LocalGgufEmbedder {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+#[async_trait::async_trait]
+impl Embedder for LocalGgufEmbedder {
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Embedding>, EmbedError> {
+        self.embed_batch_blocking(texts)
+    }
+
+    fn embed_batch_blocking(&self, texts: &[String]) -> Result<Vec<Embedding>, EmbedError> {
+        texts
+            .iter()
+            .map(|text| {
+                self.embed_with_recovery(text).map(|vector| Embedding {
+                    text: text.clone(),
+                    vector,
+                    model: self.model_name.clone(),
+                })
+            })
+            .collect()
+    }
+
+    fn dimensions(&self) -> usize {
+        self.model.dimensions()
     }
 }
