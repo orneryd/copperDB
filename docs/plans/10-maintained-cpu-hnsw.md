@@ -42,6 +42,8 @@ Store normalized vectors in a versioned append-only file with ID-to-offset metad
 
 Test CRUD, dimensions, zero vectors, concurrency, deterministic ties, cancellation, recall, no query-triggered warming, restart/corruption/version mismatch, tombstones, shutdown, and node/relationship procedures. Benchmark 1k to 1m vectors at 128/384/1,024 dimensions; report recall@k, p50/p99, QPS, visited nodes, memory/index bytes, build/update/load time.
 
+Progress: `cargo bench -p copperdb-vectorspace --bench hnsw` now calibrates deterministic recall@10, average visited nodes, and raw vector bytes before measuring HNSW and exact-cosine query latency at 128/384/1,024 dimensions. It defaults to 10,000 vectors; set `COPPERDB_HNSW_BENCH_VECTORS` to 1,000 through 1,000,000 for the required scale sweep and `COPPERDB_HNSW_BENCH_DIMENSIONS` to a comma-separated dimension list for a targeted run. Graph-memory, build/update/load-time, and engine-level observability measurements remain open.
+
 Initial gate: recall@10 at least 0.95 on seeded representative sets and a clear latency advantage by 10k vectors without unbounded tombstones.
 
 ## Definition Of Done
