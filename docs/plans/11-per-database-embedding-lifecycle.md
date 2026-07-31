@@ -16,7 +16,9 @@ Resolve enabled, `startup|lazy` warming, model, dimensions, cache capacity, work
 
 ## Progress
 
-- Complete: local GGUF required-symbol resolution now returns a typed loader error instead of panicking. Provider stats report the loader's CPU/GPU outcome and the latest embedding activity timestamp; warmup observes that shared timestamp rather than a startup snapshot. The per-database runtime, queue workers, and readiness state machine remain open.
+- Complete: local GGUF required-symbol resolution now returns a typed loader error instead of panicking. Provider stats report the loader's CPU/GPU outcome and the latest embedding activity timestamp; warmup observes that shared timestamp rather than a startup snapshot.
+- Complete: engine-owned `EmbeddingRuntime` is created per database and is `Disabled` by default with zero workers. It reports `Disabled`, `Cold`, `Ready`, or `Degraded` status and provides an explicit one-item drain path for injected providers. Successful inference runs outside storage locks, writes typed managed embeddings durably, and clears the pending entry; failures retain pending work for recovery.
+- Open: provider construction, bounded background workers, full readiness states, retry/backoff/dead-letter handling, cancellation, shutdown, and event-driven re-embedding.
 
 ## Phases
 

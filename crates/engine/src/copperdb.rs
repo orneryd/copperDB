@@ -73,6 +73,16 @@ impl CopperDb {
         self.vector_indexes.status(index_name)
     }
 
+    /// Return the per-database embedding runtime's lifecycle status.
+    pub fn embedding_runtime_status(&self) -> Result<EmbeddingRuntimeStatus, CopperDbError> {
+        self.embedding_runtime.status()
+    }
+
+    /// Process one pending embedding without starting a background worker.
+    pub fn drain_embedding_queue_once(&self) -> Result<bool, CopperDbError> {
+        self.embedding_runtime.drain_one()
+    }
+
     pub fn search_fulltext_nodes(
         &self,
         label: &str,
@@ -248,6 +258,10 @@ impl CopperDb {
         config: DatabaseConfig,
     ) -> Result<Self, CopperDbError> {
         let vector_indexes = Arc::new(VectorIndexManager::build(storage.as_ref())?);
+        let embedding_runtime = Arc::new(EmbeddingRuntime::from_config(
+            Arc::clone(&storage),
+            &config.runtime_config,
+        ));
         let eval = EvalEngine::new_with_vector_indexes_and_artifact_refresh(
             Arc::clone(&storage),
             Some(vector_indexes.registry()),
@@ -260,6 +274,7 @@ impl CopperDb {
             config,
             storage,
             vector_indexes,
+            embedding_runtime,
             eval,
             tx_manager: Arc::new(TransactionManager::new()),
             query_cache: Arc::new(QueryCache::new(

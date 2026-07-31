@@ -38,6 +38,7 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
+use crate::embedding_runtime::{EmbeddingRuntime, EmbeddingRuntimeStatus};
 use crate::vector_indexes::VectorIndexManager;
 use copperdb_audit::{AuditConfig, AuditLog, Event, EventType};
 use copperdb_cache::QueryCache;
@@ -334,6 +335,7 @@ pub struct CopperDb {
     config: DatabaseConfig,
     storage: Arc<StorageEngine>,
     vector_indexes: Arc<VectorIndexManager>,
+    embedding_runtime: Arc<EmbeddingRuntime>,
     eval: EvalEngine,
     tx_manager: Arc<TransactionManager>,
     query_cache: Arc<QueryCache<copperdb_cypher::Query>>,
@@ -342,6 +344,7 @@ pub struct CopperDb {
 }
 
 mod copperdb;
+mod embedding_runtime;
 mod vector_indexes;
 
 // ─── Legacy copperdb (full-server async variant) ──────────────────────────────
