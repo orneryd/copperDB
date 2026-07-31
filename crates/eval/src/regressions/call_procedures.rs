@@ -70,7 +70,7 @@
         engine
             .execute(
                 &parser
-                    .parse("CREATE VECTOR INDEX title_idx FOR (n:Doc) ON (n.title)")
+                    .parse("CREATE VECTOR INDEX title_idx FOR (n:Doc) ON (n.title) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}")
                     .unwrap(),
                 &HashMap::new(),
             )
@@ -157,7 +157,7 @@
         engine
             .execute(
                 &parser
-                    .parse("CREATE VECTOR INDEX title_idx FOR (n:Doc) ON (n.title)")
+                    .parse("CREATE VECTOR INDEX title_idx FOR (n:Doc) ON (n.title) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}")
                     .unwrap(),
                 &HashMap::new(),
             )
@@ -214,7 +214,7 @@
         engine
             .execute(
                 &parser
-                    .parse("CREATE VECTOR INDEX title_idx FOR (n:Doc) ON (n.title)")
+                    .parse("CREATE VECTOR INDEX title_idx FOR (n:Doc) ON (n.title) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}")
                     .unwrap(),
                 &HashMap::new(),
             )
@@ -271,7 +271,7 @@
         engine
             .execute(
                 &parser
-                    .parse("CREATE VECTOR INDEX title_idx FOR (n:Doc) ON (n.title)")
+                    .parse("CREATE VECTOR INDEX title_idx FOR (n:Doc) ON (n.title) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}")
                     .unwrap(),
                 &HashMap::new(),
             )
@@ -331,7 +331,7 @@
         engine
             .execute(
                 &parser
-                    .parse("CREATE VECTOR INDEX title_idx FOR (n:Doc) ON (n.title)")
+                    .parse("CREATE VECTOR INDEX title_idx FOR (n:Doc) ON (n.title) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}")
                     .unwrap(),
                 &HashMap::new(),
             )

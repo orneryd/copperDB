@@ -1,6 +1,6 @@
 # 10: Maintained CPU HNSW
 
-Status: planned. Priority: P1. Owners: `vectorspace`, `search`, `storage`, `engine`, `eval`.
+Status: in progress. Priority: P1. Owners: `vectorspace`, `search`, `storage`, `engine`, `eval`.
 
 ## Objective
 
@@ -9,6 +9,15 @@ Replace full-vector scans mislabeled as HNSW with an engine-owned, maintained, p
 ## Current Evidence
 
 `VectorSpace::knn` scores and sorts every vector. Vector procedures scan storage records. Engine semantic/hybrid routes are unimplemented. NornicDB references include HNSW, vector file store, search services, readiness, passive-write, exact-candidate, and shutdown fixes listed in the consolidated audit.
+
+## Progress
+
+- Complete: `vectorspace` now reports its current full-scan implementation as `ExactCosine` rather than HNSW, with deterministic ID tie-breaking. This is the explicit exact oracle/fallback baseline for Phase 1; no path currently claims ANN traversal.
+- Complete: `vectorspace::HnswIndex` now owns deterministic in-memory graph construction and traversal. Its seeded test compares a query result with the exact oracle and verifies that the graph query visits fewer candidates than the corpus. It is not yet wired to stored vector indexes, mutations, or persistence.
+- Complete: the in-memory index now supports tombstone deletion, deterministic upsert rebuilding, and mutation-triggered graph compaction after a bounded tombstone threshold. Query reads do not rebuild or mutate the graph. Durable mutation events and index lifecycle ownership remain open.
+- Complete: `vectorspace::HnswRegistry` provides a thread-safe named-index service with explicit HNSW strategy, readiness, and mutation generation. Empty-index queries preserve that generation, proving that reads do not trigger warming. Engine ownership, storage event fanout, and procedure routing remain open.
+- Complete: storage event registrations now fan out to every listener rather than replacing the previous listener. This enables a future engine-owned vector maintainer to coexist with other post-commit consumers; vector lifecycle wiring and schema-change handling remain open.
+- Complete: `CopperDb` now builds declared node vector indexes with explicit dimensions during startup, updates them from post-commit node events, and routes `db.index.vector.queryNodes` through registry-owned candidate lookup plus ID hydration. Cosine uses HNSW traversal; Euclidean uses an explicit exact strategy and is never reported as HNSW. The evaluator no longer performs an all-record fallback scan. Relationship indexes, persistence, and broader lifecycle work remain open.
 
 ## Runtime Contract
 

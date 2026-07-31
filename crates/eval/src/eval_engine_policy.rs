@@ -1376,12 +1376,6 @@ impl EvalEngine {
             )));
         }
 
-        let property = index.properties.first().ok_or_else(|| {
-            EvalError::ExecutionError(format!(
-                "vector index {index_name} is missing a target property"
-            ))
-        })?;
-
         // Load persisted index options (vector.dimensions, vector.similarity_function, etc.)
         let index_options = self
             .storage
@@ -1398,45 +1392,27 @@ impl EvalEngine {
             }
         }
 
-        // Choose similarity function based on index options
-        let similarity_fn: fn(&[f32], &[f32]) -> Option<f32> =
-            match resolve_similarity_function(&index_options) {
-                Some("euclidean") => euclidean_similarity,
-                _ => cosine_similarity,
+        let vector_indexes = self.vector_indexes.as_ref().ok_or_else(|| {
+            EvalError::ExecutionError(format!(
+                "vector index {index_name} is unavailable because this evaluator has no engine-owned vector index registry"
+            ))
+        })?;
+        let (matches, _) = vector_indexes
+            .knn(&index_name, &query_vector, limit)
+            .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
+        let mut rows = Vec::with_capacity(matches.len());
+        for (id, score) in matches {
+            let Some(node) = self.storage.get_node_record(&id)? else {
+                continue;
             };
-
-        let mut ranked = if index.label.is_empty() {
-            self.storage.all_node_records()?
-        } else {
-            self.storage.get_nodes_by_label(&index.label)?
+            let mut row = Row::new();
+            row.insert(
+                "node".to_string(),
+                Value::Object(node_record_to_props(&node).into_iter().collect()),
+            );
+            row.insert("score".to_string(), Value::from(score as f64));
+            rows.push(row);
         }
-        .into_iter()
-        .filter_map(|node| {
-            let vector = node_vector_for_property(&node, property)?;
-            let score = similarity_fn(&query_vector, &vector)?;
-            Some((node, score))
-        })
-        .collect::<Vec<_>>();
-
-        ranked.sort_by(|(left_node, left_score), (right_node, right_score)| {
-            right_score
-                .total_cmp(left_score)
-                .then(left_node.id.cmp(&right_node.id))
-        });
-        ranked.truncate(limit);
-
-        let rows = ranked
-            .into_iter()
-            .map(|(node, score)| {
-                let mut row = Row::new();
-                row.insert(
-                    "node".to_string(),
-                    Value::Object(node_record_to_props(&node).into_iter().collect()),
-                );
-                row.insert("score".to_string(), Value::from(score as f64));
-                row
-            })
-            .collect();
 
         Ok(EvalResult {
             columns: vec!["node".to_string(), "score".to_string()],
@@ -1506,12 +1482,12 @@ impl EvalEngine {
             for (position, (node, score)) in self
                 .storage
                 .search_fulltext_nodes_by_properties_with_cancellation(
-                &index.label,
-                &index.properties,
-                &candidate_query,
-                fetch_limit,
-                request_context.cancellation(),
-            )?
+                    &index.label,
+                    &index.properties,
+                    &candidate_query,
+                    fetch_limit,
+                    request_context.cancellation(),
+                )?
                 .into_iter()
                 .enumerate()
             {
@@ -1660,11 +1636,11 @@ impl EvalEngine {
             for (position, edge) in self
                 .storage
                 .search_fulltext_relationships_by_properties_with_cancellation(
-                &index.label,
-                &index.properties,
-                &candidate_terms,
-                request_context.cancellation(),
-            )?
+                    &index.label,
+                    &index.properties,
+                    &candidate_terms,
+                    request_context.cancellation(),
+                )?
                 .into_iter()
                 .enumerate()
             {
@@ -1687,7 +1663,9 @@ impl EvalEngine {
                 if let Some(score) = score {
                     results
                         .entry(edge.id.clone())
-                        .and_modify(|(_, existing_score)| *existing_score = existing_score.max(score))
+                        .and_modify(|(_, existing_score)| {
+                            *existing_score = existing_score.max(score)
+                        })
                         .or_insert((edge, score));
                 }
             }
@@ -1695,9 +1673,8 @@ impl EvalEngine {
 
         request_context.check_active()?;
         let mut results: Vec<(EdgeRecord, f64)> = results.into_values().collect();
-        results.sort_by(|(a, a_score), (b, b_score)| {
-            b_score.total_cmp(a_score).then(a.id.cmp(&b.id))
-        });
+        results
+            .sort_by(|(a, a_score), (b, b_score)| b_score.total_cmp(a_score).then(a.id.cmp(&b.id)));
         request_context.check_active()?;
 
         if options.skip > 0 {
@@ -2908,7 +2885,7 @@ fn call_arg_fulltext_options(value: Option<&Value>) -> Result<FulltextCallOption
     Ok(FulltextCallOptions { skip, limit })
 }
 
-fn node_vector_for_property(node: &NodeRecord, property: &str) -> Option<Vec<f32>> {
+pub(super) fn vector_from_node(node: &NodeRecord, property: &str) -> Option<Vec<f32>> {
     if let Some(vector) = node
         .named_embeddings
         .get(property)

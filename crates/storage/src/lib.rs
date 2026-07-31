@@ -278,6 +278,8 @@ pub enum StorageError {
     SnapshotEncryptionMismatch,
     #[error("storage snapshot restore target must be an empty directory: {0}")]
     SnapshotRestoreTargetNotEmpty(String),
+    #[error("offline staging target must be an empty directory: {0}")]
+    OfflineStagingTargetNotEmpty(String),
     #[error("storage snapshot contains duplicate key in {keyspace:?}")]
     SnapshotDuplicateKey { keyspace: StorageSnapshotKeyspace },
     #[error("key not found: {0}")]
@@ -678,8 +680,7 @@ impl WAL {
     fn batch_sync_due(&self) -> bool {
         match self.config.sync_mode {
             WALSyncMode::Batch { interval_ms } => {
-                self.last_sync_at.lock().elapsed()
-                    >= std::time::Duration::from_millis(interval_ms)
+                self.last_sync_at.lock().elapsed() >= std::time::Duration::from_millis(interval_ms)
             }
             WALSyncMode::NoSync | WALSyncMode::Immediate => false,
         }
@@ -1238,16 +1239,24 @@ impl SchemaManager {
         let applicable = constraints
             .values()
             .map(|constraint| (None, constraint))
-            .chain(namespace_constraints.iter().filter_map(|((scope, _), constraint)| {
-                (Some(scope.as_str()) == namespace).then_some((Some(scope.as_str()), constraint))
-            }));
+            .chain(
+                namespace_constraints
+                    .iter()
+                    .filter_map(|((scope, _), constraint)| {
+                        (Some(scope.as_str()) == namespace)
+                            .then_some((Some(scope.as_str()), constraint))
+                    }),
+            );
         for (constraint_namespace, constraint) in applicable.filter(|(_, constraint)| {
             constraint.entity_type == ConstraintEntityType::Node && constraint.label == label
         }) {
             match constraint.constraint_type {
                 ConstraintType::Exists => {
                     for property in &constraint.properties {
-                        if !properties.get(property).is_some_and(|value| !value.is_null()) {
+                        if !properties
+                            .get(property)
+                            .is_some_and(|value| !value.is_null())
+                        {
                             return Err(StorageError::ConstraintMissingProperty {
                                 constraint: constraint.name.clone(),
                                 property: property.clone(),
@@ -1356,9 +1365,14 @@ impl SchemaManager {
         let applicable = constraints
             .values()
             .map(|constraint| (None, constraint))
-            .chain(namespace_constraints.iter().filter_map(|((scope, _), constraint)| {
-                (Some(scope.as_str()) == namespace).then_some((Some(scope.as_str()), constraint))
-            }));
+            .chain(
+                namespace_constraints
+                    .iter()
+                    .filter_map(|((scope, _), constraint)| {
+                        (Some(scope.as_str()) == namespace)
+                            .then_some((Some(scope.as_str()), constraint))
+                    }),
+            );
         for (constraint_namespace, constraint) in applicable.filter(|(_, constraint)| {
             constraint.entity_type == ConstraintEntityType::Relationship
                 && constraint.label == edge_type
@@ -1366,7 +1380,10 @@ impl SchemaManager {
             match constraint.constraint_type {
                 ConstraintType::Exists => {
                     for property in &constraint.properties {
-                        if !properties.get(property).is_some_and(|value| !value.is_null()) {
+                        if !properties
+                            .get(property)
+                            .is_some_and(|value| !value.is_null())
+                        {
                             return Err(StorageError::ConstraintMissingProperty {
                                 constraint: constraint.name.clone(),
                                 property: property.clone(),
@@ -1395,11 +1412,11 @@ impl SchemaManager {
                         next_unique_keys.insert(UniqueValueKey {
                             scope: constraint_namespace
                                 .map(|scope| {
-                                    format!("namespace:{scope}:relationship:{start_node}:{end_node}")
+                                    format!(
+                                        "namespace:{scope}:relationship:{start_node}:{end_node}"
+                                    )
                                 })
-                                .unwrap_or_else(|| {
-                                    format!("relationship:{start_node}:{end_node}")
-                                }),
+                                .unwrap_or_else(|| format!("relationship:{start_node}:{end_node}")),
                             label: edge_type.to_string(),
                             properties: constraint.properties.clone(),
                             values,
@@ -1457,7 +1474,9 @@ impl SchemaManager {
                 **owner = None;
             }
         }
-        self.edge_unique_keys.lock().insert(edge_key, next_unique_keys);
+        self.edge_unique_keys
+            .lock()
+            .insert(edge_key, next_unique_keys);
         Ok(())
     }
 
@@ -1479,7 +1498,8 @@ impl SchemaManager {
     fn node_lock_for(&self, node_key: &(String, String)) -> EntityLockLease<'_> {
         let mut locks = self.node_locks.lock();
         let state = Arc::clone(
-            locks.entry(node_key.clone())
+            locks
+                .entry(node_key.clone())
                 .or_insert_with(|| Arc::new(EntityLockState::default())),
         );
         state.users.fetch_add(1, Ordering::Acquire);
@@ -1510,7 +1530,8 @@ impl SchemaManager {
     fn edge_lock_for(&self, edge_key: &(String, String)) -> EntityLockLease<'_> {
         let mut locks = self.edge_locks.lock();
         let state = Arc::clone(
-            locks.entry(edge_key.clone())
+            locks
+                .entry(edge_key.clone())
                 .or_insert_with(|| Arc::new(EntityLockState::default())),
         );
         state.users.fetch_add(1, Ordering::Acquire);
@@ -1529,7 +1550,9 @@ impl SchemaManager {
         let mut states = self.unique_values.lock();
         if state.users.load(Ordering::Acquire) == 0
             && state.owner.lock().is_none()
-            && states.get(key).is_some_and(|current| Arc::ptr_eq(current, state))
+            && states
+                .get(key)
+                .is_some_and(|current| Arc::ptr_eq(current, state))
         {
             states.remove(key);
         }
@@ -1553,7 +1576,9 @@ impl SchemaManager {
         }
         let mut entries = registry.lock();
         if state.users.load(Ordering::Acquire) == 0
-            && entries.get(key).is_some_and(|current| Arc::ptr_eq(current, state))
+            && entries
+                .get(key)
+                .is_some_and(|current| Arc::ptr_eq(current, state))
         {
             entries.remove(key);
         }
@@ -1758,12 +1783,12 @@ pub struct StorageEngine {
     encryption: Option<StorageEncryption>,
     temp_dir: Option<tempfile::TempDir>,
     // Event callbacks
-    on_node_created_cb: RwLock<Option<NodeEventCallback>>,
-    on_node_updated_cb: RwLock<Option<NodeEventCallback>>,
-    on_node_deleted_cb: RwLock<Option<NodeDeleteCallback>>,
-    on_edge_created_cb: RwLock<Option<EdgeEventCallback>>,
-    on_edge_updated_cb: RwLock<Option<EdgeEventCallback>>,
-    on_edge_deleted_cb: RwLock<Option<EdgeDeleteCallback>>,
+    on_node_created_cb: RwLock<Vec<NodeEventCallback>>,
+    on_node_updated_cb: RwLock<Vec<NodeEventCallback>>,
+    on_node_deleted_cb: RwLock<Vec<NodeDeleteCallback>>,
+    on_edge_created_cb: RwLock<Vec<EdgeEventCallback>>,
+    on_edge_updated_cb: RwLock<Vec<EdgeEventCallback>>,
+    on_edge_deleted_cb: RwLock<Vec<EdgeDeleteCallback>>,
 }
 
 /// A storage-owned transaction with snapshot reads and a private write overlay.
@@ -1815,6 +1840,53 @@ struct StorageEncryption {
     key_uri: String,
 }
 
+/// A sibling-directory staging database for offline import workflows.
+///
+/// The staged engine is a normal durable storage engine. Dropping an
+/// unfinished handle removes its staging directory; `promote` atomically
+/// renames a finalized staging directory into an empty target path.
+#[derive(Debug)]
+pub struct OfflineStorageStaging {
+    target: PathBuf,
+    staging: PathBuf,
+    engine: Option<StorageEngine>,
+    promoted: bool,
+}
+
+impl OfflineStorageStaging {
+    pub fn engine(&self) -> &StorageEngine {
+        self.engine
+            .as_ref()
+            .expect("offline staging engine is available before promotion")
+    }
+
+    pub fn staging_path(&self) -> &Path {
+        &self.staging
+    }
+
+    pub fn promote(mut self) -> Result<(), StorageError> {
+        drop(self.engine.take());
+        if self.target.exists() {
+            fs::remove_dir(&self.target)?;
+        }
+        if let Err(error) = fs::rename(&self.staging, &self.target) {
+            let _ = fs::remove_dir_all(&self.staging);
+            return Err(StorageError::Io(error));
+        }
+        self.promoted = true;
+        Ok(())
+    }
+}
+
+impl Drop for OfflineStorageStaging {
+    fn drop(&mut self) {
+        if !self.promoted {
+            drop(self.engine.take());
+            let _ = fs::remove_dir_all(&self.staging);
+        }
+    }
+}
+
 impl fmt::Debug for StorageEncryption {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StorageEncryption")
@@ -1859,6 +1931,38 @@ impl StorageEncryption {
 impl StorageEngine {
     pub fn for_namespace(&self, namespace: impl Into<String>) -> NamespacedStorageEngine<'_> {
         NamespacedStorageEngine::new(self, namespace)
+    }
+
+    /// Create a durable sibling staging database for an offline import target.
+    ///
+    /// Existing targets must be empty. The caller writes to `engine()` and
+    /// calls `promote()` only after all import validation and index work pass.
+    pub fn start_offline_staging(
+        target: impl AsRef<Path>,
+    ) -> Result<OfflineStorageStaging, StorageError> {
+        let target = target.as_ref().to_path_buf();
+        if target.exists() {
+            let metadata = fs::metadata(&target)?;
+            if !metadata.is_dir() || fs::read_dir(&target)?.next().is_some() {
+                return Err(StorageError::OfflineStagingTargetNotEmpty(
+                    target.display().to_string(),
+                ));
+            }
+        }
+        let parent = target.parent().unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let name = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("storage");
+        let staging = parent.join(format!(".{name}.import-staging-{}", Uuid::new_v4()));
+        let engine = Self::open(&staging)?;
+        Ok(OfflineStorageStaging {
+            target,
+            staging,
+            engine: Some(engine),
+            promoted: false,
+        })
     }
 
     /// Open (or create) a storage engine at the given path.
@@ -1948,7 +2052,10 @@ impl StorageEngine {
         let target = path.as_ref();
         let parent = target.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(parent)?;
-        let name = target.file_name().and_then(|name| name.to_str()).unwrap_or("storage");
+        let name = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("storage");
         let staging = parent.join(format!(".{name}.snapshot-staging-{}", Uuid::new_v4()));
         let backup = parent.join(format!(".{name}.snapshot-backup-{}", Uuid::new_v4()));
 
@@ -1991,63 +2098,61 @@ impl StorageEngine {
         Ok(())
     }
 
-
-fn read_storage_snapshot<R: Read>(reader: &mut R) -> Result<StorageSnapshot, StorageError> {
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes)?;
-    let snapshot: StorageSnapshot = rmp_serde::from_slice(&bytes)?;
-    if snapshot.format_version != STORAGE_SNAPSHOT_FORMAT_VERSION {
-        return Err(StorageError::UnsupportedSnapshotFormatVersion {
-            expected: STORAGE_SNAPSHOT_FORMAT_VERSION,
-            actual: snapshot.format_version,
-        });
-    }
-    if snapshot.storage_layout_version != STORAGE_LAYOUT_VERSION {
-        return Err(StorageError::SnapshotLayoutVersionMismatch {
-            expected: STORAGE_LAYOUT_VERSION,
-            actual: snapshot.storage_layout_version,
-        });
-    }
-    let mut seen = BTreeSet::new();
-    for entry in &snapshot.entries {
-        if !seen.insert((entry.keyspace, entry.key.clone())) {
-            return Err(StorageError::SnapshotDuplicateKey {
-                keyspace: entry.keyspace,
+    fn read_storage_snapshot<R: Read>(reader: &mut R) -> Result<StorageSnapshot, StorageError> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        let snapshot: StorageSnapshot = rmp_serde::from_slice(&bytes)?;
+        if snapshot.format_version != STORAGE_SNAPSHOT_FORMAT_VERSION {
+            return Err(StorageError::UnsupportedSnapshotFormatVersion {
+                expected: STORAGE_SNAPSHOT_FORMAT_VERSION,
+                actual: snapshot.format_version,
             });
         }
+        if snapshot.storage_layout_version != STORAGE_LAYOUT_VERSION {
+            return Err(StorageError::SnapshotLayoutVersionMismatch {
+                expected: STORAGE_LAYOUT_VERSION,
+                actual: snapshot.storage_layout_version,
+            });
+        }
+        let mut seen = BTreeSet::new();
+        for entry in &snapshot.entries {
+            if !seen.insert((entry.keyspace, entry.key.clone())) {
+                return Err(StorageError::SnapshotDuplicateKey {
+                    keyspace: entry.keyspace,
+                });
+            }
+        }
+        Ok(snapshot)
     }
-    Ok(snapshot)
-}
 
-fn ensure_empty_snapshot_restore_target(path: &Path) -> Result<(), StorageError> {
-    if path.exists() && fs::read_dir(path)?.next().is_some() {
-        return Err(StorageError::SnapshotRestoreTargetNotEmpty(
-            path.display().to_string(),
-        ));
+    fn ensure_empty_snapshot_restore_target(path: &Path) -> Result<(), StorageError> {
+        if path.exists() && fs::read_dir(path)?.next().is_some() {
+            return Err(StorageError::SnapshotRestoreTargetNotEmpty(
+                path.display().to_string(),
+            ));
+        }
+        Ok(())
     }
-    Ok(())
-}
 
-fn install_storage_snapshot_entries(
-    engine: &StorageEngine,
-    snapshot: StorageSnapshot,
-) -> Result<(), StorageError> {
-    for entry in snapshot.entries {
-        let target = match entry.keyspace {
-            StorageSnapshotKeyspace::Meta => &engine.meta,
-            StorageSnapshotKeyspace::Nodes => &engine.nodes,
-            StorageSnapshotKeyspace::Edges => &engine.edges,
-            StorageSnapshotKeyspace::Indexes => &engine.indexes,
-        };
-        target.fjall_insert(entry.key, entry.value)?;
+    fn install_storage_snapshot_entries(
+        engine: &StorageEngine,
+        snapshot: StorageSnapshot,
+    ) -> Result<(), StorageError> {
+        for entry in snapshot.entries {
+            let target = match entry.keyspace {
+                StorageSnapshotKeyspace::Meta => &engine.meta,
+                StorageSnapshotKeyspace::Nodes => &engine.nodes,
+                StorageSnapshotKeyspace::Edges => &engine.edges,
+                StorageSnapshotKeyspace::Indexes => &engine.indexes,
+            };
+            target.fjall_insert(entry.key, entry.value)?;
+        }
+        engine
+            .meta
+            .fjall_insert(META_WAL_APPLIED_SEQUENCE_KEY, rmp_serde::to_vec(&0_u64)?)?;
+        engine.db.persist(fjall::PersistMode::SyncAll)?;
+        Ok(())
     }
-    engine.meta.fjall_insert(
-        META_WAL_APPLIED_SEQUENCE_KEY,
-        rmp_serde::to_vec(&0_u64)?,
-    )?;
-    engine.db.persist(fjall::PersistMode::SyncAll)?;
-    Ok(())
-}
     /// Discard a corrupt WAL only when Fjall has already applied every entry.
     ///
     /// This deliberately refuses to truncate a suffix that could contain
@@ -2074,7 +2179,8 @@ fn install_storage_snapshot_entries(
         let db = Database::open(fjall::Config::new(path)).map_err(StorageError::Fjall)?;
         let meta = db.keyspace("meta", KeyspaceCreateOptions::default)?;
         let applied_sequence = wal_applied_sequence_from_meta(&meta)?;
-        let wal = match WAL::open_unverified(path.join(STORAGE_WAL_FILENAME), WALConfig::default()) {
+        let wal = match WAL::open_unverified(path.join(STORAGE_WAL_FILENAME), WALConfig::default())
+        {
             Ok(wal) => wal,
             Err(StorageError::WalMissingOrInvalidTrailer) => {
                 return Ok(WALIntegrityStatus::Malformed { applied_sequence });
@@ -2157,12 +2263,12 @@ fn install_storage_snapshot_entries(
             index_schema_generation: AtomicU64::new(0),
             encryption: None,
             temp_dir: Some(temp_dir),
-            on_node_created_cb: RwLock::new(None),
-            on_node_updated_cb: RwLock::new(None),
-            on_node_deleted_cb: RwLock::new(None),
-            on_edge_created_cb: RwLock::new(None),
-            on_edge_updated_cb: RwLock::new(None),
-            on_edge_deleted_cb: RwLock::new(None),
+            on_node_created_cb: RwLock::new(Vec::new()),
+            on_node_updated_cb: RwLock::new(Vec::new()),
+            on_node_deleted_cb: RwLock::new(Vec::new()),
+            on_edge_created_cb: RwLock::new(Vec::new()),
+            on_edge_updated_cb: RwLock::new(Vec::new()),
+            on_edge_deleted_cb: RwLock::new(Vec::new()),
         };
         engine.ensure_layout_manifest()?;
         engine.ensure_encryption_manifest()?;
@@ -2202,12 +2308,12 @@ fn install_storage_snapshot_entries(
             index_schema_generation: AtomicU64::new(0),
             encryption,
             temp_dir: None,
-            on_node_created_cb: RwLock::new(None),
-            on_node_updated_cb: RwLock::new(None),
-            on_node_deleted_cb: RwLock::new(None),
-            on_edge_created_cb: RwLock::new(None),
-            on_edge_updated_cb: RwLock::new(None),
-            on_edge_deleted_cb: RwLock::new(None),
+            on_node_created_cb: RwLock::new(Vec::new()),
+            on_node_updated_cb: RwLock::new(Vec::new()),
+            on_node_deleted_cb: RwLock::new(Vec::new()),
+            on_edge_created_cb: RwLock::new(Vec::new()),
+            on_edge_updated_cb: RwLock::new(Vec::new()),
+            on_edge_deleted_cb: RwLock::new(Vec::new()),
         };
         engine.ensure_layout_manifest()?;
         engine.ensure_encryption_manifest()?;
@@ -2272,16 +2378,13 @@ fn install_storage_snapshot_entries(
                     "delete_index" if record.payload.is_empty() => {
                         writer.delete_index_definition(&record.key)
                     }
-                    "put_index_options" => writer.put_index_options(
-                        &record.key,
-                        &rmp_serde::from_slice(&record.payload)?,
-                    ),
+                    "put_index_options" => writer
+                        .put_index_options(&record.key, &rmp_serde::from_slice(&record.payload)?),
                     "delete_index_options" if record.payload.is_empty() => {
                         writer.delete_index_options(&record.key)
                     }
-                    "put_knowledge_policy_catalog" => writer.put_knowledge_policy_catalog(
-                        &rmp_serde::from_slice(&record.payload)?,
-                    ),
+                    "put_knowledge_policy_catalog" => writer
+                        .put_knowledge_policy_catalog(&rmp_serde::from_slice(&record.payload)?),
                     "put_node" => writer.put_node_record(&rmp_serde::from_slice(&record.payload)?),
                     "delete_node" if record.payload.is_empty() => {
                         writer.delete_node_record(&record.key)
@@ -2681,61 +2784,97 @@ fn install_storage_snapshot_entries(
     // ── Event notification ─────────────────────────────────────────────────
 
     pub fn on_node_created(&self, callback: NodeEventCallback) {
-        *self.on_node_created_cb.write() = Some(callback);
+        self.on_node_created_cb.write().push(callback);
     }
 
     pub fn on_node_updated(&self, callback: NodeEventCallback) {
-        *self.on_node_updated_cb.write() = Some(callback);
+        self.on_node_updated_cb.write().push(callback);
     }
 
     pub fn on_node_deleted(&self, callback: NodeDeleteCallback) {
-        *self.on_node_deleted_cb.write() = Some(callback);
+        self.on_node_deleted_cb.write().push(callback);
     }
 
     pub fn on_edge_created(&self, callback: EdgeEventCallback) {
-        *self.on_edge_created_cb.write() = Some(callback);
+        self.on_edge_created_cb.write().push(callback);
     }
 
     pub fn on_edge_updated(&self, callback: EdgeEventCallback) {
-        *self.on_edge_updated_cb.write() = Some(callback);
+        self.on_edge_updated_cb.write().push(callback);
     }
 
     pub fn on_edge_deleted(&self, callback: EdgeDeleteCallback) {
-        *self.on_edge_deleted_cb.write() = Some(callback);
+        self.on_edge_deleted_cb.write().push(callback);
     }
 
     fn notify_node_created(&self, node: &NodeRecord) {
-        if let Some(ref cb) = *self.on_node_created_cb.read() {
+        for cb in self
+            .on_node_created_cb
+            .read()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             cb(node.clone());
         }
     }
 
     fn notify_node_updated(&self, node: &NodeRecord) {
-        if let Some(ref cb) = *self.on_node_updated_cb.read() {
+        for cb in self
+            .on_node_updated_cb
+            .read()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             cb(node.clone());
         }
     }
 
     fn notify_node_deleted(&self, id: &str) {
-        if let Some(ref cb) = *self.on_node_deleted_cb.read() {
+        for cb in self
+            .on_node_deleted_cb
+            .read()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             cb(id.to_string());
         }
     }
 
     fn notify_edge_created(&self, edge: &EdgeRecord) {
-        if let Some(ref cb) = *self.on_edge_created_cb.read() {
+        for cb in self
+            .on_edge_created_cb
+            .read()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             cb(edge.clone());
         }
     }
 
     fn notify_edge_updated(&self, edge: &EdgeRecord) {
-        if let Some(ref cb) = *self.on_edge_updated_cb.read() {
+        for cb in self
+            .on_edge_updated_cb
+            .read()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             cb(edge.clone());
         }
     }
 
     fn notify_edge_deleted(&self, id: &str) {
-        if let Some(ref cb) = *self.on_edge_deleted_cb.read() {
+        for cb in self
+            .on_edge_deleted_cb
+            .read()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             cb(id.to_string());
         }
     }
@@ -3163,7 +3302,6 @@ fn install_storage_snapshot_entries(
             }
             Ok(())
         })
-
         .or_else(Self::swallow_iteration_stopped)?;
 
         if !stop_requested && !chunk.is_empty() {
@@ -3220,7 +3358,10 @@ fn install_storage_snapshot_entries(
 
     fn namespaces_with_schema_constraints(&self) -> Result<Vec<String>, StorageError> {
         let mut namespaces = BTreeSet::new();
-        for entry in self.meta.scan_prefix(META_SCHEMA_NAMESPACE_CONSTRAINT_PREFIX) {
+        for entry in self
+            .meta
+            .scan_prefix(META_SCHEMA_NAMESPACE_CONSTRAINT_PREFIX)
+        {
             let (key, _) = entry?;
             let Some(encoded) = key
                 .as_slice()
@@ -4200,7 +4341,8 @@ fn install_storage_snapshot_entries(
     ) -> Result<(), StorageError> {
         let key = namespace_schema_constraint_key(namespace, &constraint.name);
         let previous = self.meta.fjall_get(&key)?;
-        self.meta.fjall_insert(&key, rmp_serde::to_vec(constraint)?)?;
+        self.meta
+            .fjall_insert(&key, rmp_serde::to_vec(constraint)?)?;
         if let Err(error) = self.rebuild_schema_manager() {
             match previous {
                 Some(previous) => {
@@ -4909,7 +5051,8 @@ fn install_storage_snapshot_entries(
                     ));
                     pending += 1;
                     if pending >= 4096 {
-                        self.indexes.fjall_apply_batch(&std::mem::take(&mut batch))?;
+                        self.indexes
+                            .fjall_apply_batch(&std::mem::take(&mut batch))?;
                         pending = 0;
                     }
                 }
@@ -4936,7 +5079,8 @@ fn install_storage_snapshot_entries(
                 batch.push((key, None));
                 pending += 1;
                 if pending >= 4096 {
-                    self.indexes.fjall_apply_batch(&std::mem::take(&mut batch))?;
+                    self.indexes
+                        .fjall_apply_batch(&std::mem::take(&mut batch))?;
                     pending = 0;
                     cancel.check_cancelled()?;
                 }
@@ -5677,7 +5821,9 @@ fn apply_decay_profile_updates(
 ) -> Result<(), StorageError> {
     for (key, value) in updates {
         match key.as_str() {
-            "halfLifeSeconds" => profile.half_life_seconds = value_as_i64(value, "halfLifeSeconds")?,
+            "halfLifeSeconds" => {
+                profile.half_life_seconds = value_as_i64(value, "halfLifeSeconds")?
+            }
             "visibilityThreshold" => {
                 profile.visibility_threshold = value_as_f64(value, "visibilityThreshold")?
             }
@@ -6409,11 +6555,7 @@ impl<'a> StorageTransaction<'a> {
             .find(|policy| policy.name == policy_index)
             .expect("existing promotion policy disappeared from transaction overlay");
         policy.enabled = enabled;
-        validate_promotion_policy(
-            policy,
-            &self.knowledge_policy.promotion_profiles,
-            &existing,
-        )
+        validate_promotion_policy(policy, &self.knowledge_policy.promotion_profiles, &existing)
     }
 
     pub fn drop_promotion_policy(
@@ -6659,8 +6801,13 @@ impl<'a> StorageTransaction<'a> {
     fn ensure_no_write_conflicts(&self) -> Result<(), StorageError> {
         let current_constraints = self.engine().load_constraints()?;
         for name in self.constraint_writes.keys() {
-            let snapshot_constraint = self.constraints.iter().find(|constraint| constraint.name == *name);
-            let current_constraint = current_constraints.iter().find(|constraint| constraint.name == *name);
+            let snapshot_constraint = self
+                .constraints
+                .iter()
+                .find(|constraint| constraint.name == *name);
+            let current_constraint = current_constraints
+                .iter()
+                .find(|constraint| constraint.name == *name);
             if current_constraint != snapshot_constraint {
                 return Err(StorageError::TransactionConflict {
                     logical_key: format!("constraint:{name}"),
@@ -6752,11 +6899,7 @@ impl<'a> BatchWriter<'a> {
         self.ops.push(BatchOp::DeleteIndex(name.to_string()));
     }
 
-    pub fn put_index_options(
-        &mut self,
-        name: &str,
-        options: &HashMap<String, serde_json::Value>,
-    ) {
+    pub fn put_index_options(&mut self, name: &str, options: &HashMap<String, serde_json::Value>) {
         self.ops
             .push(BatchOp::PutIndexOptions(name.to_string(), options.clone()));
     }
@@ -6958,17 +7101,19 @@ impl<'a> BatchWriter<'a> {
                 }
                 None => None,
             })
-            .chain(edges.iter().filter_map(|(id, (_, new))| match new {
-                Some(edge) => Some(MvccRecordMutation::PutEdge(edge.clone())),
-                None if self
-                    .engine
-                    .mvcc
-                    .current_head_for_key(&format!("edge:{id}"))
-                    .is_some() =>
-                {
-                    Some(MvccRecordMutation::DeleteEdge(id.clone()))
+            .chain(edges.iter().filter_map(|(id, (_, new))| {
+                match new {
+                    Some(edge) => Some(MvccRecordMutation::PutEdge(edge.clone())),
+                    None if self
+                        .engine
+                        .mvcc
+                        .current_head_for_key(&format!("edge:{id}"))
+                        .is_some() =>
+                    {
+                        Some(MvccRecordMutation::DeleteEdge(id.clone()))
+                    }
+                    None => None,
                 }
-                None => None,
             }))
             .collect::<Vec<_>>();
         let (staged_mvcc_state, _) = self
@@ -6984,20 +7129,22 @@ impl<'a> BatchWriter<'a> {
                     payload: rmp_serde::to_vec(catalog)?,
                 })
             })
-            .chain(constraints
-            .iter()
-            .map(|(name, constraint)| match constraint {
-                Some(constraint) => Ok(WALTransactionRecord {
-                    op: "put_constraint".to_string(),
-                    key: name.clone(),
-                    payload: rmp_serde::to_vec(constraint)?,
-                }),
-                None => Ok(WALTransactionRecord {
-                    op: "delete_constraint".to_string(),
-                    key: name.clone(),
-                    payload: Vec::new(),
-                }),
-            }))
+            .chain(
+                constraints
+                    .iter()
+                    .map(|(name, constraint)| match constraint {
+                        Some(constraint) => Ok(WALTransactionRecord {
+                            op: "put_constraint".to_string(),
+                            key: name.clone(),
+                            payload: rmp_serde::to_vec(constraint)?,
+                        }),
+                        None => Ok(WALTransactionRecord {
+                            op: "delete_constraint".to_string(),
+                            key: name.clone(),
+                            payload: Vec::new(),
+                        }),
+                    }),
+            )
             .chain(indexes.iter().map(|(name, index)| match index {
                 Some(index) => Ok(WALTransactionRecord {
                     op: "put_index".to_string(),
@@ -7022,35 +7169,40 @@ impl<'a> BatchWriter<'a> {
                     payload: Vec::new(),
                 }),
             }))
-            .chain(nodes
-            .iter()
-            .filter(|(_, (old, new))| old.is_some() || new.is_some())
-            .map(|(id, (_, new))| match new {
-                Some(node) => Ok(WALTransactionRecord {
-                    op: "put_node".to_string(),
-                    key: id.clone(),
-                    payload: rmp_serde::to_vec(node)?,
-                }),
-                None => Ok(WALTransactionRecord {
-                    op: "delete_node".to_string(),
-                    key: id.clone(),
-                    payload: Vec::new(),
-                }),
-            })
-            .chain(edges.iter().filter(|(_, (old, new))| old.is_some() || new.is_some()).map(
-                |(id, (_, new))| match new {
-                Some(edge) => Ok(WALTransactionRecord {
-                    op: "put_edge".to_string(),
-                    key: id.clone(),
-                    payload: rmp_serde::to_vec(edge)?,
-                }),
-                None => Ok(WALTransactionRecord {
-                    op: "delete_edge".to_string(),
-                    key: id.clone(),
-                    payload: Vec::new(),
-                }),
-            },
-            )))
+            .chain(
+                nodes
+                    .iter()
+                    .filter(|(_, (old, new))| old.is_some() || new.is_some())
+                    .map(|(id, (_, new))| match new {
+                        Some(node) => Ok(WALTransactionRecord {
+                            op: "put_node".to_string(),
+                            key: id.clone(),
+                            payload: rmp_serde::to_vec(node)?,
+                        }),
+                        None => Ok(WALTransactionRecord {
+                            op: "delete_node".to_string(),
+                            key: id.clone(),
+                            payload: Vec::new(),
+                        }),
+                    })
+                    .chain(
+                        edges
+                            .iter()
+                            .filter(|(_, (old, new))| old.is_some() || new.is_some())
+                            .map(|(id, (_, new))| match new {
+                                Some(edge) => Ok(WALTransactionRecord {
+                                    op: "put_edge".to_string(),
+                                    key: id.clone(),
+                                    payload: rmp_serde::to_vec(edge)?,
+                                }),
+                                None => Ok(WALTransactionRecord {
+                                    op: "delete_edge".to_string(),
+                                    key: id.clone(),
+                                    payload: Vec::new(),
+                                }),
+                            }),
+                    ),
+            )
             .collect::<Result<Vec<_>, rmp_serde::encode::Error>>()?;
         wal_records.sort_by(|left, right| left.op.cmp(&right.op).then(left.key.cmp(&right.key)));
         let wal_sequence = match replay_sequence {
@@ -7384,13 +7536,13 @@ impl<'a> BatchWriter<'a> {
         Ok(changes)
     }
 
-    fn stage_index_cleanup(
-        &self,
-        index: &IndexDefinition,
-    ) -> Result<Batch, StorageError> {
+    fn stage_index_cleanup(&self, index: &IndexDefinition) -> Result<Batch, StorageError> {
         let mut changes = Batch::new();
         let prefixes = if is_node_property_index(index) {
-            vec![node_property_index_definition_prefix(&index.label, &index.properties)]
+            vec![node_property_index_definition_prefix(
+                &index.label,
+                &index.properties,
+            )]
         } else if is_node_fulltext_index(index) {
             index
                 .properties
@@ -7404,7 +7556,10 @@ impl<'a> BatchWriter<'a> {
                 .map(|property| edge_fulltext_property_prefix(&index.label, property))
                 .collect()
         } else if is_relationship_property_index(index) {
-            vec![edge_property_index_definition_prefix(&index.label, &index.properties)]
+            vec![edge_property_index_definition_prefix(
+                &index.label,
+                &index.properties,
+            )]
         } else {
             Vec::new()
         };

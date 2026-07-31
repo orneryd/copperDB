@@ -24,4 +24,5 @@ copperdb-cache = { workspace = true }
 copperdb-filter = { workspace = true }
 copperdb-pool = { workspace = true }
 copperdb-search = { workspace = true }
+copperdb-vectorspace = { workspace = true }
 copperdb-util = { workspace = true }

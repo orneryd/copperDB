@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/admin",
+    "crates/adminimport",
     "crates/audit",
     "crates/auth",
     "crates/bolt",
@@ -147,7 +149,10 @@ criterion = "0.5.1"
 # Bytes / encoding utilities
 bytes = "1.11.1"
 base64 = "0.22.1"
+csv = "1.4.0"
+flate2 = "1.1.9"
 hex = "0.4.3"
+zip = { version = "2.4.2", default-features = false, features = ["deflate"] }
 getrandom = "0.4.2"
 
 # Hashing (replaces hash/fnv in Go std)
@@ -223,6 +228,7 @@ copperdb-retention = { path = "crates/retention" }
 copperdb-convert = { path = "crates/convert" }
 copperdb-envutil = { path = "crates/envutil" }
 copperdb-buildinfo = { path = "crates/buildinfo" }
+copperdb-adminimport = { path = "crates/adminimport" }
 copperdb-nornicgrpc = { path = "crates/nornicgrpc" }
 copperdb-qdrantgrpc = { path = "crates/qdrantgrpc" }
 copperdb-otel = { path = "crates/otel" }

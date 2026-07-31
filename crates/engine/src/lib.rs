@@ -38,6 +38,7 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
+use crate::vector_indexes::VectorIndexManager;
 use copperdb_audit::{AuditConfig, AuditLog, Event, EventType};
 use copperdb_cache::QueryCache;
 use copperdb_compliance::{ComplianceManager, ComplianceReporter};
@@ -332,6 +333,7 @@ impl From<QueryStats> for ResultStats {
 pub struct CopperDb {
     config: DatabaseConfig,
     storage: Arc<StorageEngine>,
+    vector_indexes: Arc<VectorIndexManager>,
     eval: EvalEngine,
     tx_manager: Arc<TransactionManager>,
     query_cache: Arc<QueryCache<copperdb_cypher::Query>>,
@@ -340,6 +342,7 @@ pub struct CopperDb {
 }
 
 mod copperdb;
+mod vector_indexes;
 
 // ─── Legacy copperdb (full-server async variant) ──────────────────────────────
 

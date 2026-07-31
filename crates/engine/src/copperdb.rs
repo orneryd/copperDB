@@ -1,4 +1,5 @@
 use super::*;
+use crate::vector_indexes::VectorIndexManager;
 use copperdb_util::RequestContext;
 impl CopperDb {
     fn ensure_ranked_search_query_enabled(&self, query: &SearchQuery) -> Result<(), CopperDbError> {
@@ -62,6 +63,14 @@ impl CopperDb {
     /// that need to share the same storage instance).
     pub fn storage_engine(&self) -> &Arc<copperdb_storage::StorageEngine> {
         &self.storage
+    }
+
+    /// Return the lifecycle state of an engine-owned HNSW vector index.
+    pub fn vector_index_status(
+        &self,
+        index_name: &str,
+    ) -> Result<copperdb_vectorspace::HnswIndexStatus, CopperDbError> {
+        self.vector_indexes.status(index_name)
     }
 
     pub fn search_fulltext_nodes(
@@ -238,12 +247,17 @@ impl CopperDb {
         storage: Arc<StorageEngine>,
         config: DatabaseConfig,
     ) -> Result<Self, CopperDbError> {
-        let eval = EvalEngine::new(Arc::clone(&storage));
+        let vector_indexes = Arc::new(VectorIndexManager::build(storage.as_ref())?);
+        let eval = EvalEngine::new_with_vector_indexes(
+            Arc::clone(&storage),
+            Some(vector_indexes.registry()),
+        );
         let audit_log = Arc::new(AuditLog::new(Arc::clone(&storage), AuditConfig::default())?);
         let compliance = Arc::new(ComplianceManager::new(Arc::clone(&storage)));
         Ok(Self {
             config,
             storage,
+            vector_indexes,
             eval,
             tx_manager: Arc::new(TransactionManager::new()),
             query_cache: Arc::new(QueryCache::new(
@@ -1057,10 +1071,8 @@ fn open_storage(config: &DatabaseConfig) -> Result<StorageEngine, CopperDbError>
             )
             .map_err(|e| CopperDbError::Storage(e.to_string()))
         }
-        None => {
-            StorageEngine::open_with_wal_config(&config.data_dir, wal_config)
-                .map_err(|e| CopperDbError::Storage(e.to_string()))
-        }
+        None => StorageEngine::open_with_wal_config(&config.data_dir, wal_config)
+            .map_err(|e| CopperDbError::Storage(e.to_string())),
     }
 }
 

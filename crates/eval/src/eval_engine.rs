@@ -1,3 +1,4 @@
+use self::eval_engine_policy::vector_from_node;
 use std::cell::RefCell;
 
 thread_local! {
@@ -7,8 +8,38 @@ thread_local! {
 use super::*;
 impl EvalEngine {
     pub fn new(storage: Arc<StorageEngine>) -> Self {
+        Self::new_with_vector_indexes(storage, Some(Arc::new(HnswRegistry::new())))
+    }
+
+    pub fn new_with_vector_indexes(
+        storage: Arc<StorageEngine>,
+        vector_indexes: Option<Arc<HnswRegistry>>,
+    ) -> Self {
+        let vector_indexes = vector_indexes.unwrap_or_else(|| Arc::new(HnswRegistry::new()));
+        let created_storage = Arc::downgrade(&storage);
+        let created_indexes = Arc::clone(&vector_indexes);
+        storage.on_node_created(Arc::new(move |node| {
+            if let Some(storage) = created_storage.upgrade() {
+                maintain_vector_indexes_for_node(&storage, &created_indexes, &node);
+            }
+        }));
+        let updated_storage = Arc::downgrade(&storage);
+        let updated_indexes = Arc::clone(&vector_indexes);
+        storage.on_node_updated(Arc::new(move |node| {
+            if let Some(storage) = updated_storage.upgrade() {
+                maintain_vector_indexes_for_node(&storage, &updated_indexes, &node);
+            }
+        }));
+        let deleted_storage = Arc::downgrade(&storage);
+        let deleted_indexes = Arc::clone(&vector_indexes);
+        storage.on_node_deleted(Arc::new(move |id| {
+            if let Some(storage) = deleted_storage.upgrade() {
+                remove_node_from_vector_indexes(&storage, &deleted_indexes, &id);
+            }
+        }));
         Self {
             storage,
+            vector_indexes: Some(vector_indexes),
             node_lookup_cache: Arc::new(Mutex::new(HashMap::new())),
             fulltext_query_cache: Arc::new(Mutex::new(HashMap::new())),
             access_flusher: Arc::new(AccessFlusher::new()),
@@ -542,7 +573,10 @@ impl EvalEngine {
                 }
                 Clause::CreateConstraint(create) => {
                     let existing = transaction.constraints_with_writes();
-                    if existing.iter().any(|constraint| constraint.name == create.name) {
+                    if existing
+                        .iter()
+                        .any(|constraint| constraint.name == create.name)
+                    {
                         if create.if_not_exists {
                             continue;
                         }
@@ -644,7 +678,11 @@ impl EvalEngine {
                             row.insert(
                                 "properties".to_string(),
                                 Value::Array(
-                                    constraint.properties.into_iter().map(Value::String).collect(),
+                                    constraint
+                                        .properties
+                                        .into_iter()
+                                        .map(Value::String)
+                                        .collect(),
                                 ),
                             );
                             row
@@ -771,7 +809,9 @@ impl EvalEngine {
                             row.insert("label".to_string(), Value::String(index.label));
                             row.insert(
                                 "properties".to_string(),
-                                Value::Array(index.properties.into_iter().map(Value::String).collect()),
+                                Value::Array(
+                                    index.properties.into_iter().map(Value::String).collect(),
+                                ),
                             );
                             row
                         })
@@ -793,9 +833,7 @@ impl EvalEngine {
                             visibility_threshold: create
                                 .options
                                 .contains_key("visibilityThreshold")
-                                .then(|| {
-                                    option_f64(&create.options, "visibilityThreshold", 0.0)
-                                })
+                                .then(|| option_f64(&create.options, "visibilityThreshold", 0.0))
                                 .transpose()?,
                             order: option_i64(&create.options, "order", 0)?,
                         })?;
@@ -822,7 +860,8 @@ impl EvalEngine {
                     }
                 }
                 Clause::AlterDecayProfile(alter) => {
-                    transaction.alter_decay_profile(&alter.name, &options_to_btreemap(&alter.options))?;
+                    transaction
+                        .alter_decay_profile(&alter.name, &options_to_btreemap(&alter.options))?;
                 }
                 Clause::DropDecayProfile(drop) => {
                     transaction.drop_decay_profile(&drop.name, drop.if_exists)?;
@@ -861,7 +900,10 @@ impl EvalEngine {
                             row.insert("target".to_string(), Value::String(target));
                             row.insert(
                                 "profileRef".to_string(),
-                                binding.profile_ref.map(Value::String).unwrap_or(Value::Null),
+                                binding
+                                    .profile_ref
+                                    .map(Value::String)
+                                    .unwrap_or(Value::Null),
                             );
                             row.insert("enabled".to_string(), Value::Bool(true));
                             row
@@ -1202,7 +1244,11 @@ impl EvalEngine {
             return Ok(current_rows);
         }
 
-        if pattern.edges.iter().any(|edge| edge.min_hops.is_some() || edge.max_hops.is_some()) {
+        if pattern
+            .edges
+            .iter()
+            .any(|edge| edge.min_hops.is_some() || edge.max_hops.is_some())
+        {
             return self.execute_storage_transaction_variable_length_match_pattern(
                 transaction,
                 base_rows,
@@ -1379,11 +1425,9 @@ impl EvalEngine {
         let expected_end = evaluate_pattern_properties(&end_pattern.properties, &row, params)?;
         let direction = storage_adjacency_direction(&edge_pattern.direction);
         let mut matches = Vec::new();
-        for edge in transaction.get_adjacent_edges(
-            &node_id,
-            direction,
-            edge_pattern.rel_type.as_deref(),
-        )? {
+        for edge in
+            transaction.get_adjacent_edges(&node_id, direction, edge_pattern.rel_type.as_deref())?
+        {
             if !edge_matches_pattern(&edge, &expected_edge)
                 || !bound_edge_matches_row(&row, edge_pattern.variable.as_deref(), &edge)
             {
@@ -1433,11 +1477,8 @@ impl EvalEngine {
         let expected_edge = evaluate_pattern_properties(&edge_pattern.properties, &row, params)?;
         let expected_end = evaluate_pattern_properties(&end_pattern.properties, &row, params)?;
         let direction = storage_adjacency_direction(&edge_pattern.direction);
-        let mut frontier = std::collections::VecDeque::from([(
-            node_id.clone(),
-            0_u32,
-            Vec::<EdgeRecord>::new(),
-        )]);
+        let mut frontier =
+            std::collections::VecDeque::from([(node_id.clone(), 0_u32, Vec::<EdgeRecord>::new())]);
         let mut visited = HashMap::from([(node_id, 0_u32)]);
         let mut matches = Vec::new();
 
@@ -1447,7 +1488,11 @@ impl EvalEngine {
                 if let Some(end) = transaction.get_node_record(&current_id)? {
                     let end_properties = node_record_to_props(&end);
                     if node_matches_pattern(&end_properties, &end_pattern.labels, &expected_end)
-                        && bound_node_matches_row(&row, end_pattern.variable.as_deref(), &end_properties)
+                        && bound_node_matches_row(
+                            &row,
+                            end_pattern.variable.as_deref(),
+                            &end_properties,
+                        )
                     {
                         let mut matched = row.clone();
                         if let Some(variable) = &edge_pattern.variable {
@@ -1482,8 +1527,8 @@ impl EvalEngine {
                 if !edge_matches_pattern(&edge, &expected_edge) {
                     continue;
                 }
-                let Some(next_id) =
-                    related_node_id(&current_id, &edge, &edge_pattern.direction).map(str::to_string)
+                let Some(next_id) = related_node_id(&current_id, &edge, &edge_pattern.direction)
+                    .map(str::to_string)
                 else {
                     continue;
                 };
@@ -1514,7 +1559,8 @@ impl EvalEngine {
                     variable,
                     property,
                     value,
-                } = item else {
+                } = item
+                else {
                     match item {
                         SetItem::MapAssignment { variable, value } => {
                             let value = self.evaluate_expression(value, row, params)?;
@@ -1749,18 +1795,15 @@ impl EvalEngine {
         let mut rows = Vec::with_capacity(base_rows.len());
         for base_row in base_rows {
             let expected = evaluate_pattern_properties(&node_pattern.properties, base_row, params)?;
-            let matched = transaction
-                .all_node_records()?
-                .into_iter()
-                .find(|node| {
-                    let properties = node_record_to_props(node);
-                    node_matches_pattern(&properties, &node_pattern.labels, &expected)
-                        && bound_node_matches_row(
-                            base_row,
-                            node_pattern.variable.as_deref(),
-                            &properties,
-                        )
-                });
+            let matched = transaction.all_node_records()?.into_iter().find(|node| {
+                let properties = node_record_to_props(node);
+                node_matches_pattern(&properties, &node_pattern.labels, &expected)
+                    && bound_node_matches_row(
+                        base_row,
+                        node_pattern.variable.as_deref(),
+                        &properties,
+                    )
+            });
             let (mut row, set_items) = if let Some(node) = matched {
                 let mut row = base_row.clone();
                 if let Some(variable) = &node_pattern.variable {
@@ -1799,7 +1842,10 @@ impl EvalEngine {
                 stats.properties_set += node_pattern.properties.len();
                 let mut row = base_row.clone();
                 if let Some(variable) = &node_pattern.variable {
-                    row.insert(variable.clone(), Value::Object(properties.into_iter().collect()));
+                    row.insert(
+                        variable.clone(),
+                        Value::Object(properties.into_iter().collect()),
+                    );
                 }
                 (row, &merge.on_create)
             };
@@ -1855,16 +1901,18 @@ impl EvalEngine {
         let mut rows = Vec::with_capacity(base_rows.len());
 
         for base_row in base_rows {
-            let start_properties = bound_row_object_props(base_row, start_variable).ok_or_else(|| {
-                EvalError::ExecutionError(
-                    "transactional relationship MERGE start node is not bound".to_string(),
-                )
-            })?;
-            let end_properties = bound_row_object_props(base_row, end_variable).ok_or_else(|| {
-                EvalError::ExecutionError(
-                    "transactional relationship MERGE end node is not bound".to_string(),
-                )
-            })?;
+            let start_properties =
+                bound_row_object_props(base_row, start_variable).ok_or_else(|| {
+                    EvalError::ExecutionError(
+                        "transactional relationship MERGE start node is not bound".to_string(),
+                    )
+                })?;
+            let end_properties =
+                bound_row_object_props(base_row, end_variable).ok_or_else(|| {
+                    EvalError::ExecutionError(
+                        "transactional relationship MERGE end node is not bound".to_string(),
+                    )
+                })?;
             let start_id = node_id(&start_properties).ok_or_else(|| {
                 EvalError::ExecutionError(
                     "transactional relationship MERGE start node is missing _id".to_string(),
@@ -1877,11 +1925,7 @@ impl EvalEngine {
             })?;
             let expected = evaluate_pattern_properties(&edge_pattern.properties, base_row, params)?;
             let existing = transaction
-                .get_adjacent_edges(
-                    start_id,
-                    EdgeAdjacencyDirection::Outgoing,
-                    Some(&edge_type),
-                )?
+                .get_adjacent_edges(start_id, EdgeAdjacencyDirection::Outgoing, Some(&edge_type))?
                 .into_iter()
                 .find(|edge| edge.end_node == end_id && edge_matches_pattern(edge, &expected));
 
@@ -1976,7 +2020,12 @@ impl EvalEngine {
                 (properties.contains_key("_type")
                     && properties.contains_key("_start")
                     && properties.contains_key("_end"))
-                .then(|| properties.get("_id").and_then(Value::as_str).map(str::to_owned))
+                .then(|| {
+                    properties
+                        .get("_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
                 .flatten()
             })
             .collect::<HashSet<_>>();
@@ -2241,22 +2290,27 @@ impl EvalEngine {
                         label: create.label.clone(),
                         properties: create.properties.clone(),
                     };
-                    if create.if_not_exists {
+                    let created = if create.if_not_exists {
                         catalog.create_if_absent_with_cancellation(
                             definition,
                             request_context.cancellation(),
-                        )?;
+                        )?
                     } else {
                         catalog
                             .create_with_cancellation(definition, request_context.cancellation())?;
-                    }
+                        true
+                    };
 
                     // Persist vector index options separately
                     if matches!(create.kind, copperdb_cypher::IndexKind::Vector)
+                        && created
                         && !create.options.is_empty()
                     {
                         self.storage
                             .persist_index_options(&create.name, &create.options)?;
+                    }
+                    if matches!(create.kind, copperdb_cypher::IndexKind::Vector) && created {
+                        self.register_vector_index(&create.name)?;
                     }
                 }
 
@@ -2862,6 +2916,72 @@ impl EvalEngine {
             rows: result_rows,
             stats,
         })
+    }
+
+    fn register_vector_index(&self, index_name: &str) -> Result<(), EvalError> {
+        let Some(vector_indexes) = &self.vector_indexes else {
+            return Err(EvalError::ExecutionError(format!(
+                "vector index {index_name} is unavailable because this evaluator has no engine-owned vector index registry"
+            )));
+        };
+        let catalog = IndexCatalog::new(self.storage.as_ref());
+        let definition = catalog
+            .get(index_name)?
+            .ok_or_else(|| EvalError::ExecutionError(format!("index not found: {index_name}")))?;
+        if definition.entity_type != copperdb_indexing::CatalogIndexEntityType::Node {
+            return Ok(());
+        }
+        let property = definition.properties.first().ok_or_else(|| {
+            EvalError::ExecutionError(format!(
+                "vector index {index_name} is missing a target property"
+            ))
+        })?;
+        let options = self.storage.load_index_options(index_name)?;
+        let dimensions = options
+            .as_ref()
+            .and_then(|options| options.get("indexConfig"))
+            .and_then(serde_json::Value::as_object)
+            .and_then(|config| config.get("vector.dimensions"))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|dimensions| usize::try_from(dimensions).ok())
+            .filter(|dimensions| *dimensions > 0)
+            .ok_or_else(|| {
+                EvalError::ExecutionError(format!(
+                    "vector index {index_name} requires a positive vector.dimensions option"
+                ))
+            })?;
+        let similarity = options
+            .as_ref()
+            .and_then(|options| options.get("indexConfig"))
+            .and_then(serde_json::Value::as_object)
+            .and_then(|config| config.get("vector.similarity_function"))
+            .and_then(serde_json::Value::as_str);
+        match similarity {
+            Some("euclidean") => vector_indexes
+                .create_exact_euclidean_index(index_name, dimensions)
+                .map_err(|error| EvalError::ExecutionError(error.to_string()))?,
+            Some("cosine") | None => vector_indexes
+                .create_index(index_name, dimensions, HnswConfig::default())
+                .map_err(|error| EvalError::ExecutionError(error.to_string()))?,
+            Some(similarity) => {
+                return Err(EvalError::ExecutionError(format!(
+                    "vector index {index_name} uses unsupported similarity function {similarity}"
+                )));
+            }
+        }
+        let nodes = if definition.label.is_empty() {
+            self.storage.all_node_records()?
+        } else {
+            self.storage.get_nodes_by_label(&definition.label)?
+        };
+        for node in nodes {
+            if let Some(vector) = vector_from_node(&node, property) {
+                vector_indexes
+                    .upsert(index_name, node.id, vector)
+                    .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
+            }
+        }
+        Ok(())
     }
 
     pub fn execute_with_pattern(
@@ -4681,7 +4801,12 @@ impl EvalEngine {
                     (properties.contains_key("_type")
                         && properties.contains_key("_start")
                         && properties.contains_key("_end"))
-                    .then(|| properties.get("_id").and_then(Value::as_str).map(str::to_owned))
+                    .then(|| {
+                        properties
+                            .get("_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
                     .flatten()
                 })
                 .collect::<HashSet<_>>();
@@ -4938,6 +5063,78 @@ impl EvalEngine {
             self.persist_node_props(props)?;
         }
         Ok(())
+    }
+}
+
+fn maintain_vector_indexes_for_node(
+    storage: &StorageEngine,
+    vector_indexes: &HnswRegistry,
+    node: &NodeRecord,
+) {
+    let definitions = match storage.load_index_definitions() {
+        Ok(definitions) => definitions,
+        Err(error) => {
+            tracing::warn!(%error, node = %node.id, "failed to load vector index definitions");
+            return;
+        }
+    };
+    for definition in definitions.into_iter().filter(|definition| {
+        definition.kind == copperdb_storage::IndexKind::Vector
+            && definition.entity_type == copperdb_storage::IndexEntityType::Node
+            && (definition.label.is_empty()
+                || node.labels.iter().any(|label| label == &definition.label))
+    }) {
+        if vector_indexes.status(&definition.name).is_err() {
+            continue;
+        }
+        let Some(property) = definition.properties.first() else {
+            continue;
+        };
+        match vector_from_node(node, property) {
+            Some(vector) => {
+                if let Err(error) = vector_indexes.upsert(&definition.name, &node.id, vector) {
+                    tracing::warn!(index = %definition.name, node = %node.id, %error, "failed to maintain vector index");
+                }
+            }
+            None => {
+                if let Err(error) = vector_indexes.remove(&definition.name, &node.id) {
+                    if !matches!(
+                        error,
+                        copperdb_vectorspace::VectorSpaceError::VectorNotFound(_)
+                    ) {
+                        tracing::warn!(index = %definition.name, node = %node.id, %error, "failed to remove stale vector index entry");
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn remove_node_from_vector_indexes(
+    storage: &StorageEngine,
+    vector_indexes: &HnswRegistry,
+    id: &str,
+) {
+    let definitions = match storage.load_index_definitions() {
+        Ok(definitions) => definitions,
+        Err(error) => {
+            tracing::warn!(%error, node = %id, "failed to load vector index definitions");
+            return;
+        }
+    };
+    for definition in definitions.into_iter().filter(|definition| {
+        definition.kind == copperdb_storage::IndexKind::Vector
+            && definition.entity_type == copperdb_storage::IndexEntityType::Node
+            && vector_indexes.status(&definition.name).is_ok()
+    }) {
+        if let Err(error) = vector_indexes.remove(&definition.name, id) {
+            if !matches!(
+                error,
+                copperdb_vectorspace::VectorSpaceError::VectorNotFound(_)
+            ) {
+                tracing::warn!(index = %definition.name, node = %id, %error, "failed to remove deleted vector index entry");
+            }
+        }
     }
 }
 

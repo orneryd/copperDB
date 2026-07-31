@@ -95,7 +95,7 @@ Implements the BM25 V2 algorithm matching NornicDB's scoring:
 
 ### Vector Search
 
-The `vectorspace` crate currently provides cosine similarity scoring over an in-memory registry. A maintained HNSW index, persistence lifecycle, and engine-owned embedding workers remain active parity work. The `localllm` and `embed` crates provide local GGUF/llama.cpp components that still need full per-database runtime composition.
+The `vectorspace` crate provides a deterministic in-memory HNSW graph and named-index registry. During `CopperDb` startup, declared node indexes with explicit dimensions are built and maintained from committed node events; `db.index.vector.queryNodes` uses registry candidates and storage hydration. Cosine indexes use HNSW traversal, while Euclidean indexes use an explicit exact strategy and are never reported as HNSW. Relationship indexes, persistence, and broader lifecycle work remain active parity work. The `localllm` and `embed` crates provide local GGUF/llama.cpp components that still need full per-database runtime composition.
 
 ### Hybrid Search (RRF)
 

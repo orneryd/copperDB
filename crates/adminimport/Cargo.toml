@@ -1,0 +1,22 @@
+[package]
+name = "copperdb-adminimport"
+description = "Offline administrative import and export pipeline primitives"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+copperdb-util.workspace = true
+copperdb-convert.workspace = true
+copperdb-storage.workspace = true
+csv.workspace = true
+flate2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+zip.workspace = true
+
+[dev-dependencies]

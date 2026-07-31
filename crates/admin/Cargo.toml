@@ -1,0 +1,18 @@
+[package]
+name = "copperdb-admin"
+description = "Offline administrative commands for copperdb"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "copperdb-admin"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+copperdb-adminimport.workspace = true
+copperdb-storage.workspace = true
+copperdb-util.workspace = true

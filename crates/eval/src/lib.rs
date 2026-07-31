@@ -26,6 +26,7 @@ use copperdb_storage::{
     StorageTransaction,
 };
 use copperdb_util::{RequestCancelled, RequestContext};
+use copperdb_vectorspace::{HnswConfig, HnswRegistry};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -213,13 +214,15 @@ impl KnowledgePolicyInspection {
 /// The query executor.
 pub struct EvalEngine {
     storage: Arc<StorageEngine>,
+    vector_indexes: Option<Arc<HnswRegistry>>,
     /// Cache for MERGE node lookups: merge_cache_key(labels, prop, val) → node JSON Value.
     ///
     /// Mirrors NornicDB v1.0.42's `nodeLookupCache` on `StorageExecutor`.
     /// Invalidated on any write operation (CREATE / SET / DELETE) and on query error
     /// to prevent stale entries from masking newly created or deleted nodes.
     node_lookup_cache: Arc<Mutex<HashMap<String, Value>>>,
-    fulltext_query_cache: Arc<Mutex<HashMap<(u64, String), copperdb_search::lucene::FulltextQuery>>>,
+    fulltext_query_cache:
+        Arc<Mutex<HashMap<(u64, String), copperdb_search::lucene::FulltextQuery>>>,
     access_flusher: Arc<AccessFlusher>,
     hot_path_trace: Arc<HotPathTraceState>,
 }

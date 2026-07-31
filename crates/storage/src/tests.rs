@@ -84,6 +84,48 @@ fn creates_and_reads_layout_manifest_v0() {
 }
 
 #[test]
+fn offline_staging_promotes_a_durable_batch_and_cleans_up_abandoned_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("imported");
+    let staging = StorageEngine::start_offline_staging(&target).unwrap();
+    let staging_path = staging.staging_path().to_path_buf();
+    staging
+        .engine()
+        .put_node_records_batch(&[
+            sample_node("n1", &["Person"]),
+            sample_node("n2", &["Person"]),
+        ])
+        .unwrap();
+    assert!(!target.exists());
+    staging.promote().unwrap();
+    assert!(!staging_path.exists());
+    let promoted = StorageEngine::open(&target).unwrap();
+    assert!(promoted.get_node_record("n1").unwrap().is_some());
+    assert!(promoted.get_node_record("n2").unwrap().is_some());
+
+    let abandoned_target = directory.path().join("abandoned");
+    let staging = StorageEngine::start_offline_staging(&abandoned_target).unwrap();
+    let staging_path = staging.staging_path().to_path_buf();
+    drop(staging);
+    assert!(!staging_path.exists());
+    assert!(!abandoned_target.exists());
+}
+
+#[test]
+fn offline_staging_rejects_non_empty_targets() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("existing");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("sentinel"), "keep").unwrap();
+
+    let error = StorageEngine::start_offline_staging(&target).unwrap_err();
+    assert!(matches!(
+        error,
+        StorageError::OfflineStagingTargetNotEmpty(_)
+    ));
+}
+
+#[test]
 fn storage_wal_sync_modes_are_explicit_and_immediate_commits_persist() {
     let default_dir = tempfile::tempdir().unwrap();
     let default_engine = StorageEngine::open(default_dir.path()).unwrap();
@@ -130,7 +172,9 @@ fn storage_batch_wal_sync_coalesces_durability_barriers() {
         },
     )
     .unwrap();
-    engine.put_node_record(&sample_node("first", &["Node"])).unwrap();
+    engine
+        .put_node_record(&sample_node("first", &["Node"]))
+        .unwrap();
     let syncs_before_interval = engine.wal_stats().syncs;
 
     std::thread::sleep(Duration::from_millis(30));
@@ -139,7 +183,9 @@ fn storage_batch_wal_sync_coalesces_durability_barriers() {
         .unwrap();
     assert_eq!(engine.wal_stats().syncs, syncs_before_interval + 1);
 
-    engine.put_node_record(&sample_node("third", &["Node"])).unwrap();
+    engine
+        .put_node_record(&sample_node("third", &["Node"]))
+        .unwrap();
     assert_eq!(engine.wal_stats().syncs, syncs_before_interval + 1);
 }
 
@@ -155,7 +201,9 @@ fn storage_batch_wal_sync_can_complete_without_a_follow_up_write() {
         },
     )
     .unwrap();
-    engine.put_node_record(&sample_node("durable", &["Node"])).unwrap();
+    engine
+        .put_node_record(&sample_node("durable", &["Node"]))
+        .unwrap();
     let syncs_before_interval = engine.wal_stats().syncs;
 
     std::thread::sleep(Duration::from_millis(30));
@@ -655,8 +703,14 @@ fn namespace_constraint_ddl_rejects_existing_duplicates_without_persisting() {
             allowed_values: Vec::new(),
         },
     );
-    assert!(matches!(result, Err(StorageError::UniqueConstraintViolation { .. })));
-    assert!(engine.load_constraints_for_namespace("alpha").unwrap().is_empty());
+    assert!(matches!(
+        result,
+        Err(StorageError::UniqueConstraintViolation { .. })
+    ));
+    assert!(engine
+        .load_constraints_for_namespace("alpha")
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -1566,7 +1620,8 @@ fn storage_transaction_rejects_invalid_constraint_ddl_with_staged_nodes() {
 fn storage_transaction_commits_index_catalog_and_derived_entries_together() {
     let engine = StorageEngine::open_temporary().unwrap();
     let mut node = sample_node("n1", &["Person"]);
-    node.properties.insert("email".to_string(), json!("a@example.com"));
+    node.properties
+        .insert("email".to_string(), json!("a@example.com"));
     engine.put_node_record(&node).unwrap();
     let index = IndexDefinition {
         name: "person_email_idx".to_string(),
@@ -1578,7 +1633,10 @@ fn storage_transaction_commits_index_catalog_and_derived_entries_together() {
 
     let mut transaction = engine.begin_transaction().unwrap();
     transaction.put_index_definition(index.clone());
-    assert_eq!(transaction.index_definitions_with_writes(), vec![index.clone()]);
+    assert_eq!(
+        transaction.index_definitions_with_writes(),
+        vec![index.clone()]
+    );
     assert!(engine.load_index_definitions().unwrap().is_empty());
     transaction.commit().unwrap();
 
@@ -1595,7 +1653,8 @@ fn storage_transaction_commits_index_catalog_and_derived_entries_together() {
 fn storage_transaction_drops_index_catalog_and_derived_entries_together() {
     let engine = StorageEngine::open_temporary().unwrap();
     let mut node = sample_node("n1", &["Person"]);
-    node.properties.insert("email".to_string(), json!("a@example.com"));
+    node.properties
+        .insert("email".to_string(), json!("a@example.com"));
     engine.put_node_record(&node).unwrap();
     let index = IndexDefinition {
         name: "person_email_idx".to_string(),
@@ -1642,8 +1701,14 @@ fn storage_transaction_commits_vector_index_options_with_its_definition() {
     assert!(engine.load_index_options(&index.name).unwrap().is_none());
     transaction.commit().unwrap();
 
-    assert_eq!(engine.load_index_definitions().unwrap(), vec![index.clone()]);
-    assert_eq!(engine.load_index_options(&index.name).unwrap(), Some(options));
+    assert_eq!(
+        engine.load_index_definitions().unwrap(),
+        vec![index.clone()]
+    );
+    assert_eq!(
+        engine.load_index_options(&index.name).unwrap(),
+        Some(options)
+    );
 }
 
 #[test]
@@ -1677,7 +1742,10 @@ fn storage_transaction_commits_knowledge_policy_catalog_atomically() {
     transaction.put_decay_profile(profile.clone()).unwrap();
     transaction.put_decay_binding(binding.clone()).unwrap();
     assert!(engine.load_decay_profile_schemas().unwrap().is_empty());
-    assert!(engine.load_decay_profile_binding_schemas().unwrap().is_empty());
+    assert!(engine
+        .load_decay_profile_binding_schemas()
+        .unwrap()
+        .is_empty());
     transaction.commit().unwrap();
 
     assert_eq!(engine.load_decay_profile_schemas().unwrap(), vec![profile]);
@@ -1732,7 +1800,9 @@ fn storage_transaction_rejects_a_knowledge_policy_catalog_changed_after_begin() 
 
     let mut transaction = engine.begin_transaction().unwrap();
     transaction.put_decay_profile(staged_profile).unwrap();
-    engine.persist_decay_profile_schema(&external_profile).unwrap();
+    engine
+        .persist_decay_profile_schema(&external_profile)
+        .unwrap();
 
     assert!(matches!(
         transaction.commit(),
@@ -1891,7 +1961,10 @@ fn storage_open_replays_unapplied_wal_transaction_frame_once() {
     drop(wal);
 
     let recovered = StorageEngine::open(test_dir.path()).unwrap();
-    assert_eq!(recovered.get_node_record(&node.id).unwrap(), Some(node.clone()));
+    assert_eq!(
+        recovered.get_node_record(&node.id).unwrap(),
+        Some(node.clone())
+    );
     assert_eq!(recovered.wal_applied_sequence().unwrap(), sequence);
     assert_eq!(recovered.wal_stats().entries, 1);
     drop(recovered);
@@ -1932,7 +2005,10 @@ fn storage_open_replays_unapplied_index_wal_transaction_frame_once() {
     drop(wal);
 
     let recovered = StorageEngine::open(test_dir.path()).unwrap();
-    assert_eq!(recovered.load_index_definitions().unwrap(), vec![index.clone()]);
+    assert_eq!(
+        recovered.load_index_definitions().unwrap(),
+        vec![index.clone()]
+    );
     assert_eq!(recovered.wal_applied_sequence().unwrap(), sequence);
     drop(recovered);
 
@@ -1980,12 +2056,18 @@ fn storage_open_replays_unapplied_knowledge_policy_catalog_wal_frame_once() {
     drop(wal);
 
     let recovered = StorageEngine::open(test_dir.path()).unwrap();
-    assert_eq!(recovered.load_decay_profile_schemas().unwrap(), vec![profile.clone()]);
+    assert_eq!(
+        recovered.load_decay_profile_schemas().unwrap(),
+        vec![profile.clone()]
+    );
     assert_eq!(recovered.wal_applied_sequence().unwrap(), sequence);
     drop(recovered);
 
     let reopened = StorageEngine::open(test_dir.path()).unwrap();
-    assert_eq!(reopened.load_decay_profile_schemas().unwrap(), vec![profile]);
+    assert_eq!(
+        reopened.load_decay_profile_schemas().unwrap(),
+        vec![profile]
+    );
     assert_eq!(reopened.wal_applied_sequence().unwrap(), sequence);
 }
 
@@ -2016,8 +2098,14 @@ fn storage_compacts_only_applied_wal_frames_and_recovers_the_remainder() {
     drop(engine);
 
     let reopened = StorageEngine::open(test_dir.path()).unwrap();
-    assert_eq!(reopened.get_node_record(&durable.id).unwrap(), Some(durable));
-    assert_eq!(reopened.get_node_record(&recovered.id).unwrap(), Some(recovered));
+    assert_eq!(
+        reopened.get_node_record(&durable.id).unwrap(),
+        Some(durable)
+    );
+    assert_eq!(
+        reopened.get_node_record(&recovered.id).unwrap(),
+        Some(recovered)
+    );
     assert_eq!(reopened.wal_applied_sequence().unwrap(), sequence);
     assert_eq!(reopened.wal_stats().entries, 1);
     assert_eq!(reopened.wal_stats().compacted_through, 1);
@@ -2051,10 +2139,23 @@ fn storage_checkpoint_compacts_only_applied_frames_and_restores_unapplied_intent
     drop(engine);
 
     let reopened = StorageEngine::open(test_dir.path()).unwrap();
-    assert_eq!(reopened.get_node_record(&durable.id).unwrap(), Some(durable));
-    assert_eq!(reopened.get_node_record(&recovered.id).unwrap(), Some(recovered));
+    assert_eq!(
+        reopened.get_node_record(&durable.id).unwrap(),
+        Some(durable)
+    );
+    assert_eq!(
+        reopened.get_node_record(&recovered.id).unwrap(),
+        Some(recovered)
+    );
     assert_eq!(reopened.wal_applied_sequence().unwrap(), sequence);
-    assert_eq!(reopened.wal_checkpoint().unwrap().unwrap().compacted_through, 1);
+    assert_eq!(
+        reopened
+            .wal_checkpoint()
+            .unwrap()
+            .unwrap()
+            .compacted_through,
+        1
+    );
 }
 
 #[test]
@@ -2090,17 +2191,19 @@ fn storage_logical_snapshot_round_trips_mvcc_namespace_metadata_and_fresh_wal() 
     let restored = StorageEngine::open(target_dir.path()).unwrap();
     assert_eq!(restored.get_node_record("n1").unwrap(), Some(updated));
     assert_eq!(
-        restored.get_node_record_visible_at(&snapshot, "n1").unwrap(),
+        restored
+            .get_node_record_visible_at(&snapshot, "n1")
+            .unwrap(),
         Some(node)
     );
     assert_eq!(
-        restored
-            .load_constraints_for_namespace("tenant")
-            .unwrap(),
+        restored.load_constraints_for_namespace("tenant").unwrap(),
         vec![constraint]
     );
     assert_eq!(restored.wal_applied_sequence().unwrap(), 0);
-    restored.put_node_record(&sample_node("n2", &["Person"])).unwrap();
+    restored
+        .put_node_record(&sample_node("n2", &["Person"]))
+        .unwrap();
     drop(restored);
 
     let reopened = StorageEngine::open(target_dir.path()).unwrap();
@@ -2160,7 +2263,9 @@ fn storage_logical_snapshot_replaces_an_offline_target_through_staging() {
 
     {
         let target = StorageEngine::open(target_dir.path()).unwrap();
-        target.put_node_record(&sample_node("old", &["Legacy"])).unwrap();
+        target
+            .put_node_record(&sample_node("old", &["Legacy"]))
+            .unwrap();
     }
     StorageEngine::restore_snapshot_replacing(target_dir.path(), Cursor::new(image)).unwrap();
 
@@ -2266,7 +2371,9 @@ fn storage_refuses_wal_repair_when_a_corrupt_frame_is_unapplied() {
 fn storage_inspects_healthy_checksum_corrupt_and_malformed_wals_without_repairing() {
     let healthy_dir = tempfile::tempdir().unwrap();
     let healthy = StorageEngine::open(healthy_dir.path()).unwrap();
-    healthy.put_node_record(&sample_node("healthy", &["Node"])).unwrap();
+    healthy
+        .put_node_record(&sample_node("healthy", &["Node"]))
+        .unwrap();
     drop(healthy);
     assert_eq!(
         StorageEngine::inspect_wal(healthy_dir.path()).unwrap(),
@@ -2279,7 +2386,9 @@ fn storage_inspects_healthy_checksum_corrupt_and_malformed_wals_without_repairin
     let corrupt_dir = tempfile::tempdir().unwrap();
     {
         let engine = StorageEngine::open(corrupt_dir.path()).unwrap();
-        engine.put_node_record(&sample_node("corrupt", &["Node"])).unwrap();
+        engine
+            .put_node_record(&sample_node("corrupt", &["Node"]))
+            .unwrap();
     }
     let corrupt_path = corrupt_dir.path().join(STORAGE_WAL_FILENAME);
     let corrupt_wal = WAL::open(&corrupt_path, WALConfig::default()).unwrap();
@@ -2310,7 +2419,9 @@ fn storage_inspects_healthy_checksum_corrupt_and_malformed_wals_without_repairin
     .unwrap();
     assert_eq!(
         StorageEngine::inspect_wal(malformed_dir.path()).unwrap(),
-        WALIntegrityStatus::Malformed { applied_sequence: 0 }
+        WALIntegrityStatus::Malformed {
+            applied_sequence: 0
+        }
     );
     assert!(matches!(
         StorageEngine::open(malformed_dir.path()),
@@ -2557,7 +2668,10 @@ fn storage_transaction_allows_read_only_snapshot_after_edge_changes() {
     engine.put_edge_record(&edge).unwrap();
 
     let mut transaction = engine.begin_transaction().unwrap();
-    assert_eq!(transaction.get_edge_record("e1").unwrap(), Some(edge.clone()));
+    assert_eq!(
+        transaction.get_edge_record("e1").unwrap(),
+        Some(edge.clone())
+    );
     engine
         .put_edge_record(&EdgeRecord {
             edge_type: "LIKES".to_string(),
@@ -5492,7 +5606,9 @@ fn schema_constraints_validate_and_persist() {
     ));
 
     let null_value = BTreeMap::from([("email".to_string(), Value::Null)]);
-    let err = schema.validate_node("n1", "Person", &null_value).unwrap_err();
+    let err = schema
+        .validate_node("n1", "Person", &null_value)
+        .unwrap_err();
     assert!(matches!(
         err,
         StorageError::ConstraintMissingProperty { .. }
@@ -5552,7 +5668,8 @@ fn schema_unique_constraints_serialize_only_colliding_values() {
             let schema = Arc::clone(&schema);
             let barrier = Arc::clone(&barrier);
             thread::spawn(move || {
-                let properties = BTreeMap::from([("email".to_string(), json!("shared@example.com"))]);
+                let properties =
+                    BTreeMap::from([("email".to_string(), json!("shared@example.com"))]);
                 barrier.wait();
                 schema.validate_node(&format!("node-{index}"), "Person", &properties)
             })
@@ -5565,9 +5682,10 @@ fn schema_unique_constraints_serialize_only_colliding_values() {
         .map(|thread| thread.join().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-    assert!(results.iter().filter(|result| result.is_err()).all(|result| {
-        matches!(result, Err(StorageError::UniqueConstraintViolation { .. }))
-    }));
+    assert!(results
+        .iter()
+        .filter(|result| result.is_err())
+        .all(|result| { matches!(result, Err(StorageError::UniqueConstraintViolation { .. })) }));
 
     let typed_string = BTreeMap::from([("email".to_string(), json!("1"))]);
     let typed_number = BTreeMap::from([("email".to_string(), json!(1))]);
@@ -5600,7 +5718,8 @@ fn schema_unique_constraints_allow_disjoint_concurrent_values() {
             let schema = Arc::clone(&schema);
             let barrier = Arc::clone(&barrier);
             thread::spawn(move || {
-                let properties = BTreeMap::from([("email".to_string(), json!(format!("{index}@example.com")))]);
+                let properties =
+                    BTreeMap::from([("email".to_string(), json!(format!("{index}@example.com")))]);
                 barrier.wait();
                 schema.validate_node(&format!("node-{index}"), "Person", &properties)
             })
@@ -5770,7 +5889,9 @@ fn schema_composite_unique_and_node_key_constraints_use_ordered_values() {
         ("tenant".to_string(), json!("one")),
         ("email".to_string(), json!("new@example.com")),
     ]);
-    schema.validate_node("first", "Person", &replacement).unwrap();
+    schema
+        .validate_node("first", "Person", &replacement)
+        .unwrap();
     schema.validate_node("reused", "Person", &first).unwrap();
 }
 
@@ -5835,7 +5956,9 @@ fn storage_engine_enforces_endpoint_scoped_relationship_keys() {
     let mut first = sample_edge("first", "KNOWS", "alice", "bob");
     first.properties.insert("since".to_string(), json!(2020));
     let mut duplicate = sample_edge("duplicate", "KNOWS", "alice", "bob");
-    duplicate.properties.insert("since".to_string(), json!(2020));
+    duplicate
+        .properties
+        .insert("since".to_string(), json!(2020));
     let mut other_endpoints = sample_edge("other", "KNOWS", "carol", "dave");
     other_endpoints
         .properties
@@ -5888,7 +6011,10 @@ fn storage_batch_writer_enforces_persisted_unique_constraints() {
         batch.put_node_record(&duplicate);
         Ok(())
     });
-    assert!(matches!(result, Err(StorageError::UniqueConstraintViolation { .. })));
+    assert!(matches!(
+        result,
+        Err(StorageError::UniqueConstraintViolation { .. })
+    ));
     assert!(engine.get_node_record("first").unwrap().is_none());
     assert!(engine.get_node_record("duplicate").unwrap().is_none());
 }
@@ -6121,28 +6247,24 @@ fn fulltext_vocabulary_is_bounded_deterministic_and_cancellable() {
 
     let cancel = RequestCancellation::new();
     let vocabulary = engine
-        .fulltext_node_vocabulary_with_cancellation(
-            "Person",
-            &["bio".into()],
-            32,
-            32,
-            &cancel,
-        )
+        .fulltext_node_vocabulary_with_cancellation("Person", &["bio".into()], 32, 32, &cancel)
         .unwrap();
     assert_eq!(
         vocabulary.terms,
-        vec!["database", "engineer", "graph", "rust", "specialist", "storage", "systems"]
+        vec![
+            "database",
+            "engineer",
+            "graph",
+            "rust",
+            "specialist",
+            "storage",
+            "systems"
+        ]
     );
     assert!(!vocabulary.truncated);
 
     let limited = engine
-        .fulltext_node_vocabulary_with_cancellation(
-            "Person",
-            &["bio".into()],
-            2,
-            32,
-            &cancel,
-        )
+        .fulltext_node_vocabulary_with_cancellation("Person", &["bio".into()], 2, 32, &cancel)
         .unwrap();
     assert_eq!(limited.terms.len(), 2);
     assert!(limited.truncated);
@@ -6181,7 +6303,10 @@ fn relationship_fulltext_index_rebuilds_and_tracks_mutations() {
     let hits = engine
         .search_fulltext_relationships_by_properties("RELATES", &["fact".into()], &terms)
         .unwrap();
-    assert_eq!(hits.iter().map(|edge| &edge.id).collect::<Vec<_>>(), vec!["e1"]);
+    assert_eq!(
+        hits.iter().map(|edge| &edge.id).collect::<Vec<_>>(),
+        vec!["e1"]
+    );
     let vocabulary = engine
         .fulltext_relationship_vocabulary_with_cancellation(
             "RELATES",
@@ -6230,14 +6355,16 @@ fn relationship_fulltext_index_rebuilds_and_tracks_mutations() {
     );
 
     engine.delete_edge_record("e1").unwrap();
-    assert!(engine
-        .search_fulltext_relationships_by_properties(
-            "RELATES",
-            &["fact".into()],
-            &["redis".into()],
-        )
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .search_fulltext_relationships_by_properties(
+                "RELATES",
+                &["fact".into()],
+                &["redis".into()],
+            )
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -7753,6 +7880,37 @@ fn event_notifier_node_created_and_updated() {
         })
         .unwrap();
     assert_eq!(*updated.lock().unwrap(), vec!["ev-n1"]);
+}
+
+#[test]
+fn event_notifier_fans_out_to_all_node_listeners() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let first = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let second = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let first_listener = Arc::clone(&first);
+    let second_listener = Arc::clone(&second);
+    engine.on_node_created(Arc::new(move |node| {
+        first_listener.lock().unwrap().push(node.id);
+    }));
+    engine.on_node_created(Arc::new(move |node| {
+        second_listener.lock().unwrap().push(node.id);
+    }));
+
+    engine
+        .put_node_record(&NodeRecord {
+            id: "fanout-n1".to_string(),
+            labels: vec![],
+            properties: BTreeMap::new(),
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: vec![],
+            embed_meta: NodeEmbeddingMetadata::default(),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+        })
+        .unwrap();
+
+    assert_eq!(*first.lock().unwrap(), vec!["fanout-n1"]);
+    assert_eq!(*second.lock().unwrap(), vec!["fanout-n1"]);
 }
 
 #[test]
