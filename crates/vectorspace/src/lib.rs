@@ -239,6 +239,14 @@ impl HnswIndex {
         Ok(())
     }
 
+    fn compact(&mut self) -> bool {
+        if self.tombstones.is_empty() {
+            return false;
+        }
+        self.rebuild();
+        true
+    }
+
     pub fn knn(
         &self,
         query: &[f32],
@@ -458,6 +466,7 @@ pub struct HnswIndexStatus {
     pub generation: u64,
     pub strategy: SimilarityMetric,
     pub ready: bool,
+    pub tombstones: usize,
 }
 
 #[derive(Debug)]
@@ -585,6 +594,7 @@ impl HnswRegistry {
                 generation: managed.generation,
                 strategy: managed.index.metric(),
                 ready: true,
+                tombstones: managed.index.tombstones.len(),
             });
         }
         let indexes = self.exact_euclidean_indexes.read();
@@ -596,6 +606,7 @@ impl HnswRegistry {
             generation: managed.generation,
             strategy: SimilarityMetric::ExactEuclidean,
             ready: true,
+            tombstones: 0,
         })
     }
 
@@ -643,6 +654,25 @@ impl HnswRegistry {
         }
         managed.generation = managed.generation.saturating_add(1);
         Ok(())
+    }
+
+    /// Rebuild an HNSW index to remove accumulated tombstones.
+    ///
+    /// Returns `true` only when a rebuild was necessary. Exact Euclidean
+    /// indexes remove entries eagerly and therefore never require compaction.
+    pub fn compact(&self, name: &str) -> Result<bool, VectorSpaceError> {
+        let mut indexes = self.indexes.write();
+        if let Some(managed) = indexes.get_mut(name) {
+            if managed.index.compact() {
+                managed.generation = managed.generation.saturating_add(1);
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        if self.exact_euclidean_indexes.read().contains_key(name) {
+            return Ok(false);
+        }
+        Err(VectorSpaceError::IndexNotFound(name.to_string()))
     }
 
     pub fn knn(
@@ -1089,6 +1119,40 @@ mod tests {
 
         assert!(index.is_empty());
         assert_eq!(index.knn(&[1.0, 0.0], 1).unwrap().0, Vec::new());
+    }
+
+    #[test]
+    fn registry_explicitly_compacts_below_threshold_tombstones() {
+        let registry = HnswRegistry::new();
+        registry
+            .create_index("documents.embedding", 2, HnswConfig::default())
+            .unwrap();
+        registry
+            .upsert("documents.embedding", "removed", vec![1.0, 0.0])
+            .unwrap();
+        registry
+            .upsert("documents.embedding", "retained", vec![0.0, 1.0])
+            .unwrap();
+        registry.remove("documents.embedding", "removed").unwrap();
+
+        let before = registry.status("documents.embedding").unwrap();
+        assert_eq!(before.tombstones, 1);
+        assert!(registry.compact("documents.embedding").unwrap());
+
+        let after = registry.status("documents.embedding").unwrap();
+        assert_eq!(after.tombstones, 0);
+        assert_eq!(after.generation, before.generation + 1);
+        assert!(!registry.compact("documents.embedding").unwrap());
+        assert_eq!(
+            registry
+                .knn("documents.embedding", &[1.0, 0.0], 2)
+                .unwrap()
+                .0
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec!["retained"]
+        );
     }
 
     #[test]

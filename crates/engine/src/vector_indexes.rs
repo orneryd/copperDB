@@ -135,6 +135,18 @@ impl VectorIndexManager {
         self.registry.status(name).map_err(vector_error)
     }
 
+    pub(crate) fn compact(
+        &self,
+        storage: &StorageEngine,
+        name: &str,
+    ) -> Result<bool, CopperDbError> {
+        let compacted = self.registry.compact(name).map_err(vector_error)?;
+        if compacted {
+            self.persist_artifact(storage);
+        }
+        Ok(compacted)
+    }
+
     pub(crate) fn registry(&self) -> Arc<HnswRegistry> {
         Arc::clone(&self.registry)
     }
@@ -456,6 +468,46 @@ mod tests {
                 .0[0]
                 .0,
             "new"
+        );
+    }
+
+    #[test]
+    fn explicit_compaction_refreshes_the_persisted_registry_artifact() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path().join("vector-db");
+        let storage = StorageEngine::open(&data_dir).unwrap();
+        storage
+            .persist_index_definition(&vector_index_definition())
+            .unwrap();
+        storage
+            .persist_index_options("document_embedding", &vector_options())
+            .unwrap();
+        storage
+            .put_node_record(&node("existing", vec![1.0, 0.0]))
+            .unwrap();
+
+        let manager = VectorIndexManager::build(&storage).unwrap();
+        manager
+            .registry()
+            .remove("document_embedding", "existing")
+            .unwrap();
+        assert_eq!(manager.status("document_embedding").unwrap().tombstones, 1);
+
+        assert!(manager.compact(&storage, "document_embedding").unwrap());
+        let status = manager.status("document_embedding").unwrap();
+        assert_eq!(status.tombstones, 0);
+
+        let artifact = HnswRegistry::load_artifact_with_source_generation(
+            data_dir.join(VECTOR_REGISTRY_ARTIFACT_FILE),
+        )
+        .unwrap();
+        assert_eq!(
+            artifact
+                .registry
+                .status("document_embedding")
+                .unwrap()
+                .generation,
+            status.generation
         );
     }
 

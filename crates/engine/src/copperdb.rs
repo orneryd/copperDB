@@ -73,6 +73,14 @@ impl CopperDb {
         self.vector_indexes.status(index_name)
     }
 
+    /// Compact tombstones from an engine-owned HNSW vector index.
+    ///
+    /// The operation is explicit so query paths remain read-only. A rebuilt
+    /// durable index artifact is persisted before this call returns.
+    pub fn compact_vector_index(&self, index_name: &str) -> Result<bool, CopperDbError> {
+        self.vector_indexes.compact(&self.storage, index_name)
+    }
+
     /// Return the per-database embedding runtime's lifecycle status.
     pub fn embedding_runtime_status(&self) -> Result<EmbeddingRuntimeStatus, CopperDbError> {
         self.embedding_runtime.status()
