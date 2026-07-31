@@ -10,8 +10,8 @@ use crate::wsconn;
 use crate::BoltError;
 use copperdb_errors::{map_transient_transaction_error, TransientTransactionCode};
 use copperdb_otel::Telemetry;
-use std::error::Error;
 use std::collections::HashMap;
+use std::error::Error;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -560,11 +560,12 @@ async fn handle_tcp_session_with_timeout(
     let mut temp_buf = [0u8; 4096];
 
     let result = 'session_loop: loop {
-        let bytes_read = match tokio::time::timeout(receive_timeout, stream.read(&mut temp_buf)).await {
-            Ok(Ok(bytes_read)) => bytes_read,
-            Ok(Err(error)) => break Err(error.into()),
-            Err(_) => break Err(BoltError::ProtocolViolation("Bolt receive timeout".into())),
-        };
+        let bytes_read =
+            match tokio::time::timeout(receive_timeout, stream.read(&mut temp_buf)).await {
+                Ok(Ok(bytes_read)) => bytes_read,
+                Ok(Err(error)) => break Err(error.into()),
+                Err(_) => break Err(BoltError::ProtocolViolation("Bolt receive timeout".into())),
+            };
         if bytes_read == 0 {
             break Ok(());
         }
@@ -657,25 +658,29 @@ where
     let mut decoder = wsconn::BoltChunkDecoder::new();
 
     let result = 'session_loop: loop {
-        let frames = match tokio::time::timeout(
-            receive_timeout,
-            wsconn::read_ws_message(ws, &mut decoder),
-        )
-        .await
-        {
-            Ok(Some(Ok(messages))) => {
-                info!(count = messages.len(), "bolt WS messages received");
-                messages
-            }
-            Ok(Some(Err(e))) => {
-                break 'session_loop Err(BoltError::ProtocolViolation(format!("WS read error: {e}")))
-            }
-            Ok(None) => {
-                info!("bolt WS connection closed");
-                break 'session_loop Ok(());
-            }
-            Err(_) => break 'session_loop Err(BoltError::ProtocolViolation("Bolt receive timeout".into())),
-        };
+        let frames =
+            match tokio::time::timeout(receive_timeout, wsconn::read_ws_message(ws, &mut decoder))
+                .await
+            {
+                Ok(Some(Ok(messages))) => {
+                    info!(count = messages.len(), "bolt WS messages received");
+                    messages
+                }
+                Ok(Some(Err(e))) => {
+                    break 'session_loop Err(BoltError::ProtocolViolation(format!(
+                        "WS read error: {e}"
+                    )))
+                }
+                Ok(None) => {
+                    info!("bolt WS connection closed");
+                    break 'session_loop Ok(());
+                }
+                Err(_) => {
+                    break 'session_loop Err(BoltError::ProtocolViolation(
+                        "Bolt receive timeout".into(),
+                    ))
+                }
+            };
 
         for frame in frames {
             let (value, consumed) = match crate::packstream::decode(&frame) {
@@ -702,7 +707,9 @@ where
                     for response_bytes in &responses {
                         info!(len = response_bytes.len(), "bolt WS sending response");
                         if let Err(error) = wsconn::write_ws_message(ws, response_bytes).await {
-                            break 'session_loop Err(BoltError::ProtocolViolation(error.to_string()));
+                            break 'session_loop Err(BoltError::ProtocolViolation(
+                                error.to_string(),
+                            ));
                         }
                     }
                     if has_responses {
@@ -747,44 +754,38 @@ async fn process_buffer(
             frame.len() - consumed
         )));
     }
-    let (op, result) = match process_message(
-        &value,
-        session,
-        Arc::clone(&executor),
-        auth_provider,
-    )
-    .await
-    {
-        Ok(responses) => {
-            let len = responses.len();
-            for response_bytes in responses {
-                info!(len = response_bytes.len(), "bolt sending response");
+    let (op, result) =
+        match process_message(&value, session, Arc::clone(&executor), auth_provider).await {
+            Ok(responses) => {
+                let len = responses.len();
+                for response_bytes in responses {
+                    info!(len = response_bytes.len(), "bolt sending response");
+                    stream
+                        .write_all(&wsconn::encode_bolt_chunks(&response_bytes))
+                        .await?;
+                }
+                if len > 0 {
+                    info!("bolt TCP responses sent");
+                }
+                ("run", "success")
+            }
+            Err(e) => {
+                let failure = BoltMessage::Failure {
+                    metadata: HashMap::from([
+                        (
+                            "code".into(),
+                            serde_json::json!("Neo.TransientError.General.UnknownError"),
+                        ),
+                        ("message".into(), serde_json::json!(e.to_string())),
+                    ]),
+                };
+                let response = dispatch::encode_message(&failure);
                 stream
-                    .write_all(&wsconn::encode_bolt_chunks(&response_bytes))
+                    .write_all(&wsconn::encode_bolt_chunks(&response))
                     .await?;
+                ("run", "error")
             }
-            if len > 0 {
-                info!("bolt TCP responses sent");
-            }
-            ("run", "success")
-        }
-        Err(e) => {
-            let failure = BoltMessage::Failure {
-                metadata: HashMap::from([
-                    (
-                        "code".into(),
-                        serde_json::json!("Neo.TransientError.General.UnknownError"),
-                    ),
-                    ("message".into(), serde_json::json!(e.to_string())),
-                ]),
-            };
-            let response = dispatch::encode_message(&failure);
-            stream
-                .write_all(&wsconn::encode_bolt_chunks(&response))
-                .await?;
-            ("run", "error")
-        }
-    };
+        };
     let _ = telemetry.record_counter(
         "nornicdb_bolt_messages_total",
         &[("op", op), ("result", result)],
@@ -2066,7 +2067,10 @@ mod tests {
             0x7F
         );
         assert!(session.transaction.is_none());
-        assert_eq!(*operations.lock().unwrap(), vec!["begin", "run", "rollback"]);
+        assert_eq!(
+            *operations.lock().unwrap(),
+            vec!["begin", "run", "rollback"]
+        );
     }
 
     #[tokio::test]
@@ -2084,9 +2088,9 @@ mod tests {
         let [Value::Map(metadata)] = fields.as_slice() else {
             panic!("expected RUN metadata");
         };
-        assert!(metadata.iter().any(|(key, value)| {
-            key == "qid" && value == &Value::Integer(0)
-        }));
+        assert!(metadata
+            .iter()
+            .any(|(key, value)| { key == "qid" && value == &Value::Integer(0) }));
 
         let pull = Value::Struct {
             signature: 0x3F,
@@ -2097,7 +2101,13 @@ mod tests {
             .unwrap();
         assert_eq!(pulled.len(), 2);
         let (record, _) = crate::packstream::decode(&pulled[0]).unwrap();
-        assert!(matches!(record, Value::Struct { signature: 0x71, .. }));
+        assert!(matches!(
+            record,
+            Value::Struct {
+                signature: 0x71,
+                ..
+            }
+        ));
         let (summary, _) = crate::packstream::decode(&pulled[1]).unwrap();
         let Value::Struct { fields, .. } = summary else {
             panic!("expected PULL summary");
@@ -2105,9 +2115,9 @@ mod tests {
         let [Value::Map(metadata)] = fields.as_slice() else {
             panic!("expected PULL summary metadata");
         };
-        assert!(metadata.iter().any(|(key, value)| {
-            key == "has_more" && value == &Value::Bool(true)
-        }));
+        assert!(metadata
+            .iter()
+            .any(|(key, value)| { key == "has_more" && value == &Value::Bool(true) }));
 
         let discard = Value::Struct {
             signature: 0x2F,
@@ -2184,18 +2194,18 @@ mod tests {
         let Value::Map(counters) = stats else {
             panic!("expected stats map");
         };
-        assert!(counters.iter().any(|(key, value)| {
-            key == "nodes-created" && value == &Value::Integer(2)
-        }));
-        assert!(counters.iter().any(|(key, value)| {
-            key == "relationships-created" && value == &Value::Integer(1)
-        }));
-        assert!(counters.iter().any(|(key, value)| {
-            key == "relationships-deleted" && value == &Value::Integer(1)
-        }));
-        assert!(counters.iter().any(|(key, value)| {
-            key == "properties-set" && value == &Value::Integer(3)
-        }));
+        assert!(counters
+            .iter()
+            .any(|(key, value)| { key == "nodes-created" && value == &Value::Integer(2) }));
+        assert!(counters
+            .iter()
+            .any(|(key, value)| { key == "relationships-created" && value == &Value::Integer(1) }));
+        assert!(counters
+            .iter()
+            .any(|(key, value)| { key == "relationships-deleted" && value == &Value::Integer(1) }));
+        assert!(counters
+            .iter()
+            .any(|(key, value)| { key == "properties-set" && value == &Value::Integer(3) }));
     }
 
     #[tokio::test]
@@ -2233,9 +2243,7 @@ mod tests {
         assert!(notification.iter().any(|(key, value)| {
             key == "code"
                 && value
-                    == &Value::String(
-                        "Neo.ClientNotification.Statement.UnknownLabelWarning".into(),
-                    )
+                    == &Value::String("Neo.ClientNotification.Statement.UnknownLabelWarning".into())
         }));
         assert!(notification.iter().any(|(key, value)| {
             key == "severity" && value == &Value::String("WARNING".into())
@@ -2529,8 +2537,8 @@ mod tests {
         let mut client = TcpStream::connect(addr).await.unwrap();
         client
             .write_all(&[
-                0x60, 0x60, 0xB0, 0x17, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x04, 0x03, 0x00,
-                0x00, 0x04, 0x02, 0x00, 0x00, 0x04, 0x01,
+                0x60, 0x60, 0xB0, 0x17, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x04, 0x03, 0x00, 0x00,
+                0x04, 0x02, 0x00, 0x00, 0x04, 0x01,
             ])
             .await
             .unwrap();
@@ -2575,8 +2583,8 @@ mod tests {
         let mut client = TcpStream::connect(addr).await.unwrap();
         client
             .write_all(&[
-                0x60, 0x60, 0xB0, 0x17, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x04, 0x03, 0x00,
-                0x00, 0x04, 0x02, 0x00, 0x00, 0x04, 0x01,
+                0x60, 0x60, 0xB0, 0x17, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x04, 0x03, 0x00, 0x00,
+                0x04, 0x02, 0x00, 0x00, 0x04, 0x01,
             ])
             .await
             .unwrap();
@@ -2588,7 +2596,10 @@ mod tests {
         let mut response = [0u8; 128];
         assert!(client.read(&mut response).await.unwrap() > 0);
 
-        let error = handler.await.unwrap().expect_err("idle session should time out");
+        let error = handler
+            .await
+            .unwrap()
+            .expect_err("idle session should time out");
         assert!(error.to_string().contains("Bolt receive timeout"));
         assert_eq!(*operations.lock().unwrap(), vec!["begin", "rollback"]);
     }
@@ -2754,12 +2765,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let telemetry = Arc::new(Telemetry::new());
         telemetry.seed_zero_catalog_metrics();
-        let server = BoltServer::new(
-            address.to_string(),
-            telemetry,
-            Arc::new(MultiRowExecutor),
-        )
-        .with_auth_enabled(false);
+        let server = BoltServer::new(address.to_string(), telemetry, Arc::new(MultiRowExecutor))
+            .with_auth_enabled(false);
         let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
 
         let graph = Graph::connect(
@@ -2803,12 +2810,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let telemetry = Arc::new(Telemetry::new());
         telemetry.seed_zero_catalog_metrics();
-        let server = BoltServer::new(
-            address.to_string(),
-            telemetry,
-            Arc::new(MultiRowExecutor),
-        )
-        .with_auth_enabled(false);
+        let server = BoltServer::new(address.to_string(), telemetry, Arc::new(MultiRowExecutor))
+            .with_auth_enabled(false);
         let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
         let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../ui/scripts/bolt-websocket-driver-e2e.mjs");

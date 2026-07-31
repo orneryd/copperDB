@@ -53,12 +53,31 @@ impl FulltextQuery {
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryNode {
     Empty,
-    Term { field: Option<String>, value: String },
-    Phrase { field: Option<String>, value: String, slop: Option<u32> },
-    Presence { field: String },
-    Wildcard { field: Option<String>, value: String },
-    Fuzzy { field: Option<String>, value: String, max_edits: u8 },
-    Regex { field: Option<String>, value: String },
+    Term {
+        field: Option<String>,
+        value: String,
+    },
+    Phrase {
+        field: Option<String>,
+        value: String,
+        slop: Option<u32>,
+    },
+    Presence {
+        field: String,
+    },
+    Wildcard {
+        field: Option<String>,
+        value: String,
+    },
+    Fuzzy {
+        field: Option<String>,
+        value: String,
+        max_edits: u8,
+    },
+    Regex {
+        field: Option<String>,
+        value: String,
+    },
     Range {
         field: Option<String>,
         lower: String,
@@ -66,10 +85,16 @@ pub enum QueryNode {
         include_lower: bool,
         include_upper: bool,
     },
-    Boolean { operator: BooleanOperator, clauses: Vec<QueryNode> },
+    Boolean {
+        operator: BooleanOperator,
+        clauses: Vec<QueryNode>,
+    },
     Required(Box<QueryNode>),
     Prohibited(Box<QueryNode>),
-    Boost { query: Box<QueryNode>, factor: f32 },
+    Boost {
+        query: Box<QueryNode>,
+        factor: f32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,7 +110,11 @@ pub struct FulltextQueryError {
 
 impl fmt::Display for FulltextQueryError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "invalid Lucene full-text query: {}", self.message)
+        write!(
+            formatter,
+            "invalid Lucene full-text query: {}",
+            self.message
+        )
     }
 }
 
@@ -93,16 +122,23 @@ impl std::error::Error for FulltextQueryError {}
 
 impl FulltextQueryError {
     fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into() }
+        Self {
+            message: message.into(),
+        }
     }
 }
 
 pub fn parse_fulltext_query(input: &str) -> Result<FulltextQuery, FulltextQueryError> {
     let tokens = tokenize(input)?;
     if matches!(tokens.as_slice(), [Token::End]) {
-        return Ok(FulltextQuery { root: QueryNode::Empty });
+        return Ok(FulltextQuery {
+            root: QueryNode::Empty,
+        });
     }
-    let mut parser = Parser { tokens, position: 0 };
+    let mut parser = Parser {
+        tokens,
+        position: 0,
+    };
     let root = parser.parse_or()?;
     if !matches!(parser.peek(), Token::End) {
         return Err(FulltextQueryError::new("unexpected trailing input"));
@@ -348,7 +384,10 @@ impl Parser {
             let factor = factor
                 .parse::<f32>()
                 .map_err(|_| FulltextQueryError::new("invalid boost factor"))?;
-            query = QueryNode::Boost { query: Box::new(query), factor };
+            query = QueryNode::Boost {
+                query: Box::new(query),
+                factor,
+            };
         }
         Ok(match modifier {
             Some(true) => QueryNode::Required(Box::new(query)),
@@ -395,7 +434,13 @@ impl Parser {
             Token::RBrace => false,
             _ => return Err(FulltextQueryError::new("expected ] or } to close range")),
         };
-        Ok(QueryNode::Range { field: Some(field), lower, upper, include_lower, include_upper })
+        Ok(QueryNode::Range {
+            field: Some(field),
+            lower,
+            upper,
+            include_lower,
+            include_upper,
+        })
     }
 
     fn range_endpoint(&mut self) -> Result<String, FulltextQueryError> {
@@ -407,9 +452,9 @@ impl Parser {
 
     fn parse_atom(&mut self, field: Option<String>) -> Result<QueryNode, FulltextQueryError> {
         match self.advance() {
-            Token::Term(value) if field.is_some() && value == "*" => {
-                Ok(QueryNode::Presence { field: field.unwrap() })
-            }
+            Token::Term(value) if field.is_some() && value == "*" => Ok(QueryNode::Presence {
+                field: field.unwrap(),
+            }),
             Token::Term(value) if value.contains('*') || value.contains('?') => {
                 Ok(QueryNode::Wildcard { field, value })
             }
@@ -417,15 +462,19 @@ impl Parser {
                 if matches!(self.peek(), Token::Tilde) {
                     self.advance();
                     let max_edits = match self.peek() {
-                        Token::Term(distance) => distance.parse::<u8>().map_err(|_| {
-                            FulltextQueryError::new("invalid fuzzy edit distance")
-                        })?,
+                        Token::Term(distance) => distance
+                            .parse::<u8>()
+                            .map_err(|_| FulltextQueryError::new("invalid fuzzy edit distance"))?,
                         _ => 2,
                     };
                     if matches!(self.peek(), Token::Term(_)) {
                         self.advance();
                     }
-                    Ok(QueryNode::Fuzzy { field, value, max_edits })
+                    Ok(QueryNode::Fuzzy {
+                        field,
+                        value,
+                        max_edits,
+                    })
                 } else {
                     Ok(QueryNode::Term { field, value })
                 }
@@ -434,9 +483,11 @@ impl Parser {
                 let slop = if matches!(self.peek(), Token::Tilde) {
                     self.advance();
                     match self.peek() {
-                        Token::Term(distance) => Some(distance.parse::<u32>().map_err(|_| {
-                            FulltextQueryError::new("invalid phrase proximity")
-                        })?),
+                        Token::Term(distance) => Some(
+                            distance
+                                .parse::<u32>()
+                                .map_err(|_| FulltextQueryError::new("invalid phrase proximity"))?,
+                        ),
                         _ => Some(0),
                     }
                 } else {
@@ -448,7 +499,9 @@ impl Parser {
                 Ok(QueryNode::Phrase { field, value, slop })
             }
             Token::Regex(value) => Ok(QueryNode::Regex { field, value }),
-            _ => Err(FulltextQueryError::new("expected term, phrase, group, or regex")),
+            _ => Err(FulltextQueryError::new(
+                "expected term, phrase, group, or regex",
+            )),
         }
     }
 
@@ -466,11 +519,16 @@ impl Parser {
     }
 
     fn peek_at(&self, offset: usize) -> &Token {
-        self.tokens.get(self.position + offset).unwrap_or(&Token::End)
+        self.tokens
+            .get(self.position + offset)
+            .unwrap_or(&Token::End)
     }
 }
 
-fn collapse_boolean(operator: BooleanOperator, clauses: Vec<QueryNode>) -> Result<QueryNode, FulltextQueryError> {
+fn collapse_boolean(
+    operator: BooleanOperator,
+    clauses: Vec<QueryNode>,
+) -> Result<QueryNode, FulltextQueryError> {
     match clauses.len() {
         0 => Err(FulltextQueryError::new("query is empty")),
         1 => Ok(clauses.into_iter().next().unwrap()),
@@ -481,32 +539,73 @@ fn collapse_boolean(operator: BooleanOperator, clauses: Vec<QueryNode>) -> Resul
 fn starts_clause(token: &Token) -> bool {
     matches!(
         token,
-        Token::Term(_) | Token::Phrase(_) | Token::Regex(_) | Token::LParen | Token::Plus | Token::Minus | Token::Not
+        Token::Term(_)
+            | Token::Phrase(_)
+            | Token::Regex(_)
+            | Token::LParen
+            | Token::Plus
+            | Token::Minus
+            | Token::Not
     )
 }
 
 fn rebind_field(query: QueryNode, field: &str) -> QueryNode {
     match query {
-        QueryNode::Term { field: None, value } => QueryNode::Term { field: Some(field.into()), value },
-        QueryNode::Phrase { field: None, value, slop } => QueryNode::Phrase { field: Some(field.into()), value, slop },
-        QueryNode::Presence { field: existing } if existing.is_empty() => QueryNode::Presence { field: field.into() },
-        QueryNode::Wildcard { field: None, value } => QueryNode::Wildcard { field: Some(field.into()), value },
-        QueryNode::Fuzzy { field: None, value, max_edits } => QueryNode::Fuzzy { field: Some(field.into()), value, max_edits },
-        QueryNode::Regex { field: None, value } => QueryNode::Regex { field: Some(field.into()), value },
+        QueryNode::Term { field: None, value } => QueryNode::Term {
+            field: Some(field.into()),
+            value,
+        },
+        QueryNode::Phrase {
+            field: None,
+            value,
+            slop,
+        } => QueryNode::Phrase {
+            field: Some(field.into()),
+            value,
+            slop,
+        },
+        QueryNode::Presence { field: existing } if existing.is_empty() => QueryNode::Presence {
+            field: field.into(),
+        },
+        QueryNode::Wildcard { field: None, value } => QueryNode::Wildcard {
+            field: Some(field.into()),
+            value,
+        },
+        QueryNode::Fuzzy {
+            field: None,
+            value,
+            max_edits,
+        } => QueryNode::Fuzzy {
+            field: Some(field.into()),
+            value,
+            max_edits,
+        },
+        QueryNode::Regex { field: None, value } => QueryNode::Regex {
+            field: Some(field.into()),
+            value,
+        },
         QueryNode::Boolean { operator, clauses } => QueryNode::Boolean {
             operator,
-            clauses: clauses.into_iter().map(|clause| rebind_field(clause, field)).collect(),
+            clauses: clauses
+                .into_iter()
+                .map(|clause| rebind_field(clause, field))
+                .collect(),
         },
         QueryNode::Required(query) => QueryNode::Required(Box::new(rebind_field(*query, field))),
-        QueryNode::Prohibited(query) => QueryNode::Prohibited(Box::new(rebind_field(*query, field))),
-        QueryNode::Boost { query, factor } => QueryNode::Boost { query: Box::new(rebind_field(*query, field)), factor },
+        QueryNode::Prohibited(query) => {
+            QueryNode::Prohibited(Box::new(rebind_field(*query, field)))
+        }
+        QueryNode::Boost { query, factor } => QueryNode::Boost {
+            query: Box::new(rebind_field(*query, field)),
+            factor,
+        },
         query => query,
     }
 }
 
 fn collect_primary_terms(query: &QueryNode, terms: &mut BTreeSet<String>) -> Option<bool> {
     match query {
-    QueryNode::Empty => Some(false),
+        QueryNode::Empty => Some(false),
         QueryNode::Term { value, .. } => {
             terms.insert(value.to_ascii_lowercase());
             Some(true)
@@ -522,7 +621,9 @@ fn collect_primary_terms(query: &QueryNode, terms: &mut BTreeSet<String>) -> Opt
             }
             Some(has_positive_term)
         }
-        QueryNode::Required(query) | QueryNode::Boost { query, .. } => collect_primary_terms(query, terms),
+        QueryNode::Required(query) | QueryNode::Boost { query, .. } => {
+            collect_primary_terms(query, terms)
+        }
         QueryNode::Prohibited(_) => Some(false),
         QueryNode::Presence { .. }
         | QueryNode::Wildcard { .. }
@@ -569,7 +670,9 @@ fn expand_candidate_terms(
             );
             Ok(true)
         }
-        QueryNode::Fuzzy { value, max_edits, .. } => {
+        QueryNode::Fuzzy {
+            value, max_edits, ..
+        } => {
             let value = value.to_ascii_lowercase();
             terms.extend(
                 vocabulary
@@ -584,17 +687,41 @@ fn expand_candidate_terms(
                 .case_insensitive(true)
                 .build()
                 .map_err(|error| FulltextQueryError::new(format!("invalid regex: {error}")))?;
-            terms.extend(vocabulary.iter().filter(|term| regex.is_match(term)).cloned());
+            terms.extend(
+                vocabulary
+                    .iter()
+                    .filter(|term| regex.is_match(term))
+                    .cloned(),
+            );
             Ok(true)
         }
-        QueryNode::Range { lower, upper, include_lower, include_upper, .. } => {
+        QueryNode::Range {
+            lower,
+            upper,
+            include_lower,
+            include_upper,
+            ..
+        } => {
             let lower = lower.to_ascii_lowercase();
             let upper = upper.to_ascii_lowercase();
-            terms.extend(vocabulary.iter().filter(|term| {
-                let above_lower = if *include_lower { *term >= &lower } else { *term > &lower };
-                let below_upper = if *include_upper { *term <= &upper } else { *term < &upper };
-                above_lower && below_upper
-            }).cloned());
+            terms.extend(
+                vocabulary
+                    .iter()
+                    .filter(|term| {
+                        let above_lower = if *include_lower {
+                            *term >= &lower
+                        } else {
+                            *term > &lower
+                        };
+                        let below_upper = if *include_upper {
+                            *term <= &upper
+                        } else {
+                            *term < &upper
+                        };
+                        above_lower && below_upper
+                    })
+                    .cloned(),
+            );
             Ok(true)
         }
         QueryNode::Boolean { clauses, .. } => {
@@ -641,14 +768,22 @@ fn evaluate_node(
         QueryNode::Presence { field } => Ok(document.has_field(field).then_some(1.0)),
         QueryNode::Boolean { operator, clauses } => evaluate_boolean(*operator, clauses, document),
         QueryNode::Required(query) => evaluate_node(query, document),
-        QueryNode::Prohibited(query) => Ok(evaluate_node(query, document)?.is_none().then_some(0.0)),
-        QueryNode::Boost { query, factor } => Ok(evaluate_node(query, document)?.map(|score| score * f64::from(*factor))),
+        QueryNode::Prohibited(query) => {
+            Ok(evaluate_node(query, document)?.is_none().then_some(0.0))
+        }
+        QueryNode::Boost { query, factor } => {
+            Ok(evaluate_node(query, document)?.map(|score| score * f64::from(*factor)))
+        }
         QueryNode::Wildcard { field, value } => Ok(document
             .fields_for(field.as_deref())
             .flat_map(fulltext_tokens)
             .any(|token| wildcard_matches(value, token))
             .then_some(1.0)),
-        QueryNode::Fuzzy { field, value, max_edits } => Ok(document
+        QueryNode::Fuzzy {
+            field,
+            value,
+            max_edits,
+        } => Ok(document
             .fields_for(field.as_deref())
             .flat_map(fulltext_tokens)
             .any(|token| levenshtein_distance(value, token) <= usize::from(*max_edits))
@@ -663,7 +798,13 @@ fn evaluate_node(
                 .any(|text| regex.is_match(text))
                 .then_some(1.0))
         }
-        QueryNode::Range { field, lower, upper, include_lower, include_upper } => {
+        QueryNode::Range {
+            field,
+            lower,
+            upper,
+            include_lower,
+            include_upper,
+        } => {
             let lower = lower.to_ascii_lowercase();
             let upper = upper.to_ascii_lowercase();
             Ok(document
@@ -702,10 +843,14 @@ fn wildcard_matches(pattern: &str, value: &str) -> bool {
     for pattern_index in 1..=pattern.len() {
         for value_index in 1..=value.len() {
             table[pattern_index][value_index] = match pattern[pattern_index - 1] {
-                b'*' => table[pattern_index - 1][value_index] || table[pattern_index][value_index - 1],
+                b'*' => {
+                    table[pattern_index - 1][value_index] || table[pattern_index][value_index - 1]
+                }
                 b'?' => table[pattern_index - 1][value_index - 1],
-                character => character.eq_ignore_ascii_case(&value[value_index - 1])
-                    && table[pattern_index - 1][value_index - 1],
+                character => {
+                    character.eq_ignore_ascii_case(&value[value_index - 1])
+                        && table[pattern_index - 1][value_index - 1]
+                }
             };
         }
     }
@@ -719,7 +864,11 @@ fn levenshtein_distance(left: &str, right: &str) -> usize {
         let mut current = vec![left_index + 1];
         for (right_index, right_char) in right_chars.iter().enumerate() {
             let substitution = previous[right_index] + usize::from(left_char != *right_char);
-            current.push((current[right_index] + 1).min(previous[right_index + 1] + 1).min(substitution));
+            current.push(
+                (current[right_index] + 1)
+                    .min(previous[right_index + 1] + 1)
+                    .min(substitution),
+            );
         }
         previous = current;
     }
@@ -741,7 +890,9 @@ fn phrase_matches_with_slop(text: &str, phrase: &str, slop: u32) -> bool {
         let mut gaps = 0u32;
         let mut matched = true;
         for phrase_token in phrase_tokens.iter().skip(1) {
-            let Some(next) = ((last + 1)..tokens.len()).find(|index| tokens[*index] == *phrase_token) else {
+            let Some(next) =
+                ((last + 1)..tokens.len()).find(|index| tokens[*index] == *phrase_token)
+            else {
                 matched = false;
                 break;
             };
@@ -801,7 +952,11 @@ fn evaluate_boolean(
                     }
                 }
             }
-            if has_required || matched_optional { Ok(Some(score)) } else { Ok(None) }
+            if has_required || matched_optional {
+                Ok(Some(score))
+            } else {
+                Ok(None)
+            }
         }
     }
 }
@@ -813,24 +968,38 @@ mod tests {
     #[test]
     fn parses_boolean_precedence_and_implicit_or() {
         assert_eq!(
-            parse_fulltext_query("alpha AND beta OR gamma").unwrap().root,
+            parse_fulltext_query("alpha AND beta OR gamma")
+                .unwrap()
+                .root,
             QueryNode::Boolean {
                 operator: BooleanOperator::Or,
                 clauses: vec![
                     QueryNode::Boolean {
                         operator: BooleanOperator::And,
                         clauses: vec![
-                            QueryNode::Term { field: None, value: "alpha".into() },
-                            QueryNode::Term { field: None, value: "beta".into() },
+                            QueryNode::Term {
+                                field: None,
+                                value: "alpha".into()
+                            },
+                            QueryNode::Term {
+                                field: None,
+                                value: "beta".into()
+                            },
                         ],
                     },
-                    QueryNode::Term { field: None, value: "gamma".into() },
+                    QueryNode::Term {
+                        field: None,
+                        value: "gamma".into()
+                    },
                 ],
             }
         );
         assert!(matches!(
             parse_fulltext_query("alpha beta").unwrap().root,
-            QueryNode::Boolean { operator: BooleanOperator::Or, .. }
+            QueryNode::Boolean {
+                operator: BooleanOperator::Or,
+                ..
+            }
         ));
         assert_eq!(
             parse_fulltext_query("alpha && beta || gamma").unwrap().root,
@@ -840,11 +1009,20 @@ mod tests {
                     QueryNode::Boolean {
                         operator: BooleanOperator::And,
                         clauses: vec![
-                            QueryNode::Term { field: None, value: "alpha".into() },
-                            QueryNode::Term { field: None, value: "beta".into() },
+                            QueryNode::Term {
+                                field: None,
+                                value: "alpha".into()
+                            },
+                            QueryNode::Term {
+                                field: None,
+                                value: "beta".into()
+                            },
                         ],
                     },
-                    QueryNode::Term { field: None, value: "gamma".into() },
+                    QueryNode::Term {
+                        field: None,
+                        value: "gamma".into()
+                    },
                 ],
             }
         );
@@ -852,13 +1030,20 @@ mod tests {
 
     #[test]
     fn parses_field_scopes_groups_ranges_and_modifiers() {
-        let parsed = parse_fulltext_query("+group:(alpha OR \"beta gamma\") -state:[a TO z}^2").unwrap();
-        let QueryNode::Boolean { operator: BooleanOperator::Or, clauses } = parsed.root else {
+        let parsed =
+            parse_fulltext_query("+group:(alpha OR \"beta gamma\") -state:[a TO z}^2").unwrap();
+        let QueryNode::Boolean {
+            operator: BooleanOperator::Or,
+            clauses,
+        } = parsed.root
+        else {
             panic!("expected an implicit OR group");
         };
         assert!(matches!(clauses[0], QueryNode::Required(_)));
         assert!(matches!(clauses[1], QueryNode::Prohibited(_)));
-        let QueryNode::Prohibited(query) = &clauses[1] else { unreachable!() };
+        let QueryNode::Prohibited(query) = &clauses[1] else {
+            unreachable!()
+        };
         assert!(matches!(
             query.as_ref(),
             QueryNode::Boost { query, factor }
@@ -878,8 +1063,14 @@ mod tests {
         for input in ["", "   ", "\t\n"] {
             let query = parse_fulltext_query(input).unwrap();
             assert!(query.is_empty());
-            assert_eq!(evaluate_fulltext_query(&query, &FulltextDocument::default()).unwrap(), None);
-            assert!(query.expand_candidate_terms(&["alpha".into()]).unwrap().is_empty());
+            assert_eq!(
+                evaluate_fulltext_query(&query, &FulltextDocument::default()).unwrap(),
+                None
+            );
+            assert!(query
+                .expand_candidate_terms(&["alpha".into()])
+                .unwrap()
+                .is_empty());
         }
     }
 
@@ -887,11 +1078,18 @@ mod tests {
     fn decodes_lucene_escapes_in_terms_and_phrases() {
         assert_eq!(
             parse_fulltext_query(r"name:Cloud\ Trail").unwrap().root,
-            QueryNode::Term { field: Some("name".into()), value: "Cloud Trail".into() }
+            QueryNode::Term {
+                field: Some("name".into()),
+                value: "Cloud Trail".into()
+            }
         );
         assert_eq!(
             parse_fulltext_query(r#""quoted \"phrase\"""#).unwrap().root,
-            QueryNode::Phrase { field: None, value: "quoted \"phrase\"".into(), slop: None }
+            QueryNode::Phrase {
+                field: None,
+                value: "quoted \"phrase\"".into(),
+                slop: None
+            }
         );
     }
 
@@ -899,15 +1097,26 @@ mod tests {
     fn parses_wildcard_fuzzy_and_phrase_proximity_modifiers() {
         assert_eq!(
             parse_fulltext_query("name:*trail").unwrap().root,
-            QueryNode::Wildcard { field: Some("name".into()), value: "*trail".into() }
+            QueryNode::Wildcard {
+                field: Some("name".into()),
+                value: "*trail".into()
+            }
         );
         assert_eq!(
             parse_fulltext_query("cloud~1").unwrap().root,
-            QueryNode::Fuzzy { field: None, value: "cloud".into(), max_edits: 1 }
+            QueryNode::Fuzzy {
+                field: None,
+                value: "cloud".into(),
+                max_edits: 1
+            }
         );
         assert_eq!(
             parse_fulltext_query("\"cloud trail\"~3").unwrap().root,
-            QueryNode::Phrase { field: None, value: "cloud trail".into(), slop: Some(3) }
+            QueryNode::Phrase {
+                field: None,
+                value: "cloud trail".into(),
+                slop: Some(3)
+            }
         );
     }
 
@@ -927,13 +1136,23 @@ mod tests {
             "group_id:*",
         ] {
             let query = parse_fulltext_query(query).unwrap();
-            assert!(evaluate_fulltext_query(&query, &document).unwrap().is_some(), "{query:?}");
+            assert!(
+                evaluate_fulltext_query(&query, &document)
+                    .unwrap()
+                    .is_some(),
+                "{query:?}"
+            );
         }
         let query = parse_fulltext_query("group_id:other AND CloudTrail").unwrap();
         assert_eq!(evaluate_fulltext_query(&query, &document).unwrap(), None);
         for query in ["*", "group_id:*"] {
             let query = parse_fulltext_query(query).unwrap();
-            assert!(evaluate_fulltext_query(&query, &document).unwrap().is_some(), "{query:?}");
+            assert!(
+                evaluate_fulltext_query(&query, &document)
+                    .unwrap()
+                    .is_some(),
+                "{query:?}"
+            );
         }
     }
 
@@ -952,7 +1171,12 @@ mod tests {
             "summary:\"cloud trail\"~1",
         ] {
             let query = parse_fulltext_query(query).unwrap();
-            assert!(evaluate_fulltext_query(&query, &document).unwrap().is_some(), "{query:?}");
+            assert!(
+                evaluate_fulltext_query(&query, &document)
+                    .unwrap()
+                    .is_some(),
+                "{query:?}"
+            );
         }
     }
 
@@ -1048,8 +1272,14 @@ mod tests {
                 .primary_terms(),
             Some(vec!["audit".into(), "cloudtrail".into(), "ft_repro".into()])
         );
-        assert_eq!(parse_fulltext_query("name:*trail").unwrap().primary_terms(), None);
-        assert_eq!(parse_fulltext_query("-retired").unwrap().primary_terms(), None);
+        assert_eq!(
+            parse_fulltext_query("name:*trail").unwrap().primary_terms(),
+            None
+        );
+        assert_eq!(
+            parse_fulltext_query("-retired").unwrap().primary_terms(),
+            None
+        );
     }
 
     #[test]
@@ -1076,9 +1306,9 @@ mod tests {
         );
         assert_eq!(
             parse_fulltext_query("-redis")
-            .unwrap()
-            .expand_candidate_terms(&vocabulary)
-            .unwrap(),
+                .unwrap()
+                .expand_candidate_terms(&vocabulary)
+                .unwrap(),
             vocabulary
         );
     }

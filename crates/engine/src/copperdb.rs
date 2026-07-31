@@ -281,10 +281,11 @@ impl CopperDb {
             &config.runtime_config,
         ));
         embedding_runtime.start_workers(config.runtime_config.embedding_workers);
-        let eval = EvalEngine::new_with_vector_indexes_and_artifact_refresh(
+        let eval = EvalEngine::new_with_vector_index_service(
             Arc::clone(&storage),
-            Some(vector_indexes.registry()),
+            vector_indexes.registry(),
             Some(vector_indexes.artifact_refresh_callback(&storage)),
+            vector_indexes.query_callback(),
         );
         vector_indexes.enable_persistence(&storage);
         let audit_log = Arc::new(AuditLog::new(Arc::clone(&storage), AuditConfig::default())?);

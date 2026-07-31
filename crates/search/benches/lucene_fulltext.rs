@@ -1,7 +1,5 @@
+use copperdb_search::lucene::{evaluate_fulltext_query, parse_fulltext_query, FulltextDocument};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use copperdb_search::lucene::{
-    evaluate_fulltext_query, parse_fulltext_query, FulltextDocument,
-};
 
 const VOCABULARY_SIZES: [usize; 2] = [256, 2_048];
 
@@ -29,7 +27,10 @@ fn bench_lucene_fulltext(criterion: &mut Criterion) {
 
         for (name, input) in [
             ("exact_terms", "alpha AND beta"),
-            ("nested_boolean", "(alpha AND beta) OR (gamma AND NOT token0001)"),
+            (
+                "nested_boolean",
+                "(alpha AND beta) OR (gamma AND NOT token0001)",
+            ),
             ("leading_wildcard", "*trail"),
             ("regex", "/token0[0-9]{3}/"),
             ("fuzzy", "cloudtrail~2"),

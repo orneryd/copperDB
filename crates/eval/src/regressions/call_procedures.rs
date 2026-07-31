@@ -1510,6 +1510,43 @@
     }
 
     #[test]
+    fn test_call_vector_query_nodes_observes_request_cancellation() {
+        let engine = make_engine();
+        let parser = Parser::new();
+
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE (:Doc {embedding: [1.0, 0.0, 0.0]})")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+        engine
+            .execute(
+                &parser
+                    .parse("CREATE VECTOR INDEX node_cancel_vec FOR (n:Doc) ON (n.embedding) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        let request_context = RequestContext::detached();
+        request_context.cancel();
+        let error = engine
+            .execute_with_context(
+                &request_context,
+                &parser
+                    .parse("CALL db.index.vector.queryNodes('node_cancel_vec', 10, [1.0, 0.0, 0.0])")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("request cancelled"));
+    }
+
+    #[test]
     fn test_call_fulltext_query_nodes_honors_pure_negative_lucene_queries() {
         let engine = make_engine();
         let parser = Parser::new();

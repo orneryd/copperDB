@@ -330,9 +330,7 @@ mod tests {
 
     #[test]
     fn test_dispatch_tool_call() {
-        let engine = Arc::new(
-            copperdb_engine::CopperDb::open_temporary().unwrap(),
-        );
+        let engine = Arc::new(copperdb_engine::CopperDb::open_temporary().unwrap());
         let registry = ToolRegistry::with_engine(engine);
         let req = McpRequest::new(
             serde_json::json!(3),

@@ -4,17 +4,26 @@
 //! Manages named embedding spaces (collections of high-dimensional vectors)
 //! and supports explicit exact cosine similarity search.
 
+use copperdb_util::RequestCancellation;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::fs;
 use std::hash::Hasher;
-use std::io;
-use std::path::Path;
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 const REGISTRY_ARTIFACT_MAGIC: &[u8] = b"COPPERDB-HNSW\0";
 const REGISTRY_ARTIFACT_FORMAT_VERSION: u32 = 1;
+const VECTOR_FILE_STORE_MAGIC: &[u8] = b"COPPERDB-VECTOR-FILE\0";
+const VECTOR_FILE_STORE_FORMAT_VERSION: u32 = 1;
+const VECTOR_FILE_STORE_HEADER_BYTES: u64 =
+    (VECTOR_FILE_STORE_MAGIC.len() + std::mem::size_of::<u32>() * 2) as u64;
+const VECTOR_FILE_STORE_UPSERT: u8 = 1;
+const VECTOR_FILE_STORE_DELETE: u8 = 2;
+const MAX_VECTOR_FILE_STORE_ID_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum VectorSpaceError {
@@ -39,7 +48,404 @@ pub enum VectorSpaceError {
     #[error("vector registry artifact I/O failed: {0}")]
     ArtifactIo(#[from] io::Error),
     #[error("vector registry artifact serialization failed: {0}")]
-    ArtifactSerialization(#[from] serde_json::Error),
+    ArtifactSerialization(String),
+    #[error("vector file store is corrupt: {0}")]
+    CorruptVectorFileStore(&'static str),
+    #[error("unsupported vector file store format: expected {expected}, got {actual}")]
+    UnsupportedVectorFileStoreFormat { expected: u32, actual: u32 },
+    #[error("vector file store I/O failed: {0}")]
+    VectorFileStoreIo(#[source] io::Error),
+    #[error("request cancelled")]
+    RequestCancelled,
+}
+
+/// Append-only normalized vector storage with an in-memory ID-to-offset map.
+///
+/// The map is reconstructed from durable upsert/delete records on open. This
+/// foundation is intentionally separate from the current in-memory HNSW
+/// registry until its lifecycle is wired through the engine.
+#[derive(Debug)]
+pub struct VectorFileStore {
+    path: PathBuf,
+    dimensions: usize,
+    offsets: BTreeMap<String, u64>,
+}
+
+impl VectorFileStore {
+    /// Create or open a version-1 vector file store at `path`.
+    pub fn open(path: impl AsRef<Path>, dimensions: usize) -> Result<Self, VectorSpaceError> {
+        if dimensions == 0 {
+            return Err(VectorSpaceError::InvalidHnswConfiguration(
+                "dimensions must be greater than zero",
+            ));
+        }
+        let path = path.as_ref().to_path_buf();
+        if !path.exists() {
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            fs::create_dir_all(parent).map_err(VectorSpaceError::VectorFileStoreIo)?;
+            let mut file = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)
+                .map_err(VectorSpaceError::VectorFileStoreIo)?;
+            file.write_all(VECTOR_FILE_STORE_MAGIC)
+                .and_then(|()| file.write_all(&VECTOR_FILE_STORE_FORMAT_VERSION.to_le_bytes()))
+                .and_then(|()| file.write_all(&(dimensions as u32).to_le_bytes()))
+                .and_then(|()| file.sync_all())
+                .map_err(VectorSpaceError::VectorFileStoreIo)?;
+        }
+
+        let mut file = fs::File::open(&path).map_err(VectorSpaceError::VectorFileStoreIo)?;
+        let offsets = Self::scan_offsets(&mut file, dimensions)?;
+        Ok(Self {
+            path,
+            dimensions,
+            offsets,
+        })
+    }
+
+    pub fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn len(&self) -> usize {
+        self.offsets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.offsets.is_empty()
+    }
+
+    /// Append a normalized replacement vector and update the live offset map.
+    pub fn upsert(&mut self, id: impl AsRef<str>, vector: &[f32]) -> Result<(), VectorSpaceError> {
+        if vector.len() != self.dimensions {
+            return Err(VectorSpaceError::DimensionMismatch {
+                expected: self.dimensions,
+                got: vector.len(),
+            });
+        }
+        let id = id.as_ref();
+        let id_length = u32::try_from(id.len()).map_err(|_| {
+            VectorSpaceError::CorruptVectorFileStore("vector ID exceeds format length limit")
+        })?;
+        let vector = normalize_vector(vector);
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&self.path)
+            .map_err(VectorSpaceError::VectorFileStoreIo)?;
+        let offset = file
+            .seek(SeekFrom::End(0))
+            .map_err(VectorSpaceError::VectorFileStoreIo)?;
+        file.write_all(&[VECTOR_FILE_STORE_UPSERT])
+            .and_then(|()| file.write_all(&id_length.to_le_bytes()))
+            .and_then(|()| file.write_all(id.as_bytes()))
+            .map_err(VectorSpaceError::VectorFileStoreIo)?;
+        for value in vector {
+            file.write_all(&value.to_le_bytes())
+                .map_err(VectorSpaceError::VectorFileStoreIo)?;
+        }
+        file.sync_data()
+            .map_err(VectorSpaceError::VectorFileStoreIo)?;
+        self.offsets.insert(id.to_owned(), offset);
+        Ok(())
+    }
+
+    /// Append a rebuild/import batch with one file open and one durability sync.
+    pub fn upsert_batch<I>(&mut self, entries: I) -> Result<(), VectorSpaceError>
+    where
+        I: IntoIterator<Item = (String, Vec<f32>)>,
+    {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&self.path)
+            .map_err(VectorSpaceError::VectorFileStoreIo)?;
+        let mut offset = file
+            .seek(SeekFrom::End(0))
+            .map_err(VectorSpaceError::VectorFileStoreIo)?;
+        let mut pending_offsets = Vec::new();
+        for (id, vector) in entries {
+            if vector.len() != self.dimensions {
+                return Err(VectorSpaceError::DimensionMismatch {
+                    expected: self.dimensions,
+                    got: vector.len(),
+                });
+            }
+            let id_length = u32::try_from(id.len()).map_err(|_| {
+                VectorSpaceError::CorruptVectorFileStore("vector ID exceeds format length limit")
+            })?;
+            let vector = normalize_vector(&vector);
+            let record_offset = offset;
+            file.write_all(&[VECTOR_FILE_STORE_UPSERT])
+                .and_then(|()| file.write_all(&id_length.to_le_bytes()))
+                .and_then(|()| file.write_all(id.as_bytes()))
+                .map_err(VectorSpaceError::VectorFileStoreIo)?;
+            for value in vector {
+                file.write_all(&value.to_le_bytes())
+                    .map_err(VectorSpaceError::VectorFileStoreIo)?;
+            }
+            offset = offset
+                .checked_add(1 + 4 + id.len() as u64 + (self.dimensions as u64 * 4))
+                .ok_or(VectorSpaceError::CorruptVectorFileStore(
+                    "vector file offset overflow",
+                ))?;
+            pending_offsets.push((id, record_offset));
+        }
+        file.sync_data()
+            .map_err(VectorSpaceError::VectorFileStoreIo)?;
+        self.offsets.extend(pending_offsets);
+        Ok(())
+    }
+
+    /// Append a delete record and remove the ID from the live offset map.
+    pub fn remove(&mut self, id: &str) -> Result<bool, VectorSpaceError> {
+        if !self.offsets.contains_key(id) {
+            return Ok(false);
+        }
+        let id_length = u32::try_from(id.len()).map_err(|_| {
+            VectorSpaceError::CorruptVectorFileStore("vector ID exceeds format length limit")
+        })?;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&self.path)
+            .map_err(VectorSpaceError::VectorFileStoreIo)?;
+        file.write_all(&[VECTOR_FILE_STORE_DELETE])
+            .and_then(|()| file.write_all(&id_length.to_le_bytes()))
+            .and_then(|()| file.write_all(id.as_bytes()))
+            .and_then(|()| file.sync_data())
+            .map_err(VectorSpaceError::VectorFileStoreIo)?;
+        self.offsets.remove(id);
+        Ok(true)
+    }
+
+    /// Read the normalized live vector for `id` without scanning the file.
+    pub fn get(&self, id: &str) -> Result<Option<Vec<f32>>, VectorSpaceError> {
+        let Some(offset) = self.offsets.get(id) else {
+            return Ok(None);
+        };
+        let mut file = fs::File::open(&self.path).map_err(VectorSpaceError::VectorFileStoreIo)?;
+        file.seek(SeekFrom::Start(*offset))
+            .map_err(VectorSpaceError::VectorFileStoreIo)?;
+        let operation = read_vector_file_byte(&mut file)?;
+        if operation != VECTOR_FILE_STORE_UPSERT {
+            return Err(VectorSpaceError::CorruptVectorFileStore(
+                "live offset does not reference an upsert record",
+            ));
+        }
+        let stored_id = read_vector_file_id(&mut file)?;
+        if stored_id != id {
+            return Err(VectorSpaceError::CorruptVectorFileStore(
+                "live offset points to another vector ID",
+            ));
+        }
+        read_vector_file_values(&mut file, self.dimensions).map(Some)
+    }
+
+    /// Score and rank candidate IDs using exact cosine similarity.
+    ///
+    /// Missing IDs are ignored so a stale derived candidate cannot escape as
+    /// a result. The backing file is opened once for the entire candidate set.
+    pub fn score_candidates<I, S>(
+        &self,
+        query: &[f32],
+        candidates: I,
+        limit: usize,
+    ) -> Result<Vec<(String, f32)>, VectorSpaceError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.score_candidates_with_cancellation(query, candidates, limit, None)
+    }
+
+    pub fn score_candidates_cancellable<I, S>(
+        &self,
+        query: &[f32],
+        candidates: I,
+        limit: usize,
+        cancellation: &RequestCancellation,
+    ) -> Result<Vec<(String, f32)>, VectorSpaceError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.score_candidates_with_cancellation(query, candidates, limit, Some(cancellation))
+    }
+
+    fn score_candidates_with_cancellation<I, S>(
+        &self,
+        query: &[f32],
+        candidates: I,
+        limit: usize,
+        cancellation: Option<&RequestCancellation>,
+    ) -> Result<Vec<(String, f32)>, VectorSpaceError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        if query.len() != self.dimensions {
+            return Err(VectorSpaceError::DimensionMismatch {
+                expected: self.dimensions,
+                got: query.len(),
+            });
+        }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let query = normalize_vector(query);
+        let mut candidate_offsets = candidates
+            .into_iter()
+            .filter_map(|candidate| {
+                let id = candidate.as_ref();
+                self.offsets
+                    .get(id)
+                    .copied()
+                    .map(|offset| (id.to_owned(), offset))
+            })
+            .collect::<Vec<_>>();
+        candidate_offsets.sort_by_key(|(_, offset)| *offset);
+        let mut file = fs::File::open(&self.path).map_err(VectorSpaceError::VectorFileStoreIo)?;
+        let mut scores = Vec::new();
+        for (position, (id, offset)) in candidate_offsets.into_iter().enumerate() {
+            if position & 0xFF == 0 && cancellation.is_some_and(RequestCancellation::is_cancelled) {
+                return Err(VectorSpaceError::RequestCancelled);
+            }
+            file.seek(SeekFrom::Start(offset))
+                .map_err(VectorSpaceError::VectorFileStoreIo)?;
+            if read_vector_file_byte(&mut file)? != VECTOR_FILE_STORE_UPSERT {
+                return Err(VectorSpaceError::CorruptVectorFileStore(
+                    "live offset does not reference an upsert record",
+                ));
+            }
+            if read_vector_file_id(&mut file)? != id {
+                return Err(VectorSpaceError::CorruptVectorFileStore(
+                    "live offset points to another vector ID",
+                ));
+            }
+            let vector = read_vector_file_values(&mut file, self.dimensions)?;
+            let score = query
+                .iter()
+                .zip(vector.iter())
+                .map(|(left, right)| left * right)
+                .sum::<f32>();
+            scores.push((id, score));
+        }
+        scores.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+        scores.truncate(limit);
+        Ok(scores)
+    }
+
+    fn scan_offsets(
+        file: &mut fs::File,
+        dimensions: usize,
+    ) -> Result<BTreeMap<String, u64>, VectorSpaceError> {
+        let file_len = file
+            .metadata()
+            .map_err(VectorSpaceError::VectorFileStoreIo)?
+            .len();
+        if file_len < VECTOR_FILE_STORE_HEADER_BYTES {
+            return Err(VectorSpaceError::CorruptVectorFileStore("truncated header"));
+        }
+        let mut magic = vec![0; VECTOR_FILE_STORE_MAGIC.len()];
+        file.read_exact(&mut magic)
+            .map_err(VectorSpaceError::VectorFileStoreIo)?;
+        if magic != VECTOR_FILE_STORE_MAGIC {
+            return Err(VectorSpaceError::CorruptVectorFileStore("invalid magic"));
+        }
+        let version = read_vector_file_u32(file)?;
+        if version != VECTOR_FILE_STORE_FORMAT_VERSION {
+            return Err(VectorSpaceError::UnsupportedVectorFileStoreFormat {
+                expected: VECTOR_FILE_STORE_FORMAT_VERSION,
+                actual: version,
+            });
+        }
+        let stored_dimensions = read_vector_file_u32(file)? as usize;
+        if stored_dimensions != dimensions {
+            return Err(VectorSpaceError::DimensionMismatch {
+                expected: dimensions,
+                got: stored_dimensions,
+            });
+        }
+
+        let mut offsets = BTreeMap::new();
+        let mut offset = VECTOR_FILE_STORE_HEADER_BYTES;
+        while offset < file_len {
+            file.seek(SeekFrom::Start(offset))
+                .map_err(VectorSpaceError::VectorFileStoreIo)?;
+            let operation = read_vector_file_byte(file)?;
+            let id = read_vector_file_id(file)?;
+            match operation {
+                VECTOR_FILE_STORE_UPSERT => {
+                    read_vector_file_values(file, dimensions)?;
+                    offsets.insert(id, offset);
+                }
+                VECTOR_FILE_STORE_DELETE => {
+                    offsets.remove(&id);
+                }
+                _ => {
+                    return Err(VectorSpaceError::CorruptVectorFileStore(
+                        "unknown record operation",
+                    ));
+                }
+            }
+            offset = file
+                .stream_position()
+                .map_err(VectorSpaceError::VectorFileStoreIo)?;
+        }
+        Ok(offsets)
+    }
+}
+
+fn normalize_vector(vector: &[f32]) -> Vec<f32> {
+    let magnitude = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if magnitude == 0.0 {
+        return vector.to_vec();
+    }
+    vector.iter().map(|value| value / magnitude).collect()
+}
+
+fn read_vector_file_byte(file: &mut fs::File) -> Result<u8, VectorSpaceError> {
+    let mut byte = [0];
+    file.read_exact(&mut byte)
+        .map_err(VectorSpaceError::VectorFileStoreIo)?;
+    Ok(byte[0])
+}
+
+fn read_vector_file_u32(file: &mut fs::File) -> Result<u32, VectorSpaceError> {
+    let mut bytes = [0; std::mem::size_of::<u32>()];
+    file.read_exact(&mut bytes)
+        .map_err(VectorSpaceError::VectorFileStoreIo)?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_vector_file_id(file: &mut fs::File) -> Result<String, VectorSpaceError> {
+    let length = read_vector_file_u32(file)? as usize;
+    if length > MAX_VECTOR_FILE_STORE_ID_BYTES {
+        return Err(VectorSpaceError::CorruptVectorFileStore(
+            "vector ID exceeds the format size limit",
+        ));
+    }
+    let mut bytes = vec![0; length];
+    file.read_exact(&mut bytes)
+        .map_err(VectorSpaceError::VectorFileStoreIo)?;
+    String::from_utf8(bytes)
+        .map_err(|_| VectorSpaceError::CorruptVectorFileStore("vector ID is not UTF-8"))
+}
+
+fn read_vector_file_values(
+    file: &mut fs::File,
+    dimensions: usize,
+) -> Result<Vec<f32>, VectorSpaceError> {
+    let mut bytes = vec![0_u8; dimensions * std::mem::size_of::<f32>()];
+    file.read_exact(&mut bytes)
+        .map_err(VectorSpaceError::VectorFileStoreIo)?;
+    Ok(bytes
+        .chunks_exact(std::mem::size_of::<f32>())
+        .map(|value| f32::from_le_bytes(value.try_into().expect("f32 chunk has four bytes")))
+        .collect())
 }
 
 /// A named vector space (collection of embeddings).
@@ -68,9 +474,9 @@ pub struct HnswConfig {
 impl Default for HnswConfig {
     fn default() -> Self {
         Self {
-            m: 16,
-            ef_construction: 200,
-            ef_search: 64,
+            m: 32,
+            ef_construction: 400,
+            ef_search: 200,
         }
     }
 }
@@ -79,6 +485,8 @@ impl Default for HnswConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HnswSearchStats {
     pub visited_nodes: usize,
+    pub returned_candidates: usize,
+    pub exact_scored_candidates: usize,
 }
 
 /// A deterministic, in-memory hierarchical navigable small-world graph.
@@ -86,16 +494,47 @@ pub struct HnswSearchStats {
 /// This is intentionally separate from [`VectorSpace`]'s exact fallback. It
 /// owns its graph from construction onwards, and query reads only traverse the
 /// existing graph; they do not build, warm, or switch strategy.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HnswIndex {
     dimensions: usize,
     config: HnswConfig,
-    entries: BTreeMap<String, Vec<f32>>,
-    tombstones: BTreeSet<String>,
-    levels: BTreeMap<String, usize>,
-    neighbors: BTreeMap<(String, usize), Vec<String>>,
-    entry_point: Option<String>,
+    external_ids: Vec<String>,
+    id_to_internal: HashMap<String, u32>,
+    vectors: Vec<f32>,
+    levels: Vec<usize>,
+    neighbors: Vec<Vec<Vec<u32>>>,
+    deleted: Vec<bool>,
+    live_count: usize,
+    entry_point: Option<u32>,
     max_level: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScoredNode {
+    score: f32,
+    internal_id: u32,
+}
+
+impl PartialEq for ScoredNode {
+    fn eq(&self, other: &Self) -> bool {
+        self.score.to_bits() == other.score.to_bits() && self.internal_id == other.internal_id
+    }
+}
+
+impl Eq for ScoredNode {}
+
+impl PartialOrd for ScoredNode {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ScoredNode {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.score
+            .total_cmp(&other.score)
+            .then_with(|| other.internal_id.cmp(&self.internal_id))
+    }
 }
 
 impl HnswIndex {
@@ -118,10 +557,13 @@ impl HnswIndex {
         Ok(Self {
             dimensions,
             config,
-            entries: BTreeMap::new(),
-            tombstones: BTreeSet::new(),
-            levels: BTreeMap::new(),
-            neighbors: BTreeMap::new(),
+            external_ids: Vec::new(),
+            id_to_internal: HashMap::new(),
+            vectors: Vec::new(),
+            levels: Vec::new(),
+            neighbors: Vec::new(),
+            deleted: Vec::new(),
+            live_count: 0,
             entry_point: None,
             max_level: 0,
         })
@@ -132,11 +574,36 @@ impl HnswIndex {
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len().saturating_sub(self.tombstones.len())
+        self.live_count
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Estimate bytes owned by index vectors and graph buffers.
+    ///
+    /// This excludes allocator bookkeeping and hash-table bucket overhead, which are
+    /// implementation-dependent. It is intended for relative lifecycle
+    /// observability rather than a process-RSS measurement.
+    pub fn estimated_memory_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self
+                .external_ids
+                .iter()
+                .map(|id| std::mem::size_of::<String>() + id.capacity())
+                .sum::<usize>()
+            + self.vectors.capacity() * std::mem::size_of::<f32>()
+            + self
+                .neighbors
+                .iter()
+                .flat_map(|levels| levels.iter())
+                .map(|links| links.capacity() * std::mem::size_of::<u32>())
+                .sum::<usize>()
+            + self.levels.capacity() * std::mem::size_of::<usize>()
+            + self.deleted.capacity() * std::mem::size_of::<bool>()
+            + self.id_to_internal.capacity()
+                * (std::mem::size_of::<String>() + std::mem::size_of::<u32>())
     }
 
     pub fn insert(
@@ -151,60 +618,56 @@ impl HnswIndex {
             });
         }
         let id = id.into();
-        if self.entries.contains_key(&id) {
+        if self.id_to_internal.contains_key(&id) {
             return Err(VectorSpaceError::DuplicateVector(id));
         }
-
+        let vector = normalize_vector(&vector);
         let level = deterministic_level(&id, self.config.m);
+        let internal_id = u32::try_from(self.external_ids.len()).map_err(|_| {
+            VectorSpaceError::InvalidHnswConfiguration("index exceeds u32 node capacity")
+        })?;
         if self.entry_point.is_none() {
-            self.entries.insert(id.clone(), vector);
-            self.levels.insert(id.clone(), level);
-            self.entry_point = Some(id);
+            self.push_node(id, vector, level);
+            self.entry_point = Some(internal_id);
             self.max_level = level;
             return Ok(());
         }
 
-        let mut entry = self.entry_point.clone().expect("entry point is present");
+        let mut entry = self.entry_point.expect("entry point is present");
         let prior_max_level = self.max_level;
-        let mut visited = BTreeSet::new();
         for current_level in ((level + 1)..=prior_max_level).rev() {
-            entry = self.greedy_search(&vector, entry, current_level, &mut visited);
+            entry = self.greedy_search(&vector, entry, current_level);
         }
 
-        self.entries.insert(id.clone(), vector.clone());
-        self.levels.insert(id.clone(), level);
+        self.push_node(id, vector.clone(), level);
         for current_level in (0..=level.min(prior_max_level)).rev() {
+            let mut visited = vec![false; self.external_ids.len()];
             let candidates = self.search_layer(
                 &vector,
-                &entry,
+                entry,
                 self.config.ef_construction,
                 current_level,
                 &mut visited,
-            );
-            let selected = self.select_neighbors(&vector, candidates, self.config.m);
-            self.neighbors
-                .insert((id.clone(), current_level), selected.clone());
-            for neighbor in selected {
-                self.connect(&id, &neighbor, current_level);
+                None,
+            )?;
+            let selected = self.select_neighbors(candidates, self.config.m);
+            self.neighbors[internal_id as usize][current_level] = selected.clone();
+            for neighbor in selected.iter().copied() {
+                self.connect(internal_id, neighbor, current_level);
             }
-            if let Some(next_entry) = self
-                .neighbors
-                .get(&(id.clone(), current_level))
-                .and_then(|v| v.first())
-            {
-                entry = next_entry.clone();
+            if let Some(next_entry) = selected.first() {
+                entry = *next_entry;
             }
         }
 
         if level > self.max_level {
-            self.entry_point = Some(id);
+            self.entry_point = Some(internal_id);
             self.max_level = level;
         }
         Ok(())
     }
 
-    /// Replace a vector and rebuild the graph from active entries so every
-    /// retained edge reflects the replacement embedding.
+    /// Replace a vector by tombstoning its old dense node and appending a new one.
     pub fn upsert(
         &mut self,
         id: impl Into<String>,
@@ -217,30 +680,27 @@ impl HnswIndex {
             });
         }
         let id = id.into();
-        if !self.entries.contains_key(&id) {
-            return self.insert(id, vector);
+        if let Some(internal_id) = self.id_to_internal.get(&id).copied() {
+            self.tombstone(internal_id);
         }
-        self.entries.insert(id.clone(), vector);
-        self.tombstones.remove(&id);
-        self.rebuild();
+        self.insert(id, vector)?;
+        self.compact_if_needed();
         Ok(())
     }
 
     /// Exclude a vector from results immediately. Stale graph links are
     /// compacted after a bounded tombstone threshold.
     pub fn remove(&mut self, id: &str) -> Result<(), VectorSpaceError> {
-        if !self.entries.contains_key(id) || self.tombstones.contains(id) {
+        let Some(internal_id) = self.id_to_internal.get(id).copied() else {
             return Err(VectorSpaceError::VectorNotFound(id.to_string()));
-        }
-        self.tombstones.insert(id.to_string());
-        if self.tombstones.len() >= self.rebuild_threshold() {
-            self.rebuild();
-        }
+        };
+        self.tombstone(internal_id);
+        self.compact_if_needed();
         Ok(())
     }
 
-    fn compact(&mut self) -> bool {
-        if self.tombstones.is_empty() {
+    pub fn compact(&mut self) -> bool {
+        if self.live_count == self.external_ids.len() {
             return false;
         }
         self.rebuild();
@@ -252,6 +712,15 @@ impl HnswIndex {
         query: &[f32],
         k: usize,
     ) -> Result<(Vec<(String, f32)>, HnswSearchStats), VectorSpaceError> {
+        self.knn_with_cancellation(query, k, None)
+    }
+
+    fn knn_with_cancellation(
+        &self,
+        query: &[f32],
+        k: usize,
+        cancellation: Option<&RequestCancellation>,
+    ) -> Result<(Vec<(String, f32)>, HnswSearchStats), VectorSpaceError> {
         if query.len() != self.dimensions {
             return Err(VectorSpaceError::DimensionMismatch {
                 expected: self.dimensions,
@@ -259,62 +728,92 @@ impl HnswIndex {
             });
         }
         if self.is_empty() {
-            return Ok((Vec::new(), HnswSearchStats { visited_nodes: 0 }));
+            return Ok((
+                Vec::new(),
+                HnswSearchStats {
+                    visited_nodes: 0,
+                    returned_candidates: 0,
+                    exact_scored_candidates: 0,
+                },
+            ));
         }
-        let Some(mut entry) = self.entry_point.clone() else {
-            return Ok((Vec::new(), HnswSearchStats { visited_nodes: 0 }));
+        let Some(mut entry) = self.entry_point else {
+            return Ok((
+                Vec::new(),
+                HnswSearchStats {
+                    visited_nodes: 0,
+                    returned_candidates: 0,
+                    exact_scored_candidates: 0,
+                },
+            ));
         };
         if k == 0 {
-            return Ok((Vec::new(), HnswSearchStats { visited_nodes: 0 }));
+            return Ok((
+                Vec::new(),
+                HnswSearchStats {
+                    visited_nodes: 0,
+                    returned_candidates: 0,
+                    exact_scored_candidates: 0,
+                },
+            ));
         }
 
-        let mut visited = BTreeSet::new();
+        let query = normalize_vector(query);
         for current_level in (1..=self.max_level).rev() {
-            entry = self.greedy_search(query, entry, current_level, &mut visited);
+            if cancellation.is_some_and(RequestCancellation::is_cancelled) {
+                return Err(VectorSpaceError::RequestCancelled);
+            }
+            entry = self.greedy_search(&query, entry, current_level);
         }
-        let candidates =
-            self.search_layer(query, &entry, self.config.ef_search.max(k), 0, &mut visited);
-        let mut results = self
-            .scored(candidates, query)
+        let mut visited = vec![false; self.external_ids.len()];
+        let candidates = self.search_layer(
+            &query,
+            entry,
+            self.config.ef_search.max(k),
+            0,
+            &mut visited,
+            cancellation,
+        )?;
+        let mut results = candidates
             .into_iter()
-            .filter(|(id, _)| !self.tombstones.contains(id))
+            .filter(|candidate| !self.deleted[candidate.internal_id as usize])
+            .map(|candidate| {
+                (
+                    self.external_ids[candidate.internal_id as usize].clone(),
+                    candidate.score,
+                )
+            })
             .collect::<Vec<_>>();
+        results.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
         results.truncate(k);
+        let returned_candidates = results.len();
         Ok((
             results,
             HnswSearchStats {
-                visited_nodes: visited.len(),
+                visited_nodes: visited.into_iter().filter(|visited| *visited).count(),
+                returned_candidates,
+                exact_scored_candidates: 0,
             },
         ))
     }
 
-    fn greedy_search(
-        &self,
-        query: &[f32],
-        mut current: String,
-        level: usize,
-        visited: &mut BTreeSet<String>,
-    ) -> String {
+    fn greedy_search(&self, query: &[f32], mut current: u32, level: usize) -> u32 {
         loop {
-            visited.insert(current.clone());
-            let current_score = self.score(query, &current);
+            let current_score = self.score(query, current);
             let next = self
-                .neighbors
-                .get(&(current.clone(), level))
-                .into_iter()
-                .flatten()
-                .filter(|candidate| self.score(query, candidate) > current_score)
-                .max_by(|left, right| {
-                    compare_scored_ids(
-                        self.score(query, left),
-                        left,
-                        self.score(query, right),
-                        right,
-                    )
+                .links(current, level)
+                .iter()
+                .copied()
+                .filter_map(|candidate| {
+                    let score = self.score(query, candidate);
+                    (score > current_score).then_some(ScoredNode {
+                        score,
+                        internal_id: candidate,
+                    })
                 })
-                .cloned();
+                .max();
             match next {
-                Some(next) => current = next,
+                Some(next) => current = next.internal_id,
                 None => return current,
             }
         }
@@ -323,133 +822,303 @@ impl HnswIndex {
     fn search_layer(
         &self,
         query: &[f32],
-        entry: &str,
+        entry: u32,
         ef: usize,
         level: usize,
-        visited: &mut BTreeSet<String>,
-    ) -> Vec<String> {
-        let mut candidates = vec![entry.to_string()];
-        let mut results = vec![entry.to_string()];
-        visited.insert(entry.to_string());
-        while !candidates.is_empty() {
-            let next_index = candidates
-                .iter()
-                .enumerate()
-                .max_by(|(_, left), (_, right)| {
-                    compare_scored_ids(
-                        self.score(query, left),
-                        left,
-                        self.score(query, right),
-                        right,
-                    )
-                })
-                .map(|(index, _)| index)
-                .expect("candidates is not empty");
-            let current = candidates.swap_remove(next_index);
+        visited: &mut [bool],
+        cancellation: Option<&RequestCancellation>,
+    ) -> Result<Vec<ScoredNode>, VectorSpaceError> {
+        let entry = ScoredNode {
+            score: self.score(query, entry),
+            internal_id: entry,
+        };
+        let mut candidates = BinaryHeap::from([entry]);
+        let mut results = BinaryHeap::from([Reverse(entry)]);
+        visited[entry.internal_id as usize] = true;
+        let mut iterations = 0_usize;
+        while let Some(current) = candidates.pop() {
+            if iterations & 0xFF == 0 && cancellation.is_some_and(RequestCancellation::is_cancelled)
+            {
+                return Err(VectorSpaceError::RequestCancelled);
+            }
+            iterations += 1;
             let worst_score = results
-                .iter()
-                .map(|id| self.score(query, id))
-                .min_by(f32::total_cmp)
+                .peek()
+                .map(|item| item.0.score)
                 .unwrap_or(f32::NEG_INFINITY);
-            if results.len() >= ef && self.score(query, &current) < worst_score {
+            if results.len() >= ef && current.score < worst_score {
                 break;
             }
-            for neighbor in self.neighbors.get(&(current, level)).into_iter().flatten() {
-                if !visited.insert(neighbor.clone()) {
+            for neighbor in self.links(current.internal_id, level).iter().copied() {
+                if visited[neighbor as usize] {
                     continue;
                 }
-                let score = self.score(query, neighbor);
-                if results.len() < ef || score >= worst_score {
-                    candidates.push(neighbor.clone());
-                    results.push(neighbor.clone());
-                    self.trim_to(query, &mut results, ef);
+                visited[neighbor as usize] = true;
+                let candidate = ScoredNode {
+                    score: self.score(query, neighbor),
+                    internal_id: neighbor,
+                };
+                if results.len() < ef || candidate.score >= worst_score {
+                    candidates.push(candidate);
+                    results.push(Reverse(candidate));
+                    if results.len() > ef {
+                        results.pop();
+                    }
                 }
             }
         }
-        results
+        Ok(results.into_iter().map(|item| item.0).collect())
     }
 
-    fn connect(&mut self, id: &str, neighbor: &str, level: usize) {
-        let links = self
-            .neighbors
-            .entry((neighbor.to_string(), level))
-            .or_default();
-        links.push(id.to_string());
-        let neighbor_vector = self.entries.get(neighbor).expect("known neighbor").clone();
-        links.sort_by(|left, right| {
-            cosine_score(
-                &neighbor_vector,
-                self.entries.get(right).expect("known vector"),
-            )
-            .total_cmp(&cosine_score(
-                &neighbor_vector,
-                self.entries.get(left).expect("known vector"),
-            ))
-            .then(left.cmp(right))
-        });
-        links.dedup();
-        links.truncate(self.config.m);
-    }
-
-    fn select_neighbors(
-        &self,
-        query: &[f32],
-        candidates: Vec<String>,
-        limit: usize,
-    ) -> Vec<String> {
-        let mut selected = self.scored(candidates, query);
-        selected.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
-        selected.into_iter().take(limit).map(|(id, _)| id).collect()
-    }
-
-    fn scored(&self, ids: Vec<String>, query: &[f32]) -> Vec<(String, f32)> {
-        let mut scores = ids
-            .into_iter()
-            .map(|id| {
-                let score = self.score(query, &id);
-                (id, score)
-            })
+    fn connect(&mut self, internal_id: u32, neighbor: u32, level: usize) {
+        let mut scored = self.neighbors[neighbor as usize][level]
+            .iter()
+            .copied()
+            .chain(std::iter::once(internal_id))
+            .map(|candidate| (candidate, dot(self.vector(neighbor), self.vector(candidate))))
             .collect::<Vec<_>>();
-        scores.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
-        scores
-    }
-
-    fn trim_to(&self, query: &[f32], ids: &mut Vec<String>, limit: usize) {
-        ids.sort_by(|left, right| {
-            compare_scored_ids(
-                self.score(query, right),
-                right,
-                self.score(query, left),
-                left,
-            )
+        scored.sort_by(|left, right| {
+            right.1.total_cmp(&left.1).then_with(|| {
+                self.external_ids[left.0 as usize].cmp(&self.external_ids[right.0 as usize])
+            })
         });
-        ids.truncate(limit);
+        scored.dedup_by_key(|candidate| candidate.0);
+        self.neighbors[neighbor as usize][level] = scored
+            .into_iter()
+            .take(self.config.m)
+            .map(|candidate| candidate.0)
+            .collect();
     }
 
-    fn score(&self, query: &[f32], id: &str) -> f32 {
-        cosine_score(
-            query,
-            self.entries
-                .get(id)
-                .expect("HNSW graph references a known vector"),
-        )
+    fn select_neighbors(&self, candidates: Vec<ScoredNode>, limit: usize) -> Vec<u32> {
+        let mut selected = candidates
+            .into_iter()
+            .filter(|candidate| !self.deleted[candidate.internal_id as usize])
+            .collect::<Vec<_>>();
+        selected.sort_by(|left, right| {
+            right.score.total_cmp(&left.score).then_with(|| {
+                self.external_ids[left.internal_id as usize]
+                    .cmp(&self.external_ids[right.internal_id as usize])
+            })
+        });
+        selected
+            .into_iter()
+            .take(limit)
+            .map(|candidate| candidate.internal_id)
+            .collect()
+    }
+
+    fn score(&self, query: &[f32], internal_id: u32) -> f32 {
+        dot(query, self.vector(internal_id))
+    }
+
+    fn vector(&self, internal_id: u32) -> &[f32] {
+        let start = internal_id as usize * self.dimensions;
+        &self.vectors[start..start + self.dimensions]
+    }
+
+    fn links(&self, internal_id: u32, level: usize) -> &[u32] {
+        self.neighbors[internal_id as usize]
+            .get(level)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    fn push_node(&mut self, id: String, vector: Vec<f32>, level: usize) {
+        let internal_id = self.external_ids.len() as u32;
+        self.id_to_internal.insert(id.clone(), internal_id);
+        self.external_ids.push(id);
+        self.vectors.extend(vector);
+        self.levels.push(level);
+        self.neighbors.push(vec![Vec::new(); level + 1]);
+        self.deleted.push(false);
+        self.live_count += 1;
+    }
+
+    fn tombstone(&mut self, internal_id: u32) {
+        let index = internal_id as usize;
+        self.deleted[index] = true;
+        self.live_count -= 1;
+        self.id_to_internal.remove(&self.external_ids[index]);
+        if self.entry_point == Some(internal_id) {
+            self.select_entry_point();
+        }
+    }
+
+    fn select_entry_point(&mut self) {
+        self.entry_point = (0..self.external_ids.len())
+            .filter(|index| !self.deleted[*index])
+            .max_by(|left, right| {
+                self.levels[*left]
+                    .cmp(&self.levels[*right])
+                    .then_with(|| self.external_ids[*right].cmp(&self.external_ids[*left]))
+            })
+            .map(|index| index as u32);
+        self.max_level = self
+            .entry_point
+            .map(|entry| self.levels[entry as usize])
+            .unwrap_or(0);
+    }
+
+    fn from_artifact(snapshot: HnswArtifactIndex) -> Result<Self, VectorSpaceError> {
+        HnswIndex::new(snapshot.dimensions, snapshot.config)
+            .map_err(|_| VectorSpaceError::CorruptArtifact("invalid HNSW configuration"))?;
+        let node_count = snapshot.external_ids.len();
+        if node_count > u32::MAX as usize {
+            return Err(VectorSpaceError::CorruptArtifact(
+                "HNSW node count exceeds u32 capacity",
+            ));
+        }
+        if snapshot.vectors.len() != node_count.saturating_mul(snapshot.dimensions)
+            || snapshot.levels.len() != node_count
+            || snapshot.neighbors.len() != node_count
+            || snapshot.deleted.len() != node_count
+        {
+            return Err(VectorSpaceError::CorruptArtifact(
+                "HNSW dense array lengths differ",
+            ));
+        }
+
+        let deleted_count = snapshot.deleted.iter().filter(|deleted| **deleted).count();
+        if snapshot.live_count > node_count || node_count - deleted_count != snapshot.live_count {
+            return Err(VectorSpaceError::CorruptArtifact(
+                "HNSW live and deleted counts are inconsistent",
+            ));
+        }
+
+        let mut id_to_internal = HashMap::with_capacity(snapshot.live_count);
+        for (index, id) in snapshot.external_ids.iter().enumerate() {
+            let vector_start = index * snapshot.dimensions;
+            let vector = &snapshot.vectors[vector_start..vector_start + snapshot.dimensions];
+            if vector.iter().any(|value| !value.is_finite()) {
+                return Err(VectorSpaceError::CorruptArtifact(
+                    "HNSW vector contains a non-finite value",
+                ));
+            }
+            let norm_squared = dot(vector, vector);
+            if norm_squared != 0.0 && (norm_squared - 1.0).abs() > 1e-4 {
+                return Err(VectorSpaceError::CorruptArtifact(
+                    "HNSW vector is not normalized",
+                ));
+            }
+            if snapshot.neighbors[index].len() != snapshot.levels[index] + 1 {
+                return Err(VectorSpaceError::CorruptArtifact(
+                    "HNSW neighbor levels do not match node level",
+                ));
+            }
+            if !snapshot.deleted[index] && id_to_internal.insert(id.clone(), index as u32).is_some()
+            {
+                return Err(VectorSpaceError::CorruptArtifact(
+                    "HNSW contains duplicate active external IDs",
+                ));
+            }
+        }
+
+        for (index, levels) in snapshot.neighbors.iter().enumerate() {
+            for (level, links) in levels.iter().enumerate() {
+                if links.len() > snapshot.config.m {
+                    return Err(VectorSpaceError::CorruptArtifact(
+                        "HNSW neighbor list exceeds configured M",
+                    ));
+                }
+                let mut unique_links = links.clone();
+                unique_links.sort_unstable();
+                if unique_links.windows(2).any(|pair| pair[0] == pair[1]) {
+                    return Err(VectorSpaceError::CorruptArtifact(
+                        "HNSW neighbor list contains duplicates",
+                    ));
+                }
+                for neighbor in links {
+                    let neighbor = *neighbor as usize;
+                    if neighbor >= node_count {
+                        return Err(VectorSpaceError::CorruptArtifact(
+                            "HNSW neighbor ID is out of bounds",
+                        ));
+                    }
+                    if neighbor == index {
+                        return Err(VectorSpaceError::CorruptArtifact(
+                            "HNSW node links to itself",
+                        ));
+                    }
+                    if snapshot.levels[neighbor] < level {
+                        return Err(VectorSpaceError::CorruptArtifact(
+                            "HNSW neighbor does not exist at linked level",
+                        ));
+                    }
+                }
+            }
+        }
+
+        let highest_live_level = snapshot
+            .levels
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !snapshot.deleted[*index])
+            .map(|(_, level)| *level)
+            .max();
+        match (
+            snapshot.live_count,
+            snapshot.entry_point,
+            highest_live_level,
+        ) {
+            (0, None, None) if snapshot.max_level == 0 => {}
+            (0, _, _) => {
+                return Err(VectorSpaceError::CorruptArtifact(
+                    "empty HNSW index has entry metadata",
+                ));
+            }
+            (_, Some(entry), Some(highest_level))
+                if (entry as usize) < node_count
+                    && !snapshot.deleted[entry as usize]
+                    && snapshot.levels[entry as usize] == highest_level
+                    && snapshot.max_level == highest_level => {}
+            _ => {
+                return Err(VectorSpaceError::CorruptArtifact(
+                    "HNSW entry point or max level is invalid",
+                ));
+            }
+        }
+
+        Ok(Self {
+            dimensions: snapshot.dimensions,
+            config: snapshot.config,
+            external_ids: snapshot.external_ids,
+            id_to_internal,
+            vectors: snapshot.vectors,
+            levels: snapshot.levels,
+            neighbors: snapshot.neighbors,
+            deleted: snapshot.deleted,
+            live_count: snapshot.live_count,
+            entry_point: snapshot.entry_point,
+            max_level: snapshot.max_level,
+        })
     }
 
     fn rebuild_threshold(&self) -> usize {
-        (self.entries.len() / 4).max(8)
+        (self.external_ids.len() / 4).max(8)
+    }
+
+    fn compact_if_needed(&mut self) {
+        if self.external_ids.len() - self.live_count >= self.rebuild_threshold() {
+            self.rebuild();
+        }
     }
 
     fn rebuild(&mut self) {
         let active_entries = self
-            .entries
+            .external_ids
             .iter()
-            .filter(|(id, _)| !self.tombstones.contains(*id))
-            .map(|(id, vector)| (id.clone(), vector.clone()))
+            .enumerate()
+            .filter(|(index, _)| !self.deleted[*index])
+            .map(|(index, id)| (id.clone(), self.vector(index as u32).to_vec()))
             .collect::<Vec<_>>();
-        self.entries.clear();
-        self.tombstones.clear();
+        self.external_ids.clear();
+        self.id_to_internal.clear();
+        self.vectors.clear();
         self.levels.clear();
         self.neighbors.clear();
+        self.deleted.clear();
+        self.live_count = 0;
         self.entry_point = None;
         self.max_level = 0;
         for (id, vector) in active_entries {
@@ -467,6 +1136,7 @@ pub struct HnswIndexStatus {
     pub strategy: SimilarityMetric,
     pub ready: bool,
     pub tombstones: usize,
+    pub estimated_memory_bytes: usize,
 }
 
 #[derive(Debug)]
@@ -495,7 +1165,14 @@ struct HnswArtifactIndex {
     dimensions: usize,
     config: HnswConfig,
     generation: u64,
-    entries: BTreeMap<String, Vec<f32>>,
+    external_ids: Vec<String>,
+    vectors: Vec<f32>,
+    levels: Vec<usize>,
+    neighbors: Vec<Vec<Vec<u32>>>,
+    deleted: Vec<bool>,
+    live_count: usize,
+    entry_point: Option<u32>,
+    max_level: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -594,7 +1271,8 @@ impl HnswRegistry {
                 generation: managed.generation,
                 strategy: managed.index.metric(),
                 ready: true,
-                tombstones: managed.index.tombstones.len(),
+                tombstones: managed.index.external_ids.len() - managed.index.live_count,
+                estimated_memory_bytes: managed.index.estimated_memory_bytes(),
             });
         }
         let indexes = self.exact_euclidean_indexes.read();
@@ -607,6 +1285,15 @@ impl HnswRegistry {
             strategy: SimilarityMetric::ExactEuclidean,
             ready: true,
             tombstones: 0,
+            estimated_memory_bytes: managed
+                .entries
+                .iter()
+                .map(|(id, vector)| {
+                    std::mem::size_of::<String>()
+                        + id.capacity()
+                        + vector.capacity() * std::mem::size_of::<f32>()
+                })
+                .sum(),
         })
     }
 
@@ -681,9 +1368,29 @@ impl HnswRegistry {
         query: &[f32],
         k: usize,
     ) -> Result<(Vec<(String, f32)>, HnswSearchStats), VectorSpaceError> {
+        self.knn_cancellable(name, query, k, None)
+    }
+
+    pub fn knn_with_cancellation(
+        &self,
+        name: &str,
+        query: &[f32],
+        k: usize,
+        cancellation: &RequestCancellation,
+    ) -> Result<(Vec<(String, f32)>, HnswSearchStats), VectorSpaceError> {
+        self.knn_cancellable(name, query, k, Some(cancellation))
+    }
+
+    fn knn_cancellable(
+        &self,
+        name: &str,
+        query: &[f32],
+        k: usize,
+        cancellation: Option<&RequestCancellation>,
+    ) -> Result<(Vec<(String, f32)>, HnswSearchStats), VectorSpaceError> {
         let indexes = self.indexes.read();
         if let Some(managed) = indexes.get(name) {
-            return managed.index.knn(query, k);
+            return managed.index.knn_with_cancellation(query, k, cancellation);
         }
         let indexes = self.exact_euclidean_indexes.read();
         let managed = indexes
@@ -695,24 +1402,27 @@ impl HnswRegistry {
                 got: query.len(),
             });
         }
-        let mut scores = managed
-            .entries
-            .iter()
-            .map(|(id, vector)| (id.clone(), euclidean_score(query, vector)))
-            .collect::<Vec<_>>();
+        let mut scores = Vec::with_capacity(managed.entries.len());
+        for (position, (id, vector)) in managed.entries.iter().enumerate() {
+            if position & 0xFF == 0 && cancellation.is_some_and(RequestCancellation::is_cancelled) {
+                return Err(VectorSpaceError::RequestCancelled);
+            }
+            scores.push((id.clone(), euclidean_score(query, vector)));
+        }
         scores.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
         scores.truncate(k);
+        let returned_candidates = scores.len();
         Ok((
             scores,
             HnswSearchStats {
                 visited_nodes: managed.entries.len(),
+                returned_candidates,
+                exact_scored_candidates: managed.entries.len(),
             },
         ))
     }
 
-    /// Persist rebuildable vector state. HNSW topology is deliberately rebuilt
-    /// from normalized active vectors during load, keeping graph storage
-    /// derived and corruption isolated from authoritative graph records.
+    /// Persist the dense HNSW graph and exact Euclidean index state.
     pub fn save_artifact(&self, path: impl AsRef<Path>) -> Result<(), VectorSpaceError> {
         self.save_artifact_at_generation(path, 0)
     }
@@ -733,13 +1443,14 @@ impl HnswRegistry {
                         dimensions: managed.index.dimensions,
                         config: managed.index.config,
                         generation: managed.generation,
-                        entries: managed
-                            .index
-                            .entries
-                            .iter()
-                            .filter(|(id, _)| !managed.index.tombstones.contains(*id))
-                            .map(|(id, vector)| (id.clone(), vector.clone()))
-                            .collect(),
+                        external_ids: managed.index.external_ids.clone(),
+                        vectors: managed.index.vectors.clone(),
+                        levels: managed.index.levels.clone(),
+                        neighbors: managed.index.neighbors.clone(),
+                        deleted: managed.index.deleted.clone(),
+                        live_count: managed.index.live_count,
+                        entry_point: managed.index.entry_point,
+                        max_level: managed.index.max_level,
                     },
                 )
             })
@@ -759,12 +1470,13 @@ impl HnswRegistry {
                 )
             })
             .collect();
-        let payload = serde_json::to_vec(&RegistryArtifact {
+        let payload = rmp_serde::to_vec_named(&RegistryArtifact {
             format_version: REGISTRY_ARTIFACT_FORMAT_VERSION,
             source_generation,
             hnsw_indexes,
             exact_euclidean_indexes,
-        })?;
+        })
+        .map_err(|error| VectorSpaceError::ArtifactSerialization(error.to_string()))?;
         let mut bytes = Vec::with_capacity(REGISTRY_ARTIFACT_MAGIC.len() + payload.len() + 8);
         bytes.extend_from_slice(REGISTRY_ARTIFACT_MAGIC);
         bytes.extend_from_slice(&payload);
@@ -779,8 +1491,7 @@ impl HnswRegistry {
         Ok(())
     }
 
-    /// Load a registry artifact without accepting partially written, corrupt,
-    /// or incompatible data. The HNSW graph is rebuilt deterministically.
+    /// Load a registry artifact without accepting malformed graph state.
     pub fn load_artifact(path: impl AsRef<Path>) -> Result<Self, VectorSpaceError> {
         Ok(Self::load_artifact_with_source_generation(path)?.registry)
     }
@@ -806,7 +1517,8 @@ impl HnswRegistry {
         if artifact_checksum(payload) != expected_checksum {
             return Err(VectorSpaceError::CorruptArtifact("checksum mismatch"));
         }
-        let artifact: RegistryArtifact = serde_json::from_slice(payload)?;
+        let artifact: RegistryArtifact = rmp_serde::from_slice(payload)
+            .map_err(|_| VectorSpaceError::CorruptArtifact("invalid artifact payload"))?;
         if artifact.format_version != REGISTRY_ARTIFACT_FORMAT_VERSION {
             return Err(VectorSpaceError::UnsupportedArtifactFormat {
                 expected: REGISTRY_ARTIFACT_FORMAT_VERSION,
@@ -816,16 +1528,12 @@ impl HnswRegistry {
 
         let registry = Self::new();
         for (name, snapshot) in artifact.hnsw_indexes {
-            registry.create_index(&name, snapshot.dimensions, snapshot.config)?;
-            for (id, vector) in snapshot.entries {
-                registry.upsert(&name, id, vector)?;
-            }
+            let generation = snapshot.generation;
+            let index = HnswIndex::from_artifact(snapshot)?;
             registry
                 .indexes
                 .write()
-                .get_mut(&name)
-                .expect("created HNSW index is present")
-                .generation = snapshot.generation;
+                .insert(name, ManagedHnswIndex { index, generation });
         }
         for (name, snapshot) in artifact.exact_euclidean_indexes {
             registry.create_exact_euclidean_index(&name, snapshot.dimensions)?;
@@ -867,17 +1575,6 @@ fn euclidean_score(a: &[f32], b: &[f32]) -> f32 {
         .sum::<f32>()
         .sqrt();
     1.0 / (1.0 + distance)
-}
-
-fn compare_scored_ids(
-    left_score: f32,
-    left_id: &str,
-    right_score: f32,
-    right_id: &str,
-) -> std::cmp::Ordering {
-    left_score
-        .total_cmp(&right_score)
-        .then_with(|| right_id.cmp(left_id))
 }
 
 fn deterministic_level(id: &str, m: usize) -> usize {
@@ -1014,6 +1711,107 @@ mod tests {
     }
 
     #[test]
+    fn vector_file_store_normalizes_reopens_and_preserves_deletes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vectors.bin");
+        let mut store = VectorFileStore::open(&path, 2).unwrap();
+        assert!(store.is_empty());
+        assert_eq!(store.dimensions(), 2);
+        assert!(matches!(
+            store.upsert("invalid", &[1.0]),
+            Err(VectorSpaceError::DimensionMismatch { .. })
+        ));
+
+        store.upsert("updated", &[3.0, 4.0]).unwrap();
+        let normalized = store.get("updated").unwrap().unwrap();
+        assert!((normalized[0] - 0.6).abs() < 1e-6);
+        assert!((normalized[1] - 0.8).abs() < 1e-6);
+
+        store.upsert("updated", &[0.0, 2.0]).unwrap();
+        store.upsert("retained", &[0.0, 0.0]).unwrap();
+        assert!(store.remove("updated").unwrap());
+        assert!(!store.remove("missing").unwrap());
+        drop(store);
+
+        let reopened = VectorFileStore::open(&path, 2).unwrap();
+        assert_eq!(reopened.len(), 1);
+        assert_eq!(reopened.get("updated").unwrap(), None);
+        assert_eq!(reopened.get("retained").unwrap(), Some(vec![0.0, 0.0]));
+    }
+
+    #[test]
+    fn vector_file_store_batches_durable_upserts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vectors.bin");
+        let mut store = VectorFileStore::open(&path, 2).unwrap();
+        store
+            .upsert_batch([
+                ("first".to_string(), vec![3.0, 4.0]),
+                ("second".to_string(), vec![0.0, 2.0]),
+            ])
+            .unwrap();
+        drop(store);
+
+        let reopened = VectorFileStore::open(&path, 2).unwrap();
+        assert_eq!(reopened.len(), 2);
+        assert_eq!(reopened.get("first").unwrap(), Some(vec![0.6, 0.8]));
+        assert_eq!(reopened.get("second").unwrap(), Some(vec![0.0, 1.0]));
+    }
+
+    #[test]
+    fn vector_file_store_exactly_reranks_candidates() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vectors.bin");
+        let mut store = VectorFileStore::open(&path, 2).unwrap();
+        store.upsert("zeta", &[1.0, 1.0]).unwrap();
+        store.upsert("alpha", &[1.0, 1.0]).unwrap();
+        store.upsert("best", &[1.0, 0.0]).unwrap();
+
+        assert_eq!(
+            store
+                .score_candidates(&[1.0, 0.0], ["zeta", "missing", "alpha", "best"], 3)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect::<Vec<_>>(),
+            vec!["best", "alpha", "zeta"]
+        );
+        assert!(matches!(
+            store.score_candidates(&[1.0], ["best"], 1),
+            Err(VectorSpaceError::DimensionMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn vector_file_store_rejects_corrupt_headers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vectors.bin");
+        fs::write(&path, b"not a vector file").unwrap();
+        assert!(matches!(
+            VectorFileStore::open(&path, 2),
+            Err(VectorSpaceError::CorruptVectorFileStore(_))
+        ));
+    }
+
+    #[test]
+    fn vector_file_store_rejects_oversized_record_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vectors.bin");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(VECTOR_FILE_STORE_MAGIC);
+        bytes.extend_from_slice(&VECTOR_FILE_STORE_FORMAT_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        bytes.push(VECTOR_FILE_STORE_UPSERT);
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        fs::write(&path, bytes).unwrap();
+
+        assert!(matches!(
+            VectorFileStore::open(&path, 2),
+            Err(VectorSpaceError::CorruptVectorFileStore(_))
+        ));
+    }
+
+    #[test]
     fn exact_cosine_orders_equal_scores_by_id() {
         let mut space = VectorSpace::new("test", 2);
         space.insert("zeta", vec![1.0, 0.0]).unwrap();
@@ -1054,7 +1852,14 @@ mod tests {
 
         assert_eq!(index.metric(), SimilarityMetric::HnswCosine);
         assert_eq!(results[0].0, "point-37");
-        assert_eq!(results, oracle);
+        assert_eq!(
+            results.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+            oracle.iter().map(|(id, _)| id).collect::<Vec<_>>()
+        );
+        assert!(results
+            .iter()
+            .zip(oracle.iter())
+            .all(|((_, actual), (_, expected))| (actual - expected).abs() < 1e-6));
         assert!(
             stats.visited_nodes < index.len(),
             "HNSW query must traverse graph neighbors instead of scanning all vectors"
@@ -1081,7 +1886,7 @@ mod tests {
     }
 
     #[test]
-    fn hnsw_tombstones_are_filtered_and_upserts_rebuild_active_graph() {
+    fn hnsw_tombstones_are_filtered_and_upserts_append_a_fresh_dense_node() {
         let mut index = HnswIndex::new(
             2,
             HnswConfig {
@@ -1100,7 +1905,14 @@ mod tests {
         assert!(after_remove.iter().all(|(id, _)| id != "removed"));
         assert_eq!(index.len(), 2);
 
+        let other_internal = index.id_to_internal["other"];
+        let old_updated_internal = index.id_to_internal["updated"];
+        let node_count = index.external_ids.len();
         index.upsert("updated", vec![1.0, 0.0]).unwrap();
+        assert_eq!(index.id_to_internal["other"], other_internal);
+        assert!(index.deleted[old_updated_internal as usize]);
+        assert_eq!(index.id_to_internal["updated"] as usize, node_count);
+        assert_eq!(index.external_ids.len(), node_count + 1);
         let (after_upsert, _) = index.knn(&[1.0, 0.0], 1).unwrap();
         assert_eq!(after_upsert[0].0, "updated");
     }
@@ -1166,6 +1978,7 @@ mod tests {
         assert_eq!(before_query.strategy, SimilarityMetric::HnswCosine);
         assert!(before_query.ready);
         assert_eq!(before_query.generation, 0);
+        assert!(before_query.estimated_memory_bytes > 0);
         assert!(registry
             .knn("documents.embedding", &[1.0, 0.0], 3)
             .unwrap()
@@ -1183,6 +1996,13 @@ mod tests {
         assert_eq!(
             registry.status("documents.embedding").unwrap().generation,
             1
+        );
+        assert!(
+            registry
+                .status("documents.embedding")
+                .unwrap()
+                .estimated_memory_bytes
+                > before_query.estimated_memory_bytes
         );
         assert_eq!(
             registry
@@ -1217,6 +2037,7 @@ mod tests {
         let status = registry.status("documents.embedding").unwrap();
         assert_eq!(status.strategy, SimilarityMetric::ExactEuclidean);
         assert_eq!(status.generation, 2);
+        assert!(status.estimated_memory_bytes > 0);
         assert!(registry
             .upsert("documents.embedding", "invalid", vec![1.0])
             .is_err());
@@ -1237,14 +2058,38 @@ mod tests {
             .upsert("documents.cosine", "one", vec![1.0, 0.0])
             .unwrap();
         registry
+            .upsert("documents.cosine", "two", vec![0.0, 1.0])
+            .unwrap();
+        registry
+            .upsert("documents.cosine", "removed", vec![-1.0, 0.0])
+            .unwrap();
+        registry.remove("documents.cosine", "removed").unwrap();
+        registry
             .upsert("documents.euclidean", "two", vec![0.0, 1.0])
             .unwrap();
+        let expected_graph = registry
+            .indexes
+            .read()
+            .get("documents.cosine")
+            .unwrap()
+            .index
+            .clone();
         registry.save_artifact_at_generation(&artifact, 42).unwrap();
 
         let loaded = HnswRegistry::load_artifact_with_source_generation(&artifact).unwrap();
         assert_eq!(loaded.source_generation, 42);
         let restored = loaded.registry;
-        assert_eq!(restored.status("documents.cosine").unwrap().generation, 1);
+        assert_eq!(restored.status("documents.cosine").unwrap().generation, 4);
+        assert_eq!(
+            restored
+                .indexes
+                .read()
+                .get("documents.cosine")
+                .unwrap()
+                .index,
+            expected_graph,
+            "loading must install the persisted dense topology without rebuilding it"
+        );
         assert_eq!(
             restored.knn("documents.cosine", &[1.0, 0.0], 1).unwrap().0[0].0,
             "one"
@@ -1258,6 +2103,46 @@ mod tests {
         assert!(matches!(
             HnswRegistry::load_artifact(&artifact),
             Err(VectorSpaceError::CorruptArtifact(_))
+        ));
+    }
+
+    #[test]
+    fn registry_artifact_rejects_malformed_hnsw_topology() {
+        let directory = tempfile::tempdir().unwrap();
+        let artifact_path = directory.path().join("vectors.artifact");
+        let registry = HnswRegistry::new();
+        registry
+            .create_index("documents.cosine", 2, HnswConfig::default())
+            .unwrap();
+        registry
+            .upsert("documents.cosine", "one", vec![1.0, 0.0])
+            .unwrap();
+        registry
+            .upsert("documents.cosine", "two", vec![0.0, 1.0])
+            .unwrap();
+        registry.save_artifact(&artifact_path).unwrap();
+
+        let bytes = fs::read(&artifact_path).unwrap();
+        let checksum_offset = bytes.len() - 8;
+        let payload = &bytes[REGISTRY_ARTIFACT_MAGIC.len()..checksum_offset];
+        let mut artifact: RegistryArtifact = rmp_serde::from_slice(payload).unwrap();
+        artifact
+            .hnsw_indexes
+            .get_mut("documents.cosine")
+            .unwrap()
+            .neighbors[0][0] = vec![u32::MAX];
+        let payload = rmp_serde::to_vec_named(&artifact).unwrap();
+        let mut malformed = Vec::new();
+        malformed.extend_from_slice(REGISTRY_ARTIFACT_MAGIC);
+        malformed.extend_from_slice(&payload);
+        malformed.extend_from_slice(&artifact_checksum(&payload).to_le_bytes());
+        fs::write(&artifact_path, malformed).unwrap();
+
+        assert!(matches!(
+            HnswRegistry::load_artifact(&artifact_path),
+            Err(VectorSpaceError::CorruptArtifact(
+                "HNSW neighbor ID is out of bounds"
+            ))
         ));
     }
 }

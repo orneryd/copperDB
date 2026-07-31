@@ -1,8 +1,12 @@
 use super::*;
-use copperdb_vectorspace::{HnswConfig, HnswIndexStatus, HnswRegistry, VectorSpaceError};
-use std::path::PathBuf;
+use copperdb_vectorspace::{
+    HnswConfig, HnswIndexStatus, HnswRegistry, SimilarityMetric, VectorFileStore, VectorSpaceError,
+};
+use std::{path::PathBuf, sync::Mutex};
 
 const VECTOR_REGISTRY_ARTIFACT_FILE: &str = "vectors.hnsw";
+const VECTOR_FILE_STORE_DIRECTORY: &str = "vectors";
+const EXACT_RERANK_CANDIDATE_MULTIPLIER: usize = 4;
 
 #[derive(Debug, Clone)]
 struct VectorIndexBinding {
@@ -10,6 +14,7 @@ struct VectorIndexBinding {
     label: String,
     property: String,
     entity_type: IndexEntityType,
+    dimensions: usize,
 }
 
 /// Per-database owner for schema-declared cosine HNSW indexes.
@@ -20,6 +25,9 @@ struct VectorIndexBinding {
 pub(crate) struct VectorIndexManager {
     registry: Arc<HnswRegistry>,
     artifact_path: Option<PathBuf>,
+    file_store_directory: Option<PathBuf>,
+    file_stores: Mutex<BTreeMap<String, VectorFileStore>>,
+    file_store_bindings: Mutex<Vec<VectorIndexBinding>>,
 }
 
 impl VectorIndexManager {
@@ -58,6 +66,7 @@ impl VectorIndexManager {
                 label: definition.label,
                 property: property.clone(),
                 entity_type: definition.entity_type,
+                dimensions,
             });
         }
 
@@ -126,7 +135,13 @@ impl VectorIndexManager {
         let manager = Self {
             registry,
             artifact_path,
+            file_store_directory: storage
+                .data_dir()
+                .map(|path| path.join(VECTOR_FILE_STORE_DIRECTORY)),
+            file_stores: Mutex::new(BTreeMap::new()),
+            file_store_bindings: Mutex::new(bindings),
         };
+        manager.rebuild_file_stores(storage);
         manager.persist_artifact(storage);
         Ok(manager)
     }
@@ -151,6 +166,56 @@ impl VectorIndexManager {
         Arc::clone(&self.registry)
     }
 
+    pub(crate) fn query_callback(self: &Arc<Self>) -> copperdb_eval::VectorIndexQuery {
+        let manager = Arc::downgrade(self);
+        Arc::new(move |cancellation, name, query, limit| {
+            let Some(manager) = manager.upgrade() else {
+                return Err(VectorSpaceError::IndexNotFound(name.to_string()));
+            };
+            manager.query(cancellation, name, query, limit)
+        })
+    }
+
+    fn query(
+        &self,
+        cancellation: &copperdb_util::RequestCancellation,
+        name: &str,
+        query: &[f32],
+        limit: usize,
+    ) -> Result<(Vec<(String, f32)>, copperdb_vectorspace::HnswSearchStats), VectorSpaceError> {
+        let status = self.registry.status(name)?;
+        if status.strategy != SimilarityMetric::HnswCosine || limit == 0 {
+            return self
+                .registry
+                .knn_with_cancellation(name, query, limit, cancellation);
+        }
+        let candidate_limit = limit
+            .saturating_mul(EXACT_RERANK_CANDIDATE_MULTIPLIER)
+            .max(limit);
+        let (candidates, mut stats) =
+            self.registry
+                .knn_with_cancellation(name, query, candidate_limit, cancellation)?;
+        let stores = self
+            .file_stores
+            .lock()
+            .map_err(|_| VectorSpaceError::IndexNotFound(name.to_string()))?;
+        let Some(store) = stores.get(name) else {
+            let matches = candidates.into_iter().take(limit).collect::<Vec<_>>();
+            stats.returned_candidates = matches.len();
+            return Ok((matches, stats));
+        };
+        let candidate_ids = candidates
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>();
+        let exact_scored_candidates = candidate_ids.len();
+        let matches =
+            store.score_candidates_cancellable(query, candidate_ids, limit, cancellation)?;
+        stats.returned_candidates = matches.len();
+        stats.exact_scored_candidates = exact_scored_candidates;
+        Ok((matches, stats))
+    }
+
     pub(crate) fn enable_persistence(self: &Arc<Self>, storage: &Arc<StorageEngine>) {
         let manager = Arc::downgrade(self);
         let weak_storage = Arc::downgrade(storage);
@@ -159,6 +224,42 @@ impl VectorIndexManager {
                 return;
             };
             manager.persist_artifact(&storage);
+        }));
+        let manager = Arc::downgrade(self);
+        storage.on_node_created(Arc::new(move |node| {
+            if let Some(manager) = manager.upgrade() {
+                manager.maintain_node_file_stores(&node);
+            }
+        }));
+        let manager = Arc::downgrade(self);
+        storage.on_node_updated(Arc::new(move |node| {
+            if let Some(manager) = manager.upgrade() {
+                manager.maintain_node_file_stores(&node);
+            }
+        }));
+        let manager = Arc::downgrade(self);
+        storage.on_node_deleted(Arc::new(move |id| {
+            if let Some(manager) = manager.upgrade() {
+                manager.remove_file_store_entry(IndexEntityType::Node, &id);
+            }
+        }));
+        let manager = Arc::downgrade(self);
+        storage.on_edge_created(Arc::new(move |edge| {
+            if let Some(manager) = manager.upgrade() {
+                manager.maintain_edge_file_stores(&edge);
+            }
+        }));
+        let manager = Arc::downgrade(self);
+        storage.on_edge_updated(Arc::new(move |edge| {
+            if let Some(manager) = manager.upgrade() {
+                manager.maintain_edge_file_stores(&edge);
+            }
+        }));
+        let manager = Arc::downgrade(self);
+        storage.on_edge_deleted(Arc::new(move |id| {
+            if let Some(manager) = manager.upgrade() {
+                manager.remove_file_store_entry(IndexEntityType::Relationship, &id);
+            }
         }));
     }
 
@@ -172,8 +273,184 @@ impl VectorIndexManager {
             let (Some(manager), Some(storage)) = (manager.upgrade(), storage.upgrade()) else {
                 return;
             };
+            manager.refresh_file_store_bindings(&storage);
             manager.persist_artifact(&storage);
         })
+    }
+
+    fn refresh_file_store_bindings(&self, storage: &StorageEngine) {
+        let bindings = match file_store_bindings(storage, &self.registry) {
+            Ok(bindings) => bindings,
+            Err(error) => {
+                tracing::warn!(%error, "failed to load vector file store bindings");
+                return;
+            }
+        };
+        match self.file_store_bindings.lock() {
+            Ok(mut current) => *current = bindings,
+            Err(_) => {
+                tracing::warn!("vector file store bindings lock is poisoned");
+                return;
+            }
+        }
+        self.rebuild_file_stores(storage);
+    }
+
+    fn rebuild_file_stores(&self, storage: &StorageEngine) {
+        let Some(directory) = self.file_store_directory.as_ref() else {
+            return;
+        };
+        let bindings = match self.file_store_bindings.lock() {
+            Ok(bindings) => bindings.clone(),
+            Err(_) => {
+                tracing::warn!("vector file store bindings lock is poisoned");
+                return;
+            }
+        };
+        let old_stores = match self.file_stores.lock() {
+            Ok(mut stores) => std::mem::take(&mut *stores),
+            Err(_) => {
+                tracing::warn!("vector file store lock is poisoned");
+                return;
+            }
+        };
+        for store in old_stores.into_values() {
+            if let Err(error) = std::fs::remove_file(store.path()) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(path = %store.path().display(), %error, "failed to discard stale vector file store");
+                }
+            }
+        }
+
+        let mut stores = BTreeMap::new();
+        for binding in bindings {
+            let path = vector_file_store_path(directory, &binding.name);
+            if let Err(error) = std::fs::remove_file(&path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(index = %binding.name, path = %path.display(), %error, "failed to reset vector file store before rebuild");
+                    continue;
+                }
+            }
+            let mut store = match VectorFileStore::open(&path, binding.dimensions) {
+                Ok(store) => store,
+                Err(error) => {
+                    tracing::warn!(index = %binding.name, path = %path.display(), %error, "failed to create vector file store");
+                    continue;
+                }
+            };
+            if let Err(error) = populate_file_store(storage, &binding, &mut store) {
+                tracing::warn!(index = %binding.name, %error, "failed to rebuild vector file store");
+                let _ = std::fs::remove_file(store.path());
+                continue;
+            }
+            stores.insert(binding.name.clone(), store);
+        }
+        if let Ok(mut current) = self.file_stores.lock() {
+            *current = stores;
+        } else {
+            tracing::warn!("vector file store lock is poisoned");
+        }
+    }
+
+    fn maintain_node_file_stores(&self, node: &NodeRecord) {
+        self.maintain_file_stores(
+            IndexEntityType::Node,
+            &node.id,
+            &node.labels,
+            None,
+            |binding| node_vector_for_property(node, &binding.property),
+        );
+    }
+
+    fn maintain_edge_file_stores(&self, edge: &EdgeRecord) {
+        self.maintain_file_stores(
+            IndexEntityType::Relationship,
+            &edge.id,
+            &[],
+            Some(&edge.edge_type),
+            |binding| edge_vector_for_property(edge, &binding.property),
+        );
+    }
+
+    fn maintain_file_stores<F>(
+        &self,
+        entity_type: IndexEntityType,
+        id: &str,
+        labels: &[String],
+        edge_type: Option<&str>,
+        vector_for_binding: F,
+    ) where
+        F: Fn(&VectorIndexBinding) -> Option<Vec<f32>>,
+    {
+        let bindings = match self.file_store_bindings.lock() {
+            Ok(bindings) => bindings.clone(),
+            Err(_) => {
+                tracing::warn!("vector file store bindings lock is poisoned");
+                return;
+            }
+        };
+        let mut stores = match self.file_stores.lock() {
+            Ok(stores) => stores,
+            Err(_) => {
+                tracing::warn!("vector file store lock is poisoned");
+                return;
+            }
+        };
+        for binding in bindings
+            .into_iter()
+            .filter(|binding| binding.entity_type == entity_type)
+        {
+            let Some(store) = stores.get_mut(&binding.name) else {
+                continue;
+            };
+            let matches_binding = match entity_type {
+                IndexEntityType::Node => {
+                    binding.label.is_empty() || labels.iter().any(|label| label == &binding.label)
+                }
+                IndexEntityType::Relationship => {
+                    binding.label.is_empty() || edge_type == Some(binding.label.as_str())
+                }
+            };
+            let result = if matches_binding {
+                match vector_for_binding(&binding) {
+                    Some(vector) => store.upsert(id, &vector).map(|()| true),
+                    None => store.remove(id),
+                }
+            } else {
+                store.remove(id)
+            };
+            if let Err(error) = result {
+                tracing::warn!(index = %binding.name, entity = %id, %error, "failed to maintain vector file store");
+            }
+        }
+    }
+
+    fn remove_file_store_entry(&self, entity_type: IndexEntityType, id: &str) {
+        let bindings = match self.file_store_bindings.lock() {
+            Ok(bindings) => bindings.clone(),
+            Err(_) => {
+                tracing::warn!("vector file store bindings lock is poisoned");
+                return;
+            }
+        };
+        let mut stores = match self.file_stores.lock() {
+            Ok(stores) => stores,
+            Err(_) => {
+                tracing::warn!("vector file store lock is poisoned");
+                return;
+            }
+        };
+        for binding in bindings
+            .into_iter()
+            .filter(|binding| binding.entity_type == entity_type)
+        {
+            let Some(store) = stores.get_mut(&binding.name) else {
+                continue;
+            };
+            if let Err(error) = store.remove(id) {
+                tracing::warn!(index = %binding.name, entity = %id, %error, "failed to remove vector file store entry");
+            }
+        }
     }
 
     fn persist_artifact(&self, storage: &StorageEngine) {
@@ -191,6 +468,74 @@ impl VectorIndexManager {
             tracing::warn!(path = %path.display(), %error, "failed to persist vector registry artifact");
         }
     }
+}
+
+fn file_store_bindings(
+    storage: &StorageEngine,
+    registry: &HnswRegistry,
+) -> Result<Vec<VectorIndexBinding>, CopperDbError> {
+    storage
+        .load_index_definitions()?
+        .into_iter()
+        .filter(|definition| definition.kind == IndexKind::Vector)
+        .filter_map(|definition| {
+            let status = registry.status(&definition.name).ok()?;
+            if status.strategy != SimilarityMetric::HnswCosine {
+                return None;
+            }
+            let property = definition.properties.first()?.clone();
+            Some(Ok(VectorIndexBinding {
+                name: definition.name,
+                label: definition.label,
+                property,
+                entity_type: definition.entity_type,
+                dimensions: status.dimensions,
+            }))
+        })
+        .collect()
+}
+
+fn vector_file_store_path(directory: &std::path::Path, index_name: &str) -> PathBuf {
+    let encoded = index_name
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    directory.join(format!("{encoded}.vec"))
+}
+
+fn populate_file_store(
+    storage: &StorageEngine,
+    binding: &VectorIndexBinding,
+    store: &mut VectorFileStore,
+) -> Result<(), CopperDbError> {
+    let entries = match binding.entity_type {
+        IndexEntityType::Node => storage
+            .all_node_records()?
+            .into_iter()
+            .filter(|node| {
+                binding.label.is_empty() || node.labels.iter().any(|label| label == &binding.label)
+            })
+            .filter_map(|node| {
+                node_vector_for_property(&node, &binding.property).map(|vector| (node.id, vector))
+            })
+            .collect::<Vec<_>>(),
+        IndexEntityType::Relationship => {
+            let edges = if binding.label.is_empty() {
+                storage.all_edges()?
+            } else {
+                storage.get_edges_by_type(&binding.label)?
+            };
+            edges
+                .into_iter()
+                .filter_map(|edge| {
+                    edge_vector_for_property(&edge, &binding.property)
+                        .map(|vector| (edge.id, vector))
+                })
+                .collect::<Vec<_>>()
+        }
+    };
+    store.upsert_batch(entries).map_err(vector_error)
 }
 
 fn registry_matches_declared_indexes(candidate: &HnswRegistry, declared: &HnswRegistry) -> bool {
@@ -360,6 +705,38 @@ mod tests {
     }
 
     #[test]
+    fn persistent_cosine_query_expands_and_exactly_reranks_candidates() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path().join("vector-db");
+        let storage = StorageEngine::open(&data_dir).unwrap();
+        storage
+            .persist_index_definition(&vector_index_definition())
+            .unwrap();
+        storage
+            .persist_index_options("document_embedding", &vector_options())
+            .unwrap();
+        for position in 0..8 {
+            storage
+                .put_node_record(&node(
+                    &format!("node-{position}"),
+                    vec![8.0 - position as f32, position as f32],
+                ))
+                .unwrap();
+        }
+
+        let manager = VectorIndexManager::build(&storage).unwrap();
+        let cancellation = copperdb_util::RequestCancellation::new();
+        let (matches, stats) = manager
+            .query(&cancellation, "document_embedding", &[1.0, 0.0], 1)
+            .unwrap();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0, "node-0");
+        assert!(stats.exact_scored_candidates > matches.len());
+        assert_eq!(stats.returned_candidates, matches.len());
+    }
+
+    #[test]
     fn copperdb_startup_builds_persisted_indexes_and_registers_maintenance() {
         let directory = tempfile::tempdir().unwrap();
         let data_dir = directory.path().join("vector-db");
@@ -387,6 +764,12 @@ mod tests {
                 .unwrap()
                 .generation,
             1
+        );
+        assert!(
+            db.vector_index_status("document_embedding")
+                .unwrap()
+                .estimated_memory_bytes
+                > 0
         );
 
         db.storage()
@@ -433,6 +816,80 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("new")
         );
+    }
+
+    #[test]
+    fn file_store_mirrors_committed_node_lifecycle() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path().join("vector-db");
+        {
+            let storage = StorageEngine::open(&data_dir).unwrap();
+            storage
+                .persist_index_definition(&vector_index_definition())
+                .unwrap();
+            storage
+                .persist_index_options("document_embedding", &vector_options())
+                .unwrap();
+            storage
+                .put_node_record(&node("existing", vec![3.0, 4.0]))
+                .unwrap();
+            storage.flush().unwrap();
+        }
+
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: data_dir.to_string_lossy().into_owned(),
+            ..DatabaseConfig::default()
+        })
+        .unwrap();
+        let path = vector_file_store_path(
+            &data_dir.join(VECTOR_FILE_STORE_DIRECTORY),
+            "document_embedding",
+        );
+        let store = VectorFileStore::open(&path, 2).unwrap();
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.get("existing").unwrap(), Some(vec![0.6, 0.8]));
+
+        db.storage()
+            .put_node_record(&node("new", vec![0.0, 2.0]))
+            .unwrap();
+        let store = VectorFileStore::open(&path, 2).unwrap();
+        assert_eq!(store.get("new").unwrap(), Some(vec![0.0, 1.0]));
+
+        let mut no_longer_matching = node("existing", vec![1.0, 0.0]);
+        no_longer_matching.labels.clear();
+        db.storage().put_node_record(&no_longer_matching).unwrap();
+        let store = VectorFileStore::open(&path, 2).unwrap();
+        assert_eq!(store.get("existing").unwrap(), None);
+
+        db.storage().delete_node_record("new").unwrap();
+        let store = VectorFileStore::open(&path, 2).unwrap();
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn file_store_rebuild_discards_stale_derived_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path().join("vector-db");
+        let storage = StorageEngine::open(&data_dir).unwrap();
+        storage
+            .persist_index_definition(&vector_index_definition())
+            .unwrap();
+        storage
+            .persist_index_options("document_embedding", &vector_options())
+            .unwrap();
+        storage
+            .put_node_record(&node("stale", vec![1.0, 0.0]))
+            .unwrap();
+        VectorIndexManager::build(&storage).unwrap();
+
+        storage.delete_node_record("stale").unwrap();
+        VectorIndexManager::build(&storage).unwrap();
+
+        let path = vector_file_store_path(
+            &data_dir.join(VECTOR_FILE_STORE_DIRECTORY),
+            "document_embedding",
+        );
+        assert!(VectorFileStore::open(&path, 2).unwrap().is_empty());
     }
 
     #[test]
@@ -526,6 +983,11 @@ mod tests {
         let artifact = data_dir.join(VECTOR_REGISTRY_ARTIFACT_FILE);
         let loaded = HnswRegistry::load_artifact_with_source_generation(&artifact).unwrap();
         assert_eq!(loaded.registry.index_names(), vec!["document_embedding"]);
+        let file_store = vector_file_store_path(
+            &data_dir.join(VECTOR_FILE_STORE_DIRECTORY),
+            "document_embedding",
+        );
+        assert!(file_store.exists());
         assert_eq!(
             loaded.source_generation,
             db.storage().wal_applied_sequence().unwrap()
@@ -535,6 +997,7 @@ mod tests {
             .unwrap();
         let loaded = HnswRegistry::load_artifact_with_source_generation(&artifact).unwrap();
         assert!(loaded.registry.index_names().is_empty());
+        assert!(!file_store.exists());
         assert_eq!(
             loaded.source_generation,
             db.storage().wal_applied_sequence().unwrap()
@@ -570,9 +1033,17 @@ mod tests {
                 .generation,
             1
         );
+        let file_store_path = vector_file_store_path(
+            &data_dir.join(VECTOR_FILE_STORE_DIRECTORY),
+            "relationship_embedding",
+        );
+        let file_store = VectorFileStore::open(&file_store_path, 2).unwrap();
+        assert_eq!(file_store.get("existing").unwrap(), Some(vec![1.0, 0.0]));
         db.storage()
             .put_edge_record(&edge("new", vec![0.0, 1.0]))
             .unwrap();
+        let file_store = VectorFileStore::open(&file_store_path, 2).unwrap();
+        assert_eq!(file_store.get("new").unwrap(), Some(vec![0.0, 1.0]));
         let result = db
             .execute(
                 "CALL db.index.vector.queryRelationships('relationship_embedding', 1, [0.0, 1.0]) YIELD relationship, score RETURN relationship, score",
@@ -590,6 +1061,8 @@ mod tests {
         db.storage()
             .put_edge_record(&edge("existing", vec![0.0, 1.0]))
             .unwrap();
+        let file_store = VectorFileStore::open(&file_store_path, 2).unwrap();
+        assert_eq!(file_store.get("existing").unwrap(), Some(vec![0.0, 1.0]));
         assert_eq!(
             db.execute(
                 "CALL db.index.vector.queryRelationships('relationship_embedding', 1, [0.0, 1.0]) YIELD relationship RETURN relationship",
@@ -603,7 +1076,14 @@ mod tests {
             .and_then(serde_json::Value::as_str),
             Some("existing")
         );
-        db.storage().delete_edge("new").unwrap();
+        db.storage().delete_edge_record("new").unwrap();
+        assert_eq!(
+            VectorFileStore::open(&file_store_path, 2)
+                .unwrap()
+                .get("new")
+                .unwrap(),
+            None
+        );
         assert_eq!(
             db.execute(
                 "CALL db.index.vector.queryRelationships('relationship_embedding', 1, [0.0, 1.0]) YIELD relationship RETURN relationship",

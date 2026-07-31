@@ -25,8 +25,8 @@ use copperdb_storage::{
     PromotionPolicySchema, PromotionProfileSchema, PromotionWhenClauseSchema, StorageEngine,
     StorageTransaction,
 };
-use copperdb_util::{RequestCancelled, RequestContext};
-use copperdb_vectorspace::{HnswConfig, HnswRegistry};
+use copperdb_util::{RequestCancellation, RequestCancelled, RequestContext};
+use copperdb_vectorspace::{HnswConfig, HnswRegistry, HnswSearchStats, VectorSpaceError};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -38,6 +38,17 @@ pub use copperdb_filter::Row;
 
 const VAR_LENGTH_UNBOUNDED_MAX_HOPS: u32 = 1 << 16;
 const BFS_CANCEL_CHECK_MASK: usize = 0xFF;
+
+pub type VectorIndexQuery = Arc<
+    dyn Fn(
+            &RequestCancellation,
+            &str,
+            &[f32],
+            usize,
+        ) -> Result<(Vec<(String, f32)>, HnswSearchStats), VectorSpaceError>
+        + Send
+        + Sync,
+>;
 
 #[derive(Debug, Error)]
 pub enum EvalError {
@@ -214,7 +225,8 @@ impl KnowledgePolicyInspection {
 /// The query executor.
 pub struct EvalEngine {
     storage: Arc<StorageEngine>,
-    vector_indexes: Option<Arc<HnswRegistry>>,
+    vector_indexes: Arc<HnswRegistry>,
+    vector_index_query: VectorIndexQuery,
     vector_index_artifact_refresh: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Cache for MERGE node lookups: merge_cache_key(labels, prop, val) → node JSON Value.
     ///

@@ -4546,8 +4546,8 @@ async fn bolt_tcp_reports_outdated_for_a_live_edge_snapshot_conflict() {
     let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
     client
         .write_all(&[
-            0x60, 0x60, 0xB0, 0x17, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x04, 0x03, 0x00,
-            0x00, 0x04, 0x02, 0x00, 0x00, 0x04, 0x01,
+            0x60, 0x60, 0xB0, 0x17, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x04, 0x03, 0x00, 0x00,
+            0x04, 0x02, 0x00, 0x00, 0x04, 0x01,
         ])
         .await
         .unwrap();
@@ -4605,9 +4605,9 @@ async fn bolt_tcp_reports_outdated_for_a_live_edge_snapshot_conflict() {
         panic!("expected Bolt FAILURE metadata");
     };
     assert_eq!(
-        metadata.iter().find_map(|(key, value)| {
-            (key == "code").then_some(value)
-        }),
+        metadata
+            .iter()
+            .find_map(|(key, value)| { (key == "code").then_some(value) }),
         Some(&Value::String(
             "Neo.TransientError.Transaction.Outdated".into()
         ))
@@ -4622,7 +4622,9 @@ fn appstate_bolt_executor_validates_implicit_run_bookmarks() {
     let state = demo_temp_appstate_with_catalog(&temp_dir);
     let executor = AppStateBoltExecutor::new(state);
     let empty = HashMap::new();
-    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .unwrap();
     let bookmark = executor.commit_transaction(&transaction).unwrap();
 
     let result = executor
@@ -4843,7 +4845,9 @@ fn appstate_bolt_executor_reads_schema_catalogs_inside_explicit_transactions() {
         )
         .unwrap();
 
-    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .unwrap();
     let indexes = executor
         .execute_in_transaction_with_context(
             &transaction,
@@ -4853,7 +4857,10 @@ fn appstate_bolt_executor_reads_schema_catalogs_inside_explicit_transactions() {
             None,
         )
         .unwrap();
-    assert!(indexes.rows.iter().any(|row| row[0] == serde_json::json!("tx_catalog_idx")));
+    assert!(indexes
+        .rows
+        .iter()
+        .any(|row| row[0] == serde_json::json!("tx_catalog_idx")));
     let constraints = executor
         .execute_in_transaction_with_context(
             &transaction,
@@ -4876,7 +4883,9 @@ fn appstate_bolt_executor_schema_catalog_reads_are_pinned_at_begin() {
     let state = demo_temp_appstate_with_catalog(&temp_dir);
     let executor = AppStateBoltExecutor::new(state);
     let empty = HashMap::new();
-    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .unwrap();
 
     executor
         .execute_on_database(
@@ -4908,7 +4917,9 @@ fn appstate_bolt_executor_stages_constraint_ddl_until_commit() {
     let state = demo_temp_appstate_with_catalog(&temp_dir);
     let executor = AppStateBoltExecutor::new(state);
     let empty = HashMap::new();
-    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .unwrap();
 
     executor
         .execute_in_transaction_with_context(
@@ -4956,7 +4967,9 @@ fn appstate_bolt_executor_rolls_back_staged_constraint_ddl() {
     let state = demo_temp_appstate_with_catalog(&temp_dir);
     let executor = AppStateBoltExecutor::new(state);
     let empty = HashMap::new();
-    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .unwrap();
 
     executor
         .execute_in_transaction_with_context(
@@ -4984,7 +4997,9 @@ fn appstate_bolt_executor_stages_index_ddl_until_commit() {
     let state = demo_temp_appstate_with_catalog(&temp_dir);
     let executor = AppStateBoltExecutor::new(state);
     let empty = HashMap::new();
-    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .unwrap();
 
     executor
         .execute_in_transaction_with_context(
@@ -5032,7 +5047,9 @@ fn appstate_bolt_executor_rolls_back_staged_index_ddl() {
     let state = demo_temp_appstate_with_catalog(&temp_dir);
     let executor = AppStateBoltExecutor::new(state);
     let empty = HashMap::new();
-    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .unwrap();
 
     executor
         .execute_in_transaction_with_context(
@@ -5060,7 +5077,9 @@ fn appstate_bolt_executor_stages_knowledge_policy_ddl_until_commit() {
     let state = demo_temp_appstate_with_catalog(&temp_dir);
     let executor = AppStateBoltExecutor::new(state);
     let empty = HashMap::new();
-    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .unwrap();
 
     executor
         .execute_in_transaction_with_context(
@@ -5108,7 +5127,9 @@ fn appstate_bolt_executor_rolls_back_staged_knowledge_policy_ddl() {
     let state = demo_temp_appstate_with_catalog(&temp_dir);
     let executor = AppStateBoltExecutor::new(state);
     let empty = HashMap::new();
-    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .unwrap();
 
     executor
         .execute_in_transaction_with_context(
@@ -5461,7 +5482,9 @@ fn appstate_bolt_executor_unwind_match_with_mutations_aggregate_counters() {
             &empty,
         )
         .unwrap();
-    let transaction = executor.begin_transaction("copperdb", &empty, None).unwrap();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .unwrap();
 
     let marked = executor
         .execute_in_transaction_with_context(
@@ -5583,7 +5606,10 @@ fn appstate_bolt_executor_unwind_relationship_delete_commits_or_rolls_back() {
                 &empty,
             )
             .unwrap();
-        assert_eq!(remaining.rows, vec![vec![serde_json::json!(expected_remaining)]]);
+        assert_eq!(
+            remaining.rows,
+            vec![vec![serde_json::json!(expected_remaining)]]
+        );
     }
 }
 

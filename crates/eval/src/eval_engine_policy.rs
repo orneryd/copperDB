@@ -99,12 +99,12 @@ impl EvalEngine {
             .procedure
             .eq_ignore_ascii_case("db.index.vector.queryNodes")
         {
-            self.execute_vector_query_nodes_call(call, params)
+            self.execute_vector_query_nodes_call(request_context, call, params)
         } else if call
             .procedure
             .eq_ignore_ascii_case("db.index.vector.queryRelationships")
         {
-            self.execute_vector_query_relationships_call(call, params)
+            self.execute_vector_query_relationships_call(request_context, call, params)
         } else if call
             .procedure
             .eq_ignore_ascii_case("db.create.setNodeVectorProperty")
@@ -1340,6 +1340,7 @@ impl EvalEngine {
 
     fn execute_vector_query_nodes_call(
         &self,
+        request_context: &copperdb_util::RequestContext,
         call: &copperdb_cypher::CallClause,
         params: &HashMap<String, Value>,
     ) -> Result<EvalResult, EvalError> {
@@ -1392,14 +1393,13 @@ impl EvalEngine {
             }
         }
 
-        let vector_indexes = self.vector_indexes.as_ref().ok_or_else(|| {
-            EvalError::ExecutionError(format!(
-                "vector index {index_name} is unavailable because this evaluator has no engine-owned vector index registry"
-            ))
-        })?;
-        let (matches, _) = vector_indexes
-            .knn(&index_name, &query_vector, limit)
-            .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
+        let (matches, _) = (self.vector_index_query)(
+            request_context.cancellation(),
+            &index_name,
+            &query_vector,
+            limit,
+        )
+        .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
         let mut rows = Vec::with_capacity(matches.len());
         for (id, score) in matches {
             let Some(node) = self.storage.get_node_record(&id)? else {
@@ -1714,6 +1714,7 @@ impl EvalEngine {
 
     fn execute_vector_query_relationships_call(
         &self,
+        request_context: &copperdb_util::RequestContext,
         call: &copperdb_cypher::CallClause,
         params: &HashMap<String, Value>,
     ) -> Result<EvalResult, EvalError> {
@@ -1748,14 +1749,13 @@ impl EvalEngine {
             )));
         }
 
-        let vector_indexes = self.vector_indexes.as_ref().ok_or_else(|| {
-            EvalError::ExecutionError(format!(
-                "vector index {index_name} is unavailable because this evaluator has no engine-owned vector index registry"
-            ))
-        })?;
-        let (matches, _) = vector_indexes
-            .knn(&index_name, &query_vector, limit)
-            .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
+        let (matches, _) = (self.vector_index_query)(
+            request_context.cancellation(),
+            &index_name,
+            &query_vector,
+            limit,
+        )
+        .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
         let mut rows = Vec::with_capacity(matches.len());
         for (id, score) in matches {
             let Some(edge) = self.storage.get_edge_record(&id)? else {

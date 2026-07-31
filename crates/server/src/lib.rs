@@ -1702,7 +1702,11 @@ fn execute_statement(
     })();
 
     if let Some(started) = fulltext_started {
-        observe_fulltext_procedure(&state, started, result.as_ref().ok().map(|result| result.rows.len()));
+        observe_fulltext_procedure(
+            &state,
+            started,
+            result.as_ref().ok().map(|result| result.rows.len()),
+        );
     }
     result.map(convert_engine_result)
 }
@@ -1929,11 +1933,12 @@ impl QueryExecutor for AppStateBoltExecutor {
         let engine =
             open_engine(&self.state, &transaction.database).map_err(BoltTransactionError::from)?;
         let mut storage_transactions = self.storage_transactions.lock();
-        let storage_transaction = storage_transactions
-            .get_mut(&transaction_id)
-            .ok_or_else(|| {
-                BoltTransactionError::from("Bolt storage transaction is no longer active")
-            })?;
+        let storage_transaction =
+            storage_transactions
+                .get_mut(&transaction_id)
+                .ok_or_else(|| {
+                    BoltTransactionError::from("Bolt storage transaction is no longer active")
+                })?;
         if let Err(error) = storage_transaction.commit() {
             let is_conflict = matches!(&error, StorageError::TransactionConflict { .. });
             storage_transactions.remove(&transaction_id);
@@ -2296,7 +2301,10 @@ fn open_engine(state: &AppState, database: &str) -> Result<Arc<GraphEngine>, Str
 }
 
 fn offline_database_storage_path(state: &AppState, database: &str) -> Result<String, StatusCode> {
-    let database = state.db_manager.get(database).ok_or(StatusCode::NOT_FOUND)?;
+    let database = state
+        .db_manager
+        .get(database)
+        .ok_or(StatusCode::NOT_FOUND)?;
     if state.engine_cache.read().contains_key(&database.name) {
         return Err(StatusCode::CONFLICT);
     }
@@ -2470,7 +2478,10 @@ async fn set_mvcc_lifecycle_schedule_handler(
         return status.into_response();
     }
     let Some(interval_ms) = parse_mvcc_schedule_ms(&request.interval) else {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid interval"})))
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid interval"})),
+        )
             .into_response();
     };
     match open_engine(&state, &database) {

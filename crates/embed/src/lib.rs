@@ -32,9 +32,15 @@ pub enum EmbedError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Provider {
     /// Local GGUF model via llama.cpp with Metal/CUDA.
-    LocalGGUF { model_name: String, dimensions: usize },
+    LocalGGUF {
+        model_name: String,
+        dimensions: usize,
+    },
     /// LRU-cached wrapper around any provider.
-    Cached { inner: Box<Provider>, max_size: usize },
+    Cached {
+        inner: Box<Provider>,
+        max_size: usize,
+    },
     /// Mock provider for testing.
     Mock { dimensions: usize },
 }
@@ -64,26 +70,36 @@ pub struct MockEmbedder {
 }
 
 impl MockEmbedder {
-    pub fn new(dims: usize) -> Self { Self { dims } }
+    pub fn new(dims: usize) -> Self {
+        Self { dims }
+    }
 }
 
 #[async_trait::async_trait]
 impl Embedder for MockEmbedder {
     async fn embed(&self, texts: &[String]) -> Result<Vec<Embedding>, EmbedError> {
-        Ok(texts.iter().map(|t| Embedding {
-            text: t.clone(),
-            vector: vec![0.0; self.dims],
-            model: "mock".into(),
-        }).collect())
+        Ok(texts
+            .iter()
+            .map(|t| Embedding {
+                text: t.clone(),
+                vector: vec![0.0; self.dims],
+                model: "mock".into(),
+            })
+            .collect())
     }
     fn embed_batch_blocking(&self, texts: &[String]) -> Result<Vec<Embedding>, EmbedError> {
-        Ok(texts.iter().map(|t| Embedding {
-            text: t.clone(),
-            vector: vec![0.0; self.dims],
-            model: "mock".into(),
-        }).collect())
+        Ok(texts
+            .iter()
+            .map(|t| Embedding {
+                text: t.clone(),
+                vector: vec![0.0; self.dims],
+                model: "mock".into(),
+            })
+            .collect())
     }
-    fn dimensions(&self) -> usize { self.dims }
+    fn dimensions(&self) -> usize {
+        self.dims
+    }
 }
 
 #[cfg(test)]

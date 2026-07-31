@@ -273,8 +273,8 @@ impl Component for GrpcComponent {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("copperdb=info,fjall=warn,info"));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("copperdb=info,fjall=warn,info"));
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
@@ -287,7 +287,10 @@ async fn main() -> Result<()> {
     if cli.no_auth {
         warn!("authentication disabled by explicit --no-auth override");
     } else {
-        info!(auth_enabled = startup.runtime_config.auth.enabled, "resolved authentication configuration");
+        info!(
+            auth_enabled = startup.runtime_config.auth.enabled,
+            "resolved authentication configuration"
+        );
     }
     let telemetry = Arc::new(Telemetry::new());
     telemetry.seed_zero_catalog_metrics();
@@ -446,5 +449,4 @@ mod tests {
         assert!(!startup.runtime_config.auth.enabled);
         std::fs::remove_file(config_path).unwrap();
     }
-
 }

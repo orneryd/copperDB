@@ -11,7 +11,7 @@
 
 #[cfg(test)]
 mod e2e_tests {
-    use crate::{CachedEmbedder, Embedder, EmbedError, Embedding, LocalGgufEmbedder};
+    use crate::{CachedEmbedder, EmbedError, Embedder, Embedding, LocalGgufEmbedder};
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
@@ -43,13 +43,16 @@ mod e2e_tests {
         let model_path = find_model().expect("no GGUF model found — set COPPERDB_MODELS_DIR");
         let model_name = model_path.file_stem().unwrap().to_str().unwrap();
 
-        eprintln!("=== Loading model: {model_name} from {} ===", model_path.display());
+        eprintln!(
+            "=== Loading model: {model_name} from {} ===",
+            model_path.display()
+        );
 
         // 1. Load model with warmup enabled
         let embedder = LocalGgufEmbedder::new(
             model_name,
             model_path.clone(),
-            0, // auto-detect dimensions
+            0,                             // auto-detect dimensions
             Some(Duration::from_secs(10)), // 10s warmup for testing
         )
         .expect("failed to load model");
@@ -79,15 +82,24 @@ mod e2e_tests {
 
         // 3. Verify normalization (unit vector)
         let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 0.01, "embedding should be L2-normalized (norm={norm})");
+        assert!(
+            (norm - 1.0).abs() < 0.01,
+            "embedding should be L2-normalized (norm={norm})"
+        );
 
         // 4. Batch embedding
         let texts: Vec<String> = (0..5).map(|i| format!("test text {i}")).collect();
         let t0 = Instant::now();
         for text in &texts {
-            embedder.embed_with_recovery(text).expect("batch embed failed");
+            embedder
+                .embed_with_recovery(text)
+                .expect("batch embed failed");
         }
-        eprintln!("✅ Batch of {} embeddings in {:.2}ms", texts.len(), t0.elapsed().as_secs_f64() * 1000.0);
+        eprintln!(
+            "✅ Batch of {} embeddings in {:.2}ms",
+            texts.len(),
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
 
         let stats = embedder.stats();
         eprintln!(
@@ -104,10 +116,7 @@ mod e2e_tests {
         eprintln!("⏳ Waiting for warmup cycle...");
         std::thread::sleep(Duration::from_secs(12));
         let stats_after = embedder.stats();
-        eprintln!(
-            "📊 After warmup: {} embeddings",
-            stats_after.embed_count
-        );
+        eprintln!("📊 After warmup: {} embeddings", stats_after.embed_count);
 
         embedder.close();
         eprintln!("=== All E2E embedding tests passed ===");
@@ -123,25 +132,47 @@ mod e2e_tests {
         }
         impl CountingEmbedder {
             fn new(dims: usize) -> Self {
-                Self { dims, count: std::sync::atomic::AtomicU64::new(0) }
+                Self {
+                    dims,
+                    count: std::sync::atomic::AtomicU64::new(0),
+                }
             }
-            fn inc(&self) { self.count.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+            fn inc(&self) {
+                self.count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         #[async_trait::async_trait]
         impl Embedder for CountingEmbedder {
             async fn embed(&self, texts: &[String]) -> Result<Vec<Embedding>, EmbedError> {
-                Ok(texts.iter().map(|t| {
-                    self.inc();
-                    Embedding { text: t.clone(), vector: vec![1.0; self.dims], model: "test".into() }
-                }).collect())
+                Ok(texts
+                    .iter()
+                    .map(|t| {
+                        self.inc();
+                        Embedding {
+                            text: t.clone(),
+                            vector: vec![1.0; self.dims],
+                            model: "test".into(),
+                        }
+                    })
+                    .collect())
             }
             fn embed_batch_blocking(&self, texts: &[String]) -> Result<Vec<Embedding>, EmbedError> {
-                Ok(texts.iter().map(|t| {
-                    self.inc();
-                    Embedding { text: t.clone(), vector: vec![1.0; self.dims], model: "test".into() }
-                }).collect())
+                Ok(texts
+                    .iter()
+                    .map(|t| {
+                        self.inc();
+                        Embedding {
+                            text: t.clone(),
+                            vector: vec![1.0; self.dims],
+                            model: "test".into(),
+                        }
+                    })
+                    .collect())
             }
-            fn dimensions(&self) -> usize { self.dims }
+            fn dimensions(&self) -> usize {
+                self.dims
+            }
         }
 
         let base = Box::new(CountingEmbedder::new(128));
@@ -170,7 +201,11 @@ mod e2e_tests {
         let _ = cache.embed_sync("text1").unwrap();
         assert_eq!(cache.miss_count(), 5);
 
-        eprintln!("✅ LRU cache: {} hits, {} misses", cache.hit_count(), cache.miss_count());
+        eprintln!(
+            "✅ LRU cache: {} hits, {} misses",
+            cache.hit_count(),
+            cache.miss_count()
+        );
     }
 
     /// Test: Crash resilience — verify panic recovery works.
@@ -186,8 +221,8 @@ mod e2e_tests {
 
         let model_name = model_path.file_stem().unwrap().to_str().unwrap();
         let path = model_path.clone();
-        let embedder = LocalGgufEmbedder::new(model_name, path, 0, None)
-            .expect("failed to load model");
+        let embedder =
+            LocalGgufEmbedder::new(model_name, path, 0, None).expect("failed to load model");
 
         // Embed very long text — should either work or return error, never panic
         let long_text = "test ".repeat(10000);
@@ -197,7 +232,10 @@ mod e2e_tests {
             Err(e) => eprintln!("✅ Long text gracefully errored: {e}"),
         }
         // The key assertion: we got here without panicking
-        assert!(embedder.stats().panic_count <= 1, "should have 0 or 1 panics");
+        assert!(
+            embedder.stats().panic_count <= 1,
+            "should have 0 or 1 panics"
+        );
 
         embedder.close();
         eprintln!("=== Crash resilience test passed ===");

@@ -8,22 +8,22 @@ thread_local! {
 use super::*;
 impl EvalEngine {
     pub fn new(storage: Arc<StorageEngine>) -> Self {
-        Self::new_with_vector_indexes(storage, Some(Arc::new(HnswRegistry::new())))
+        let vector_indexes = Arc::new(HnswRegistry::new());
+        let query_indexes = Arc::clone(&vector_indexes);
+        let vector_index_query = Arc::new(
+            move |cancellation: &RequestCancellation, name: &str, query: &[f32], limit: usize| {
+                query_indexes.knn_with_cancellation(name, query, limit, cancellation)
+            },
+        );
+        Self::new_with_vector_index_service(storage, vector_indexes, None, vector_index_query)
     }
 
-    pub fn new_with_vector_indexes(
+    pub fn new_with_vector_index_service(
         storage: Arc<StorageEngine>,
-        vector_indexes: Option<Arc<HnswRegistry>>,
-    ) -> Self {
-        Self::new_with_vector_indexes_and_artifact_refresh(storage, vector_indexes, None)
-    }
-
-    pub fn new_with_vector_indexes_and_artifact_refresh(
-        storage: Arc<StorageEngine>,
-        vector_indexes: Option<Arc<HnswRegistry>>,
+        vector_indexes: Arc<HnswRegistry>,
         vector_index_artifact_refresh: Option<Arc<dyn Fn() + Send + Sync>>,
+        vector_index_query: VectorIndexQuery,
     ) -> Self {
-        let vector_indexes = vector_indexes.unwrap_or_else(|| Arc::new(HnswRegistry::new()));
         let created_storage = Arc::downgrade(&storage);
         let created_indexes = Arc::clone(&vector_indexes);
         storage.on_node_created(Arc::new(move |node| {
@@ -68,7 +68,8 @@ impl EvalEngine {
         }));
         Self {
             storage,
-            vector_indexes: Some(vector_indexes),
+            vector_indexes,
+            vector_index_query,
             vector_index_artifact_refresh,
             node_lookup_cache: Arc::new(Mutex::new(HashMap::new())),
             fulltext_query_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -2963,11 +2964,7 @@ impl EvalEngine {
     }
 
     fn register_vector_index(&self, index_name: &str) -> Result<(), EvalError> {
-        let Some(vector_indexes) = &self.vector_indexes else {
-            return Err(EvalError::ExecutionError(format!(
-                "vector index {index_name} is unavailable because this evaluator has no engine-owned vector index registry"
-            )));
-        };
+        let vector_indexes = &self.vector_indexes;
         let catalog = IndexCatalog::new(self.storage.as_ref());
         let definition = catalog
             .get(index_name)?
@@ -3045,9 +3042,7 @@ impl EvalEngine {
     }
 
     fn unregister_vector_index(&self, index_name: &str) -> Result<(), EvalError> {
-        let Some(vector_indexes) = &self.vector_indexes else {
-            return Ok(());
-        };
+        let vector_indexes = &self.vector_indexes;
         match vector_indexes.drop_index(index_name) {
             Ok(()) => {
                 self.refresh_vector_index_artifact();
