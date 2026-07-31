@@ -18,6 +18,7 @@ tracing.workspace = true
 nalgebra.workspace = true
 fnv.workspace = true
 copperdb-embeddingutil = { workspace = true }
+copperdb-simd = { workspace = true }
 copperdb-storage = { workspace = true }
 copperdb-util = { workspace = true }
 

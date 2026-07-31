@@ -7,6 +7,7 @@
 use copperdb_util::RequestCancellation;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::fs;
@@ -537,6 +538,52 @@ impl Ord for ScoredNode {
     }
 }
 
+#[derive(Default)]
+struct HnswSearchScratch {
+    visited_generations: Vec<u32>,
+    generation: u32,
+    visited_count: usize,
+    candidates: BinaryHeap<ScoredNode>,
+    results: BinaryHeap<Reverse<ScoredNode>>,
+}
+
+impl HnswSearchScratch {
+    fn reset(&mut self, node_count: usize, entry: ScoredNode, ef: usize) {
+        self.visited_generations.resize(node_count, 0);
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.visited_generations.fill(0);
+            self.generation = 1;
+        }
+        self.visited_count = 1;
+        self.candidates.clear();
+        self.results.clear();
+        if self.candidates.capacity() < ef.saturating_mul(2) {
+            self.candidates.reserve(ef.saturating_mul(2));
+        }
+        if self.results.capacity() < ef.saturating_mul(2) {
+            self.results.reserve(ef.saturating_mul(2));
+        }
+        self.visited_generations[entry.internal_id as usize] = self.generation;
+        self.candidates.push(entry);
+        self.results.push(Reverse(entry));
+    }
+
+    fn mark_visited(&mut self, internal_id: u32) -> bool {
+        let visited = &mut self.visited_generations[internal_id as usize];
+        if *visited == self.generation {
+            return false;
+        }
+        *visited = self.generation;
+        self.visited_count += 1;
+        true
+    }
+}
+
+thread_local! {
+    static HNSW_SEARCH_SCRATCH: RefCell<HnswSearchScratch> = RefCell::default();
+}
+
 impl HnswIndex {
     pub fn new(dimensions: usize, config: HnswConfig) -> Result<Self, VectorSpaceError> {
         if dimensions == 0 {
@@ -641,13 +688,11 @@ impl HnswIndex {
 
         self.push_node(id, vector.clone(), level);
         for current_level in (0..=level.min(prior_max_level)).rev() {
-            let mut visited = vec![false; self.external_ids.len()];
-            let candidates = self.search_layer(
+            let (candidates, _) = self.search_layer(
                 &vector,
                 entry,
                 self.config.ef_construction,
                 current_level,
-                &mut visited,
                 None,
             )?;
             let selected = self.select_neighbors(candidates, self.config.m);
@@ -765,15 +810,8 @@ impl HnswIndex {
             }
             entry = self.greedy_search(&query, entry, current_level);
         }
-        let mut visited = vec![false; self.external_ids.len()];
-        let candidates = self.search_layer(
-            &query,
-            entry,
-            self.config.ef_search.max(k),
-            0,
-            &mut visited,
-            cancellation,
-        )?;
+        let (candidates, visited_nodes) =
+            self.search_layer(&query, entry, self.config.ef_search.max(k), 0, cancellation)?;
         let mut results = candidates
             .into_iter()
             .filter(|candidate| !self.deleted[candidate.internal_id as usize])
@@ -790,7 +828,7 @@ impl HnswIndex {
         Ok((
             results,
             HnswSearchStats {
-                visited_nodes: visited.into_iter().filter(|visited| *visited).count(),
+                visited_nodes,
                 returned_candidates,
                 exact_scored_candidates: 0,
             },
@@ -825,49 +863,63 @@ impl HnswIndex {
         entry: u32,
         ef: usize,
         level: usize,
-        visited: &mut [bool],
         cancellation: Option<&RequestCancellation>,
-    ) -> Result<Vec<ScoredNode>, VectorSpaceError> {
+    ) -> Result<(Vec<ScoredNode>, usize), VectorSpaceError> {
+        HNSW_SEARCH_SCRATCH.with_borrow_mut(|scratch| {
+            self.search_layer_with_scratch(query, entry, ef, level, cancellation, scratch)
+        })
+    }
+
+    fn search_layer_with_scratch(
+        &self,
+        query: &[f32],
+        entry: u32,
+        ef: usize,
+        level: usize,
+        cancellation: Option<&RequestCancellation>,
+        scratch: &mut HnswSearchScratch,
+    ) -> Result<(Vec<ScoredNode>, usize), VectorSpaceError> {
         let entry = ScoredNode {
             score: self.score(query, entry),
             internal_id: entry,
         };
-        let mut candidates = BinaryHeap::from([entry]);
-        let mut results = BinaryHeap::from([Reverse(entry)]);
-        visited[entry.internal_id as usize] = true;
+        scratch.reset(self.external_ids.len(), entry, ef);
         let mut iterations = 0_usize;
-        while let Some(current) = candidates.pop() {
+        while let Some(current) = scratch.candidates.pop() {
             if iterations & 0xFF == 0 && cancellation.is_some_and(RequestCancellation::is_cancelled)
             {
                 return Err(VectorSpaceError::RequestCancelled);
             }
             iterations += 1;
-            let worst_score = results
+            let worst_score = scratch
+                .results
                 .peek()
                 .map(|item| item.0.score)
                 .unwrap_or(f32::NEG_INFINITY);
-            if results.len() >= ef && current.score < worst_score {
+            if scratch.results.len() >= ef && current.score < worst_score {
                 break;
             }
             for neighbor in self.links(current.internal_id, level).iter().copied() {
-                if visited[neighbor as usize] {
+                if !scratch.mark_visited(neighbor) {
                     continue;
                 }
-                visited[neighbor as usize] = true;
                 let candidate = ScoredNode {
                     score: self.score(query, neighbor),
                     internal_id: neighbor,
                 };
-                if results.len() < ef || candidate.score >= worst_score {
-                    candidates.push(candidate);
-                    results.push(Reverse(candidate));
-                    if results.len() > ef {
-                        results.pop();
+                if scratch.results.len() < ef || candidate.score >= worst_score {
+                    scratch.candidates.push(candidate);
+                    scratch.results.push(Reverse(candidate));
+                    if scratch.results.len() > ef {
+                        scratch.results.pop();
                     }
                 }
             }
         }
-        Ok(results.into_iter().map(|item| item.0).collect())
+        Ok((
+            scratch.results.iter().map(|item| item.0).collect(),
+            scratch.visited_count,
+        ))
     }
 
     fn connect(&mut self, internal_id: u32, neighbor: u32, level: usize) {
@@ -875,7 +927,12 @@ impl HnswIndex {
             .iter()
             .copied()
             .chain(std::iter::once(internal_id))
-            .map(|candidate| (candidate, dot(self.vector(neighbor), self.vector(candidate))))
+            .map(|candidate| {
+                (
+                    candidate,
+                    dot(self.vector(neighbor), self.vector(candidate)),
+                )
+            })
             .collect::<Vec<_>>();
         scored.sort_by(|left, right| {
             right.1.total_cmp(&left.1).then_with(|| {
@@ -1651,7 +1708,7 @@ impl VectorSpace {
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+    copperdb_simd::dot_f32(a, b).expect("vector dimensions must match")
 }
 
 fn cosine_score(a: &[f32], b: &[f32]) -> f32 {

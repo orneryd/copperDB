@@ -32,6 +32,16 @@ pub fn dot_f32(a: &[f32], b: &[f32]) -> Result<f32, SimdError> {
         });
     }
 
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 support was detected above and both slices have equal length.
+        return Ok(unsafe { dot_f32_avx2(a, b) });
+    }
+
+    Ok(dot_f32_portable(a, b))
+}
+
+fn dot_f32_portable(a: &[f32], b: &[f32]) -> f32 {
     let chunks = a.len() / 8;
     let remainder = a.len() % 8;
     let mut acc = f32x8::ZERO;
@@ -70,7 +80,39 @@ pub fn dot_f32(a: &[f32], b: &[f32]) -> Result<f32, SimdError> {
         .map(|(x, y)| x * y)
         .sum();
 
-    Ok(simd_sum + scalar_sum)
+    simd_sum + scalar_sum
+}
+
+#[cfg(target_arch = "x86")]
+use std::arch::x86::{
+    _mm256_add_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_setzero_ps, _mm256_storeu_ps,
+};
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::{
+    _mm256_add_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_setzero_ps, _mm256_storeu_ps,
+};
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn dot_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
+    let vectorized_len = a.len() / 8 * 8;
+    let mut acc = _mm256_setzero_ps();
+    let mut index = 0;
+    while index < vectorized_len {
+        let left = _mm256_loadu_ps(a.as_ptr().add(index));
+        let right = _mm256_loadu_ps(b.as_ptr().add(index));
+        acc = _mm256_add_ps(acc, _mm256_mul_ps(left, right));
+        index += 8;
+    }
+
+    let mut lanes = [0.0_f32; 8];
+    _mm256_storeu_ps(lanes.as_mut_ptr(), acc);
+    lanes.into_iter().sum::<f32>()
+        + a[vectorized_len..]
+            .iter()
+            .zip(&b[vectorized_len..])
+            .map(|(left, right)| left * right)
+            .sum::<f32>()
 }
 
 /// Compute squared L2 distance using SIMD.
@@ -147,6 +189,20 @@ mod tests {
         let a = vec![1.0f32; 16];
         let b = vec![1.0f32; 16];
         assert!((dot_f32(&a, &b).unwrap() - 16.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_dot_product_with_scalar_tail() {
+        let a = (0..19).map(|value| value as f32 * 0.25).collect::<Vec<_>>();
+        let b = (0..19)
+            .map(|value| (value as f32 - 7.0) * 0.5)
+            .collect::<Vec<_>>();
+        let expected = a
+            .iter()
+            .zip(&b)
+            .map(|(left, right)| left * right)
+            .sum::<f32>();
+        assert!((dot_f32(&a, &b).unwrap() - expected).abs() < 1e-4);
     }
 
     #[test]
