@@ -1748,73 +1748,30 @@ impl EvalEngine {
             )));
         }
 
-        let property = index.properties.first().ok_or_else(|| {
+        let vector_indexes = self.vector_indexes.as_ref().ok_or_else(|| {
             EvalError::ExecutionError(format!(
-                "vector index {index_name} is missing a target property"
+                "vector index {index_name} is unavailable because this evaluator has no engine-owned vector index registry"
             ))
         })?;
-
-        // Load persisted index options
-        let index_options = self
-            .storage
-            .load_index_options(&index_name)
-            .map_err(|e| EvalError::ExecutionError(format!("failed to load index options: {e}")))?;
-
-        // Validate query vector dimensions if specified
-        if let Some(expected_dims) = resolve_vector_dimensions(&index_options) {
-            if query_vector.len() as u64 != expected_dims {
-                return Err(EvalError::ExecutionError(format!(
-                    "vector index {index_name} expects {expected_dims} dimensions, got {}",
-                    query_vector.len()
-                )));
-            }
-        }
-
-        // Choose similarity function based on index options
-        let similarity_fn: fn(&[f32], &[f32]) -> Option<f32> =
-            match resolve_similarity_function(&index_options) {
-                Some("euclidean") => euclidean_similarity,
-                _ => cosine_similarity,
+        let (matches, _) = vector_indexes
+            .knn(&index_name, &query_vector, limit)
+            .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
+        let mut rows = Vec::with_capacity(matches.len());
+        for (id, score) in matches {
+            let Some(edge) = self.storage.get_edge_record(&id)? else {
+                continue;
             };
-
-        let edges = if index.label.is_empty() {
-            self.storage.all_edges()?
-        } else {
-            self.storage.get_edges_by_type(&index.label)?
-        };
-
-        let mut ranked: Vec<(EdgeRecord, f32)> = Vec::new();
-        for edge in edges {
-            if let Some(vector) = edge_vector_for_property(&edge, property) {
-                if let Some(score) = similarity_fn(&query_vector, &vector) {
-                    ranked.push((edge, score));
-                }
-            }
+            let mut row = Row::new();
+            let mut props: HashMap<String, Value> = edge.properties.clone().into_iter().collect();
+            props.insert("_id".to_string(), Value::String(edge.id));
+            props.insert("_type".to_string(), Value::String(edge.edge_type));
+            row.insert(
+                "relationship".to_string(),
+                Value::Object(props.into_iter().collect()),
+            );
+            row.insert("score".to_string(), Value::from(score as f64));
+            rows.push(row);
         }
-
-        ranked.sort_by(|(left, left_score), (right, right_score)| {
-            right_score
-                .total_cmp(left_score)
-                .then(left.id.cmp(&right.id))
-        });
-        ranked.truncate(limit);
-
-        let rows = ranked
-            .into_iter()
-            .map(|(edge, score)| {
-                let mut row = Row::new();
-                let mut props: HashMap<String, Value> =
-                    edge.properties.clone().into_iter().collect();
-                props.insert("_id".to_string(), Value::String(edge.id));
-                props.insert("_type".to_string(), Value::String(edge.edge_type));
-                row.insert(
-                    "relationship".to_string(),
-                    Value::Object(props.into_iter().collect()),
-                );
-                row.insert("score".to_string(), Value::from(score as f64));
-                row
-            })
-            .collect();
 
         Ok(EvalResult {
             columns: vec!["relationship".to_string(), "score".to_string()],
@@ -2909,7 +2866,7 @@ pub(super) fn vector_from_node(node: &NodeRecord, property: &str) -> Option<Vec<
         .cloned()
 }
 
-fn edge_vector_for_property(edge: &EdgeRecord, property: &str) -> Option<Vec<f32>> {
+pub(super) fn edge_vector_for_property(edge: &EdgeRecord, property: &str) -> Option<Vec<f32>> {
     edge.properties.get(property).and_then(value_to_vector)
 }
 
@@ -2919,56 +2876,6 @@ fn value_to_vector(value: &Value) -> Option<Vec<f32>> {
             .iter()
             .map(|item| item.as_f64().map(|component| component as f32))
             .collect::<Option<Vec<_>>>()
-    })
-}
-
-fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
-    if left.len() != right.len() || left.is_empty() {
-        return None;
-    }
-
-    let mut dot = 0.0f32;
-    let mut left_norm = 0.0f32;
-    let mut right_norm = 0.0f32;
-
-    for (left_component, right_component) in left.iter().zip(right.iter()) {
-        dot += left_component * right_component;
-        left_norm += left_component * left_component;
-        right_norm += right_component * right_component;
-    }
-
-    if left_norm == 0.0 || right_norm == 0.0 {
-        return None;
-    }
-
-    Some(dot / (left_norm.sqrt() * right_norm.sqrt()))
-}
-
-fn euclidean_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
-    if left.len() != right.len() || left.is_empty() {
-        return None;
-    }
-
-    let mut sum_sq = 0.0f32;
-    for (l, r) in left.iter().zip(right.iter()) {
-        let diff = l - r;
-        sum_sq += diff * diff;
-    }
-
-    // Map to [0, 1] where 1 = identical (inverse of distance)
-    Some(1.0 / (1.0 + sum_sq.sqrt()))
-}
-
-/// Resolve the similarity function name from index options.
-/// Returns the function to use for scoring (cosine or euclidean).
-fn resolve_similarity_function(
-    options: &Option<HashMap<String, serde_json::Value>>,
-) -> Option<&str> {
-    options.as_ref().and_then(|opts| {
-        opts.get("indexConfig")
-            .and_then(|cfg| cfg.as_object())
-            .and_then(|cfg| cfg.get("vector.similarity_function"))
-            .and_then(|v| v.as_str())
     })
 }
 

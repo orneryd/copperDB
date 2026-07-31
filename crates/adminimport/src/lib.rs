@@ -1040,6 +1040,7 @@ pub fn import_offline(
         .as_deref()
         .map(read_schema_metadata)
         .transpose()?;
+    preflight_import(options, cancellation)?;
     let staging = StorageEngine::start_offline_staging(target)?;
     let nodes_imported = stream_node_record_batches(options, cancellation, |records| {
         write_node_batch(staging.engine(), records)
@@ -1074,6 +1075,7 @@ pub fn import_nodes_offline(
     if !options.relationship_sources.is_empty() {
         return Err(AdminImportError::RelationshipImportNotImplemented);
     }
+    preflight_import(options, cancellation)?;
     let staging = StorageEngine::start_offline_staging(target)?;
     let nodes_imported = stream_node_record_batches(options, cancellation, |records| {
         write_node_batch(staging.engine(), records)
@@ -2099,6 +2101,28 @@ mod tests {
             AdminImportError::MissingRelationshipNode { endpoint: "end", id, .. } if id == "missing"
         ));
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn full_import_preflights_relationship_sources_before_creating_staging() {
+        let directory = tempdir().unwrap();
+        let nodes = directory.path().join("nodes.csv");
+        let relationships = directory.path().join("relationships.csv");
+        let staging_parent_file = directory.path().join("not-a-directory");
+        fs::write(&nodes, ":ID\n1\n").unwrap();
+        fs::write(&relationships, ":START_ID,:TYPE\n1,KNOWS\n").unwrap();
+        fs::write(&staging_parent_file, "not a directory").unwrap();
+        let mut import_options = options(directory.path(), nodes);
+        import_options.relationship_sources.push(relationships);
+
+        let error = import_offline(
+            staging_parent_file.join("target"),
+            &import_options,
+            &RequestCancellation::new(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, AdminImportError::InvalidHeader { .. }));
     }
 
     #[test]

@@ -20,3 +20,8 @@ thiserror.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "offline_import"
+harness = false

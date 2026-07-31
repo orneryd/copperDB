@@ -9,6 +9,7 @@ struct VectorIndexBinding {
     name: String,
     label: String,
     property: String,
+    entity_type: IndexEntityType,
 }
 
 /// Per-database owner for schema-declared cosine HNSW indexes.
@@ -27,9 +28,7 @@ impl VectorIndexManager {
         let mut bindings = Vec::new();
 
         for definition in storage.load_index_definitions()? {
-            if definition.kind != IndexKind::Vector
-                || definition.entity_type != IndexEntityType::Node
-            {
+            if definition.kind != IndexKind::Vector {
                 continue;
             }
             let Some(property) = definition.properties.first() else {
@@ -58,6 +57,7 @@ impl VectorIndexManager {
                 name: definition.name,
                 label: definition.label,
                 property: property.clone(),
+                entity_type: definition.entity_type,
             });
         }
 
@@ -88,17 +88,37 @@ impl VectorIndexManager {
         if let Some(artifact) = artifact_is_current {
             registry = Arc::new(artifact.registry);
         } else {
-            for node in storage.all_node_records()? {
-                for binding in &bindings {
-                    let matches_label = binding.label.is_empty()
-                        || node.labels.iter().any(|label| label == &binding.label);
-                    if !matches_label {
-                        continue;
+            for binding in &bindings {
+                match binding.entity_type {
+                    IndexEntityType::Node => {
+                        for node in storage.all_node_records()? {
+                            let matches_label = binding.label.is_empty()
+                                || node.labels.iter().any(|label| label == &binding.label);
+                            if !matches_label {
+                                continue;
+                            }
+                            if let Some(vector) = node_vector_for_property(&node, &binding.property)
+                            {
+                                registry
+                                    .upsert(&binding.name, &node.id, vector)
+                                    .map_err(vector_error)?;
+                            }
+                        }
                     }
-                    if let Some(vector) = node_vector_for_property(&node, &binding.property) {
-                        registry
-                            .upsert(&binding.name, &node.id, vector)
-                            .map_err(vector_error)?;
+                    IndexEntityType::Relationship => {
+                        let edges = if binding.label.is_empty() {
+                            storage.all_edges()?
+                        } else {
+                            storage.get_edges_by_type(&binding.label)?
+                        };
+                        for edge in edges {
+                            if let Some(vector) = edge_vector_for_property(&edge, &binding.property)
+                            {
+                                registry
+                                    .upsert(&binding.name, &edge.id, vector)
+                                    .map_err(vector_error)?;
+                            }
+                        }
                     }
                 }
             }
@@ -219,6 +239,10 @@ fn node_vector_for_property(node: &NodeRecord, property: &str) -> Option<Vec<f32
         .cloned()
 }
 
+fn edge_vector_for_property(edge: &EdgeRecord, property: &str) -> Option<Vec<f32>> {
+    edge.properties.get(property).and_then(value_to_vector)
+}
+
 fn value_to_vector(value: &serde_json::Value) -> Option<Vec<f32>> {
     value.as_array().and_then(|items| {
         items
@@ -235,7 +259,7 @@ fn vector_error(error: VectorSpaceError) -> CopperDbError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use copperdb_storage::{IndexDefinition, NodeEmbeddingMetadata};
+    use copperdb_storage::{EdgeRecord, IndexDefinition, NodeEmbeddingMetadata};
     use copperdb_vectorspace::HnswRegistry;
     use std::collections::BTreeMap;
 
@@ -267,6 +291,28 @@ mod tests {
             named_embeddings: BTreeMap::from([("embedding".to_string(), embedding)]),
             chunk_embeddings: Vec::new(),
             embed_meta: NodeEmbeddingMetadata::default(),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+        }
+    }
+
+    fn relationship_index_definition() -> IndexDefinition {
+        IndexDefinition {
+            name: "relationship_embedding".to_string(),
+            entity_type: IndexEntityType::Relationship,
+            label: "RELATES".to_string(),
+            properties: vec!["embedding".to_string()],
+            kind: IndexKind::Vector,
+        }
+    }
+
+    fn edge(id: &str, embedding: Vec<f32>) -> EdgeRecord {
+        EdgeRecord {
+            id: id.to_string(),
+            start_node: "start".to_string(),
+            end_node: "end".to_string(),
+            edge_type: "RELATES".to_string(),
+            properties: BTreeMap::from([("embedding".to_string(), serde_json::json!(embedding))]),
             created_at_unix_ms: 1,
             updated_at_unix_ms: 1,
         }
@@ -440,6 +486,105 @@ mod tests {
         assert_eq!(
             loaded.source_generation,
             db.storage().wal_applied_sequence().unwrap()
+        );
+    }
+
+    #[test]
+    fn relationship_indexes_build_maintain_and_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let data_dir = directory.path().join("vector-db");
+        {
+            let storage = StorageEngine::open(&data_dir).unwrap();
+            storage
+                .persist_index_definition(&relationship_index_definition())
+                .unwrap();
+            storage
+                .persist_index_options("relationship_embedding", &vector_options())
+                .unwrap();
+            storage
+                .put_edge_record(&edge("existing", vec![1.0, 0.0]))
+                .unwrap();
+            storage.flush().unwrap();
+        }
+
+        let db = CopperDb::open(DatabaseConfig {
+            data_dir: data_dir.to_string_lossy().into_owned(),
+            ..DatabaseConfig::default()
+        })
+        .unwrap();
+        assert_eq!(
+            db.vector_index_status("relationship_embedding")
+                .unwrap()
+                .generation,
+            1
+        );
+        db.storage()
+            .put_edge_record(&edge("new", vec![0.0, 1.0]))
+            .unwrap();
+        let result = db
+            .execute(
+                "CALL db.index.vector.queryRelationships('relationship_embedding', 1, [0.0, 1.0]) YIELD relationship, score RETURN relationship, score",
+                HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            result.rows[0]
+                .get("relationship")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|edge| edge.get("_id"))
+                .and_then(serde_json::Value::as_str),
+            Some("new")
+        );
+        db.storage()
+            .put_edge_record(&edge("existing", vec![0.0, 1.0]))
+            .unwrap();
+        assert_eq!(
+            db.execute(
+                "CALL db.index.vector.queryRelationships('relationship_embedding', 1, [0.0, 1.0]) YIELD relationship RETURN relationship",
+                HashMap::new(),
+            )
+            .unwrap()
+            .rows[0]
+            .get("relationship")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|edge| edge.get("_id"))
+            .and_then(serde_json::Value::as_str),
+            Some("existing")
+        );
+        db.storage().delete_edge("new").unwrap();
+        assert_eq!(
+            db.execute(
+                "CALL db.index.vector.queryRelationships('relationship_embedding', 1, [0.0, 1.0]) YIELD relationship RETURN relationship",
+                HashMap::new(),
+            )
+            .unwrap()
+            .rows[0]
+            .get("relationship")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|edge| edge.get("_id"))
+            .and_then(serde_json::Value::as_str),
+            Some("existing")
+        );
+        drop(db);
+
+        let reopened = CopperDb::open(DatabaseConfig {
+            data_dir: data_dir.to_string_lossy().into_owned(),
+            ..DatabaseConfig::default()
+        })
+        .unwrap();
+        assert_eq!(
+            reopened
+                .execute(
+                    "CALL db.index.vector.queryRelationships('relationship_embedding', 1, [0.0, 1.0]) YIELD relationship RETURN relationship",
+                    HashMap::new(),
+                )
+                .unwrap()
+                .rows[0]
+                .get("relationship")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|edge| edge.get("_id"))
+                .and_then(serde_json::Value::as_str),
+            Some("existing")
         );
     }
 }

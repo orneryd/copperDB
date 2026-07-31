@@ -40,6 +40,8 @@ Header types, custom delimiters, gzip/zip, anonymous/composite IDs, duplicates a
 
 Benchmark 1m nodes/5m relationships with scalar- and vector-heavy records, several chunk sizes, and compression formats. RSS must scale with chunk plus bounded ID-map cache, not dataset size. Report rows/s, MB/s, bytes written, index time, and cancellation latency.
 
+Progress: a Criterion offline-import workload now covers scalar/vector node rows, relationships, plain/gzip/zip sources, and 1,000/10,000/100,000 row chunks. It defaults to 10,000 nodes and 50,000 relationships for local iteration; set `COPPERDB_ADMINIMPORT_BENCH_NODES=1000000` and `COPPERDB_ADMINIMPORT_BENCH_RELATIONSHIPS=5000000` for the required scale. Rows/s, source MB/s, and target MB/s are reported by Criterion; target size is calibrated outside timed iterations. Index-time and cancellation-latency measurements remain open.
+
 ## Definition Of Done
 
 No partial database becomes visible, sources are fully preflighted, memory is bounded, reports and exit codes are deterministic, cancellation cleans up, and a schema/vector/relationship dataset round-trips without semantic loss.

@@ -1,4 +1,4 @@
-use self::eval_engine_policy::vector_from_node;
+use self::eval_engine_policy::{edge_vector_for_property, vector_from_node};
 use std::cell::RefCell;
 
 thread_local! {
@@ -43,6 +43,27 @@ impl EvalEngine {
         storage.on_node_deleted(Arc::new(move |id| {
             if let Some(storage) = deleted_storage.upgrade() {
                 remove_node_from_vector_indexes(&storage, &deleted_indexes, &id);
+            }
+        }));
+        let created_storage = Arc::downgrade(&storage);
+        let created_indexes = Arc::clone(&vector_indexes);
+        storage.on_edge_created(Arc::new(move |edge| {
+            if let Some(storage) = created_storage.upgrade() {
+                maintain_vector_indexes_for_edge(&storage, &created_indexes, &edge);
+            }
+        }));
+        let updated_storage = Arc::downgrade(&storage);
+        let updated_indexes = Arc::clone(&vector_indexes);
+        storage.on_edge_updated(Arc::new(move |edge| {
+            if let Some(storage) = updated_storage.upgrade() {
+                maintain_vector_indexes_for_edge(&storage, &updated_indexes, &edge);
+            }
+        }));
+        let deleted_storage = Arc::downgrade(&storage);
+        let deleted_indexes = Arc::clone(&vector_indexes);
+        storage.on_edge_deleted(Arc::new(move |id| {
+            if let Some(storage) = deleted_storage.upgrade() {
+                remove_edge_from_vector_indexes(&storage, &deleted_indexes, &id);
             }
         }));
         Self {
@@ -2343,8 +2364,6 @@ impl EvalEngine {
                         definition,
                         Some(ref definition)
                             if definition.kind == copperdb_indexing::CatalogIndexKind::Vector
-                                && definition.entity_type
-                                    == copperdb_indexing::CatalogIndexEntityType::Node
                     ) {
                         self.unregister_vector_index(&drop.name)?;
                     }
@@ -2953,9 +2972,6 @@ impl EvalEngine {
         let definition = catalog
             .get(index_name)?
             .ok_or_else(|| EvalError::ExecutionError(format!("index not found: {index_name}")))?;
-        if definition.entity_type != copperdb_indexing::CatalogIndexEntityType::Node {
-            return Ok(());
-        }
         let property = definition.properties.first().ok_or_else(|| {
             EvalError::ExecutionError(format!(
                 "vector index {index_name} is missing a target property"
@@ -2994,16 +3010,34 @@ impl EvalEngine {
                 )));
             }
         }
-        let nodes = if definition.label.is_empty() {
-            self.storage.all_node_records()?
-        } else {
-            self.storage.get_nodes_by_label(&definition.label)?
-        };
-        for node in nodes {
-            if let Some(vector) = vector_from_node(&node, property) {
-                vector_indexes
-                    .upsert(index_name, node.id, vector)
-                    .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
+        match definition.entity_type {
+            copperdb_indexing::CatalogIndexEntityType::Node => {
+                let nodes = if definition.label.is_empty() {
+                    self.storage.all_node_records()?
+                } else {
+                    self.storage.get_nodes_by_label(&definition.label)?
+                };
+                for node in nodes {
+                    if let Some(vector) = vector_from_node(&node, property) {
+                        vector_indexes
+                            .upsert(index_name, node.id, vector)
+                            .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
+                    }
+                }
+            }
+            copperdb_indexing::CatalogIndexEntityType::Relationship => {
+                let edges = if definition.label.is_empty() {
+                    self.storage.all_edges()?
+                } else {
+                    self.storage.get_edges_by_type(&definition.label)?
+                };
+                for edge in edges {
+                    if let Some(vector) = edge_vector_for_property(&edge, property) {
+                        vector_indexes
+                            .upsert(index_name, edge.id, vector)
+                            .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
+                    }
+                }
             }
         }
         self.refresh_vector_index_artifact();
@@ -5173,6 +5207,77 @@ fn remove_node_from_vector_indexes(
                 copperdb_vectorspace::VectorSpaceError::VectorNotFound(_)
             ) {
                 tracing::warn!(index = %definition.name, node = %id, %error, "failed to remove deleted vector index entry");
+            }
+        }
+    }
+}
+
+fn maintain_vector_indexes_for_edge(
+    storage: &StorageEngine,
+    vector_indexes: &HnswRegistry,
+    edge: &EdgeRecord,
+) {
+    let definitions = match storage.load_index_definitions() {
+        Ok(definitions) => definitions,
+        Err(error) => {
+            tracing::warn!(%error, edge = %edge.id, "failed to load vector index definitions");
+            return;
+        }
+    };
+    for definition in definitions.into_iter().filter(|definition| {
+        definition.kind == copperdb_storage::IndexKind::Vector
+            && definition.entity_type == copperdb_storage::IndexEntityType::Relationship
+            && (definition.label.is_empty() || definition.label == edge.edge_type)
+    }) {
+        if vector_indexes.status(&definition.name).is_err() {
+            continue;
+        }
+        let Some(property) = definition.properties.first() else {
+            continue;
+        };
+        match edge_vector_for_property(edge, property) {
+            Some(vector) => {
+                if let Err(error) = vector_indexes.upsert(&definition.name, &edge.id, vector) {
+                    tracing::warn!(index = %definition.name, edge = %edge.id, %error, "failed to maintain vector index");
+                }
+            }
+            None => {
+                if let Err(error) = vector_indexes.remove(&definition.name, &edge.id) {
+                    if !matches!(
+                        error,
+                        copperdb_vectorspace::VectorSpaceError::VectorNotFound(_)
+                    ) {
+                        tracing::warn!(index = %definition.name, edge = %edge.id, %error, "failed to remove stale vector index entry");
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn remove_edge_from_vector_indexes(
+    storage: &StorageEngine,
+    vector_indexes: &HnswRegistry,
+    id: &str,
+) {
+    let definitions = match storage.load_index_definitions() {
+        Ok(definitions) => definitions,
+        Err(error) => {
+            tracing::warn!(%error, edge = %id, "failed to load vector index definitions");
+            return;
+        }
+    };
+    for definition in definitions.into_iter().filter(|definition| {
+        definition.kind == copperdb_storage::IndexKind::Vector
+            && definition.entity_type == copperdb_storage::IndexEntityType::Relationship
+            && vector_indexes.status(&definition.name).is_ok()
+    }) {
+        if let Err(error) = vector_indexes.remove(&definition.name, id) {
+            if !matches!(
+                error,
+                copperdb_vectorspace::VectorSpaceError::VectorNotFound(_)
+            ) {
+                tracing::warn!(index = %definition.name, edge = %id, %error, "failed to remove deleted vector index entry");
             }
         }
     }
