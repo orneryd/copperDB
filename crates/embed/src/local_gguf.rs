@@ -87,31 +87,28 @@ impl LocalGgufEmbedder {
                 *embedder.stop_warmup.lock().unwrap() = Some(tx);
                 let model = Arc::clone(&embedder.model);
                 let last_embed = Arc::clone(&embedder.last_embed_time);
-                thread::spawn(move || {
-                    loop {
-                        // Check stop signal
-                        if rx.try_recv().is_ok() {
-                            break;
-                        }
-                        thread::sleep(interval.min(Duration::from_secs(60)));
+                thread::spawn(move || loop {
+                    match rx.recv_timeout(interval) {
+                        Ok(_) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                    }
 
-                        // Skip warmup if recently used
-                        let last = last_embed.load(Ordering::Relaxed);
-                        let elapsed = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as i64
-                            - last;
-                        if elapsed < interval.as_secs() as i64 / 2 {
-                            continue;
-                        }
+                    // Skip warmup if recently used.
+                    let last = last_embed.load(Ordering::Relaxed);
+                    let elapsed = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs() as i64
+                        - last;
+                    if elapsed < interval.as_secs() as i64 / 2 {
+                        continue;
+                    }
 
-                        // Dummy embedding to keep GPU memory warm
-                        match model.embed("warmup") {
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::warn!(error = %e, "model warmup failed");
-                            }
+                    // Dummy embedding to keep GPU memory warm
+                    match model.embed("warmup") {
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(error = %e, "model warmup failed");
                         }
                     }
                 });

@@ -1631,6 +1631,8 @@ pub struct NodeEmbeddingMetadata {
     #[serde(default)]
     pub embedding_model: Option<String>,
     #[serde(default)]
+    pub embedding_generation: Option<String>,
+    #[serde(default)]
     pub embedding_dimensions: Option<usize>,
     #[serde(default)]
     pub has_embedding: Option<bool>,
@@ -1660,6 +1662,7 @@ pub enum EmbeddingFailureDisposition {
 impl NodeEmbeddingMetadata {
     pub fn is_empty(&self) -> bool {
         self.embedding_model.is_none()
+            && self.embedding_generation.is_none()
             && self.embedding_dimensions.is_none()
             && self.has_embedding.is_none()
             && self.embedded_at.is_none()
@@ -1669,6 +1672,7 @@ impl NodeEmbeddingMetadata {
 
     fn clear_materialized_state(&mut self) {
         self.embedding_model = None;
+        self.embedding_generation = None;
         self.embedding_dimensions = None;
         self.has_embedding = None;
         self.embedded_at = None;
@@ -3087,6 +3091,18 @@ impl StorageEngine {
         self.embedding_claims.lock().remove(id);
     }
 
+    /// Cancel the current pending embedding request if no worker has claimed it.
+    /// A later explicit re-embedding request or source update can enqueue new work.
+    pub fn cancel_pending_embedding(&self, id: &str) -> Result<bool, StorageError> {
+        let claims = self.embedding_claims.lock();
+        if claims.contains(id) || self.meta.fjall_get(pending_embedding_key(id))?.is_none() {
+            return Ok(false);
+        }
+        self.meta.fjall_remove(pending_embedding_key(id))?;
+        self.meta.fjall_remove(forced_reembedding_key(id))?;
+        Ok(true)
+    }
+
     pub fn mark_node_embedded(&self, id: &str) -> Result<(), StorageError> {
         self.meta.fjall_remove(pending_embedding_key(id))?;
         self.meta.fjall_remove(forced_reembedding_key(id))?;
@@ -3119,6 +3135,34 @@ impl StorageEngine {
         self.put_node_record(&node)?;
         self.meta.fjall_insert(pending_embedding_key(id), [])?;
         Ok(true)
+    }
+
+    /// Queue managed embeddings whose configured provider generation or requested dimensions
+    /// no longer match the active runtime.
+    pub fn request_reembedding_for_generation(
+        &self,
+        generation: &str,
+        dimensions: usize,
+    ) -> Result<usize, StorageError> {
+        let ids = self
+            .all_node_records()?
+            .into_iter()
+            .filter(|node| {
+                node_record_is_embedding_eligible(node)
+                    && node.has_materialized_chunk_embeddings()
+                    && (node.embed_meta.embedding_generation.as_deref() != Some(generation)
+                        || (dimensions > 0
+                            && node.embed_meta.embedding_dimensions != Some(dimensions)))
+            })
+            .map(|node| node.id)
+            .collect::<Vec<_>>();
+        let mut queued = 0;
+        for id in ids {
+            if self.request_reembedding(&id)? {
+                queued += 1;
+            }
+        }
+        Ok(queued)
     }
 
     fn has_forced_reembedding(&self, id: &str) -> Result<bool, StorageError> {
@@ -7100,6 +7144,10 @@ fn edge_content_matches(left: &EdgeRecord, right: &EdgeRecord) -> bool {
         && left.properties == right.properties
 }
 
+fn node_embedding_source_changed(old: &NodeRecord, new: &NodeRecord) -> bool {
+    old.labels != new.labels || old.properties != new.properties
+}
+
 impl<'a> BatchWriter<'a> {
     pub fn put_constraint(&mut self, constraint: &Constraint) {
         self.ops.push(BatchOp::PutConstraint(constraint.clone()));
@@ -7515,10 +7563,19 @@ impl<'a> BatchWriter<'a> {
             }
             match new {
                 Some(new) => {
+                    let mut stored = new.clone();
+                    let source_changed = old.as_ref().is_some_and(|old| {
+                        old.has_materialized_chunk_embeddings()
+                            && node_embedding_source_changed(old, new)
+                    }) && node_record_is_embedding_eligible(&stored);
+                    if source_changed {
+                        stored.clear_managed_chunk_embeddings();
+                    }
                     batch.insert(
                         &self.engine.nodes,
                         id.as_bytes(),
-                        self.engine.encode_record_bytes(rmp_serde::to_vec(new)?)?,
+                        self.engine
+                            .encode_record_bytes(rmp_serde::to_vec(&stored)?)?,
                     );
                     stage_node_indexes!(
                         batch,
@@ -7529,7 +7586,10 @@ impl<'a> BatchWriter<'a> {
                         true
                     );
                     stage_node_counter_deltas(&mut counter_deltas, new, 1);
-                    if new.needs_embedding() {
+                    if source_changed {
+                        batch.insert(&self.engine.meta, forced_reembedding_key(id), []);
+                    }
+                    if source_changed || stored.needs_embedding() {
                         batch.insert(&self.engine.meta, pending_embedding_key(id), []);
                     } else {
                         batch.remove(&self.engine.meta, pending_embedding_key(id));

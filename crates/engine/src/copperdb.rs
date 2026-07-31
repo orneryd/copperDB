@@ -83,6 +83,11 @@ impl CopperDb {
         Ok(self.storage.request_reembedding(id)?)
     }
 
+    /// Cancel the current unclaimed embedding request for one node.
+    pub fn cancel_node_embedding(&self, id: &str) -> Result<bool, CopperDbError> {
+        Ok(self.storage.cancel_pending_embedding(id)?)
+    }
+
     /// Process one pending embedding without starting a background worker.
     pub fn drain_embedding_queue_once(&self) -> Result<bool, CopperDbError> {
         self.embedding_runtime.drain_one()

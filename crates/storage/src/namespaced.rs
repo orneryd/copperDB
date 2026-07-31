@@ -216,6 +216,10 @@ impl<'a> NamespacedStorageEngine<'a> {
         self.inner.mark_node_embedded(&self.prefix_id(id))
     }
 
+    pub fn cancel_pending_embedding(&self, id: &str) -> Result<bool, StorageError> {
+        self.inner.cancel_pending_embedding(&self.prefix_id(id))
+    }
+
     pub fn add_to_pending_embeddings(&self, id: &str) -> Result<(), StorageError> {
         self.inner.add_to_pending_embeddings(&self.prefix_id(id))
     }

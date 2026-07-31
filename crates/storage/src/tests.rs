@@ -3364,6 +3364,27 @@ fn storage_engine_embedding_claims_exclude_duplicate_work_and_release_for_retry(
 }
 
 #[test]
+fn storage_engine_cancels_only_unclaimed_embedding_requests() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let mut node = sample_node("n1", &["File"]);
+    node.properties
+        .insert("content".to_string(), json!("pending"));
+    engine.put_node_record(&node).unwrap();
+
+    assert!(engine.cancel_pending_embedding("n1").unwrap());
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 0);
+    assert!(!engine.cancel_pending_embedding("n1").unwrap());
+
+    assert!(engine.request_reembedding("n1").unwrap());
+    assert_eq!(
+        engine.claim_node_needing_embedding().unwrap().unwrap().id,
+        "n1"
+    );
+    assert!(!engine.cancel_pending_embedding("n1").unwrap());
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
+}
+
+#[test]
 fn storage_engine_embedding_dead_letter_is_durable_and_explicitly_requeueable() {
     let engine = StorageEngine::open_temporary().unwrap();
     let mut node = sample_node("n1", &["File"]);
@@ -3596,6 +3617,74 @@ fn storage_engine_update_node_embedding_preserves_non_embedding_properties_and_r
     );
     assert_eq!(engine.node_count_by_prefix("").unwrap(), 1);
     assert_eq!(engine.pending_embeddings_count().unwrap(), 0);
+}
+
+#[test]
+fn storage_engine_source_change_requeues_managed_embedding_and_preserves_named_vectors() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let mut node = sample_node("n1", &["File"]);
+    node.properties
+        .insert("content".to_string(), json!("original source"));
+    node.named_embeddings
+        .insert("external".to_string(), vec![0.1, 0.2]);
+    node.set_managed_chunk_embeddings(
+        vec![vec![0.3, 0.4]],
+        Some("model-a".to_string()),
+        Some("2026-05-29T00:00:00Z".to_string()),
+    );
+    engine.put_node_record(&node).unwrap();
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 0);
+
+    node.properties
+        .insert("content".to_string(), json!("changed source"));
+    engine.put_node_record(&node).unwrap();
+
+    let updated = engine.get_node_record("n1").unwrap().unwrap();
+    assert!(updated.chunk_embeddings.is_empty());
+    assert!(updated.embed_meta.is_empty());
+    assert_eq!(
+        updated.named_embeddings.get("external"),
+        Some(&vec![0.1, 0.2])
+    );
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
+}
+
+#[test]
+fn storage_engine_generation_change_requeues_managed_embeddings() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let mut node = sample_node("n1", &["File"]);
+    node.properties
+        .insert("content".to_string(), json!("stable source"));
+    node.named_embeddings
+        .insert("external".to_string(), vec![0.1, 0.2]);
+    node.set_managed_chunk_embeddings(
+        vec![vec![0.3, 0.4]],
+        Some("provider-model".to_string()),
+        Some("2026-05-29T00:00:00Z".to_string()),
+    );
+    node.embed_meta.embedding_generation = Some("model-a.gguf".to_string());
+    engine.put_node_record(&node).unwrap();
+
+    assert_eq!(
+        engine
+            .request_reembedding_for_generation("model-a.gguf", 2)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        engine
+            .request_reembedding_for_generation("model-b.gguf", 2)
+            .unwrap(),
+        1
+    );
+
+    let updated = engine.get_node_record("n1").unwrap().unwrap();
+    assert!(updated.chunk_embeddings.is_empty());
+    assert_eq!(
+        updated.named_embeddings.get("external"),
+        Some(&vec![0.1, 0.2])
+    );
+    assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
 }
 
 #[test]
