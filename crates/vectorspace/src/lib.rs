@@ -516,6 +516,35 @@ struct ScoredNode {
     internal_id: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ExactScoredEntry<'a> {
+    score: f32,
+    id: &'a str,
+}
+
+impl PartialEq for ExactScoredEntry<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.score.to_bits() == other.score.to_bits() && self.id == other.id
+    }
+}
+
+impl Eq for ExactScoredEntry<'_> {}
+
+impl PartialOrd for ExactScoredEntry<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ExactScoredEntry<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .score
+            .total_cmp(&self.score)
+            .then_with(|| self.id.cmp(other.id))
+    }
+}
+
 impl PartialEq for ScoredNode {
     fn eq(&self, other: &Self) -> bool {
         self.score.to_bits() == other.score.to_bits() && self.internal_id == other.internal_id
@@ -1673,7 +1702,7 @@ impl VectorSpace {
                 got: vector.len(),
             });
         }
-        self.entries.insert(id.into(), vector);
+        self.entries.insert(id.into(), normalize_vector(&vector));
         Ok(())
     }
 
@@ -1688,13 +1717,25 @@ impl VectorSpace {
                 got: query.len(),
             });
         }
-        let mut scores: Vec<(String, f32)> = self
-            .entries
-            .iter()
-            .map(|(id, v)| (id.clone(), cosine_score(query, v)))
-            .collect();
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+        let query = normalize_vector(query);
+        let mut best = BinaryHeap::with_capacity(k.saturating_add(1));
+        for (id, vector) in &self.entries {
+            best.push(ExactScoredEntry {
+                score: dot(&query, vector),
+                id,
+            });
+            if best.len() > k {
+                best.pop();
+            }
+        }
+        let mut scores = best
+            .into_iter()
+            .map(|entry| (entry.id.to_string(), entry.score))
+            .collect::<Vec<_>>();
         scores.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
-        scores.truncate(k);
         Ok(scores)
     }
 
@@ -1709,17 +1750,6 @@ impl VectorSpace {
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     copperdb_simd::dot_f32(a, b).expect("vector dimensions must match")
-}
-
-fn cosine_score(a: &[f32], b: &[f32]) -> f32 {
-    let d = dot(a, b);
-    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 {
-        0.0
-    } else {
-        d / (na * nb)
-    }
 }
 
 /// Global registry of vector spaces.
@@ -1879,6 +1909,20 @@ mod tests {
             results.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
             vec!["alpha", "zeta"]
         );
+    }
+
+    #[test]
+    fn exact_cosine_normalizes_mutations_and_handles_zero_vectors() {
+        let mut space = VectorSpace::new("test", 2);
+        space.insert("updated", vec![3.0, 0.0]).unwrap();
+        space.insert("updated", vec![0.0, 5.0]).unwrap();
+        space.insert("zero", vec![0.0, 0.0]).unwrap();
+
+        assert!(space.knn(&[0.0, 7.0], 0).unwrap().is_empty());
+        let results = space.knn(&[0.0, 7.0], 2).unwrap();
+        assert_eq!(results[0].0, "updated");
+        assert!((results[0].1 - 1.0).abs() < 1e-6);
+        assert_eq!(results[1], ("zero".to_string(), 0.0));
     }
 
     #[test]

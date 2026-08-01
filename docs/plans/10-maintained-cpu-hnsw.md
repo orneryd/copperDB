@@ -8,7 +8,7 @@ Replace full-vector scans mislabeled as HNSW with an engine-owned, maintained, p
 
 ## Current Evidence
 
-`VectorSpace::knn` scores and sorts every vector. Vector procedures scan storage records. Engine semantic/hybrid routes are unimplemented. NornicDB references include HNSW, vector file store, search services, readiness, passive-write, exact-candidate, and shutdown fixes listed in the consolidated audit.
+`VectorSpace::knn` is the explicit exact cosine oracle and bounded fallback. Vector procedures use the engine-owned maintained index service rather than scanning storage records. Engine semantic/hybrid routes remain outside this plan. NornicDB references include HNSW, vector file store, search services, readiness, passive-write, exact-candidate, and shutdown fixes listed in the consolidated audit.
 
 ## Progress
 
@@ -21,6 +21,7 @@ Replace full-vector scans mislabeled as HNSW with an engine-owned, maintained, p
 - Complete: `HnswRegistry` writes and reloads a single greenfield format-1, checksummed artifact containing normalized active vectors, index configuration, strategy, generation, and committed storage revision. Loads reject corrupt or incompatible artifacts and deterministically rebuild HNSW topology. `CopperDb` stores the sidecar beside durable storage, persists it after all post-commit maintenance callbacks and vector DDL changes, restores it only when its source revision and declared index schema match, and otherwise rebuilds from graph records.
 - Complete: declared relationship vector indexes now share the engine-owned registry lifecycle: startup/reopen builds, committed edge create/update/delete callbacks, sidecar persistence, and `db.index.vector.queryRelationships` candidate lookup with ID hydration. Relationship queries no longer scan stored edges; Phase 5 tuning/observability remains open.
 - Complete: vector index status now exposes tombstone count and an explicitly scoped owned-buffer memory estimate, and `CopperDb::compact_vector_index` explicitly rebuilds a named HNSW index below the automatic threshold before synchronously refreshing its sidecar artifact. Query reads remain non-mutating. Persistent cosine indexes mirror normalized vectors into per-index greenfield append-only files, rebuilt from graph records on startup and vector DDL and maintained through committed node/relationship mutations. Engine-owned vector procedures expand HNSW results to a bounded `4 * k` candidate set and deterministically exact-rerank those IDs against the file store; standalone evaluators retain direct registry behavior.
+- Complete: exact cosine vectors are normalized once at mutation time, queries are normalized once per request, scoring uses the runtime-dispatched SIMD dot-product kernel, and a bounded top-k heap avoids cloning and sorting the full corpus. Deterministic score/ID ordering, replacement, zero vectors, non-unit inputs, and `k = 0` are covered by regression tests.
 
 ## Runtime Contract
 
@@ -43,6 +44,8 @@ Store normalized vectors in a versioned append-only file with ID-to-offset metad
 Test CRUD, dimensions, zero vectors, concurrency, deterministic ties, cancellation, recall, no query-triggered warming, restart/corruption/version mismatch, tombstones, shutdown, and node/relationship procedures. Benchmark 1k to 1m vectors at 128/384/1,024 dimensions; report recall@k, p50/p99, QPS, visited nodes, memory/index bytes, build/update/load time.
 
 Progress: `cargo bench -p copperdb-vectorspace --bench hnsw` now calibrates deterministic recall@10, average visited nodes, raw vector bytes, an owned-buffer graph-memory estimate, and Windows process working-set before/after/delta before measuring HNSW build, update/rebuild, artifact load/rebuild, HNSW query, HNSW plus file-backed exact reranking, and exact-cosine full-scan query latency at 128/384/1,024 dimensions. All reported Rust measurements must use Cargo's optimized `bench` profile; verify the build reports `Finished bench profile [optimized]` and that any directly invoked scale-gate executable comes from `target/release/deps`, never `target/debug`. It defaults to 10,000 vectors; set `COPPERDB_HNSW_BENCH_VECTORS` to 1,000 through 1,000,000 for the required scale sweep and `COPPERDB_HNSW_BENCH_DIMENSIONS` to a comma-separated dimension list for a targeted run. Set `COPPERDB_HNSW_BENCH_SCALE_GATE=1` for bounded one-shot build/update/save/load measurements and fixed-corpus query latency/QPS instead of repeated production-scale rebuilds under Criterion. Production-scale gate results remain open.
+
+Correlated exact-cosine results on an Intel i9-9900KF with Rust/Cargo 1.95.0 and Go 1.25.4 compare the same 10,000 deterministic vectors and 16 queries against NornicDB `2c7dbe9e`. CopperDB's optimized `bench` profile averages 0.893 ms at 128 dimensions, 1.841 ms at 384 dimensions, and 3.540 ms at 1,024 dimensions. NornicDB averages 2.524 ms, 3.842 ms, and 5.215 ms respectively, so CopperDB is 2.83x, 2.09x, and 1.47x faster on the correlated exact scan.
 
 Initial gate: recall@10 at least 0.95 on seeded representative sets and a clear latency advantage by 10k vectors without unbounded tombstones.
 
