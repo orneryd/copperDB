@@ -1670,7 +1670,7 @@ fn deterministic_level(id: &str, m: usize) -> usize {
         state = state.wrapping_mul(0x0000_0100_0000_01b3);
     }
     let mut level = 0;
-    while level < 16 && state % m as u64 == 0 {
+    while level < 16 && state.is_multiple_of(m as u64) {
         level += 1;
         state = state.rotate_left(17).wrapping_mul(0x9e37_79b9_7f4a_7c15);
     }

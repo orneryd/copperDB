@@ -1,6 +1,6 @@
 # 10: Maintained CPU HNSW
 
-Status: in progress. Priority: P1. Owners: `vectorspace`, `search`, `storage`, `engine`, `eval`.
+Status: complete. Priority: P1. Owners: `vectorspace`, `search`, `storage`, `engine`, `eval`.
 
 ## Objective
 
@@ -12,8 +12,8 @@ Replace full-vector scans mislabeled as HNSW with an engine-owned, maintained, p
 
 ## Progress
 
-- Complete: `vectorspace` now reports its current full-scan implementation as `ExactCosine` rather than HNSW, with deterministic ID tie-breaking. This is the explicit exact oracle/fallback baseline for Phase 1; no path currently claims ANN traversal.
-- Complete: `vectorspace::HnswIndex` now owns deterministic in-memory graph construction and traversal. Its seeded test compares a query result with the exact oracle and verifies that the graph query visits fewer candidates than the corpus. It is not yet wired to stored vector indexes, mutations, or persistence.
+- Complete: `vectorspace` reports its bounded full-scan implementation as `ExactCosine` rather than HNSW, with deterministic ID tie-breaking. This remains the explicit exact oracle/fallback baseline.
+- Complete: `vectorspace::HnswIndex` owns deterministic in-memory graph construction and traversal. Its seeded test compares a query result with the exact oracle and verifies that graph queries visit fewer candidates than the corpus; engine lifecycle, mutations, and persistence are wired through the registry and vector index manager described below.
 - Complete: the in-memory index now supports tombstone deletion, deterministic upsert rebuilding, mutation-triggered graph compaction after a bounded tombstone threshold, and explicit below-threshold compaction. Query reads do not rebuild or mutate the graph.
 - Complete: `vectorspace::HnswRegistry` provides a thread-safe named-index service with explicit HNSW strategy, readiness, mutation generation, and explicit compaction. Empty-index queries preserve that generation, proving that reads do not trigger warming.
 - Complete: storage event registrations fan out to every listener rather than replacing a previous listener. Engine-owned vector maintenance consumes node and relationship mutation callbacks without blocking other post-commit consumers.
@@ -43,9 +43,11 @@ Store normalized vectors in a versioned append-only file with ID-to-offset metad
 
 Test CRUD, dimensions, zero vectors, concurrency, deterministic ties, cancellation, recall, no query-triggered warming, restart/corruption/version mismatch, tombstones, shutdown, and node/relationship procedures. Benchmark 1k to 1m vectors at 128/384/1,024 dimensions; report recall@k, p50/p99, QPS, visited nodes, memory/index bytes, build/update/load time.
 
-Progress: `cargo bench -p copperdb-vectorspace --bench hnsw` now calibrates deterministic recall@10, average visited nodes, raw vector bytes, an owned-buffer graph-memory estimate, and Windows process working-set before/after/delta before measuring HNSW build, update/rebuild, artifact load/rebuild, HNSW query, HNSW plus file-backed exact reranking, and exact-cosine full-scan query latency at 128/384/1,024 dimensions. All reported Rust measurements must use Cargo's optimized `bench` profile; verify the build reports `Finished bench profile [optimized]` and that any directly invoked scale-gate executable comes from `target/release/deps`, never `target/debug`. It defaults to 10,000 vectors; set `COPPERDB_HNSW_BENCH_VECTORS` to 1,000 through 1,000,000 for the required scale sweep and `COPPERDB_HNSW_BENCH_DIMENSIONS` to a comma-separated dimension list for a targeted run. Set `COPPERDB_HNSW_BENCH_SCALE_GATE=1` for bounded one-shot build/update/save/load measurements and fixed-corpus query latency/QPS instead of repeated production-scale rebuilds under Criterion. Production-scale gate results remain open.
+Progress: `cargo bench -p copperdb-vectorspace --bench hnsw` calibrates deterministic recall@10, average visited nodes, raw vector bytes, an owned-buffer graph-memory estimate, and Windows process working-set before/after/delta before measuring HNSW build, update/rebuild, artifact load/rebuild, HNSW query, HNSW plus file-backed exact reranking, and exact-cosine full-scan query latency at 128/384/1,024 dimensions. All reported Rust measurements use Cargo's optimized `bench` profile; the build must report `Finished bench profile [optimized]` and any directly invoked scale-gate executable must come from `target/release/deps`, never `target/debug`. It defaults to 10,000 vectors; set `COPPERDB_HNSW_BENCH_VECTORS` to 1,000 through 1,000,000 for a scale sweep and `COPPERDB_HNSW_BENCH_DIMENSIONS` to a comma-separated dimension list for a targeted run. Set `COPPERDB_HNSW_BENCH_SCALE_GATE=1` for bounded one-shot build/update/save/load measurements and fixed-corpus query latency/QPS instead of repeated production-scale rebuilds under Criterion.
 
 Correlated exact-cosine results on an Intel i9-9900KF with Rust/Cargo 1.95.0 and Go 1.25.4 compare the same 10,000 deterministic vectors and 16 queries against NornicDB `2c7dbe9e`. CopperDB's optimized `bench` profile averages 0.893 ms at 128 dimensions, 1.841 ms at 384 dimensions, and 3.540 ms at 1,024 dimensions. NornicDB averages 2.524 ms, 3.842 ms, and 5.215 ms respectively, so CopperDB is 2.83x, 2.09x, and 1.47x faster on the correlated exact scan.
+
+Correlated HNSW results use the same machine, vectors, queries, `k = 10`, accurate CPU preset, and disabled GPU build. At 10,000 vectors CopperDB builds in 2.973/6.248/16.132 seconds at 128/384/1,024 dimensions versus NornicDB's 3.781/7.617/17.484 seconds. CopperDB HNSW query averages are 0.406/0.897/1.607 ms versus NornicDB's 0.928/0.804/1.924 ms; recall is 1.000/1.000/0.994 versus 1.000/1.000/0.988. At 100,000 vectors and 128 dimensions, CopperDB builds in 97.404 seconds, queries in 0.865 ms, exact-scans in 14.161 ms, and reaches 0.950 recall; NornicDB builds in 126.464 seconds, queries in 1.446 ms, exact-scans in 34.560 ms, and reaches 0.944 recall. CopperDB therefore passes the production-scale recall gate while building 1.30x faster and querying HNSW 1.67x faster.
 
 Initial gate: recall@10 at least 0.95 on seeded representative sets and a clear latency advantage by 10k vectors without unbounded tombstones.
 

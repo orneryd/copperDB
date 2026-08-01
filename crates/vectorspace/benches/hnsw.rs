@@ -381,11 +381,10 @@ fn bench_hnsw(criterion: &mut Criterion) {
             bench.iter_batched(
                 || workload.hnsw.clone(),
                 |mut index| {
-                    black_box(
-                        index
-                            .upsert(updated_id.clone(), updated_vector.clone())
-                            .expect("benchmark vector dimensions must match"),
-                    );
+                    index
+                        .upsert(updated_id.clone(), updated_vector.clone())
+                        .expect("benchmark vector dimensions must match");
+                    black_box(());
                 },
                 BatchSize::LargeInput,
             );
