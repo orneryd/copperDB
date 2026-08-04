@@ -216,12 +216,78 @@ impl CopperDb {
                     hits,
                 })
             }
-            SearchQuery::Semantic { .. } => Err(CopperDbError::Config(
-                "local semantic search runtime is not implemented".into(),
-            )),
-            SearchQuery::Hybrid { .. } => Err(CopperDbError::Config(
-                "local hybrid search runtime is not implemented".into(),
-            )),
+            SearchQuery::Semantic {
+                vector,
+                k,
+                min_score,
+            } => {
+                request_context.check_active()?;
+                let matches = self.vector_indexes.query_node_indexes(
+                    request_context.cancellation(),
+                    vector,
+                    *k,
+                    *min_score,
+                )?;
+                let hits = matches
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, (id, score, label))| RrfSearchHit {
+                        global_id: FabricGlobalId::new(placement.clone(), "node", id),
+                        rank: index + 1,
+                        score,
+                        source: "semantic".into(),
+                        shard: placement.clone(),
+                        label,
+                        snippet: None,
+                    })
+                    .collect();
+                Ok(RrfSearchBatch {
+                    shard: placement.clone(),
+                    source: "semantic".into(),
+                    hits,
+                })
+            }
+            SearchQuery::Hybrid { text, vector, k } => {
+                let lexical = self.search_fabric_ranked_batch_locally_with_context(
+                    request_context,
+                    placement,
+                    &SearchQuery::FullText {
+                        query: text.clone(),
+                        fields: Vec::new(),
+                        limit: *k,
+                    },
+                )?;
+                let semantic = self.search_fabric_ranked_batch_locally_with_context(
+                    request_context,
+                    placement,
+                    &SearchQuery::Semantic {
+                        vector: vector.clone(),
+                        k: *k,
+                        min_score: f32::NEG_INFINITY,
+                    },
+                )?;
+                let outcome =
+                    merge_rrf_search_batches(vec![lexical, semantic], RrfConfig::new(60.0, *k));
+                let hits = outcome
+                    .results
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, hit)| RrfSearchHit {
+                        global_id: hit.global_id,
+                        rank: index + 1,
+                        score: hit.rrf_score,
+                        source: "hybrid".into(),
+                        shard: hit.shard,
+                        label: hit.label,
+                        snippet: hit.snippet,
+                    })
+                    .collect();
+                Ok(RrfSearchBatch {
+                    shard: placement.clone(),
+                    source: "hybrid".into(),
+                    hits,
+                })
+            }
         }
     }
 
@@ -436,7 +502,7 @@ impl CopperDb {
             phase_compliance_us = t_compliance.as_micros(),
             phase_pattern_us = t_pattern.as_micros(),
             phase_eval_us = t_eval.as_micros(),
-            phase_audit_us = t_total.as_micros().saturating_sub(non_audit_us as u128),
+            phase_audit_us = t_total.as_micros().saturating_sub(non_audit_us),
             phase_total_us = t_total.as_micros(),
             "query phase breakdown"
         );

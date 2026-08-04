@@ -19,7 +19,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::{oneshot, Notify};
@@ -347,14 +347,16 @@ impl ReplicationStorage for MemoryStorage {
 }
 
 pub struct StorageEngineAdapter {
-    engine: Mutex<StorageEngine>,
+    engine: Arc<StorageEngine>,
 }
 
 impl StorageEngineAdapter {
     pub fn new(engine: StorageEngine) -> Self {
-        Self {
-            engine: Mutex::new(engine),
-        }
+        Self::from_shared(Arc::new(engine))
+    }
+
+    pub fn from_shared(engine: Arc<StorageEngine>) -> Self {
+        Self { engine }
     }
 
     fn data_key(key: &[u8]) -> String {
@@ -394,7 +396,7 @@ impl StorageEngineAdapter {
 #[async_trait]
 impl ReplicationStorage for StorageEngineAdapter {
     fn apply_command(&self, command: &Command) -> Result<(), ReplicationError> {
-        let engine = self.engine.lock().unwrap();
+        let engine = &self.engine;
         match command {
             Command::Noop => Ok(()),
             Command::Put { key, value } => engine
@@ -422,12 +424,12 @@ impl ReplicationStorage for StorageEngineAdapter {
     }
 
     fn read_key(&self, key: &[u8]) -> Result<Option<Vec<u8>>, ReplicationError> {
-        let engine = self.engine.lock().unwrap();
+        let engine = &self.engine;
         engine.get_node(&Self::data_key(key)).map_err(Into::into)
     }
 
     fn graph_node(&self, node_id: &str) -> Result<Option<Vec<u8>>, ReplicationError> {
-        let engine = self.engine.lock().unwrap();
+        let engine = &self.engine;
         match engine.get_node_record(node_id) {
             Ok(Some(record)) => Ok(Some(Self::node_record_bytes(&record)?)),
             Ok(None) => engine.get_node(node_id).map_err(Into::into),
@@ -440,7 +442,7 @@ impl ReplicationStorage for StorageEngineAdapter {
         node_id: &str,
         rel_type: Option<&str>,
     ) -> Result<Vec<EdgeRecord>, ReplicationError> {
-        let engine = self.engine.lock().unwrap();
+        let engine = &self.engine;
         engine
             .get_adjacent_edges(node_id, EdgeAdjacencyDirection::Outgoing, rel_type)
             .map_err(Into::into)
@@ -451,14 +453,14 @@ impl ReplicationStorage for StorageEngineAdapter {
         node_id: &str,
         rel_type: Option<&str>,
     ) -> Result<Vec<EdgeRecord>, ReplicationError> {
-        let engine = self.engine.lock().unwrap();
+        let engine = &self.engine;
         engine
             .get_adjacent_edges(node_id, EdgeAdjacencyDirection::Incoming, rel_type)
             .map_err(Into::into)
     }
 
     fn graph_nodes_by_label(&self, label: &str) -> Result<Vec<Vec<u8>>, ReplicationError> {
-        let engine = self.engine.lock().unwrap();
+        let engine = &self.engine;
         engine
             .get_nodes_by_label(label)?
             .iter()
@@ -472,7 +474,7 @@ impl ReplicationStorage for StorageEngineAdapter {
         property: &str,
         value: &Value,
     ) -> Result<Vec<Vec<u8>>, ReplicationError> {
-        let engine = self.engine.lock().unwrap();
+        let engine = &self.engine;
         engine
             .get_nodes_by_property(label, property, value)?
             .iter()
@@ -484,14 +486,14 @@ impl ReplicationStorage for StorageEngineAdapter {
         &self,
         entity_id: &str,
     ) -> Result<Option<KnowledgePolicyAccessMetadata>, ReplicationError> {
-        let engine = self.engine.lock().unwrap();
+        let engine = &self.engine;
         engine
             .get_knowledge_policy_access_metadata(entity_id)
             .map_err(Into::into)
     }
 
     fn write_snapshot(&self) -> Result<Vec<u8>, ReplicationError> {
-        let engine = self.engine.lock().unwrap();
+        let engine = &self.engine;
         let mut snapshot = BTreeMap::new();
         for entry in engine.scan_nodes_with_prefix("replication:") {
             let (key, value) = entry?;
@@ -501,7 +503,7 @@ impl ReplicationStorage for StorageEngineAdapter {
     }
 
     fn restore_snapshot(&self, snapshot: &[u8]) -> Result<(), ReplicationError> {
-        let engine = self.engine.lock().unwrap();
+        let engine = &self.engine;
         let restored: BTreeMap<Vec<u8>, Vec<u8>> = serde_json::from_slice(snapshot)
             .map_err(|error| ReplicationError::Storage(error.to_string()))?;
 

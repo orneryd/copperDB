@@ -32,16 +32,13 @@ pub type Tree = Keyspace;
 /// A batch of key-value operations: (key, optional_value). None = delete.
 pub type Batch = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
+type StorageIterator<'a> = Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StorageError>> + 'a>;
+
 /// Extension trait making fjall's Keyspace behave like fjall's Tree.
 trait KeyspaceExt {
-    fn scan_prefix<'a>(
-        &'a self,
-        prefix: &'a [u8],
-    ) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StorageError>> + 'a>;
+    fn scan_prefix<'a>(&'a self, prefix: &'a [u8]) -> StorageIterator<'a>;
 
-    fn fjall_iter<'a>(
-        &'a self,
-    ) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StorageError>> + 'a>;
+    fn fjall_iter<'a>(&'a self) -> StorageIterator<'a>;
 
     fn fjall_get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError>;
 
@@ -61,14 +58,11 @@ trait KeyspaceExt {
     fn fjall_range<'a, R: std::ops::RangeBounds<Vec<u8>> + 'a>(
         &'a self,
         range: R,
-    ) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StorageError>> + 'a>;
+    ) -> StorageIterator<'a>;
 }
 
 impl KeyspaceExt for Keyspace {
-    fn scan_prefix<'a>(
-        &'a self,
-        prefix: &'a [u8],
-    ) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StorageError>> + 'a> {
+    fn scan_prefix<'a>(&'a self, prefix: &'a [u8]) -> StorageIterator<'a> {
         Box::new(self.prefix(prefix).map(|guard| {
             guard
                 .into_inner()
@@ -77,9 +71,7 @@ impl KeyspaceExt for Keyspace {
         }))
     }
 
-    fn fjall_iter<'a>(
-        &'a self,
-    ) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StorageError>> + 'a> {
+    fn fjall_iter<'a>(&'a self) -> StorageIterator<'a> {
         Box::new(self.iter().map(|guard| {
             guard
                 .into_inner()
@@ -135,7 +127,7 @@ impl KeyspaceExt for Keyspace {
     fn fjall_range<'a, R: std::ops::RangeBounds<Vec<u8>> + 'a>(
         &'a self,
         range: R,
-    ) -> Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StorageError>> + 'a> {
+    ) -> StorageIterator<'a> {
         // Convert Vec<u8> bounds to &[u8] bounds
         let start = std::ops::Bound::map(range.start_bound(), |v: &Vec<u8>| v.as_slice());
         let end = std::ops::Bound::map(range.end_bound(), |v: &Vec<u8>| v.as_slice());
@@ -401,17 +393,14 @@ pub struct WALSegment {
     pub end_seq: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum WALSyncMode {
+    #[default]
     NoSync,
-    Batch { interval_ms: u64 },
+    Batch {
+        interval_ms: u64,
+    },
     Immediate,
-}
-
-impl Default for WALSyncMode {
-    fn default() -> Self {
-        Self::NoSync
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1255,10 +1244,7 @@ impl SchemaManager {
             match constraint.constraint_type {
                 ConstraintType::Exists => {
                     for property in &constraint.properties {
-                        if !properties
-                            .get(property)
-                            .is_some_and(|value| !value.is_null())
-                        {
+                        if properties.get(property).is_none_or(|value| value.is_null()) {
                             return Err(StorageError::ConstraintMissingProperty {
                                 constraint: constraint.name.clone(),
                                 property: property.clone(),
@@ -1382,10 +1368,7 @@ impl SchemaManager {
             match constraint.constraint_type {
                 ConstraintType::Exists => {
                     for property in &constraint.properties {
-                        if !properties
-                            .get(property)
-                            .is_some_and(|value| !value.is_null())
-                        {
+                        if properties.get(property).is_none_or(|value| value.is_null()) {
                             return Err(StorageError::ConstraintMissingProperty {
                                 constraint: constraint.name.clone(),
                                 property: property.clone(),
@@ -2672,7 +2655,7 @@ impl StorageEngine {
         prefix: &'a str,
     ) -> impl Iterator<Item = Result<(Bytes, Bytes), StorageError>> + 'a {
         self.nodes.scan_prefix(prefix.as_bytes()).map(move |res| {
-            let (k, v) = res.map_err(StorageError::from)?;
+            let (k, v) = res?;
             let key = std::str::from_utf8(k.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
             let raw = self.decode_record_bytes(v.as_ref())?;
             let value = if let Some(node) = compat_node_record_from_bytes(key, &raw)? {
@@ -3269,11 +3252,7 @@ impl StorageEngine {
         let keys = self
             .meta
             .scan_prefix(META_PENDING_EMBEDDING_PREFIX)
-            .map(|entry| {
-                entry
-                    .map(|(key, _)| key.to_vec())
-                    .map_err(StorageError::from)
-            })
+            .map(|entry| entry.map(|(key, _)| key.to_vec()))
             .collect::<Result<Vec<_>, _>>()?;
         for key in keys {
             self.meta.fjall_remove(key)?;
@@ -3769,7 +3748,7 @@ impl StorageEngine {
                 for entry in self.indexes.scan_prefix(token_prefix.as_bytes()) {
                     let (key, _) = entry?;
                     scanned_entries += 1;
-                    if scanned_entries % 256 == 0 {
+                    if scanned_entries.is_multiple_of(256) {
                         cancel.check_cancelled()?;
                     }
                     let key_str =
@@ -3867,7 +3846,7 @@ impl StorageEngine {
                 }
                 let (key, _) = entry?;
                 scanned_entries += 1;
-                if scanned_entries % 256 == 0 {
+                if scanned_entries.is_multiple_of(256) {
                     cancel.check_cancelled()?;
                 }
                 let key = std::str::from_utf8(&key).map_err(|_| StorageError::InvalidUtf8)?;
@@ -3922,7 +3901,7 @@ impl StorageEngine {
                 }
                 let (key, _) = entry?;
                 scanned_entries += 1;
-                if scanned_entries % 256 == 0 {
+                if scanned_entries.is_multiple_of(256) {
                     cancel.check_cancelled()?;
                 }
                 let key = std::str::from_utf8(&key).map_err(|_| StorageError::InvalidUtf8)?;
@@ -3977,7 +3956,7 @@ impl StorageEngine {
                 for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
                     let (key, _) = entry?;
                     scanned_entries += 1;
-                    if scanned_entries % 256 == 0 {
+                    if scanned_entries.is_multiple_of(256) {
                         cancel.check_cancelled()?;
                     }
                     let key = std::str::from_utf8(&key).map_err(|_| StorageError::InvalidUtf8)?;
@@ -4052,7 +4031,7 @@ impl StorageEngine {
         let mut result = Vec::new();
         for (_term, _idf, doc_tfs) in scored_terms.into_iter().take(max_terms) {
             let mut docs: Vec<(String, usize)> = doc_tfs.into_iter().collect();
-            docs.sort_by(|a, b| b.1.cmp(&a.1));
+            docs.sort_by_key(|doc| std::cmp::Reverse(doc.1));
             for (node_id, _tf) in docs.into_iter().take(per_term) {
                 if seed_ids.insert(node_id.clone()) {
                     result.push(node_id);
@@ -5534,11 +5513,7 @@ impl StorageEngine {
         let keys = self
             .meta
             .scan_prefix(prefix)
-            .map(|entry| {
-                entry
-                    .map(|(key, _)| key.to_vec())
-                    .map_err(StorageError::from)
-            })
+            .map(|entry| entry.map(|(key, _)| key.to_vec()))
             .collect::<Result<Vec<_>, _>>()?;
         for key in keys {
             self.meta.fjall_remove(key)?;

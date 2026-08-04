@@ -10,7 +10,7 @@
 //!   cargo test -p copperdb-embed -- e2e --nocapture
 
 #[cfg(test)]
-mod e2e_tests {
+mod tests {
     use crate::{CachedEmbedder, EmbedError, Embedder, Embedding, LocalGgufEmbedder};
     use std::path::PathBuf;
     use std::time::{Duration, Instant};

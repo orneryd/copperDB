@@ -212,6 +212,7 @@ pub struct AppState {
 #[derive(Clone)]
 struct LocalEngineReplicaHandler {
     state: Arc<AppState>,
+    storage_cache: Arc<RwLock<HashMap<String, Arc<StorageEngineAdapter>>>>,
 }
 
 #[derive(Clone)]
@@ -231,7 +232,10 @@ struct UnifiedClusterAuthValidator {
 
 impl LocalEngineReplicaHandler {
     fn new(state: Arc<AppState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            storage_cache: Arc::new(RwLock::new(HashMap::new())),
+        }
     }
 
     fn database_for_command(&self, command: &Command) -> String {
@@ -241,16 +245,25 @@ impl LocalEngineReplicaHandler {
         }
     }
 
-    fn open_replication_storage(&self, database: &str) -> Result<StorageEngineAdapter, GrpcError> {
-        let data_dir = self
-            .state
-            .db_manager
-            .get(database)
-            .map(|database| database.storage_path)
-            .unwrap_or_else(|| format!("data/{database}"));
-        let engine = StorageEngine::open(&data_dir)
-            .map_err(|error| GrpcError::Transport(error.to_string()))?;
-        Ok(StorageEngineAdapter::new(engine))
+    fn open_replication_storage(
+        &self,
+        database: &str,
+    ) -> Result<Arc<StorageEngineAdapter>, GrpcError> {
+        if let Some(storage) = self.storage_cache.read().get(database) {
+            return Ok(Arc::clone(storage));
+        }
+
+        let mut cache = self.storage_cache.write();
+        if let Some(storage) = cache.get(database) {
+            return Ok(Arc::clone(storage));
+        }
+
+        let engine = open_engine(&self.state, database).map_err(GrpcError::Transport)?;
+        let storage = Arc::new(StorageEngineAdapter::from_shared(Arc::clone(
+            engine.storage(),
+        )));
+        cache.insert(database.to_owned(), Arc::clone(&storage));
+        Ok(storage)
     }
 }
 
@@ -1282,8 +1295,7 @@ async fn search_handler(
         .get("limit")
         .and_then(|v| v.as_u64())
         .unwrap_or(10)
-        .max(1)
-        .min(1000) as usize;
+        .clamp(1, 1000) as usize;
 
     if query_text.is_empty() {
         return Json(serde_json::json!({
@@ -1400,11 +1412,8 @@ async fn search_handler(
     }
     let bm25_time_ms = bm25_start.elapsed().as_millis() as u64;
 
-    let search_method = if !vector_indexes.is_empty() {
-        "bm25" // TODO: wire RRF hybrid when vector search API is available
-    } else {
-        "bm25"
-    };
+    // TODO: wire RRF hybrid when the vector search API is available.
+    let search_method = "bm25";
     let total_candidates = bm25_candidates;
 
     Json(serde_json::json!({

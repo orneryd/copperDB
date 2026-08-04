@@ -438,7 +438,13 @@ mod tests {
             overrides.get("COPPERDB_SEARCH_BM25_ENABLED").unwrap(),
             "true"
         );
-        assert_eq!(reloaded.allowed_config_keys().len(), 13);
+        let allowed_keys = reloaded.allowed_config_keys();
+        assert!(allowed_keys
+            .iter()
+            .any(|metadata| metadata.key == "COPPERDB_SEARCH_BM25_ENABLED"));
+        assert!(allowed_keys
+            .iter()
+            .any(|metadata| metadata.key == "COPPERDB_SEARCH_VECTOR_ENABLED"));
     }
 
     #[test]

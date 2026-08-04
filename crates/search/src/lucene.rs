@@ -630,7 +630,7 @@ fn collect_primary_terms(query: &QueryNode, terms: &mut BTreeSet<String>) -> Opt
         | QueryNode::Fuzzy { .. }
         | QueryNode::Regex { .. }
         | QueryNode::Range { .. }
-        | QueryNode::Phrase { .. } => return None,
+        | QueryNode::Phrase { .. } => None,
     }
 }
 

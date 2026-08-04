@@ -11,6 +11,8 @@ use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+type ParsedNeo4jHeaderToken = (String, Option<String>, BTreeMap<String, String>);
+
 #[derive(Debug, Error)]
 pub enum ConvertError {
     #[error("type mismatch: expected {expected}, got {got}")]
@@ -239,9 +241,7 @@ fn parse_neo4j_column(field: &str, target: Neo4jHeaderTarget) -> Result<Neo4jCol
     })
 }
 
-fn parse_neo4j_header_token(
-    token: &str,
-) -> Result<(String, Option<String>, BTreeMap<String, String>), ConvertError> {
+fn parse_neo4j_header_token(token: &str) -> Result<ParsedNeo4jHeaderToken, ConvertError> {
     let (base, options) = if let Some(open) = token.find('{') {
         let close = token.rfind('}').ok_or_else(|| {
             ConvertError::InvalidNeo4jHeader(format!("unterminated options: {token}"))

@@ -45,7 +45,7 @@ The first work must close verified audit findings. New feature expansion should 
    - Upstream: commits `20215f13` and `1837c8c7`; `pkg/config/config.go`, `cmd/nornicdb/main.go`.
    - Copper targets: [crates/config/src/lib.rs](../crates/config/src/lib.rs), [crates/server/src/lib.rs](../crates/server/src/lib.rs), [crates/copperdb/src/main.rs](../crates/copperdb/src/main.rs), and [crates/engine/src/lib.rs](../crates/engine/src/lib.rs).
    - Delivered behavior: authentication defaults on; `auth.enabled` and `COPPERDB_AUTH_ENABLED` participate in normal precedence; `--no-auth` is the only command-line bypass; HTTP, Bolt, and internal services consume the same resolved setting.
-   - Validated: config, executable startup, Bolt, server auth, and engine test suites. An isolated workspace run remains red only on unrelated server discovery and distributed-quorum tests.
+   - Validated: config, executable startup, Bolt, server auth, engine, and full workspace test suites.
 
 2. **Replace Bolt's placeholder authentication and transaction acknowledgements.**
    - Upstream: `pkg/bolt/server.go` and transaction/write tests.
@@ -97,18 +97,19 @@ The first work must close verified audit findings. New feature expansion should 
    - Copper targets: [crates/convert/src/lib.rs](../crates/convert/src/lib.rs), storage batching, indexing, and executable commands.
    - Use bounded `BufRead` pipelines, chunked fjall batches, cancellation, compressed/zip input, Neo4j typed headers, duplicate/bad-row policy, namespace targeting, schema application, index build, deterministic reports, and Neo4j-compatible CSV export.
 
-10. **Replace vector full scans with a real maintained HNSW path.**
-    - Current gap: [crates/vectorspace/src/lib.rs](../crates/vectorspace/src/lib.rs) scores and sorts every vector while reporting an HNSW metric; vector procedures also scan records.
-    - Implement a maintained CPU HNSW index, durable format/version metadata, exact fallback policy, lifecycle state, and search service ownership. Do not call a path HNSW until it performs ANN traversal.
-    - Preserve NornicDB fixes for passive reads/writes, explicit brute-force fallback, no query-triggered warming, file-backed exact candidates, and shutdown cancellation (`f065645b`, `214729d2`, `72876f17`, `31ce0546`, `ec0de01a`, `a10fe13a`, `53b4234b`, `b90574ef`, `2c27ec5f`).
+10. **Complete: replace vector full scans with a real maintained HNSW path.**
+   - Delivered behavior: engine-owned CPU HNSW uses dense normalized vectors, maintained mutation hooks, tombstones/compaction, cancellable ANN traversal, lifecycle status, checksummed greenfield persistence, direct topology restoration, and file-backed exact reranking. Exact cosine fallback normalizes once, uses SIMD scoring, and retains only bounded top-k results.
+   - Preserved NornicDB behavior for passive reads/writes, explicit exact fallback, no query-triggered warming, file-backed exact candidates, and shutdown cancellation (`f065645b`, `214729d2`, `72876f17`, `31ce0546`, `ec0de01a`, `a10fe13a`, `53b4234b`, `b90574ef`, `2c27ec5f`).
+   - Validated: deterministic lifecycle/restart/cancellation tests, production-profile 10k and 100k Criterion workloads, recall and resource gates, and correlated same-machine comparisons against current NornicDB.
 
-11. **Assemble the per-database embedding lifecycle.**
-    - Existing local GGUF and caching pieces are not yet composed into the running engine.
-    - Resolve per-database config, start bounded workers, consume the pending embedding queue, persist typed embedding state, support startup/lazy warming, expose readiness, and stop workers through lifecycle cancellation.
-    - Dynamic-library symbol failures must return typed errors instead of panicking. Backend reporting must reflect actual CPU/GPU fallback.
+11. **Complete: assemble the per-database embedding lifecycle.**
+   - Delivered behavior: per-database configuration resolves into an engine-owned runtime with bounded workers, persistent pending work, retries/backoff, cache integration, startup/lazy loading, typed embedding state, readiness/status, explicit re-embedding/cancellation, and lifecycle-governed shutdown.
+   - Dynamic-library symbol failures return typed errors, and backend status reports the actual CPU/GPU fallback path.
+   - Validated: runtime lifecycle, queue drain/retry, cache, shutdown, status, and re-embedding tests.
 
-12. **Finish semantic and hybrid search.**
-    - Current engine paths explicitly report local semantic and hybrid search as unimplemented, and HTTP remains BM25-only.
+12. **In progress: finish semantic and hybrid search.**
+   - Delivered so far: local semantic search uses compatible declared maintained node vector indexes with bounded cancellable queries, minimum-score filtering, stable-ID deduplication, and deterministic ranking. Local hybrid search independently produces bounded BM25 and vector batches and combines them through shared deterministic RRF duplicate fusion.
+   - Current gap: HTTP remains BM25-only; request index/label selection, optional query embedding, policy/decay suppression before pagination, diagnostics, caches, and production benchmarks remain incomplete.
     - Route BM25 and HNSW candidates through deterministic RRF, policy/decay filtering, hydration, pagination, and stage-level observability.
     - Keep automatic search/index/embedding work disabled by default per database. Schema-declared indexes still load, rebuild, and maintain regardless of that automatic-work gate.
 

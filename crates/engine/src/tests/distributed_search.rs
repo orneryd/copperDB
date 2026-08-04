@@ -1,6 +1,169 @@
 use super::*;
 use crate::copperdb::distributed_shortest_path_query_shape;
 use copperdb_storage::EdgeRecord;
+
+#[test]
+fn local_semantic_search_uses_compatible_maintained_node_indexes() {
+    use copperdb_storage::{
+        IndexDefinition, IndexEntityType, IndexKind, NodeRecord, StorageEngine,
+    };
+    use copperdb_topology::PlacementKey;
+
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("db");
+    let storage = StorageEngine::open(&data_dir).unwrap();
+    storage
+        .persist_index_definition(&IndexDefinition {
+            name: "document_embedding".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Document".into(),
+            properties: vec!["embedding".into()],
+            kind: IndexKind::Vector,
+        })
+        .unwrap();
+    storage
+        .persist_index_options(
+            "document_embedding",
+            &HashMap::from([(
+                "indexConfig".into(),
+                serde_json::json!({
+                    "vector.dimensions": 2,
+                    "vector.similarity_function": "cosine"
+                }),
+            )]),
+        )
+        .unwrap();
+    for (id, embedding) in [
+        ("document:a", vec![1.0, 0.0]),
+        ("document:b", vec![0.8, 0.2]),
+        ("document:c", vec![0.0, 1.0]),
+    ] {
+        storage
+            .put_node_record(&NodeRecord {
+                id: id.into(),
+                labels: vec!["Document".into()],
+                properties: BTreeMap::new(),
+                named_embeddings: BTreeMap::from([("embedding".into(), embedding)]),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+    }
+    drop(storage);
+
+    let mut config = DatabaseConfig {
+        data_dir: data_dir.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    config.runtime_config.vector_enabled = true;
+    let db = CopperDb::open(config).unwrap();
+    let batch = db
+        .search_fabric_ranked_batch_locally(
+            &PlacementKey::default_for_database("copper"),
+            &SearchQuery::Semantic {
+                vector: vec![1.0, 0.0],
+                k: 3,
+                min_score: 0.9,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(batch.source, "semantic");
+    assert_eq!(batch.hits.len(), 2);
+    assert_eq!(batch.hits[0].global_id.local_id, "document:a");
+    assert_eq!(batch.hits[0].rank, 1);
+    assert_eq!(batch.hits[0].label, "Document");
+    assert_eq!(batch.hits[1].global_id.local_id, "document:b");
+    assert!(batch.hits.iter().all(|hit| hit.score >= 0.9));
+}
+
+#[test]
+fn local_hybrid_search_fuses_duplicate_lexical_and_semantic_hits() {
+    use copperdb_storage::{
+        IndexDefinition, IndexEntityType, IndexKind, NodeRecord, StorageEngine,
+    };
+    use copperdb_topology::PlacementKey;
+
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("db");
+    let storage = StorageEngine::open(&data_dir).unwrap();
+    for definition in [
+        IndexDefinition {
+            name: "document_title".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Document".into(),
+            properties: vec!["title".into()],
+            kind: IndexKind::FullText,
+        },
+        IndexDefinition {
+            name: "document_embedding".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Document".into(),
+            properties: vec!["embedding".into()],
+            kind: IndexKind::Vector,
+        },
+    ] {
+        storage.persist_index_definition(&definition).unwrap();
+    }
+    storage
+        .persist_index_options(
+            "document_embedding",
+            &HashMap::from([(
+                "indexConfig".into(),
+                serde_json::json!({
+                    "vector.dimensions": 2,
+                    "vector.similarity_function": "cosine"
+                }),
+            )]),
+        )
+        .unwrap();
+    for (id, title, embedding) in [
+        ("document:a", "database internals", vec![1.0, 0.0]),
+        ("document:b", "graph database", vec![0.8, 0.2]),
+    ] {
+        storage
+            .put_node_record(&NodeRecord {
+                id: id.into(),
+                labels: vec!["Document".into()],
+                properties: BTreeMap::from([("title".into(), Value::String(title.into()))]),
+                named_embeddings: BTreeMap::from([("embedding".into(), embedding)]),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+    }
+    drop(storage);
+
+    let mut config = DatabaseConfig {
+        data_dir: data_dir.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    config.runtime_config.bm25_enabled = true;
+    config.runtime_config.vector_enabled = true;
+    let db = CopperDb::open(config).unwrap();
+    let batch = db
+        .search_fabric_ranked_batch_locally(
+            &PlacementKey::default_for_database("copper"),
+            &SearchQuery::Hybrid {
+                text: "graph".into(),
+                vector: vec![1.0, 0.0],
+                k: 2,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(batch.source, "hybrid");
+    assert_eq!(batch.hits.len(), 2);
+    assert_eq!(batch.hits[0].global_id.local_id, "document:b");
+    assert_eq!(batch.hits[0].rank, 1);
+    assert_eq!(batch.hits[1].global_id.local_id, "document:a");
+    assert!(batch.hits[0].score > batch.hits[1].score);
+}
+
 #[tokio::test]
 async fn engine_executes_fabric_ranked_search_with_transport() {
     use copperdb_search::{InMemorySearchTransport, RrfSearchHit};

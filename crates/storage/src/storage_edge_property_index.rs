@@ -197,11 +197,7 @@ impl StorageEngine {
             .scan_prefix(
                 edge_property_index_definition_prefix(&index.label, &index.properties).as_bytes(),
             )
-            .map(|entry| {
-                entry
-                    .map(|(key, _)| key.to_vec())
-                    .map_err(StorageError::from)
-            })
+            .map(|entry| entry.map(|(key, _)| key.to_vec()))
             .collect::<Result<Vec<_>, _>>()?;
         for key in keys {
             self.indexes.fjall_remove(key)?;

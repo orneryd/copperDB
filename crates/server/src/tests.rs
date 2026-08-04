@@ -1061,7 +1061,6 @@ async fn neo4j_commit_can_opt_into_distributed_graph_read_routing() {
                     .header("x-copperdb-distributed", "true")
                     .body(Body::from(
                         serde_json::json!({
-                            "bookmarks": [LogicalTransactionId::new(7, 41, 9).stable_id()],
                             "statements": [
                                 {
                                     "statement": "MATCH p = shortestPath((a:Node {name: 'a'})-[:LINK*]->(d:Node {name: 'd'})) RETURN length(p) AS hops, p AS shortest"
@@ -3246,16 +3245,15 @@ async fn test_discovery_returns_neo4j_required_fields() {
     }
 }
 
-/// Browser requests (Accept: text/html) get discovery JSON when no UI dist is
-/// available. Matches NornicDB: when uiHandler == nil, discovery is served to
-/// all requesters regardless of Accept header.
+/// Browser requests fall back to the embedded UI when a configured static
+/// directory does not contain an index.
 #[tokio::test]
-async fn test_discovery_served_to_browser_when_no_ui_available() {
+async fn test_embedded_ui_served_when_static_directory_has_no_index() {
     use axum::body::Body;
     use axum::http::{header, Request};
     use tower::ServiceExt;
 
-    // Use a temp static_dir that has no index.html to simulate "no UI available"
+    // A custom directory takes precedence per file, then embedded assets fill misses.
     let temp = tempfile::tempdir().unwrap();
     let mut state = AppState::default();
     state.static_dir = Some(temp.path().to_string_lossy().into_owned());
@@ -3272,13 +3270,16 @@ async fn test_discovery_served_to_browser_when_no_ui_available() {
         )
         .await
         .unwrap();
-    // No index.html means ui_available() returns false, so discovery is served.
     assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(header::CONTENT_TYPE).unwrap(),
+        "text/html; charset=utf-8"
+    );
     let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
         .unwrap();
-    let discovery: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(discovery.get("bolt_direct").is_some());
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(html.contains("<!doctype html>") || html.contains("<!DOCTYPE html>"));
 }
 
 /// Headless mode always serves discovery JSON, even to browser requests.

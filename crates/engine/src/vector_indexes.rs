@@ -150,6 +150,60 @@ impl VectorIndexManager {
         self.registry.status(name).map_err(vector_error)
     }
 
+    pub(crate) fn query_node_indexes(
+        &self,
+        cancellation: &copperdb_util::RequestCancellation,
+        query: &[f32],
+        limit: usize,
+        min_score: f32,
+    ) -> Result<Vec<(String, f32, String)>, CopperDbError> {
+        let bindings = self
+            .file_store_bindings
+            .lock()
+            .map_err(|_| CopperDbError::Config("vector index bindings lock poisoned".into()))?
+            .iter()
+            .filter(|binding| {
+                binding.entity_type == IndexEntityType::Node && binding.dimensions == query.len()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if bindings.is_empty() {
+            return Err(CopperDbError::Config(format!(
+                "no node vector index configured for {} query dimensions",
+                query.len()
+            )));
+        }
+
+        let mut best_by_id = BTreeMap::<String, (f32, String)>::new();
+        for binding in bindings {
+            let (matches, _) = self
+                .query(cancellation, &binding.name, query, limit)
+                .map_err(vector_error)?;
+            for (id, score) in matches {
+                if score < min_score {
+                    continue;
+                }
+                let replace = best_by_id
+                    .get(&id)
+                    .is_none_or(|(current_score, current_label)| {
+                        score > *current_score
+                            || (score == *current_score && binding.label < *current_label)
+                    });
+                if replace {
+                    best_by_id.insert(id, (score, binding.label.clone()));
+                }
+            }
+        }
+
+        let mut matches = best_by_id
+            .into_iter()
+            .map(|(id, (score, label))| (id, score, label))
+            .collect::<Vec<_>>();
+        matches.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+        matches.truncate(limit);
+        Ok(matches)
+    }
+
     pub(crate) fn compact(
         &self,
         storage: &StorageEngine,

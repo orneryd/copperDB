@@ -1,6 +1,6 @@
 # 12: Semantic And Hybrid Search
 
-Status: planned. Priority: P1. Owners: `search`, `vectorspace`, `engine`, `server`, `knowledgepolicy`.
+Status: in progress. Priority: P1. Owners: `search`, `vectorspace`, `engine`, `server`, `knowledgepolicy`.
 
 ## Objective
 
@@ -25,6 +25,14 @@ Requests identify database, mode (`lexical`, `semantic`, `hybrid`), text or vect
 3. Implement hybrid composition using existing RRF primitives and strict duplicate handling.
 4. Replace the server's BM25-only branch with the engine API; maintain HTTP/embedded parity.
 5. Add parsed/query result caches keyed by data/index generation and stage-level observability.
+
+## Progress
+
+- Complete: maintained vector indexes expose readiness, generation, strategy, dimensions, cancellation, file-backed exact reranking, and bounded ANN queries through the engine-owned manager.
+- Complete: local semantic search queries every compatible declared node vector index, deduplicates stable entity IDs, applies minimum score before pagination, and returns deterministic ranked batches without record scans.
+- Complete: local hybrid search produces bounded lexical and semantic batches independently and fuses duplicates through the shared deterministic RRF implementation.
+- Validated: focused engine regressions cover compatible-index selection, semantic ranking and minimum score, stable labels/IDs, and hybrid duplicate fusion; the engine suite passes 103/103, warning-denied Clippy passes for all engine targets, and workspace formatting is clean.
+- Remaining: optional text-to-query embedding, explicit request index/label selection, policy/decay suppression before pagination, server HTTP parity, response diagnostics, caches, cancellation/deadline regressions, restart coverage, and production benchmarks.
 
 ## Tests And Performance
 

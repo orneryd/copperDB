@@ -8,6 +8,8 @@ use copperdb_adminimport::{
 use copperdb_storage::StorageEngine;
 use copperdb_util::RequestCancellation;
 
+type AdminResult<T> = Result<T, Box<AdminImportError>>;
+
 #[derive(Debug, Parser)]
 #[command(name = "copperdb-admin")]
 #[command(about = "Offline administrative commands for copperdb")]
@@ -106,7 +108,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<(), AdminImportError> {
+fn run(cli: Cli) -> AdminResult<()> {
     match cli.command {
         Command::Database {
             command:
@@ -133,7 +135,7 @@ fn run(cli: Cli) -> Result<(), AdminImportError> {
         } => {
             let source = args.source.clone();
             let options = export_options_from_args(args)?;
-            let engine = StorageEngine::open(source)?;
+            let engine = StorageEngine::open(source).map_err(AdminImportError::from)?;
             let cancellation = RequestCancellation::new();
             let report = export_neo4j_csv(&engine, &options, &cancellation)?;
             println!(
@@ -147,7 +149,7 @@ fn run(cli: Cli) -> Result<(), AdminImportError> {
     }
 }
 
-fn options_from_args(args: FullImportArgs) -> Result<ImportOptions, AdminImportError> {
+fn options_from_args(args: FullImportArgs) -> AdminResult<ImportOptions> {
     Ok(ImportOptions {
         database_name: args.database,
         node_sources: args.nodes,
@@ -166,9 +168,7 @@ fn options_from_args(args: FullImportArgs) -> Result<ImportOptions, AdminImportE
     })
 }
 
-fn export_options_from_args(
-    args: Neo4jCsvExportArgs,
-) -> Result<Neo4jCsvExportOptions, AdminImportError> {
+fn export_options_from_args(args: Neo4jCsvExportArgs) -> AdminResult<Neo4jCsvExportOptions> {
     Ok(Neo4jCsvExportOptions {
         output_directory: args.output,
         delimiter: ascii_byte(args.delimiter)?,
@@ -178,9 +178,12 @@ fn export_options_from_args(
     })
 }
 
-fn ascii_byte(value: char) -> Result<u8, AdminImportError> {
-    u8::try_from(value).map_err(|_| AdminImportError::UnsupportedSourceFormat {
-        path: PathBuf::from(format!("non-ASCII CSV delimiter {value:?}")),
+fn ascii_byte(value: char) -> AdminResult<u8> {
+    u8::try_from(value).map_err(|_| {
+        AdminImportError::UnsupportedSourceFormat {
+            path: PathBuf::from(format!("non-ASCII CSV delimiter {value:?}")),
+        }
+        .into()
     })
 }
 

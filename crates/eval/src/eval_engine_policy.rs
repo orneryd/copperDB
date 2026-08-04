@@ -1548,7 +1548,7 @@ impl EvalEngine {
                     "node".to_string(),
                     Value::Object(node_record_to_props(&node).into_iter().collect()),
                 );
-                row.insert("score".to_string(), Value::from(score as f64));
+                row.insert("score".to_string(), Value::from(score));
                 Ok(row)
             })
             .collect::<Result<Vec<_>, EvalError>>()?;
@@ -1700,7 +1700,7 @@ impl EvalEngine {
                     "relationship".to_string(),
                     Value::Object(props.into_iter().collect()),
                 );
-                row.insert("score".to_string(), Value::from(score as f64));
+                row.insert("score".to_string(), Value::from(score));
                 Ok(row)
             })
             .collect::<Result<Vec<_>, EvalError>>()?;

@@ -1661,9 +1661,9 @@
         let result = engine
             .execute(
                 &parser
-                    .parse(&format!(
-                        "MERGE (n:M {{uuid: $d.uuid}}) SET n:Extra SET n = $d RETURN properties(n) AS p, labels(n) AS labels"
-                    ))
+                    .parse(
+                        "MERGE (n:M {uuid: $d.uuid}) SET n:Extra SET n = $d RETURN properties(n) AS p, labels(n) AS labels",
+                    )
                     .unwrap(),
                 &params,
             )
@@ -1704,9 +1704,9 @@
         let result = engine
             .execute(
                 &parser
-                    .parse(&format!(
-                        "MERGE (n:M {{uuid: $d.uuid}}) SET n = $d SET n:Extra RETURN properties(n) AS p, labels(n) AS labels"
-                    ))
+                    .parse(
+                        "MERGE (n:M {uuid: $d.uuid}) SET n = $d SET n:Extra RETURN properties(n) AS p, labels(n) AS labels",
+                    )
                     .unwrap(),
                 &params,
             )
@@ -1740,9 +1740,9 @@
         let result = engine
             .execute(
                 &parser
-                    .parse(&format!(
-                        "MERGE (n:M {{uuid: $d.uuid}}) SET n:$(d.labels) SET n = $d RETURN properties(n) AS p, labels(n) AS labels"
-                    ))
+                    .parse(
+                        "MERGE (n:M {uuid: $d.uuid}) SET n:$(d.labels) SET n = $d RETURN properties(n) AS p, labels(n) AS labels",
+                    )
                     .unwrap(),
                 &params,
             )
@@ -1840,7 +1840,7 @@
             let name = row.get("p.name").and_then(Value::as_str).unwrap();
             let cat = row.get("category");
             if name == "Bob" {
-                assert!(cat.map_or(true, |v| v.is_null()), "Bob should be null");
+                assert!(cat.is_none_or(|v| v.is_null()), "Bob should be null");
             } else {
                 assert!(cat.and_then(Value::as_str).is_some(), "{name} should have category");
             }
@@ -3386,7 +3386,7 @@
             )
             .unwrap();
         let w = result.rows[0].get("w").and_then(Value::as_i64).unwrap();
-        assert!(w >= 1 && w <= 2, "week should be 1 or 2, got {w}");
+        assert!((1..=2).contains(&w), "week should be 1 or 2, got {w}");
 
         // date.dayOfWeek (2024-01-01 is Monday)
         let result = engine
@@ -3647,7 +3647,7 @@
                 &HashMap::new(),
             )
             .unwrap();
-        assert!(result.rows.len() >= 1);
+        assert!(!result.rows.is_empty());
     }
 
     /// Tests temporal $param round-trip: datetime string survives CREATE + READ.

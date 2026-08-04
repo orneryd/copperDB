@@ -800,7 +800,6 @@ impl EvalEngine {
                     result_rows = transaction
                         .index_definitions_with_writes()
                         .iter()
-                        .cloned()
                         .filter(|index| match show.kind {
                             Some(copperdb_cypher::IndexKind::Range) => {
                                 index.kind == copperdb_indexing::CatalogIndexKind::Range
@@ -816,6 +815,7 @@ impl EvalEngine {
                             }
                             None => true,
                         })
+                        .cloned()
                         .map(|index| {
                             let mut row = Row::new();
                             row.insert("name".to_string(), Value::String(index.name));
@@ -1558,7 +1558,7 @@ impl EvalEngine {
             }
             for edge in transaction.get_adjacent_edges(
                 &current_id,
-                direction.clone(),
+                direction,
                 edge_pattern.rel_type.as_deref(),
             )? {
                 if !edge_matches_pattern(&edge, &expected_edge) {
@@ -3458,7 +3458,7 @@ impl EvalEngine {
         // Full sequential scan is fastest for LSM trees — avoids per-edge
         // random lookups that index-based approaches would incur.
         let edge_count = self.storage.bfs_stream_edges(|edge| {
-            if !rel_types.is_empty() && !rel_types.iter().any(|t| *t == edge.edge_type) {
+            if !rel_types.is_empty() && !rel_types.contains(&edge.edge_type) {
                 return Ok(());
             }
             if !self
@@ -3654,7 +3654,7 @@ impl EvalEngine {
             let edges = neighbors.unwrap_or(&empty);
 
             for edge in edges {
-                let next_id = related_node_id(&current_id, &edge, direction).map(str::to_string);
+                let next_id = related_node_id(&current_id, edge, direction).map(str::to_string);
 
                 let Some(next_id) = next_id else {
                     continue;
@@ -3777,7 +3777,7 @@ impl EvalEngine {
                 let col = column_name(item);
                 let val = self.evaluate_return_expr_for_path(
                     &item.expression,
-                    &path,
+                    path,
                     &node_vals,
                     &edge_vals,
                     row.clone(),
@@ -3808,10 +3808,8 @@ impl EvalEngine {
         match expr {
             // length(p) → hops
             Expression::FunctionCall { name, args, .. } if name.eq_ignore_ascii_case("length") => {
-                if let Some(arg) = args.first() {
-                    if let Expression::Variable(_) = arg {
-                        return Ok(Value::from(path.hops as i64));
-                    }
+                if let Some(Expression::Variable(_)) = args.first() {
+                    return Ok(Value::from(path.hops as i64));
                 }
                 Ok(Value::from(path.hops as i64))
             }
