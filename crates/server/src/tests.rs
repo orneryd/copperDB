@@ -98,10 +98,38 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
         .put_node_record(&NodeRecord {
             id: "document:graph".into(),
             labels: vec!["Document".into()],
-            properties: BTreeMap::from([(
-                "title".into(),
-                serde_json::Value::String("graph database internals".into()),
-            )]),
+            properties: BTreeMap::from([
+                (
+                    "title".into(),
+                    serde_json::Value::String("graph database internals".into()),
+                ),
+                (
+                    "collection".into(),
+                    serde_json::Value::String("keep".into()),
+                ),
+            ]),
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        })
+        .unwrap();
+    engine
+        .storage()
+        .put_node_record(&NodeRecord {
+            id: "document:unrelated".into(),
+            labels: vec!["Document".into()],
+            properties: BTreeMap::from([
+                (
+                    "title".into(),
+                    serde_json::Value::String("graph graph graph graph".into()),
+                ),
+                (
+                    "collection".into(),
+                    serde_json::Value::String("discard".into()),
+                ),
+            ]),
             named_embeddings: BTreeMap::new(),
             chunk_embeddings: Vec::new(),
             embed_meta: Default::default(),
@@ -142,7 +170,8 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
                         "database": "copper",
                         "query": "graph",
                         "labels": ["Document"],
-                        "limit": 5
+                        "limit": 1,
+                        "filters": {"collection": ["keep"]}
                     })
                     .to_string(),
                 ))
@@ -157,6 +186,7 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
         .unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(payload.is_array());
+    assert_eq!(payload.as_array().unwrap().len(), 1);
     assert_eq!(payload[0]["node"]["id"], "document:graph");
     assert_eq!(payload[0]["node"]["labels"][0], "Document");
     assert_eq!(payload[0]["vector_rank"], 0);

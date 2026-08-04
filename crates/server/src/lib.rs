@@ -1298,15 +1298,6 @@ async fn search_handler(
     if let Err(status) = authorize_database_access(&state, &headers, &database, false) {
         return status.into_response();
     }
-    if !request.filters.is_empty() {
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(serde_json::json!({
-                "error": "search property filters are not implemented"
-            })),
-        )
-            .into_response();
-    }
     let limit = request.limit.max(1);
 
     let engine = match open_engine(&state, &database) {
@@ -1447,6 +1438,7 @@ async fn search_handler(
                 &placement,
                 &query,
                 &request.labels,
+                &request.filters,
             )
         })
         .collect::<Result<Vec<_>, _>>(),
@@ -1456,6 +1448,7 @@ async fn search_handler(
                 &placement,
                 &query,
                 &request.labels,
+                &request.filters,
             )
             .map(|batch| vec![batch]),
     };

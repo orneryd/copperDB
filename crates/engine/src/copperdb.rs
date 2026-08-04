@@ -161,6 +161,7 @@ impl CopperDb {
             placement,
             query,
             &[],
+            &BTreeMap::new(),
         )
     }
 
@@ -170,6 +171,7 @@ impl CopperDb {
         placement: &PlacementKey,
         query: &SearchQuery,
         labels: &[String],
+        filters: &BTreeMap<String, Vec<String>>,
     ) -> Result<RrfSearchBatch, CopperDbError> {
         self.ensure_ranked_search_query_enabled(query)?;
 
@@ -190,6 +192,7 @@ impl CopperDb {
                 if !labels.is_empty() {
                     search_labels.retain(|label| labels.contains(label));
                 }
+                let candidate_limit = search_candidate_limit(*limit);
                 let mut hits = Vec::new();
 
                 for label in search_labels {
@@ -204,9 +207,12 @@ impl CopperDb {
                         &label,
                         &matched_properties,
                         query,
-                        *limit,
+                        candidate_limit,
                     )? {
                         let (node, score) = result;
+                        if !node_matches_search_filters(&node, filters) {
+                            continue;
+                        }
                         hits.push(RrfSearchHit {
                             global_id: FabricGlobalId::new(
                                 placement.clone(),
@@ -249,12 +255,20 @@ impl CopperDb {
                 let matches = self.vector_indexes.query_node_indexes(
                     request_context.cancellation(),
                     vector,
-                    *k,
+                    search_candidate_limit(*k),
                     *min_score,
                     labels,
                 )?;
                 let hits = matches
                     .into_iter()
+                    .filter(|(id, _, _)| {
+                        self.storage
+                            .get_node_record(id)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|node| node_matches_search_filters(&node, filters))
+                    })
+                    .take(*k)
                     .enumerate()
                     .map(|(index, (id, score, label))| RrfSearchHit {
                         global_id: FabricGlobalId::new(placement.clone(), "node", id),
@@ -282,6 +296,7 @@ impl CopperDb {
                         limit: *k,
                     },
                     labels,
+                    filters,
                 )?;
                 let semantic = self.search_fabric_ranked_batch_locally_scoped_with_context(
                     request_context,
@@ -292,6 +307,7 @@ impl CopperDb {
                         min_score: f32::NEG_INFINITY,
                     },
                     labels,
+                    filters,
                 )?;
                 let outcome =
                     merge_rrf_search_batches(vec![lexical, semantic], RrfConfig::new(60.0, *k));
@@ -621,6 +637,34 @@ fn matched_fulltext_properties(
         }
     }
     properties.into_iter().collect()
+}
+
+const MAX_SEARCH_CANDIDATES: usize = 5_000;
+
+fn search_candidate_limit(limit: usize) -> usize {
+    limit.saturating_mul(10).clamp(50, MAX_SEARCH_CANDIDATES)
+}
+
+fn node_matches_search_filters(node: &NodeRecord, filters: &BTreeMap<String, Vec<String>>) -> bool {
+    filters.iter().all(|(property, values)| {
+        values.is_empty()
+            || node
+                .properties
+                .get(property)
+                .is_some_and(|value| search_filter_value_matches(value, values))
+    })
+}
+
+fn search_filter_value_matches(value: &Value, expected: &[String]) -> bool {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(|value| search_filter_value_matches(value, expected)),
+        Value::String(value) => expected.iter().any(|candidate| candidate == value),
+        value => expected
+            .iter()
+            .any(|candidate| candidate == &value.to_string()),
+    }
 }
 
 fn build_fulltext_snippet(node: &NodeRecord, properties: &[String]) -> Option<String> {
