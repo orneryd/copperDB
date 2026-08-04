@@ -284,6 +284,81 @@ fn local_fulltext_search_suppresses_decayed_candidates_before_limit() {
     assert_eq!(batch.hits[0].rank, 1);
 }
 
+#[test]
+fn local_fulltext_search_suppresses_restricted_labels_before_limit() {
+    use copperdb_compliance::{ComplianceControl, CompliancePolicy};
+    use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind, NodeRecord};
+    use copperdb_topology::PlacementKey;
+    use copperdb_util::RequestContext;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = DatabaseConfig {
+        data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    config.runtime_config.bm25_enabled = true;
+    let db = CopperDb::open(config).unwrap();
+    db.compliance_manager()
+        .add_policy(CompliancePolicy::new(
+            "patient-label",
+            "Patient Label",
+            ComplianceControl::RestrictLabel {
+                label: "Patient".into(),
+                allowed_roles: vec!["doctor".into()],
+            },
+        ))
+        .unwrap();
+    for label in ["Document", "Patient"] {
+        db.storage()
+            .persist_index_definition(&IndexDefinition {
+                name: format!("{label}_title"),
+                entity_type: IndexEntityType::Node,
+                label: label.into(),
+                properties: vec!["title".into()],
+                kind: IndexKind::FullText,
+            })
+            .unwrap();
+    }
+    for (id, label, title) in [
+        ("patient:alice", "Patient", "graph graph graph graph"),
+        ("document:graph", "Document", "graph"),
+    ] {
+        db.storage()
+            .put_node_record(&NodeRecord {
+                id: id.into(),
+                labels: vec![label.into()],
+                properties: BTreeMap::from([("title".into(), Value::String(title.into()))]),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+    }
+
+    let request_context = RequestContext::detached();
+    let reader_roles = vec!["reader".into()];
+    let batch = db
+        .search_fabric_ranked_batch_locally_scoped_with_context_and_roles(
+            &request_context,
+            &PlacementKey::default_for_database("copper"),
+            &SearchQuery::FullText {
+                query: "graph".into(),
+                fields: Vec::new(),
+                limit: 1,
+            },
+            &[],
+            &BTreeMap::new(),
+            &reader_roles,
+        )
+        .unwrap();
+
+    assert_eq!(batch.hits.len(), 1);
+    assert_eq!(batch.hits[0].global_id.local_id, "document:graph");
+    assert_eq!(batch.hits[0].rank, 1);
+}
+
 #[tokio::test]
 async fn engine_executes_fabric_ranked_search_with_transport() {
     use copperdb_search::{InMemorySearchTransport, RrfSearchHit};

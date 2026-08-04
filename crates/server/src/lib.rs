@@ -403,8 +403,17 @@ fn forwarded_caller_claims(
     database: &str,
     write: bool,
 ) -> Result<(), GrpcError> {
+    forwarded_caller_roles(state, caller_auth_token, database, write).map(|_| ())
+}
+
+fn forwarded_caller_roles(
+    state: &AppState,
+    caller_auth_token: Option<&str>,
+    database: &str,
+    write: bool,
+) -> Result<Vec<String>, GrpcError> {
     if !state.auth.security_enabled {
-        return Ok(());
+        return Ok(vec!["admin".into()]);
     }
     let token = caller_auth_token.ok_or_else(|| {
         GrpcError::Unauthenticated("missing forwarded caller authorization token".into())
@@ -422,7 +431,7 @@ fn forwarded_caller_claims(
         }
         other => GrpcError::Transport(format!("unexpected authorization status {other}")),
     })?;
-    Ok(())
+    Ok(claims.roles)
 }
 
 impl GrpcAuthValidator for UnifiedClusterAuthValidator {
@@ -456,7 +465,7 @@ impl RemoteRankedSearchClient for LocalEngineRankedSearchHandler {
         &self,
         request: RemoteRankedSearchRequest,
     ) -> Result<copperdb_search::RrfSearchBatch, GrpcError> {
-        forwarded_caller_claims(
+        let roles = forwarded_caller_roles(
             &self.state,
             request.caller_auth_token.as_deref(),
             &request.placement.database,
@@ -475,10 +484,13 @@ impl RemoteRankedSearchClient for LocalEngineRankedSearchHandler {
         tokio::task::spawn_blocking(move || {
             let engine = open_engine(&state, &database).map_err(GrpcError::Transport)?;
             engine
-                .search_fabric_ranked_batch_locally_with_context(
+                .search_fabric_ranked_batch_locally_scoped_with_context_and_roles(
                     &request_context,
                     &placement,
                     &query,
+                    &[],
+                    &BTreeMap::new(),
+                    &roles,
                 )
                 .map_err(|error| GrpcError::Transport(error.to_string()))
         })
@@ -1295,9 +1307,11 @@ async fn search_handler(
     let database = path_database
         .or_else(|| (!request.database.is_empty()).then_some(request.database))
         .unwrap_or_else(|| state.db_name.clone());
-    if let Err(status) = authorize_database_access(&state, &headers, &database, false) {
-        return status.into_response();
-    }
+    let claims = match authorize_database_access(&state, &headers, &database, false) {
+        Ok(claims) => claims,
+        Err(status) => return status.into_response(),
+    };
+    let roles = roles_for_claims(claims.as_ref());
     let limit = request.limit.max(1);
 
     let engine = match open_engine(&state, &database) {
@@ -1433,22 +1447,24 @@ async fn search_handler(
         ]
         .into_iter()
         .map(|query| {
-            engine.search_fabric_ranked_batch_locally_scoped_with_context(
+            engine.search_fabric_ranked_batch_locally_scoped_with_context_and_roles(
                 &request_context,
                 &placement,
                 &query,
                 &request.labels,
                 &request.filters,
+                &roles,
             )
         })
         .collect::<Result<Vec<_>, _>>(),
         query => engine
-            .search_fabric_ranked_batch_locally_scoped_with_context(
+            .search_fabric_ranked_batch_locally_scoped_with_context_and_roles(
                 &request_context,
                 &placement,
                 &query,
                 &request.labels,
                 &request.filters,
+                &roles,
             )
             .map(|batch| vec![batch]),
     };

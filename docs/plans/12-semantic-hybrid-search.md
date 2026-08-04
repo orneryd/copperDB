@@ -36,9 +36,10 @@ Requests identify database, mode (`lexical`, `semantic`, `hybrid`), text or vect
 - Complete: `POST /copperdb/search` is the CopperDB-branded equivalent of NornicDB's extension endpoint, and `POST /db/{database}/search` is the CopperDB database-scoped form. Both use the engine-owned pipeline and return the canonical node/score/RRF-rank array rather than a custom diagnostics envelope.
 - Complete: property filters use NornicDB semantics (AND across populated keys, OR within values, empty values ignored, scalar/array string matching) and restrict bounded lexical/vector candidates before source ranks, RRF, and final pagination.
 - Complete: knowledge-policy visibility resolves from the durable catalog and suppresses lexical/vector candidates before source ranks, RRF, and final pagination, honoring created, version, last-accessed, and custom timestamp anchors plus compiled promotion predicates.
+- Complete: caller-specific compliance checks deny explicitly requested governed labels/properties and suppress restricted candidate labels before ranks and pagination. Direct HTTP derives roles from its authenticated caller, while local ranked-search RPC validates the forwarded caller token to derive the same roles.
 - Validated: focused engine regressions cover compatible-index selection, semantic ranking and minimum score, stable labels/IDs, and hybrid duplicate fusion; the engine suite passes 103/103, warning-denied Clippy passes for all engine targets, and workspace formatting is clean.
 - Validated: server regression verifies a higher-ranked nonmatching lexical candidate is excluded before `limit: 1`, leaving the lower-ranked matching result through the canonical CopperDB routes.
-- Remaining: explicit request index/label selection, caller-specific compliance suppression before pagination, complete server HTTP parity, response diagnostics, caches, cancellation/deadline regressions, restart coverage, and production benchmarks.
+- Remaining: explicit request index selection, complete server HTTP parity, response diagnostics, caches, cancellation/deadline regressions, restart coverage, and production benchmarks. copperDB benchmarks are to be compared to upstream NornicDB correlated benchmarks and compared. Performance optimizations to be applied if copperDB is slower. 
 
 ## Tests And Performance
 

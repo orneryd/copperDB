@@ -173,7 +173,32 @@ impl CopperDb {
         labels: &[String],
         filters: &BTreeMap<String, Vec<String>>,
     ) -> Result<RrfSearchBatch, CopperDbError> {
+        self.search_fabric_ranked_batch_locally_scoped_with_context_and_roles(
+            request_context,
+            placement,
+            query,
+            labels,
+            filters,
+            &["admin".to_string()],
+        )
+    }
+
+    pub fn search_fabric_ranked_batch_locally_scoped_with_context_and_roles(
+        &self,
+        request_context: &RequestContext,
+        placement: &PlacementKey,
+        query: &SearchQuery,
+        labels: &[String],
+        filters: &BTreeMap<String, Vec<String>>,
+        roles: &[String],
+    ) -> Result<RrfSearchBatch, CopperDbError> {
         self.ensure_ranked_search_query_enabled(query)?;
+        for label in labels {
+            self.compliance.check_label_access(label, roles)?;
+        }
+        for property in filters.keys() {
+            self.compliance.check_property_access(property, roles)?;
+        }
 
         match query {
             SearchQuery::FullText {
@@ -202,6 +227,12 @@ impl CopperDb {
                     if matched_properties.is_empty() {
                         continue;
                     }
+                    if self.compliance.check_label_access(&label, roles).is_err() {
+                        continue;
+                    }
+                    for property in &matched_properties {
+                        self.compliance.check_property_access(property, roles)?;
+                    }
 
                     for result in self.storage.search_fulltext_nodes_by_properties(
                         &label,
@@ -211,7 +242,7 @@ impl CopperDb {
                     )? {
                         let (node, score) = result;
                         if !node_matches_search_filters(&node, filters)
-                            || !self.node_is_search_visible(&node)?
+                            || !self.node_is_search_visible(&node, roles)?
                         {
                             continue;
                         }
@@ -267,7 +298,7 @@ impl CopperDb {
                         continue;
                     };
                     if !node_matches_search_filters(&node, filters)
-                        || !self.node_is_search_visible(&node)?
+                        || !self.node_is_search_visible(&node, roles)?
                     {
                         continue;
                     }
@@ -291,28 +322,32 @@ impl CopperDb {
                 })
             }
             SearchQuery::Hybrid { text, vector, k } => {
-                let lexical = self.search_fabric_ranked_batch_locally_scoped_with_context(
-                    request_context,
-                    placement,
-                    &SearchQuery::FullText {
-                        query: text.clone(),
-                        fields: Vec::new(),
-                        limit: *k,
-                    },
-                    labels,
-                    filters,
-                )?;
-                let semantic = self.search_fabric_ranked_batch_locally_scoped_with_context(
-                    request_context,
-                    placement,
-                    &SearchQuery::Semantic {
-                        vector: vector.clone(),
-                        k: *k,
-                        min_score: f32::NEG_INFINITY,
-                    },
-                    labels,
-                    filters,
-                )?;
+                let lexical = self
+                    .search_fabric_ranked_batch_locally_scoped_with_context_and_roles(
+                        request_context,
+                        placement,
+                        &SearchQuery::FullText {
+                            query: text.clone(),
+                            fields: Vec::new(),
+                            limit: *k,
+                        },
+                        labels,
+                        filters,
+                        roles,
+                    )?;
+                let semantic = self
+                    .search_fabric_ranked_batch_locally_scoped_with_context_and_roles(
+                        request_context,
+                        placement,
+                        &SearchQuery::Semantic {
+                            vector: vector.clone(),
+                            k: *k,
+                            min_score: f32::NEG_INFINITY,
+                        },
+                        labels,
+                        filters,
+                        roles,
+                    )?;
                 let outcome =
                     merge_rrf_search_batches(vec![lexical, semantic], RrfConfig::new(60.0, *k));
                 let hits = outcome
@@ -338,7 +373,16 @@ impl CopperDb {
         }
     }
 
-    fn node_is_search_visible(&self, node: &NodeRecord) -> Result<bool, CopperDbError> {
+    fn node_is_search_visible(
+        &self,
+        node: &NodeRecord,
+        roles: &[String],
+    ) -> Result<bool, CopperDbError> {
+        for label in &node.labels {
+            if self.compliance.check_label_access(label, roles).is_err() {
+                return Ok(false);
+            }
+        }
         let access_metadata = self
             .storage
             .get_knowledge_policy_access_metadata(&node.id)?;
