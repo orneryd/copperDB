@@ -192,6 +192,28 @@ impl CopperDb {
         filters: &BTreeMap<String, Vec<String>>,
         roles: &[String],
     ) -> Result<RrfSearchBatch, CopperDbError> {
+        self.search_fabric_ranked_batch_locally_scoped_with_context_and_roles_and_indexes(
+            request_context,
+            placement,
+            query,
+            labels,
+            filters,
+            roles,
+            &[],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn search_fabric_ranked_batch_locally_scoped_with_context_and_roles_and_indexes(
+        &self,
+        request_context: &RequestContext,
+        placement: &PlacementKey,
+        query: &SearchQuery,
+        labels: &[String],
+        filters: &BTreeMap<String, Vec<String>>,
+        roles: &[String],
+        index_names: &[String],
+    ) -> Result<RrfSearchBatch, CopperDbError> {
         self.ensure_ranked_search_query_enabled(query)?;
         for label in labels {
             self.compliance.check_label_access(label, roles)?;
@@ -206,7 +228,7 @@ impl CopperDb {
                 fields,
                 limit,
             } => {
-                let index_definitions = self.storage.load_index_definitions()?;
+                let index_definitions = self.selected_search_indexes(index_names)?;
                 let mut search_labels = Self::local_ranked_search_labels(
                     self.load_fabric_database(&placement.tenant, &placement.database)?
                         .as_ref(),
@@ -291,6 +313,7 @@ impl CopperDb {
                     search_candidate_limit(*k),
                     *min_score,
                     labels,
+                    index_names,
                 )?;
                 let mut hits = Vec::new();
                 for (id, score, label) in matches {
@@ -323,7 +346,7 @@ impl CopperDb {
             }
             SearchQuery::Hybrid { text, vector, k } => {
                 let lexical = self
-                    .search_fabric_ranked_batch_locally_scoped_with_context_and_roles(
+                    .search_fabric_ranked_batch_locally_scoped_with_context_and_roles_and_indexes(
                         request_context,
                         placement,
                         &SearchQuery::FullText {
@@ -334,9 +357,10 @@ impl CopperDb {
                         labels,
                         filters,
                         roles,
+                        index_names,
                     )?;
                 let semantic = self
-                    .search_fabric_ranked_batch_locally_scoped_with_context_and_roles(
+                    .search_fabric_ranked_batch_locally_scoped_with_context_and_roles_and_indexes(
                         request_context,
                         placement,
                         &SearchQuery::Semantic {
@@ -347,6 +371,7 @@ impl CopperDb {
                         labels,
                         filters,
                         roles,
+                        index_names,
                     )?;
                 let outcome =
                     merge_rrf_search_batches(vec![lexical, semantic], RrfConfig::new(60.0, *k));
@@ -371,6 +396,31 @@ impl CopperDb {
                 })
             }
         }
+    }
+
+    fn selected_search_indexes(
+        &self,
+        index_names: &[String],
+    ) -> Result<Vec<copperdb_storage::IndexDefinition>, CopperDbError> {
+        let definitions = self.storage.load_index_definitions()?;
+        if index_names.is_empty() {
+            return Ok(definitions);
+        }
+        let selected = definitions
+            .into_iter()
+            .filter(|definition| index_names.contains(&definition.name))
+            .collect::<Vec<_>>();
+        if selected.len() != index_names.len()
+            || selected.iter().any(|definition| {
+                definition.entity_type != IndexEntityType::Node
+                    || !matches!(definition.kind, IndexKind::FullText | IndexKind::Vector)
+            })
+        {
+            return Err(CopperDbError::Config(
+                "search indexes must name declared node FULLTEXT or VECTOR indexes".into(),
+            ));
+        }
+        Ok(selected)
     }
 
     fn node_is_search_visible(

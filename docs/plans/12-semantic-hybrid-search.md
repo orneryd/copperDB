@@ -37,9 +37,10 @@ Requests identify database, mode (`lexical`, `semantic`, `hybrid`), text or vect
 - Complete: property filters use NornicDB semantics (AND across populated keys, OR within values, empty values ignored, scalar/array string matching) and restrict bounded lexical/vector candidates before source ranks, RRF, and final pagination.
 - Complete: knowledge-policy visibility resolves from the durable catalog and suppresses lexical/vector candidates before source ranks, RRF, and final pagination, honoring created, version, last-accessed, and custom timestamp anchors plus compiled promotion predicates.
 - Complete: caller-specific compliance checks deny explicitly requested governed labels/properties and suppress restricted candidate labels before ranks and pagination. Direct HTTP derives roles from its authenticated caller, while local ranked-search RPC validates the forwarded caller token to derive the same roles.
+- Complete: search requests can select declared node FULLTEXT and VECTOR indexes through `indexes`; unknown or non-search selections fail validation, and the engine applies the same selected names to lexical, semantic, and hybrid candidate production.
 - Validated: focused engine regressions cover compatible-index selection, semantic ranking and minimum score, stable labels/IDs, and hybrid duplicate fusion; the engine suite passes 103/103, warning-denied Clippy passes for all engine targets, and workspace formatting is clean.
 - Validated: server regression verifies a higher-ranked nonmatching lexical candidate is excluded before `limit: 1`, leaving the lower-ranked matching result through the canonical CopperDB routes.
-- Remaining: explicit request index selection, complete server HTTP parity, response diagnostics, caches, cancellation/deadline regressions, restart coverage, and production benchmarks. copperDB benchmarks are to be compared to upstream NornicDB correlated benchmarks and compared. Performance optimizations to be applied if copperDB is slower. 
+- Remaining: complete server HTTP parity, response diagnostics, caches, cancellation/deadline regressions, restart coverage, and production benchmarks. CopperDB benchmarks must use production-mode artifacts, be correlated and compared with upstream NornicDB benchmarks, and receive performance optimization when CopperDB is slower.
 
 ## Tests And Performance
 

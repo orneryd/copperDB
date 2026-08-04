@@ -87,6 +87,13 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
             properties: vec!["embedding".into()],
             kind: IndexKind::Vector,
         },
+        IndexDefinition {
+            name: "document_summary".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Document".into(),
+            properties: vec!["summary".into()],
+            kind: IndexKind::FullText,
+        },
     ] {
         engine
             .storage()
@@ -106,6 +113,28 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
                 (
                     "collection".into(),
                     serde_json::Value::String("keep".into()),
+                ),
+            ]),
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        })
+        .unwrap();
+    engine
+        .storage()
+        .put_node_record(&NodeRecord {
+            id: "document:summary".into(),
+            labels: vec!["Document".into()],
+            properties: BTreeMap::from([
+                (
+                    "title".into(),
+                    serde_json::Value::String("unrelated title".into()),
+                ),
+                (
+                    "summary".into(),
+                    serde_json::Value::String("graph graph graph graph".into()),
                 ),
             ]),
             named_embeddings: BTreeMap::new(),
@@ -159,7 +188,7 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
 
     assert_eq!(database_path_response.status(), StatusCode::OK);
 
-    let response = build_router(Arc::new(state))
+    let response = build_router(Arc::new(state.clone()))
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -191,6 +220,34 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
     assert_eq!(payload[0]["node"]["labels"][0], "Document");
     assert_eq!(payload[0]["vector_rank"], 0);
     assert_eq!(payload[0]["bm25_rank"], 1);
+
+    let selected_index_response = build_router(Arc::new(state))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/copperdb/search")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "database": "copper",
+                        "query": "graph",
+                        "indexes": ["document_summary"],
+                        "limit": 1
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(selected_index_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(selected_index_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload.as_array().unwrap().len(), 1);
+    assert_eq!(payload[0]["node"]["id"], "document:summary");
 }
 
 #[test]

@@ -1274,6 +1274,8 @@ struct SearchRequest {
     #[serde(default)]
     labels: Vec<String>,
     #[serde(default)]
+    indexes: Vec<String>,
+    #[serde(default)]
     limit: usize,
     #[serde(default)]
     filters: BTreeMap<String, Vec<String>>,
@@ -1334,6 +1336,32 @@ async fn search_handler(
             )
                 .into_response();
         }
+    };
+    let index_defs = if request.indexes.is_empty() {
+        index_defs
+    } else {
+        let selected = index_defs
+            .into_iter()
+            .filter(|index| request.indexes.contains(&index.name))
+            .collect::<Vec<_>>();
+        if selected.len() != request.indexes.len()
+            || selected.iter().any(|index| {
+                index.entity_type != copperdb_storage::IndexEntityType::Node
+                    || !matches!(
+                        index.kind,
+                        copperdb_storage::IndexKind::FullText | copperdb_storage::IndexKind::Vector
+                    )
+            })
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "indexes must name declared node FULLTEXT or VECTOR indexes"
+                })),
+            )
+                .into_response();
+        }
+        selected
     };
 
     // Check if BM25 is configured
@@ -1447,24 +1475,26 @@ async fn search_handler(
         ]
         .into_iter()
         .map(|query| {
-            engine.search_fabric_ranked_batch_locally_scoped_with_context_and_roles(
+            engine.search_fabric_ranked_batch_locally_scoped_with_context_and_roles_and_indexes(
                 &request_context,
                 &placement,
                 &query,
                 &request.labels,
                 &request.filters,
                 &roles,
+                &request.indexes,
             )
         })
         .collect::<Result<Vec<_>, _>>(),
         query => engine
-            .search_fabric_ranked_batch_locally_scoped_with_context_and_roles(
+            .search_fabric_ranked_batch_locally_scoped_with_context_and_roles_and_indexes(
                 &request_context,
                 &placement,
                 &query,
                 &request.labels,
                 &request.filters,
                 &roles,
+                &request.indexes,
             )
             .map(|batch| vec![batch]),
     };

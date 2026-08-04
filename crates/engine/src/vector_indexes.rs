@@ -157,6 +157,7 @@ impl VectorIndexManager {
         limit: usize,
         min_score: f32,
         labels: &[String],
+        index_names: &[String],
     ) -> Result<Vec<(String, f32, String)>, CopperDbError> {
         let bindings = self
             .file_store_bindings
@@ -167,6 +168,7 @@ impl VectorIndexManager {
                 binding.entity_type == IndexEntityType::Node
                     && binding.dimensions == query.len()
                     && (labels.is_empty() || labels.contains(&binding.label))
+                    && (index_names.is_empty() || index_names.contains(&binding.name))
             })
             .cloned()
             .collect::<Vec<_>>();
