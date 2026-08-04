@@ -168,7 +168,8 @@ fn local_hybrid_search_fuses_duplicate_lexical_and_semantic_hits() {
 fn local_fulltext_search_suppresses_decayed_candidates_before_limit() {
     use copperdb_storage::{
         DecayProfileBindingSchema, DecayProfileSchema, IndexDefinition, IndexEntityType, IndexKind,
-        NodeRecord, StorageEngine,
+        NodeRecord, PromotionPolicySchema, PromotionProfileSchema, PromotionWhenClauseSchema,
+        StorageEngine,
     };
     use copperdb_topology::PlacementKey;
 
@@ -212,16 +213,45 @@ fn local_fulltext_search_suppresses_decayed_candidates_before_limit() {
             order: 0,
         })
         .unwrap();
+    transaction
+        .put_promotion_profile(PromotionProfileSchema {
+            name: "urgent_document".into(),
+            scope: "NODE".into(),
+            multiplier: 1.0,
+            score_floor: 0.95,
+            score_cap: 1.0,
+            enabled: true,
+        })
+        .unwrap();
+    transaction
+        .put_promotion_policy(PromotionPolicySchema {
+            name: "urgent_document_policy".into(),
+            target_labels: vec!["Document".into()],
+            target_edge_type: None,
+            is_wildcard: false,
+            is_edge: false,
+            enabled: true,
+            on_access_mutations: Vec::new(),
+            when_clauses: vec![PromotionWhenClauseSchema {
+                profile_ref: "urgent_document".into(),
+                predicate: "n.priority = 'urgent'".into(),
+                order: 0,
+            }],
+        })
+        .unwrap();
     transaction.commit().unwrap();
-    for (id, title, created_at_unix_ms) in [
-        ("document:expired", "graph graph graph graph", 0),
-        ("document:fresh", "graph", i64::MAX),
+    for (id, title, priority, created_at_unix_ms) in [
+        ("document:expired", "graph graph graph graph", "urgent", 0),
+        ("document:fresh", "graph", "normal", i64::MAX),
     ] {
         storage
             .put_node_record(&NodeRecord {
                 id: id.into(),
                 labels: vec!["Document".into()],
-                properties: BTreeMap::from([("title".into(), Value::String(title.into()))]),
+                properties: BTreeMap::from([
+                    ("title".into(), Value::String(title.into())),
+                    ("priority".into(), Value::String(priority.into())),
+                ]),
                 named_embeddings: BTreeMap::new(),
                 chunk_embeddings: Vec::new(),
                 embed_meta: Default::default(),
@@ -250,7 +280,7 @@ fn local_fulltext_search_suppresses_decayed_candidates_before_limit() {
         .unwrap();
 
     assert_eq!(batch.hits.len(), 1);
-    assert_eq!(batch.hits[0].global_id.local_id, "document:fresh");
+    assert_eq!(batch.hits[0].global_id.local_id, "document:expired");
     assert_eq!(batch.hits[0].rank, 1);
 }
 
