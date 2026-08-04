@@ -80,6 +80,66 @@ fn local_semantic_search_uses_compatible_maintained_node_indexes() {
 }
 
 #[test]
+fn local_semantic_search_returns_request_cancelled_before_candidate_work() {
+    use copperdb_topology::PlacementKey;
+    use copperdb_util::RequestContext;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = DatabaseConfig {
+        data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    config.runtime_config.vector_enabled = true;
+    let db = CopperDb::open(config).unwrap();
+    let request_context = RequestContext::detached();
+    request_context.cancel();
+
+    let error = db
+        .search_fabric_ranked_batch_locally_with_context(
+            &request_context,
+            &PlacementKey::default_for_database("copper"),
+            &SearchQuery::Semantic {
+                vector: vec![1.0, 0.0],
+                k: 1,
+                min_score: f32::NEG_INFINITY,
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, CopperDbError::RequestCancelled(_)));
+}
+
+#[test]
+fn local_semantic_search_returns_request_cancelled_after_deadline() {
+    use copperdb_topology::PlacementKey;
+    use copperdb_util::RequestContext;
+    use std::time::UNIX_EPOCH;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = DatabaseConfig {
+        data_dir: dir.path().join("db").to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    config.runtime_config.vector_enabled = true;
+    let db = CopperDb::open(config).unwrap();
+    let (request_context, _request_guard) = RequestContext::root(Some(UNIX_EPOCH));
+
+    let error = db
+        .search_fabric_ranked_batch_locally_with_context(
+            &request_context,
+            &PlacementKey::default_for_database("copper"),
+            &SearchQuery::Semantic {
+                vector: vec![1.0, 0.0],
+                k: 1,
+                min_score: f32::NEG_INFINITY,
+            },
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, CopperDbError::RequestCancelled(_)));
+}
+
+#[test]
 fn local_hybrid_search_fuses_duplicate_lexical_and_semantic_hits() {
     use copperdb_storage::{
         IndexDefinition, IndexEntityType, IndexKind, NodeRecord, StorageEngine,
