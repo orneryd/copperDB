@@ -1314,7 +1314,11 @@ async fn search_handler(
         Err(status) => return status.into_response(),
     };
     let roles = roles_for_claims(claims.as_ref());
-    let limit = request.limit.max(1);
+    let limit = if request.limit == 0 {
+        10
+    } else {
+        request.limit
+    };
 
     let engine = match open_engine(&state, &database) {
         Ok(e) => e,
@@ -1510,6 +1514,7 @@ async fn search_handler(
     };
     let search_time_ms = search_started.elapsed().as_millis() as u64;
     let hydration_started = std::time::Instant::now();
+    let candidate_count = outcome.output_hits;
     let results = outcome
         .results
         .into_iter()
@@ -1529,6 +1534,31 @@ async fn search_handler(
         })
         .collect::<Vec<_>>();
     let hydration_time_ms = hydration_started.elapsed().as_millis() as u64;
+        let result = if results.is_empty() {
+            "no_results"
+        } else {
+            "success"
+        };
+        let _ = state.telemetry.record_counter(
+            "nornicdb_search_requests_total",
+            &[("mode", search_method), ("result", result)],
+        );
+        for (stage, duration_ms) in [
+            ("embedding", embedding_time_ms),
+            ("index", search_time_ms),
+            ("hydration", hydration_time_ms),
+        ] {
+            let _ = state.telemetry.observe_histogram(
+                "nornicdb_search_duration_seconds",
+                &[("mode", search_method), ("stage", stage)],
+                duration_ms as f64 / 1_000.0,
+            );
+        }
+        let _ = state.telemetry.set_gauge(
+            "nornicdb_search_candidates_rows",
+            &[],
+            candidate_count as f64,
+        );
     tracing::debug!(
         database,
         search_method,

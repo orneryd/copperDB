@@ -31,17 +31,20 @@ Requests identify database, mode (`lexical`, `semantic`, `hybrid`), text or vect
 ## Progress
 
 - Complete: maintained vector indexes expose readiness, generation, strategy, dimensions, cancellation, file-backed exact reranking, and bounded ANN queries through the engine-owned manager.
-- Complete: local semantic search queries every compatible declared node vector index, deduplicates stable entity IDs, applies minimum score before pagination, and returns deterministic ranked batches without record scans.
+- Complete: local semantic search queries every compatible declared node vector index, deduplicates stable entity IDs, applies minimum score before pagination, and returns deterministic ranked batches without record scans; persisted indexes rebuild into the same ranked results after reopen.
 - Complete: local hybrid search produces bounded lexical and semantic batches independently and fuses duplicates through the shared deterministic RRF implementation.
 - Complete: `POST /copperdb/search` is the CopperDB-branded equivalent of NornicDB's extension endpoint, and `POST /db/{database}/search` is the CopperDB database-scoped form. Both use the engine-owned pipeline and return the canonical node/score/RRF-rank array rather than a custom diagnostics envelope.
 - Complete: property filters use NornicDB semantics (AND across populated keys, OR within values, empty values ignored, scalar/array string matching) and restrict bounded lexical/vector candidates before source ranks, RRF, and final pagination.
 - Complete: knowledge-policy visibility resolves from the durable catalog and suppresses lexical/vector candidates before source ranks, RRF, and final pagination, honoring created, version, last-accessed, and custom timestamp anchors plus compiled promotion predicates.
 - Complete: caller-specific compliance checks deny explicitly requested governed labels/properties and suppress restricted candidate labels before ranks and pagination. Direct HTTP derives roles from its authenticated caller, while local ranked-search RPC validates the forwarded caller token to derive the same roles.
 - Complete: search requests can select declared node FULLTEXT and VECTOR indexes through `indexes`; unknown or non-search selections fail validation, and the engine applies the same selected names to lexical, semantic, and hybrid candidate production.
-- Validated: focused engine regressions cover compatible-index selection, semantic ranking and minimum score, stable labels/IDs, and hybrid duplicate fusion; the engine suite passes 103/103, warning-denied Clippy passes for all engine targets, and workspace formatting is clean.
+- Complete: bounded local ranked-search batches are cached only after authorization and policy filtering. Cache keys include request inputs, normalized caller roles, durable data generation, and index-schema generation, so committed changes cannot return stale hits.
+- Complete: canonical HTTP search responses remain result arrays while the server publishes catalog-backed request outcome, bounded candidate count, and embedding/index/hydration duration metrics with the same mode labels as the existing full-text procedure diagnostics.
+- Validated: focused engine regressions cover compatible-index selection, semantic ranking and minimum score, stable labels/IDs, hybrid duplicate fusion, and pre-candidate cancellation/deadline handling; the engine suite passes 108/108, warning-denied Clippy passes for all engine targets, and workspace formatting is clean.
 - Validated: server regression verifies a higher-ranked nonmatching lexical candidate is excluded before `limit: 1`, leaving the lower-ranked matching result through the canonical CopperDB routes.
+- Complete: HTTP search matches NornicDB's `limit` behavior, defaulting omitted or zero limits to 10 while preserving explicit limits for the bounded engine pipeline.
 - Validated: pre-cancelled and already-expired request contexts stop local semantic search before vector candidate work and preserve the typed `RequestCancelled` engine error. Ingress-wide cancellation ownership and mid-loop lifecycle coverage remain tracked by Plan 14.
-- Remaining: complete server HTTP parity, response diagnostics, caches, cancellation/deadline regressions, restart coverage, and production benchmarks. CopperDB benchmarks must use production-mode artifacts, be correlated and compared with upstream NornicDB benchmarks, and receive performance optimization when CopperDB is slower.
+- Remaining: complete production benchmarks. CopperDB benchmarks must use production-mode artifacts, be correlated and compared with upstream NornicDB benchmarks, and receive performance optimization when CopperDB is slower.
 
 ## Tests And Performance
 

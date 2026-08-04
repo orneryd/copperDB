@@ -176,8 +176,7 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
                 .body(Body::from(
                     serde_json::json!({
                         "query": "graph",
-                        "labels": ["Document"],
-                        "limit": 5
+                        "labels": ["Document"]
                     })
                     .to_string(),
                 ))
@@ -187,6 +186,11 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
         .unwrap();
 
     assert_eq!(database_path_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(database_path_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload.as_array().unwrap().len(), 3);
 
     let response = build_router(Arc::new(state.clone()))
         .oneshot(
@@ -221,7 +225,7 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
     assert_eq!(payload[0]["vector_rank"], 0);
     assert_eq!(payload[0]["bm25_rank"], 1);
 
-    let selected_index_response = build_router(Arc::new(state))
+    let selected_index_response = build_router(Arc::new(state.clone()))
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -248,6 +252,45 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload.as_array().unwrap().len(), 1);
     assert_eq!(payload[0]["node"]["id"], "document:summary");
+
+    assert_eq!(
+        state
+            .telemetry
+            .snapshot_metric("nornicdb_search_requests_total")
+            .unwrap(),
+        vec![copperdb_otel::MetricSample {
+            labels: vec![
+                ("mode".to_string(), "bm25".to_string()),
+                ("result".to_string(), "success".to_string()),
+            ],
+            value: copperdb_otel::MetricValue::Counter(3.0),
+        }]
+    );
+    assert_eq!(
+        state
+            .telemetry
+            .snapshot_metric("nornicdb_search_candidates_rows")
+            .unwrap(),
+        vec![copperdb_otel::MetricSample {
+            labels: Vec::new(),
+            value: copperdb_otel::MetricValue::Gauge(1.0),
+        }]
+    );
+    let durations = state
+        .telemetry
+        .snapshot_metric("nornicdb_search_duration_seconds")
+        .unwrap();
+    assert_eq!(durations.len(), 3);
+    assert!(durations.iter().all(|sample| {
+        matches!(
+            sample,
+            copperdb_otel::MetricSample {
+                labels,
+                value: copperdb_otel::MetricValue::Histogram(values),
+            } if labels.iter().any(|(key, value)| key == "mode" && value == "bm25")
+                && values.len() == 3
+        )
+    }));
 }
 
 #[test]

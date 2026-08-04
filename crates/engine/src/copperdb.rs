@@ -221,8 +221,21 @@ impl CopperDb {
         for property in filters.keys() {
             self.compliance.check_property_access(property, roles)?;
         }
+        self.selected_search_indexes(index_names)?;
+        request_context.check_active()?;
+        let cache_key = self.ranked_search_cache_key(
+            placement,
+            query,
+            labels,
+            filters,
+            roles,
+            index_names,
+        )?;
+        if let Some(batch) = self.ranked_search_cache.get(cache_key) {
+            return Ok(batch);
+        }
 
-        match query {
+        let result = match query {
             SearchQuery::FullText {
                 query,
                 fields,
@@ -395,7 +408,30 @@ impl CopperDb {
                     hits,
                 })
             }
+        };
+        if let Ok(batch) = &result {
+            self.ranked_search_cache.put(cache_key, batch.clone());
         }
+        result
+    }
+
+    fn ranked_search_cache_key(
+        &self,
+        placement: &PlacementKey,
+        query: &SearchQuery,
+        labels: &[String],
+        filters: &BTreeMap<String, Vec<String>>,
+        roles: &[String],
+        index_names: &[String],
+    ) -> Result<u64, CopperDbError> {
+        let mut canonical_roles = roles.to_vec();
+        canonical_roles.sort();
+        let data_generation = self.storage.wal_applied_sequence()?;
+        let cache_input = format!(
+            "{placement:?}|{query:?}|{labels:?}|{filters:?}|{canonical_roles:?}|{index_names:?}|{data_generation}|{}",
+            self.storage.index_schema_generation(),
+        );
+        Ok(QueryCache::<RrfSearchBatch>::key(&cache_input, &[]))
     }
 
     fn selected_search_indexes(
@@ -514,6 +550,10 @@ impl CopperDb {
             eval,
             tx_manager: Arc::new(TransactionManager::new()),
             query_cache: Arc::new(QueryCache::new(
+                1024,
+                Some(std::time::Duration::from_secs(300)),
+            )),
+            ranked_search_cache: Arc::new(QueryCache::new(
                 1024,
                 Some(std::time::Duration::from_secs(300)),
             )),

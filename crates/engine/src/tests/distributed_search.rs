@@ -58,7 +58,7 @@ fn local_semantic_search_uses_compatible_maintained_node_indexes() {
         ..Default::default()
     };
     config.runtime_config.vector_enabled = true;
-    let db = CopperDb::open(config).unwrap();
+    let db = CopperDb::open(config.clone()).unwrap();
     let batch = db
         .search_fabric_ranked_batch_locally(
             &PlacementKey::default_for_database("copper"),
@@ -77,6 +77,68 @@ fn local_semantic_search_uses_compatible_maintained_node_indexes() {
     assert_eq!(batch.hits[0].label, "Document");
     assert_eq!(batch.hits[1].global_id.local_id, "document:b");
     assert!(batch.hits.iter().all(|hit| hit.score >= 0.9));
+    assert_eq!(db.ranked_search_cache.stats().misses, 1);
+
+    let cached_batch = db
+        .search_fabric_ranked_batch_locally(
+            &PlacementKey::default_for_database("copper"),
+            &SearchQuery::Semantic {
+                vector: vec![1.0, 0.0],
+                k: 3,
+                min_score: 0.9,
+            },
+        )
+        .unwrap();
+    assert_eq!(cached_batch, batch);
+    assert_eq!(db.ranked_search_cache.stats().hits, 1);
+
+    drop(db);
+
+    let reopened = CopperDb::open(config).unwrap();
+    let batch = reopened
+        .search_fabric_ranked_batch_locally(
+            &PlacementKey::default_for_database("copper"),
+            &SearchQuery::Semantic {
+                vector: vec![1.0, 0.0],
+                k: 3,
+                min_score: 0.9,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(batch.source, "semantic");
+    assert_eq!(batch.hits.len(), 2);
+    assert_eq!(batch.hits[0].global_id.local_id, "document:a");
+    assert_eq!(batch.hits[0].rank, 1);
+    assert_eq!(batch.hits[0].label, "Document");
+    assert_eq!(batch.hits[1].global_id.local_id, "document:b");
+    assert!(batch.hits.iter().all(|hit| hit.score >= 0.9));
+
+    reopened
+        .storage()
+        .put_node_record(&NodeRecord {
+            id: "document:c".into(),
+            labels: vec!["Document".into()],
+            properties: BTreeMap::new(),
+            named_embeddings: BTreeMap::from([("embedding".into(), vec![1.0, 0.0])]),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 1,
+        })
+        .unwrap();
+    let refreshed_batch = reopened
+        .search_fabric_ranked_batch_locally(
+            &PlacementKey::default_for_database("copper"),
+            &SearchQuery::Semantic {
+                vector: vec![1.0, 0.0],
+                k: 3,
+                min_score: 0.9,
+            },
+        )
+        .unwrap();
+    assert_eq!(refreshed_batch.hits.len(), 3);
+    assert_eq!(reopened.ranked_search_cache.stats().misses, 2);
 }
 
 #[test]
