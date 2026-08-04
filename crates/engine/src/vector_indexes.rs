@@ -156,6 +156,7 @@ impl VectorIndexManager {
         query: &[f32],
         limit: usize,
         min_score: f32,
+        labels: &[String],
     ) -> Result<Vec<(String, f32, String)>, CopperDbError> {
         let bindings = self
             .file_store_bindings
@@ -163,7 +164,9 @@ impl VectorIndexManager {
             .map_err(|_| CopperDbError::Config("vector index bindings lock poisoned".into()))?
             .iter()
             .filter(|binding| {
-                binding.entity_type == IndexEntityType::Node && binding.dimensions == query.len()
+                binding.entity_type == IndexEntityType::Node
+                    && binding.dimensions == query.len()
+                    && (labels.is_empty() || labels.contains(&binding.label))
             })
             .cloned()
             .collect::<Vec<_>>();

@@ -86,6 +86,12 @@ impl CopperDb {
         self.embedding_runtime.status()
     }
 
+    /// Embed search text with this database's configured embedding provider.
+    /// Returns `None` when embedding is disabled or the query is empty.
+    pub fn embed_search_query(&self, text: &str) -> Result<Option<Vec<f32>>, CopperDbError> {
+        self.embedding_runtime.embed_query(text)
+    }
+
     /// Queue one node for managed chunk re-embedding while preserving named vectors.
     pub fn request_node_reembedding(&self, id: &str) -> Result<bool, CopperDbError> {
         Ok(self.storage.request_reembedding(id)?)
@@ -150,6 +156,21 @@ impl CopperDb {
         placement: &PlacementKey,
         query: &SearchQuery,
     ) -> Result<RrfSearchBatch, CopperDbError> {
+        self.search_fabric_ranked_batch_locally_scoped_with_context(
+            request_context,
+            placement,
+            query,
+            &[],
+        )
+    }
+
+    pub fn search_fabric_ranked_batch_locally_scoped_with_context(
+        &self,
+        request_context: &RequestContext,
+        placement: &PlacementKey,
+        query: &SearchQuery,
+        labels: &[String],
+    ) -> Result<RrfSearchBatch, CopperDbError> {
         self.ensure_ranked_search_query_enabled(query)?;
 
         match query {
@@ -159,16 +180,19 @@ impl CopperDb {
                 limit,
             } => {
                 let index_definitions = self.storage.load_index_definitions()?;
-                let labels = Self::local_ranked_search_labels(
+                let mut search_labels = Self::local_ranked_search_labels(
                     self.load_fabric_database(&placement.tenant, &placement.database)?
                         .as_ref(),
                     placement,
                     &index_definitions,
                     fields,
                 );
+                if !labels.is_empty() {
+                    search_labels.retain(|label| labels.contains(label));
+                }
                 let mut hits = Vec::new();
 
-                for label in labels {
+                for label in search_labels {
                     request_context.check_active()?;
                     let matched_properties =
                         matched_fulltext_properties(&index_definitions, &label, fields);
@@ -227,6 +251,7 @@ impl CopperDb {
                     vector,
                     *k,
                     *min_score,
+                    labels,
                 )?;
                 let hits = matches
                     .into_iter()
@@ -248,7 +273,7 @@ impl CopperDb {
                 })
             }
             SearchQuery::Hybrid { text, vector, k } => {
-                let lexical = self.search_fabric_ranked_batch_locally_with_context(
+                let lexical = self.search_fabric_ranked_batch_locally_scoped_with_context(
                     request_context,
                     placement,
                     &SearchQuery::FullText {
@@ -256,8 +281,9 @@ impl CopperDb {
                         fields: Vec::new(),
                         limit: *k,
                     },
+                    labels,
                 )?;
-                let semantic = self.search_fabric_ranked_batch_locally_with_context(
+                let semantic = self.search_fabric_ranked_batch_locally_scoped_with_context(
                     request_context,
                     placement,
                     &SearchQuery::Semantic {
@@ -265,6 +291,7 @@ impl CopperDb {
                         k: *k,
                         min_score: f32::NEG_INFINITY,
                     },
+                    labels,
                 )?;
                 let outcome =
                     merge_rrf_search_batches(vec![lexical, semantic], RrfConfig::new(60.0, *k));

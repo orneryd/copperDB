@@ -593,7 +593,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/databases", get(ui_handler))
         .route("/assets/{*path}", get(asset_handler))
         .route("/favicon.ico", get(favicon_handler))
-        .route("/nornicdb.svg", get(nornic_logo_handler))
         .route("/copperdb.svg", get(copper_logo_handler))
         .route("/health", get(health_handler))
         .route("/status", get(status_handler))
@@ -603,7 +602,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/auth/me", get(auth_me_handler))
         .route("/db/{database}", get(database_info_handler))
         .route("/db/{database}/tx/commit", post(neo4j_tx_commit_handler))
-        .route("/db/{database}/search", post(search_handler))
+        .route("/db/{database}/search", post(database_search_handler))
+        .route("/copperdb/search", post(copperdb_search_handler))
         .route(
             "/admin/databases/{database}/config",
             get(get_database_config_handler).put(update_database_config_handler),
@@ -833,7 +833,6 @@ fn rewrite_index_html(state: &AppState, html: String) -> String {
     } else {
         html.replace("\"/assets/", &format!("\"{}/assets/", base))
             .replace("\"/favicon.ico\"", &format!("\"{}/favicon.ico\"", base))
-            .replace("\"/nornicdb.svg\"", &format!("\"{}/nornicdb.svg\"", base))
             .replace("\"/copperdb.svg\"", &format!("\"{}/copperdb.svg\"", base))
     }
 }
@@ -931,15 +930,6 @@ async fn asset_handler(
 async fn favicon_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match read_static_file(&state, "favicon.ico") {
         Some(bytes) => binary_response(StatusCode::OK, "image/x-icon", bytes),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
-async fn nornic_logo_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match read_static_file(&state, "nornicdb.svg")
-        .or_else(|| read_static_file(&state, "copperdb.svg"))
-    {
-        Some(bytes) => binary_response(StatusCode::OK, "image/svg+xml", bytes),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -1264,51 +1254,60 @@ struct DatabaseConfigUpdateRequest {
     overrides: BTreeMap<String, String>,
 }
 
-/// POST /db/{database}/search — BM25 fulltext search with optional RRF vector fusion.
-/// Request body: {"query": "...", "labels": ["Label"], "limit": 10}
-/// Response matches NornicDB's search endpoint shape.
-async fn search_handler(
+#[derive(Deserialize)]
+struct SearchRequest {
+    #[serde(default)]
+    database: String,
+    query: String,
+    #[serde(default)]
+    labels: Vec<String>,
+    #[serde(default)]
+    limit: usize,
+    #[serde(default)]
+    filters: BTreeMap<String, Vec<String>>,
+}
+
+/// POST /copperdb/search — CopperDB's branded equivalent of NornicDB search.
+async fn copperdb_search_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<SearchRequest>,
+) -> impl IntoResponse {
+    search_handler(state, headers, request, None).await
+}
+
+/// POST /db/{database}/search — database-scoped CopperDB search.
+async fn database_search_handler(
     State(state): State<Arc<AppState>>,
     Path(database): Path<String>,
     headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
+    Json(request): Json<SearchRequest>,
 ) -> impl IntoResponse {
+    search_handler(state, headers, request, Some(database)).await
+}
+
+async fn search_handler(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    request: SearchRequest,
+    path_database: Option<String>,
+) -> Response {
+    let database = path_database
+        .or_else(|| (!request.database.is_empty()).then_some(request.database))
+        .unwrap_or_else(|| state.db_name.clone());
     if let Err(status) = authorize_database_access(&state, &headers, &database, false) {
         return status.into_response();
     }
-
-    let query_text = body
-        .get("query")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let labels: Vec<String> = body
-        .get("labels")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    let limit = body
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(10)
-        .clamp(1, 1000) as usize;
-
-    if query_text.is_empty() {
-        return Json(serde_json::json!({
-            "status": "ok",
-            "query": "",
-            "results": [],
-            "total_candidates": 0,
-            "returned": 0,
-            "search_method": "bm25",
-            "metrics": {"bm25_time_ms": 0}
-        }))
-        .into_response();
+    if !request.filters.is_empty() {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({
+                "error": "search property filters are not implemented"
+            })),
+        )
+            .into_response();
     }
+    let limit = request.limit.max(1);
 
     let engine = match open_engine(&state, &database) {
         Ok(e) => e,
@@ -1337,7 +1336,7 @@ async fn search_handler(
         .iter()
         .filter(|idx| {
             idx.kind == copperdb_storage::IndexKind::FullText
-                && (labels.is_empty() || labels.iter().any(|l| l == &idx.label))
+                && (request.labels.is_empty() || request.labels.iter().any(|l| l == &idx.label))
         })
         .cloned()
         .collect();
@@ -1347,7 +1346,7 @@ async fn search_handler(
         .iter()
         .filter(|idx| {
             idx.kind == copperdb_storage::IndexKind::Vector
-                && (labels.is_empty() || labels.iter().any(|l| l == &idx.label))
+                && (request.labels.is_empty() || request.labels.iter().any(|l| l == &idx.label))
         })
         .cloned()
         .collect();
@@ -1363,72 +1362,145 @@ async fn search_handler(
             .into_response();
     }
 
-    let bm25_start = std::time::Instant::now();
-
-    // BM25 fulltext search
-    let mut bm25_results: Vec<serde_json::Value> = Vec::new();
-    let mut bm25_candidates: usize = 0;
-    if !bm25_indexes.is_empty() {
-        let fetch_limit = limit * 3; // overfetch for RRF merging
-                                     // Collect raw hits with ranks for RRF fusion
-        let mut all_hits: Vec<(String, f32, String)> = Vec::new(); // (id, score, snippet)
-        for index in &bm25_indexes {
-            if let Ok(hits) = engine.search_fulltext_nodes(
-                &index.label,
-                &index.properties,
-                &query_text,
-                fetch_limit,
-            ) {
-                bm25_candidates = bm25_candidates.max(hits.len());
-                for hit in hits {
-                    all_hits.push((hit.id, hit.score, hit.snippet.unwrap_or_default()));
-                }
+    let (request_context, _request_guard) = RequestContext::root(None);
+    let embedding_started = std::time::Instant::now();
+    let query_vector = if vector_indexes.is_empty() {
+        None
+    } else {
+        match engine.embed_search_query(&request.query) {
+            Ok(vector) => vector,
+            Err(error) if !bm25_indexes.is_empty() => {
+                tracing::warn!(database, %error, "query embedding failed; falling back to BM25");
+                None
+            }
+            Err(error) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({"error": error.to_string()})),
+                )
+                    .into_response();
             }
         }
-        // Sort by score descending, deduplicate by id
-        all_hits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let mut seen = std::collections::HashSet::new();
-        all_hits.retain(|(id, _, _)| seen.insert(id.clone()));
-
-        for (rank, (id, score, snippet)) in all_hits.iter().enumerate().take(limit) {
-            let mut result = serde_json::json!({
-                "id": id,
-                "score": score,
-                "snippet": snippet,
-                "bm25_rank": rank + 1,
-            });
-            // Enrich with node properties if available
-            if let Ok(Some(node)) = engine.get_node(id) {
-                result["properties"] = serde_json::Value::Object(
-                    node.properties
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect(),
-                );
-                result["labels"] = serde_json::json!(node.labels);
-            }
-            bm25_results.push(result);
+    };
+    let embedding_time_ms = embedding_started.elapsed().as_millis() as u64;
+    let (query, search_method) = match (bm25_indexes.is_empty(), query_vector) {
+        (false, Some(vector)) => (
+            SearchQuery::Hybrid {
+                text: request.query.clone(),
+                vector,
+                k: limit,
+            },
+            "hybrid",
+        ),
+        (true, Some(vector)) => (
+            SearchQuery::Semantic {
+                vector,
+                k: limit,
+                min_score: f32::NEG_INFINITY,
+            },
+            "semantic",
+        ),
+        (false, None) => (
+            SearchQuery::FullText {
+                query: request.query.clone(),
+                fields: bm25_indexes
+                    .iter()
+                    .flat_map(|index| index.properties.iter().cloned())
+                    .collect(),
+                limit,
+            },
+            "bm25",
+        ),
+        (true, None) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "query embedding is unavailable for vector-only search"
+                })),
+            )
+                .into_response();
         }
-    }
-    let bm25_time_ms = bm25_start.elapsed().as_millis() as u64;
+    };
 
-    // TODO: wire RRF hybrid when the vector search API is available.
-    let search_method = "bm25";
-    let total_candidates = bm25_candidates;
-
-    Json(serde_json::json!({
-        "status": "success",
-        "query": query_text,
-        "results": bm25_results,
-        "total_candidates": total_candidates,
-        "returned": bm25_results.len(),
-        "search_method": search_method,
-        "bm25_candidates": bm25_candidates,
-        "metrics": {
-            "bm25_time_ms": bm25_time_ms,
+    let search_started = std::time::Instant::now();
+    let placement = PlacementKey::default_for_database(&database);
+    let batches = match query {
+        SearchQuery::Hybrid { text, vector, k } => [
+            SearchQuery::FullText {
+                query: text,
+                fields: bm25_indexes
+                    .iter()
+                    .flat_map(|index| index.properties.iter().cloned())
+                    .collect(),
+                limit: k,
+            },
+            SearchQuery::Semantic {
+                vector,
+                k,
+                min_score: f32::NEG_INFINITY,
+            },
+        ]
+        .into_iter()
+        .map(|query| {
+            engine.search_fabric_ranked_batch_locally_scoped_with_context(
+                &request_context,
+                &placement,
+                &query,
+                &request.labels,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>(),
+        query => engine
+            .search_fabric_ranked_batch_locally_scoped_with_context(
+                &request_context,
+                &placement,
+                &query,
+                &request.labels,
+            )
+            .map(|batch| vec![batch]),
+    };
+    let outcome = match batches {
+        Ok(batches) => engine.merge_fabric_ranked_search(batches, RrfConfig::new(60.0, limit)),
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response();
         }
-    }))
-    .into_response()
+    };
+    let search_time_ms = search_started.elapsed().as_millis() as u64;
+    let hydration_started = std::time::Instant::now();
+    let results = outcome
+        .results
+        .into_iter()
+        .filter_map(|hit| {
+            let node = engine.get_node(&hit.global_id.local_id).ok()??;
+            Some(serde_json::json!({
+                "node": {
+                    "id": node.id,
+                    "labels": node.labels,
+                    "properties": node.properties,
+                },
+                "score": hit.rrf_score,
+                "rrf_score": hit.rrf_score,
+                "vector_rank": hit.vector_rank,
+                "bm25_rank": hit.bm25_rank,
+            }))
+        })
+        .collect::<Vec<_>>();
+    let hydration_time_ms = hydration_started.elapsed().as_millis() as u64;
+    tracing::debug!(
+        database,
+        search_method,
+        embedding_time_ms,
+        search_time_ms,
+        hydration_time_ms,
+        returned = results.len(),
+        "search completed"
+    );
+
+    Json(results).into_response()
 }
 
 async fn database_info_handler(

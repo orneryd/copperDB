@@ -254,6 +254,32 @@ impl EmbeddingRuntime {
         })
     }
 
+    pub(crate) fn embed_query(&self, text: &str) -> Result<Option<Vec<f32>>, CopperDbError> {
+        if text.trim().is_empty()
+            || *self.state.lock().expect("embedding runtime state lock")
+                == EmbeddingRuntimeState::Disabled
+        {
+            return Ok(None);
+        }
+        let embedder = self.ensure_embedder()?;
+        let embedding = embedder
+            .embed_batch_blocking(&[text.to_string()])
+            .map_err(|error| CopperDbError::Init(format!("query embedding failed: {error}")))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                CopperDbError::Init("query embedding provider returned no embedding".into())
+            })?;
+        if self.dimensions > 0 && embedding.vector.len() != self.dimensions {
+            return Err(CopperDbError::Config(format!(
+                "query embedding dimensions mismatch: expected {}, got {}",
+                self.dimensions,
+                embedding.vector.len()
+            )));
+        }
+        Ok(Some(embedding.vector))
+    }
+
     pub(crate) fn drain_one(&self) -> Result<bool, CopperDbError> {
         if *self.state.lock().expect("embedding runtime state lock")
             == EmbeddingRuntimeState::Disabled
@@ -759,6 +785,20 @@ mod tests {
         assert_eq!(runtime.status().unwrap().worker_count, 0);
         assert!(runtime.status().unwrap().model_load_duration_ms.is_none());
         assert!(!runtime.drain_one().unwrap());
+        assert_eq!(runtime.embed_query("graph database").unwrap(), None);
+    }
+
+    #[test]
+    fn ready_runtime_embeds_search_queries() {
+        let storage = Arc::new(StorageEngine::open_temporary().unwrap());
+        let runtime =
+            EmbeddingRuntime::ready(storage, 2, Arc::new(TestEmbedder(Ok(vec![0.25, 0.75]))));
+
+        assert_eq!(
+            runtime.embed_query("graph database").unwrap(),
+            Some(vec![0.25, 0.75])
+        );
+        assert_eq!(runtime.embed_query("   ").unwrap(), None);
     }
 
     #[test]

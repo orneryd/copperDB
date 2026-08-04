@@ -41,6 +41,128 @@ async fn read_bolt_message(stream: &mut tokio::net::TcpStream) -> copperdb_bolt:
         .0
 }
 
+#[tokio::test]
+async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_disabled() {
+    use axum::{body::Body, http::Request};
+    use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind, NodeRecord};
+    use tower::ServiceExt;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage_path = temp_dir
+        .path()
+        .join("copper")
+        .to_string_lossy()
+        .into_owned();
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager.create("copper", storage_path).unwrap();
+    db_manager
+        .set_config_overrides(
+            "copper",
+            BTreeMap::from([
+                ("COPPERDB_SEARCH_BM25_ENABLED".into(), "true".into()),
+                ("COPPERDB_SEARCH_VECTOR_ENABLED".into(), "true".into()),
+                ("COPPERDB_EMBEDDING_ENABLED".into(), "false".into()),
+            ]),
+        )
+        .unwrap();
+    let mut state = AppState {
+        db_name: "copper".into(),
+        db_manager,
+        ..Default::default()
+    };
+    state.auth.security_enabled = false;
+    let engine = open_engine(&state, "copper").unwrap();
+    for definition in [
+        IndexDefinition {
+            name: "document_title".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Document".into(),
+            properties: vec!["title".into()],
+            kind: IndexKind::FullText,
+        },
+        IndexDefinition {
+            name: "document_embedding".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Document".into(),
+            properties: vec!["embedding".into()],
+            kind: IndexKind::Vector,
+        },
+    ] {
+        engine
+            .storage()
+            .persist_index_definition(&definition)
+            .unwrap();
+    }
+    engine
+        .storage()
+        .put_node_record(&NodeRecord {
+            id: "document:graph".into(),
+            labels: vec!["Document".into()],
+            properties: BTreeMap::from([(
+                "title".into(),
+                serde_json::Value::String("graph database internals".into()),
+            )]),
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        })
+        .unwrap();
+
+    let database_path_response = build_router(Arc::new(state.clone()))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/db/copper/search")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "query": "graph",
+                        "labels": ["Document"],
+                        "limit": 5
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(database_path_response.status(), StatusCode::OK);
+
+    let response = build_router(Arc::new(state))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/copperdb/search")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "database": "copper",
+                        "query": "graph",
+                        "labels": ["Document"],
+                        "limit": 5
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(payload.is_array());
+    assert_eq!(payload[0]["node"]["id"], "document:graph");
+    assert_eq!(payload[0]["node"]["labels"][0], "Document");
+    assert_eq!(payload[0]["vector_rank"], 0);
+    assert_eq!(payload[0]["bm25_rank"], 1);
+}
+
 #[test]
 fn open_engine_maps_storage_sync_writes_to_immediate_wal_durability() {
     let temp_dir = tempfile::tempdir().unwrap();

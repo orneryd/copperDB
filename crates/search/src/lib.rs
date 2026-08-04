@@ -60,6 +60,8 @@ pub struct RrfMergedHit {
     pub global_id: FabricGlobalId,
     pub rrf_score: f32,
     pub best_score: f32,
+    pub vector_rank: usize,
+    pub bm25_rank: usize,
     pub sources: Vec<String>,
     pub shard: PlacementKey,
     pub label: String,
@@ -185,6 +187,8 @@ pub fn merge_rrf_search_hits(
             global_id: hit.global_id.clone(),
             rrf_score: 0.0,
             best_score: hit.score,
+            vector_rank: 0,
+            bm25_rank: 0,
             sources: Vec::new(),
             shard: hit.shard.clone(),
             label: hit.label.clone(),
@@ -195,6 +199,11 @@ pub fn merge_rrf_search_hits(
             entry.best_score = hit.score;
             entry.label = hit.label.clone();
             entry.snippet = hit.snippet.clone();
+        }
+        match hit.source.as_str() {
+            "lexical" => entry.bm25_rank = hit.rank,
+            "semantic" | "vector" => entry.vector_rank = hit.rank,
+            _ => {}
         }
         if !entry.sources.iter().any(|source| source == &hit.source) {
             entry.sources.push(hit.source);
@@ -1294,8 +1303,12 @@ mod tests {
         assert_eq!(merged[0].best_score, 0.99);
         assert_eq!(merged[0].snippet, Some("vector a".into()));
         assert_eq!(merged[0].sources, vec!["lexical", "vector"]);
+        assert_eq!(merged[0].vector_rank, 2);
+        assert_eq!(merged[0].bm25_rank, 1);
         assert_eq!(merged[1].global_id.local_id, "Memory:7");
         assert_eq!(merged[1].sources, vec!["lexical", "vector"]);
+        assert_eq!(merged[1].vector_rank, 1);
+        assert_eq!(merged[1].bm25_rank, 2);
     }
 
     #[test]
@@ -1368,6 +1381,8 @@ mod tests {
                     global_id: doc_a.clone(),
                     rrf_score: 0.032,
                     best_score: 0.9,
+                    vector_rank: 2,
+                    bm25_rank: 1,
                     sources: vec!["lexical".into(), "vector".into()],
                     shard: primary.clone(),
                     label: "Person".into(),
@@ -1377,6 +1392,8 @@ mod tests {
                     global_id: doc_b,
                     rrf_score: 0.016,
                     best_score: 0.4,
+                    vector_rank: 0,
+                    bm25_rank: 1,
                     sources: vec!["lexical".into()],
                     shard: primary.clone(),
                     label: "Secret".into(),
