@@ -2096,6 +2096,24 @@ impl EvalEngine {
             .suppressed)
     }
 
+    pub fn node_visible_with_resolver_and_access_metadata(
+        &self,
+        resolver: &Resolver,
+        node: &NodeRecord,
+        access_metadata: Option<KnowledgePolicyAccessMetadata>,
+        params: &HashMap<String, Value>,
+    ) -> Result<bool, EvalError> {
+        Ok(!self
+            .inspect_node_policy_with_access_metadata(
+                resolver,
+                node,
+                access_metadata,
+                params,
+                false,
+            )?
+            .suppressed)
+    }
+
     pub fn edge_visible_with_access_metadata(
         &self,
         edge: &EdgeRecord,

@@ -1,5 +1,6 @@
 use super::*;
 use crate::vector_indexes::VectorIndexManager;
+use copperdb_knowledgepolicy::Resolver;
 use copperdb_util::RequestContext;
 impl CopperDb {
     fn ensure_ranked_search_query_enabled(&self, query: &SearchQuery) -> Result<(), CopperDbError> {
@@ -29,6 +30,13 @@ impl CopperDb {
 
     pub fn validate_ranked_search_query(&self, query: &SearchQuery) -> Result<(), CopperDbError> {
         self.ensure_ranked_search_query_enabled(query)
+    }
+
+    /// Enable or disable cached local ranked-search batches.
+    ///
+    /// Disabling drops resident batches while preserving durable indexes and the warmed pipeline.
+    pub fn set_ranked_search_cache_enabled(&self, enabled: bool) {
+        self.ranked_search_cache.set_enabled(enabled);
     }
 
     /// Return all currently configured index definitions.
@@ -223,14 +231,8 @@ impl CopperDb {
         }
         self.selected_search_indexes(index_names)?;
         request_context.check_active()?;
-        let cache_key = self.ranked_search_cache_key(
-            placement,
-            query,
-            labels,
-            filters,
-            roles,
-            index_names,
-        )?;
+        let cache_key =
+            self.ranked_search_cache_key(placement, query, labels, filters, roles, index_names)?;
         if let Some(batch) = self.ranked_search_cache.get(cache_key) {
             return Ok(batch);
         }
@@ -241,6 +243,8 @@ impl CopperDb {
                 fields,
                 limit,
             } => {
+                let policy_resolver = self.eval.knowledge_policy_resolver()?;
+                let compliance_policies = self.compliance.enabled_policies_snapshot()?;
                 let index_definitions = self.selected_search_indexes(index_names)?;
                 let mut search_labels = Self::local_ranked_search_labels(
                     self.load_fabric_database(&placement.tenant, &placement.database)?
@@ -252,7 +256,7 @@ impl CopperDb {
                 if !labels.is_empty() {
                     search_labels.retain(|label| labels.contains(label));
                 }
-                let candidate_limit = search_candidate_limit(*limit);
+                let candidate_limit = *limit;
                 let mut hits = Vec::new();
 
                 for label in search_labels {
@@ -277,7 +281,12 @@ impl CopperDb {
                     )? {
                         let (node, score) = result;
                         if !node_matches_search_filters(&node, filters)
-                            || !self.node_is_search_visible(&node, roles)?
+                            || !self.node_is_search_visible(
+                                &node,
+                                roles,
+                                &compliance_policies,
+                                &policy_resolver,
+                            )?
                         {
                             continue;
                         }
@@ -320,10 +329,12 @@ impl CopperDb {
                 min_score,
             } => {
                 request_context.check_active()?;
+                let policy_resolver = self.eval.knowledge_policy_resolver()?;
+                let compliance_policies = self.compliance.enabled_policies_snapshot()?;
                 let matches = self.vector_indexes.query_node_indexes(
                     request_context.cancellation(),
                     vector,
-                    search_candidate_limit(*k),
+                    vector_candidate_limit(*k),
                     *min_score,
                     labels,
                     index_names,
@@ -334,7 +345,12 @@ impl CopperDb {
                         continue;
                     };
                     if !node_matches_search_filters(&node, filters)
-                        || !self.node_is_search_visible(&node, roles)?
+                        || !self.node_is_search_visible(
+                            &node,
+                            roles,
+                            &compliance_policies,
+                            &policy_resolver,
+                        )?
                     {
                         continue;
                     }
@@ -365,7 +381,7 @@ impl CopperDb {
                         &SearchQuery::FullText {
                             query: text.clone(),
                             fields: Vec::new(),
-                            limit: *k,
+                            limit: hybrid_fulltext_candidate_limit(*k),
                         },
                         labels,
                         filters,
@@ -463,18 +479,34 @@ impl CopperDb {
         &self,
         node: &NodeRecord,
         roles: &[String],
+        compliance_policies: &[copperdb_compliance::CompliancePolicy],
+        policy_resolver: &Resolver,
     ) -> Result<bool, CopperDbError> {
         for label in &node.labels {
-            if self.compliance.check_label_access(label, roles).is_err() {
+            if self
+                .compliance
+                .check_label_access_with_policies(label, roles, compliance_policies)
+                .is_err()
+            {
                 return Ok(false);
             }
+        }
+        if policy_resolver.resolve_node(&node.labels).is_none()
+            && policy_resolver
+                .resolve_node_promotion(&node.labels)
+                .is_none()
+        {
+            return Ok(true);
         }
         let access_metadata = self
             .storage
             .get_knowledge_policy_access_metadata(&node.id)?;
-        Ok(self
-            .eval
-            .node_visible_with_access_metadata(node, access_metadata, &HashMap::new())?)
+        Ok(self.eval.node_visible_with_resolver_and_access_metadata(
+            policy_resolver,
+            node,
+            access_metadata,
+            &HashMap::new(),
+        )?)
     }
 
     pub fn hydrate_fabric_entities_locally(
@@ -788,8 +820,12 @@ fn matched_fulltext_properties(
 
 const MAX_SEARCH_CANDIDATES: usize = 5_000;
 
-fn search_candidate_limit(limit: usize) -> usize {
+fn vector_candidate_limit(limit: usize) -> usize {
     limit.saturating_mul(10).clamp(50, MAX_SEARCH_CANDIDATES)
+}
+
+fn hybrid_fulltext_candidate_limit(limit: usize) -> usize {
+    limit.saturating_mul(2).max(20)
 }
 
 fn node_matches_search_filters(node: &NodeRecord, filters: &BTreeMap<String, Vec<String>>) -> bool {

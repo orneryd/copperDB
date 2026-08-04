@@ -1,0 +1,158 @@
+use std::collections::BTreeMap;
+
+use copperdb_engine::{CopperDb, DatabaseConfig};
+use copperdb_search::SearchQuery;
+use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind, NodeRecord, StorageEngine};
+use copperdb_topology::PlacementKey;
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use tempfile::TempDir;
+
+const NODE_COUNT: usize = 9_000;
+const DIMENSIONS: usize = 64;
+const LIMIT: usize = 20;
+const QUERY: &str = "where are my prescriptions?";
+
+struct Workload {
+    db: CopperDb,
+    placement: PlacementKey,
+    query: SearchQuery,
+    _data_directory: TempDir,
+}
+
+impl Workload {
+    fn new() -> Self {
+        let data_directory = tempfile::tempdir().expect("benchmark data directory must exist");
+        let data_dir = data_directory.path().join("db");
+        let storage = StorageEngine::open(&data_dir).expect("benchmark storage must open");
+        storage
+            .persist_index_definition(&IndexDefinition {
+                name: "document_title".into(),
+                entity_type: IndexEntityType::Node,
+                label: "Document".into(),
+                properties: vec!["title".into(), "content".into()],
+                kind: IndexKind::FullText,
+            })
+            .expect("fulltext index definition must persist");
+        storage
+            .persist_index_definition(&IndexDefinition {
+                name: "document_embedding".into(),
+                entity_type: IndexEntityType::Node,
+                label: "Document".into(),
+                properties: vec!["embedding".into()],
+                kind: IndexKind::Vector,
+            })
+            .expect("vector index definition must persist");
+        storage
+            .persist_index_options(
+                "document_embedding",
+                &std::collections::HashMap::from([(
+                    "indexConfig".into(),
+                    serde_json::json!({
+                        "vector.dimensions": DIMENSIONS,
+                        "vector.similarity_function": "cosine"
+                    }),
+                )]),
+            )
+            .expect("vector index options must persist");
+        for position in 0..NODE_COUNT {
+            storage
+                .put_node_record(&NodeRecord {
+                    id: format!("n-{position}"),
+                    labels: vec!["Document".into()],
+                    properties: BTreeMap::from([
+                        (
+                            "title".into(),
+                            serde_json::Value::String(format!("Prescription document {position}")),
+                        ),
+                        (
+                            "content".into(),
+                            serde_json::Value::String(
+                                "where are my prescriptions and refill history".into(),
+                            ),
+                        ),
+                    ]),
+                    named_embeddings: BTreeMap::from([(
+                        "embedding".into(),
+                        profile_vector(position),
+                    )]),
+                    chunk_embeddings: Vec::new(),
+                    embed_meta: Default::default(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .expect("benchmark node must persist");
+        }
+        drop(storage);
+
+        let mut config = DatabaseConfig {
+            data_dir: data_dir.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        config.runtime_config.bm25_enabled = true;
+        config.runtime_config.vector_enabled = true;
+        let db = CopperDb::open(config).expect("benchmark engine must open");
+        let placement = PlacementKey::default_for_database("copper");
+        let query = SearchQuery::Hybrid {
+            text: QUERY.into(),
+            vector: profile_query_vector(),
+            k: LIMIT,
+        };
+        db.set_ranked_search_cache_enabled(false);
+        let warmup = db
+            .search_fabric_ranked_batch_locally(&placement, &query)
+            .expect("benchmark warmup search must succeed");
+        assert_eq!(warmup.source, "hybrid");
+        assert!(warmup.hits.iter().any(|hit| hit.source == "hybrid"));
+        assert!(!warmup.hits.is_empty());
+
+        eprintln!(
+            "search profile RRF hybrid: nodes={NODE_COUNT}, dimensions={DIMENSIONS}, limit={LIMIT}, response_cache=disabled, profile=bench"
+        );
+        Self {
+            db,
+            placement,
+            query,
+            _data_directory: data_directory,
+        }
+    }
+}
+
+fn profile_vector(position: usize) -> Vec<f32> {
+    let mut vector = vec![0.0; DIMENSIONS];
+    vector[position % DIMENSIONS] = 1.0;
+    vector[(position + 7) % DIMENSIONS] = 0.25;
+    vector[(position + 13) % DIMENSIONS] = 0.15;
+    vector
+}
+
+fn profile_query_vector() -> Vec<f32> {
+    let mut vector = vec![0.0; DIMENSIONS];
+    vector[0] = 1.0;
+    vector[7] = 0.25;
+    vector[13] = 0.15;
+    vector
+}
+
+fn bench_semantic_hybrid(criterion: &mut Criterion) {
+    let workload = Workload::new();
+    let benchmark_id = BenchmarkId::new("rrf_hybrid", format!("{NODE_COUNT}-d{DIMENSIONS}"));
+    let mut group = criterion.benchmark_group("search_profile");
+    group.throughput(Throughput::Elements(LIMIT as u64));
+    group.bench_with_input(benchmark_id, &workload, |bench, workload| {
+        bench.iter(|| {
+            black_box(
+                workload
+                    .db
+                    .search_fabric_ranked_batch_locally(
+                        &workload.placement,
+                        black_box(&workload.query),
+                    )
+                    .expect("benchmark hybrid search must succeed"),
+            );
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_semantic_hybrid);
+criterion_main!(benches);

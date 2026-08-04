@@ -139,7 +139,21 @@ impl ComplianceManager {
     }
 
     pub fn check_label_access(&self, label: &str, roles: &[String]) -> Result<(), ComplianceError> {
-        for policy in self.enabled_policies()? {
+        let policies = self.enabled_policies()?;
+        self.check_label_access_with_policies(label, roles, &policies)
+    }
+
+    pub fn enabled_policies_snapshot(&self) -> Result<Vec<CompliancePolicy>, ComplianceError> {
+        self.enabled_policies()
+    }
+
+    pub fn check_label_access_with_policies(
+        &self,
+        label: &str,
+        roles: &[String],
+        policies: &[CompliancePolicy],
+    ) -> Result<(), ComplianceError> {
+        for policy in policies {
             if let ComplianceControl::RestrictLabel {
                 label: governed,
                 allowed_roles,
@@ -147,7 +161,7 @@ impl ComplianceManager {
             {
                 if governed == label && !role_allowed(roles, allowed_roles) {
                     return Err(ComplianceError::PolicyViolation {
-                        policy: policy.id,
+                        policy: policy.id.clone(),
                         message: format!("access to label '{label}' is restricted"),
                     });
                 }

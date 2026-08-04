@@ -475,9 +475,9 @@ pub struct HnswConfig {
 impl Default for HnswConfig {
     fn default() -> Self {
         Self {
-            m: 32,
-            ef_construction: 400,
-            ef_search: 200,
+            m: 16,
+            ef_construction: 100,
+            ef_search: 50,
         }
     }
 }

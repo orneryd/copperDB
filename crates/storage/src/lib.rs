@@ -3793,11 +3793,16 @@ impl StorageEngine {
             })
             .collect();
 
-        ranked.sort_by(|a, b| {
+        let compare_ranked = |a: &(String, f64), b: &(String, f64)| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then(a.0.cmp(&b.0))
-        });
+        };
+        if limit < ranked.len() {
+            ranked.select_nth_unstable_by(limit, compare_ranked);
+            ranked.truncate(limit);
+        }
+        ranked.sort_by(compare_ranked);
 
         let mut nodes = Vec::new();
         for (position, (node_id, score)) in ranked.into_iter().take(limit).enumerate() {

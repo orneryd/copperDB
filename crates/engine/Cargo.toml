@@ -51,4 +51,9 @@ tempfile.workspace = true
 tower.workspace = true
 axum.workspace = true
 rmp-serde.workspace = true
+criterion.workspace = true
 copperdb-server = { workspace = true }
+
+[[bench]]
+name = "semantic_hybrid"
+harness = false
