@@ -1,6 +1,12 @@
 use super::*;
 use crate::vector_indexes::VectorIndexManager;
+use copperdb_knowledgepolicy::{
+    build_binding_table, build_bundles_by_name, build_decay_bindings,
+    build_promotion_policies_by_name, build_promotion_profiles_by_name, score_binding, Resolver,
+    ScoreFromMode,
+};
 use copperdb_util::RequestContext;
+use std::time::{SystemTime, UNIX_EPOCH};
 impl CopperDb {
     fn ensure_ranked_search_query_enabled(&self, query: &SearchQuery) -> Result<(), CopperDbError> {
         match query {
@@ -174,6 +180,7 @@ impl CopperDb {
         filters: &BTreeMap<String, Vec<String>>,
     ) -> Result<RrfSearchBatch, CopperDbError> {
         self.ensure_ranked_search_query_enabled(query)?;
+        let decay_resolver = self.search_decay_resolver()?;
 
         match query {
             SearchQuery::FullText {
@@ -210,7 +217,9 @@ impl CopperDb {
                         candidate_limit,
                     )? {
                         let (node, score) = result;
-                        if !node_matches_search_filters(&node, filters) {
+                        if !node_matches_search_filters(&node, filters)
+                            || !self.node_is_search_visible(&node, decay_resolver.as_ref())?
+                        {
                             continue;
                         }
                         hits.push(RrfSearchHit {
@@ -259,27 +268,29 @@ impl CopperDb {
                     *min_score,
                     labels,
                 )?;
-                let hits = matches
-                    .into_iter()
-                    .filter(|(id, _, _)| {
-                        self.storage
-                            .get_node_record(id)
-                            .ok()
-                            .flatten()
-                            .is_some_and(|node| node_matches_search_filters(&node, filters))
-                    })
-                    .take(*k)
-                    .enumerate()
-                    .map(|(index, (id, score, label))| RrfSearchHit {
+                let mut hits = Vec::new();
+                for (id, score, label) in matches {
+                    let Some(node) = self.storage.get_node_record(&id)? else {
+                        continue;
+                    };
+                    if !node_matches_search_filters(&node, filters)
+                        || !self.node_is_search_visible(&node, decay_resolver.as_ref())?
+                    {
+                        continue;
+                    }
+                    if hits.len() == *k {
+                        break;
+                    }
+                    hits.push(RrfSearchHit {
                         global_id: FabricGlobalId::new(placement.clone(), "node", id),
-                        rank: index + 1,
+                        rank: hits.len() + 1,
                         score,
                         source: "semantic".into(),
                         shard: placement.clone(),
                         label,
                         snippet: None,
-                    })
-                    .collect();
+                    });
+                }
                 Ok(RrfSearchBatch {
                     shard: placement.clone(),
                     source: "semantic".into(),
@@ -332,6 +343,52 @@ impl CopperDb {
                 })
             }
         }
+    }
+
+    fn search_decay_resolver(&self) -> Result<Option<Resolver>, CopperDbError> {
+        let decay_bindings = self.storage.load_decay_profile_binding_schemas()?;
+        if decay_bindings.is_empty() {
+            return Ok(None);
+        }
+        let bundles = build_bundles_by_name(&self.storage.load_decay_profile_schemas()?)
+            .map_err(|error| CopperDbError::Config(error.to_string()))?;
+        let binding_table = build_binding_table(
+            &bundles,
+            &build_decay_bindings(&decay_bindings),
+            &build_promotion_profiles_by_name(&self.storage.load_promotion_profile_schemas()?)
+                .map_err(|error| CopperDbError::Config(error.to_string()))?,
+            &build_promotion_policies_by_name(&self.storage.load_promotion_policy_schemas()?),
+        )
+        .map_err(|error| CopperDbError::Config(error.to_string()))?;
+        Ok(Some(Resolver::new(binding_table)))
+    }
+
+    fn node_is_search_visible(
+        &self,
+        node: &NodeRecord,
+        resolver: Option<&Resolver>,
+    ) -> Result<bool, CopperDbError> {
+        let Some(binding) = resolver.and_then(|resolver| resolver.resolve_node(&node.labels))
+        else {
+            return Ok(true);
+        };
+        let access_metadata = self
+            .storage
+            .get_knowledge_policy_access_metadata(&node.id)?;
+        let anchor_unix_ms = match binding.score_from {
+            ScoreFromMode::Created => Some(node.created_at_unix_ms),
+            ScoreFromMode::Version => Some(node.updated_at_unix_ms),
+            ScoreFromMode::LastAccessed => access_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.last_accessed_at_unix_ms)
+                .or(Some(node.created_at_unix_ms)),
+            ScoreFromMode::Custom => binding
+                .score_from_property
+                .as_deref()
+                .and_then(|property| node.properties.get(property))
+                .and_then(search_value_as_unix_ms),
+        };
+        Ok(!score_binding(&binding, anchor_unix_ms, search_now_unix_ms(), None).suppressed)
     }
 
     pub fn hydrate_fabric_entities_locally(
@@ -665,6 +722,20 @@ fn search_filter_value_matches(value: &Value, expected: &[String]) -> bool {
             .iter()
             .any(|candidate| candidate == &value.to_string()),
     }
+}
+
+fn search_value_as_unix_ms(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+        .or_else(|| value.as_f64().map(|value| value as i64))
+}
+
+fn search_now_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0)
 }
 
 fn build_fulltext_snippet(node: &NodeRecord, properties: &[String]) -> Option<String> {

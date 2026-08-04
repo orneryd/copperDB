@@ -35,9 +35,10 @@ Requests identify database, mode (`lexical`, `semantic`, `hybrid`), text or vect
 - Complete: local hybrid search produces bounded lexical and semantic batches independently and fuses duplicates through the shared deterministic RRF implementation.
 - Complete: `POST /copperdb/search` is the CopperDB-branded equivalent of NornicDB's extension endpoint, and `POST /db/{database}/search` is the CopperDB database-scoped form. Both use the engine-owned pipeline and return the canonical node/score/RRF-rank array rather than a custom diagnostics envelope.
 - Complete: property filters use NornicDB semantics (AND across populated keys, OR within values, empty values ignored, scalar/array string matching) and restrict bounded lexical/vector candidates before source ranks, RRF, and final pagination.
+- Complete: decay visibility bindings resolve from the durable knowledge-policy catalog and suppress lexical/vector candidates before source ranks, RRF, and final pagination, honoring created, version, last-accessed, and custom timestamp anchors.
 - Validated: focused engine regressions cover compatible-index selection, semantic ranking and minimum score, stable labels/IDs, and hybrid duplicate fusion; the engine suite passes 103/103, warning-denied Clippy passes for all engine targets, and workspace formatting is clean.
 - Validated: server regression verifies a higher-ranked nonmatching lexical candidate is excluded before `limit: 1`, leaving the lower-ranked matching result through the canonical CopperDB routes.
-- Remaining: explicit request index/label selection, policy/decay suppression before pagination, complete server HTTP parity, response diagnostics, caches, cancellation/deadline regressions, restart coverage, and production benchmarks.
+- Remaining: explicit request index/label selection, caller-specific compliance and promotion-policy suppression before pagination, complete server HTTP parity, response diagnostics, caches, cancellation/deadline regressions, restart coverage, and production benchmarks.
 
 ## Tests And Performance
 

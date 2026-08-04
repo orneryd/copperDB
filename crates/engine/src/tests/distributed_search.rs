@@ -164,6 +164,96 @@ fn local_hybrid_search_fuses_duplicate_lexical_and_semantic_hits() {
     assert!(batch.hits[0].score > batch.hits[1].score);
 }
 
+#[test]
+fn local_fulltext_search_suppresses_decayed_candidates_before_limit() {
+    use copperdb_storage::{
+        DecayProfileBindingSchema, DecayProfileSchema, IndexDefinition, IndexEntityType, IndexKind,
+        NodeRecord, StorageEngine,
+    };
+    use copperdb_topology::PlacementKey;
+
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("db");
+    let storage = StorageEngine::open(&data_dir).unwrap();
+    storage
+        .persist_index_definition(&IndexDefinition {
+            name: "document_title".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Document".into(),
+            properties: vec!["title".into()],
+            kind: IndexKind::FullText,
+        })
+        .unwrap();
+    let mut transaction = storage.begin_transaction().unwrap();
+    transaction
+        .put_decay_profile(DecayProfileSchema {
+            name: "document_decay".into(),
+            half_life_seconds: 1,
+            visibility_threshold: 0.9,
+            score_floor: 0.0,
+            function: "exponential".into(),
+            scope: "NODE".into(),
+            decay_enabled: true,
+            score_from: "CREATED".into(),
+            score_from_property: None,
+            enabled: true,
+        })
+        .unwrap();
+    transaction
+        .put_decay_binding(DecayProfileBindingSchema {
+            name: "document_decay_binding".into(),
+            target_labels: vec!["Document".into()],
+            target_edge_type: None,
+            is_wildcard: false,
+            is_edge: false,
+            profile_ref: Some("document_decay".into()),
+            no_decay: false,
+            visibility_threshold: None,
+            order: 0,
+        })
+        .unwrap();
+    transaction.commit().unwrap();
+    for (id, title, created_at_unix_ms) in [
+        ("document:expired", "graph graph graph graph", 0),
+        ("document:fresh", "graph", i64::MAX),
+    ] {
+        storage
+            .put_node_record(&NodeRecord {
+                id: id.into(),
+                labels: vec!["Document".into()],
+                properties: BTreeMap::from([("title".into(), Value::String(title.into()))]),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms,
+                updated_at_unix_ms: created_at_unix_ms,
+            })
+            .unwrap();
+    }
+    drop(storage);
+
+    let mut config = DatabaseConfig {
+        data_dir: data_dir.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    config.runtime_config.bm25_enabled = true;
+    let db = CopperDb::open(config).unwrap();
+    let batch = db
+        .search_fabric_ranked_batch_locally(
+            &PlacementKey::default_for_database("copper"),
+            &SearchQuery::FullText {
+                query: "graph".into(),
+                fields: Vec::new(),
+                limit: 1,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(batch.hits.len(), 1);
+    assert_eq!(batch.hits[0].global_id.local_id, "document:fresh");
+    assert_eq!(batch.hits[0].rank, 1);
+}
+
 #[tokio::test]
 async fn engine_executes_fabric_ranked_search_with_transport() {
     use copperdb_search::{InMemorySearchTransport, RrfSearchHit};
