@@ -330,6 +330,35 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
     assert_eq!(payload.as_array().unwrap().len(), 1);
     assert_eq!(payload[0]["node"]["id"], "document:summary");
 
+    let invalid_index_response = build_router(Arc::new(state.clone()))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/copperdb/search")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "database": "copper",
+                        "query": "graph",
+                        "indexes": ["missing_index"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(invalid_index_response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(invalid_index_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["error"],
+        "indexes must name declared node FULLTEXT or VECTOR indexes"
+    );
+
     assert_eq!(
         state
             .telemetry
