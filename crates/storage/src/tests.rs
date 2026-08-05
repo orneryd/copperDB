@@ -6428,6 +6428,49 @@ fn fulltext_index_rebuilds_and_tracks_mutations() {
 }
 
 #[test]
+fn fulltext_runtime_index_preserves_multi_property_term_frequency() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let mut repeated = sample_node("db:n1", &["Document"]);
+    repeated
+        .properties
+        .insert("title".into(), json!("prescriptions"));
+    repeated
+        .properties
+        .insert("content".into(), json!("prescriptions"));
+    let mut single = sample_node("db:n2", &["Document"]);
+    single
+        .properties
+        .insert("title".into(), json!("prescriptions"));
+    single
+        .properties
+        .insert("content".into(), json!("delivery status"));
+    engine.put_node_record(&repeated).unwrap();
+    engine.put_node_record(&single).unwrap();
+    engine
+        .persist_index_definition(&IndexDefinition {
+            name: "document_text_fulltext_idx".to_string(),
+            entity_type: IndexEntityType::Node,
+            kind: IndexKind::FullText,
+            label: "Document".to_string(),
+            properties: vec!["title".to_string(), "content".to_string()],
+        })
+        .unwrap();
+
+    let results = engine
+        .search_fulltext_nodes_by_properties(
+            "Document",
+            &["title".into(), "content".into()],
+            "prescriptions",
+            10,
+        )
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].0.id, "db:n1");
+    assert!(results[0].1 > results[1].1);
+}
+
+#[test]
 fn fulltext_vocabulary_is_bounded_deterministic_and_cancellable() {
     let engine = StorageEngine::open_temporary().unwrap();
     let mut alice = sample_node("db:n1", &["Person"]);

@@ -1787,6 +1787,7 @@ pub struct StorageEngine {
     wal: WAL,
     batch_commit_lock: Mutex<()>,
     embedding_claims: Mutex<BTreeSet<String>>,
+    fulltext_runtime_indexes: Mutex<HashMap<String, Arc<FulltextRuntimeIndex>>>,
     schema_manager: RwLock<Arc<SchemaManager>>,
     index_schema_generation: AtomicU64,
     encryption: Option<StorageEncryption>,
@@ -1800,6 +1801,18 @@ pub struct StorageEngine {
     on_edge_updated_cb: RwLock<Vec<EdgeEventCallback>>,
     on_edge_deleted_cb: RwLock<Vec<EdgeDeleteCallback>>,
     on_commit_completed_cb: RwLock<Vec<CommitEventCallback>>,
+}
+
+#[derive(Debug)]
+struct FulltextRuntimeIndex {
+    document_ids: Vec<String>,
+    postings: HashMap<String, Vec<FulltextRuntimePosting>>,
+}
+
+#[derive(Debug)]
+struct FulltextRuntimePosting {
+    document_number: u32,
+    term_frequency: usize,
 }
 
 /// A storage-owned transaction with snapshot reads and a private write overlay.
@@ -2274,6 +2287,7 @@ impl StorageEngine {
             wal: WAL::new(WALConfig::default()),
             batch_commit_lock: Mutex::new(()),
             embedding_claims: Mutex::new(BTreeSet::new()),
+            fulltext_runtime_indexes: Mutex::new(HashMap::new()),
             schema_manager: RwLock::new(Arc::new(SchemaManager::new())),
             index_schema_generation: AtomicU64::new(0),
             encryption: None,
@@ -2324,6 +2338,7 @@ impl StorageEngine {
             wal,
             batch_commit_lock: Mutex::new(()),
             embedding_claims: Mutex::new(BTreeSet::new()),
+            fulltext_runtime_indexes: Mutex::new(HashMap::new()),
             schema_manager: RwLock::new(Arc::new(SchemaManager::new())),
             index_schema_generation: AtomicU64::new(0),
             encryption,
@@ -3715,6 +3730,73 @@ impl StorageEngine {
         )
     }
 
+    fn fulltext_runtime_index(
+        &self,
+        label: &str,
+        properties: &[String],
+    ) -> Result<Arc<FulltextRuntimeIndex>, StorageError> {
+        let mut canonical_properties = properties.to_vec();
+        canonical_properties.sort();
+        canonical_properties.dedup();
+        let cache_key = format!("{label}\u{1f}{}", canonical_properties.join("\u{1f}"));
+        if let Some(index) = self
+            .fulltext_runtime_indexes
+            .lock()
+            .get(&cache_key)
+            .cloned()
+        {
+            return Ok(index);
+        }
+
+        let mut document_ids = Vec::new();
+        let mut postings = HashMap::<String, Vec<FulltextRuntimePosting>>::new();
+        for node in self.all_node_records()? {
+            if !node.labels.iter().any(|node_label| node_label == label) {
+                continue;
+            }
+            let document_number = u32::try_from(document_ids.len()).map_err(|_| {
+                StorageError::InvalidFulltextIndexKey(
+                    "fulltext runtime index exceeds u32 capacity".into(),
+                )
+            })?;
+            document_ids.push(node.id);
+            for property in &canonical_properties {
+                let Some(value) = node.properties.get(property) else {
+                    continue;
+                };
+                let unique_tokens = fulltext_tokens_for_value(value)
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
+                for token in unique_tokens {
+                    let token_postings = postings.entry(token).or_default();
+                    if let Some(last_posting) = token_postings.last_mut() {
+                        if last_posting.document_number == document_number {
+                            last_posting.term_frequency += 1;
+                            continue;
+                        }
+                    }
+                    {
+                        token_postings.push(FulltextRuntimePosting {
+                            document_number,
+                            term_frequency: 1,
+                        });
+                    }
+                }
+            }
+        }
+
+        let index = Arc::new(FulltextRuntimeIndex {
+            document_ids,
+            postings,
+        });
+        let mut indexes = self.fulltext_runtime_indexes.lock();
+        Ok(Arc::clone(
+            indexes
+                .entry(cache_key)
+                .or_insert_with(|| Arc::clone(&index)),
+        ))
+    }
+
     pub fn search_fulltext_nodes_by_properties_with_cancellation(
         &self,
         label: &str,
@@ -3729,74 +3811,87 @@ impl StorageEngine {
             return Ok(Vec::new());
         }
 
-        // Count total documents in this label for IDF
-        let total_docs = self
-            .node_count_by_label_in_namespace("", label)
-            .unwrap_or(1)
-            .max(1) as f64;
+        let index_definitions = self.load_index_definitions()?;
+        let indexed_properties = properties
+            .iter()
+            .filter(|property| {
+                index_definitions.iter().any(|definition| {
+                    definition.entity_type == IndexEntityType::Node
+                        && definition.kind == IndexKind::FullText
+                        && definition.label == label
+                        && definition.properties.contains(*property)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if indexed_properties.is_empty() {
+            return Ok(Vec::new());
+        }
+        let runtime_index = self.fulltext_runtime_index(label, &indexed_properties)?;
+        let total_docs = runtime_index.document_ids.len().max(1) as f64;
 
-        // Collect per-token document frequencies and document scores
-        let mut doc_scores: HashMap<String, f64> = HashMap::new();
-        let mut doc_lengths: HashMap<String, usize> = HashMap::new();
+        // Compact document numbers make dense score slots cheaper than per-query hash maps.
+        let mut doc_scores = vec![0.0; runtime_index.document_ids.len()];
+        let mut doc_lengths = vec![0_usize; runtime_index.document_ids.len()];
+        let mut matched_document_numbers = Vec::new();
 
         let mut scanned_entries = 0usize;
         for token in &tokens {
-            let mut df: HashMap<String, usize> = HashMap::new();
-            // Collect per-document term frequency across all properties
-            for property in properties {
-                let token_prefix = node_fulltext_token_prefix(label, property, token);
-                for entry in self.indexes.scan_prefix(token_prefix.as_bytes()) {
-                    let (key, _) = entry?;
-                    scanned_entries += 1;
-                    if scanned_entries.is_multiple_of(256) {
-                        cancel.check_cancelled()?;
-                    }
-                    let key_str =
-                        std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
-                    if let Some(node_id) = key_str.rsplit('/').next() {
-                        *df.entry(node_id.to_string()).or_default() += 1;
-                    }
-                }
-            }
-
-            let n_docs_with_term = df.len().max(1) as f64;
+            let token_postings = runtime_index.postings.get(token);
+            let n_docs_with_term = token_postings.map_or(0, Vec::len).max(1) as f64;
             // BM25 IDF: ln(1 + (N - df + 0.5) / (df + 0.5))  -- V2 formula
             let idf = (1.0 + (total_docs - n_docs_with_term + 0.5) / (n_docs_with_term + 0.5))
                 .ln()
                 .max(0.0);
 
-            for (node_id, tf) in df {
-                let tf = tf as f64;
+            for posting in token_postings.into_iter().flatten() {
+                scanned_entries += 1;
+                if scanned_entries.is_multiple_of(256) {
+                    cancel.check_cancelled()?;
+                }
+                let document_number = posting.document_number as usize;
+                if doc_lengths[document_number] == 0 {
+                    matched_document_numbers.push(posting.document_number);
+                }
+                let term_frequency = posting.term_frequency as f64;
                 // Accumulate raw TF*IDF for now; length normalization applied below
-                *doc_scores.entry(node_id.clone()).or_default() += idf * (tf * (BM25_K1 + 1.0));
+                doc_scores[document_number] += idf * (term_frequency * (BM25_K1 + 1.0));
                 // Also track document length for normalization denominator
-                *doc_lengths.entry(node_id).or_default() += tf as usize;
+                doc_lengths[document_number] += posting.term_frequency;
             }
         }
 
         // Compute average document length across matched documents
-        let avg_dl = if doc_lengths.is_empty() {
+        let avg_dl = if matched_document_numbers.is_empty() {
             1.0
         } else {
-            doc_lengths.values().sum::<usize>() as f64 / doc_lengths.len() as f64
+            matched_document_numbers
+                .iter()
+                .map(|document_number| doc_lengths[*document_number as usize])
+                .sum::<usize>() as f64
+                / matched_document_numbers.len() as f64
         };
 
         // Apply BM25 length normalization: score / (tf_sum + k1*(1-b + b*docLen/avg))
-        let mut ranked: Vec<(String, f64)> = doc_scores
+        let mut ranked: Vec<(u32, f64)> = matched_document_numbers
             .into_iter()
-            .map(|(node_id, raw_score)| {
-                let doc_len = *doc_lengths.get(&node_id).unwrap_or(&1) as f64;
+            .map(|document_number| {
+                let document_number_usize = document_number as usize;
+                let doc_len = doc_lengths[document_number_usize] as f64;
                 let tf_sum = doc_len; // sum of TFs across all query terms for this doc
                 let denominator = tf_sum + BM25_K1 * (1.0 - BM25_B + BM25_B * doc_len / avg_dl);
-                let final_score = raw_score / denominator;
-                (node_id, final_score)
+                let final_score = doc_scores[document_number_usize] / denominator;
+                (document_number, final_score)
             })
             .collect();
 
-        let compare_ranked = |a: &(String, f64), b: &(String, f64)| {
+        let compare_ranked = |a: &(u32, f64), b: &(u32, f64)| {
             b.1.partial_cmp(&a.1)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.0.cmp(&b.0))
+                .then_with(|| {
+                    runtime_index.document_ids[a.0 as usize]
+                        .cmp(&runtime_index.document_ids[b.0 as usize])
+                })
         };
         if limit < ranked.len() {
             ranked.select_nth_unstable_by(limit, compare_ranked);
@@ -3805,11 +3900,13 @@ impl StorageEngine {
         ranked.sort_by(compare_ranked);
 
         let mut nodes = Vec::new();
-        for (position, (node_id, score)) in ranked.into_iter().take(limit).enumerate() {
+        for (position, (document_number, score)) in ranked.into_iter().take(limit).enumerate() {
             if position % 256 == 0 {
                 cancel.check_cancelled()?;
             }
-            if let Some(node) = self.get_node_record(&node_id)? {
+            if let Some(node) =
+                self.get_node_record(&runtime_index.document_ids[document_number as usize])?
+            {
                 nodes.push((node, score));
             }
         }
@@ -4661,6 +4758,9 @@ impl StorageEngine {
             self.rebuild_relationship_fulltext_index_with_cancellation(index, cancel)?;
         } else if is_relationship_property_index(index) {
             self.rebuild_relationship_property_index_with_cancellation(index, cancel)?;
+        }
+        if is_node_fulltext_index(index) {
+            self.fulltext_runtime_indexes.lock().clear();
         }
         self.index_schema_generation.fetch_add(1, Ordering::Release);
         Ok(())
@@ -7674,6 +7774,9 @@ impl<'a> BatchWriter<'a> {
         }
         if let Some(manager) = replacement_schema_manager {
             *self.engine.schema_manager.write() = manager;
+        }
+        if !nodes.is_empty() {
+            self.engine.fulltext_runtime_indexes.lock().clear();
         }
         if !indexes.is_empty() {
             self.engine
