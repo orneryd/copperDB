@@ -54,6 +54,50 @@ async fn copperdb_search_returns_not_found_for_an_authorized_missing_database() 
     assert_eq!(payload["error"], "database not found: missing-db");
 }
 
+#[tokio::test]
+async fn copperdb_search_reports_not_ready_when_no_search_indexes_are_declared() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage_path = temp_dir
+        .path()
+        .join("cold-db")
+        .to_string_lossy()
+        .into_owned();
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager.create("cold-db", storage_path).unwrap();
+    let mut state = AppState {
+        db_name: "cold-db".into(),
+        db_manager,
+        ..Default::default()
+    };
+    state.auth.security_enabled = false;
+
+    let response = build_router(Arc::new(state))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/copperdb/search")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"query": "hello"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["database"], "cold-db");
+    assert_eq!(payload["retryable"], true);
+    assert_eq!(payload["request_status"], "search_not_ready");
+}
+
 async fn read_bolt_message(stream: &mut tokio::net::TcpStream) -> copperdb_bolt::packstream::Value {
     use tokio::io::AsyncReadExt;
 

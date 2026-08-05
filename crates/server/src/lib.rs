@@ -1400,6 +1400,9 @@ async fn search_handler(
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({
                 "error": "no search indexes configured",
+                "database": database,
+                "retryable": true,
+                "request_status": "search_not_ready",
                 "hint": "Create a fulltext index: CREATE FULLTEXT INDEX ... FOR (n:Label) ON EACH [n.prop]"
             })),
         )
