@@ -255,6 +255,87 @@ impl CopperDb {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn search_fabric_ranked_outcome_locally_scoped_with_context_and_roles_and_indexes(
+        &self,
+        request_context: &RequestContext,
+        placement: &PlacementKey,
+        query: &SearchQuery,
+        labels: &[String],
+        filters: &BTreeMap<String, Vec<String>>,
+        roles: &[String],
+        index_names: &[String],
+    ) -> Result<RrfSearchOutcome, CopperDbError> {
+        if !matches!(query, SearchQuery::Hybrid { .. }) {
+            let limit = match query {
+                SearchQuery::FullText { limit, .. } => *limit,
+                SearchQuery::Semantic { k, .. } => *k,
+                SearchQuery::Hybrid { .. } => unreachable!("hybrid queries return below"),
+            };
+            return self
+                .search_fabric_ranked_batch_locally_scoped_with_context_and_roles_and_indexes(
+                    request_context,
+                    placement,
+                    query,
+                    labels,
+                    filters,
+                    roles,
+                    index_names,
+                )
+                .map(|batch| merge_rrf_search_batches(vec![batch], RrfConfig::new(60.0, limit)));
+        }
+
+        self.ensure_ranked_search_query_enabled(query)?;
+        for label in labels {
+            self.compliance.check_label_access(label, roles)?;
+        }
+        for property in filters.keys() {
+            self.compliance.check_property_access(property, roles)?;
+        }
+        request_context.check_active()?;
+
+        let SearchQuery::Hybrid { text, vector, k } = query else {
+            unreachable!("non-hybrid queries return above");
+        };
+        let visibility_snapshot = SearchVisibilitySnapshot {
+            policy_resolver: self.eval.knowledge_policy_resolver()?,
+            compliance_policies: self.compliance.enabled_policies_snapshot()?,
+            index_definitions: self.selected_search_indexes(index_names)?,
+        };
+        let lexical = self.search_fabric_ranked_batch_locally_with_visibility_snapshot(
+            request_context,
+            placement,
+            &SearchQuery::FullText {
+                query: text.clone(),
+                fields: Vec::new(),
+                limit: Self::hybrid_fulltext_candidate_limit(*k),
+            },
+            labels,
+            filters,
+            roles,
+            index_names,
+            Some(&visibility_snapshot),
+        )?;
+        let semantic = self.search_fabric_ranked_batch_locally_with_visibility_snapshot(
+            request_context,
+            placement,
+            &SearchQuery::Semantic {
+                vector: vector.clone(),
+                k: *k,
+                min_score: f32::NEG_INFINITY,
+            },
+            labels,
+            filters,
+            roles,
+            index_names,
+            Some(&visibility_snapshot),
+        )?;
+        Ok(merge_rrf_search_batches(
+            vec![lexical, semantic],
+            RrfConfig::new(60.0, *k),
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn search_fabric_ranked_batch_locally_with_visibility_snapshot(
         &self,
         request_context: &RequestContext,

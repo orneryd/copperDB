@@ -1461,49 +1461,17 @@ async fn search_handler(
 
     let search_started = std::time::Instant::now();
     let placement = PlacementKey::default_for_database(&database);
-    let batches = match query {
-        SearchQuery::Hybrid { text, vector, k } => [
-            SearchQuery::FullText {
-                query: text,
-                fields: bm25_indexes
-                    .iter()
-                    .flat_map(|index| index.properties.iter().cloned())
-                    .collect(),
-                limit: GraphEngine::hybrid_fulltext_candidate_limit(k),
-            },
-            SearchQuery::Semantic {
-                vector,
-                k,
-                min_score: f32::NEG_INFINITY,
-            },
-        ]
-        .into_iter()
-        .map(|query| {
-            engine.search_fabric_ranked_batch_locally_scoped_with_context_and_roles_and_indexes(
-                &request_context,
-                &placement,
-                &query,
-                &request.labels,
-                &request.filters,
-                &roles,
-                &request.indexes,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>(),
-        query => engine
-            .search_fabric_ranked_batch_locally_scoped_with_context_and_roles_and_indexes(
-                &request_context,
-                &placement,
-                &query,
-                &request.labels,
-                &request.filters,
-                &roles,
-                &request.indexes,
-            )
-            .map(|batch| vec![batch]),
-    };
-    let outcome = match batches {
-        Ok(batches) => engine.merge_fabric_ranked_search(batches, RrfConfig::new(60.0, limit)),
+    let outcome = match engine
+        .search_fabric_ranked_outcome_locally_scoped_with_context_and_roles_and_indexes(
+            &request_context,
+            &placement,
+            &query,
+            &request.labels,
+            &request.filters,
+            &roles,
+            &request.indexes,
+        ) {
+        Ok(outcome) => outcome,
         Err(error) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,

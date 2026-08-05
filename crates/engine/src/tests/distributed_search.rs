@@ -207,6 +207,7 @@ fn local_hybrid_search_fuses_duplicate_lexical_and_semantic_hits() {
         IndexDefinition, IndexEntityType, IndexKind, NodeRecord, StorageEngine,
     };
     use copperdb_topology::PlacementKey;
+    use copperdb_util::RequestContext;
 
     let dir = tempfile::tempdir().unwrap();
     let data_dir = dir.path().join("db");
@@ -284,6 +285,30 @@ fn local_hybrid_search_fuses_duplicate_lexical_and_semantic_hits() {
     assert_eq!(batch.hits[0].rank, 1);
     assert_eq!(batch.hits[1].global_id.local_id, "document:a");
     assert!(batch.hits[0].score > batch.hits[1].score);
+
+    let outcome = db
+        .search_fabric_ranked_outcome_locally_scoped_with_context_and_roles_and_indexes(
+            &RequestContext::detached(),
+            &PlacementKey::default_for_database("copper"),
+            &SearchQuery::Hybrid {
+                text: "graph".into(),
+                vector: vec![1.0, 0.0],
+                k: 2,
+            },
+            &[],
+            &BTreeMap::new(),
+            &["admin".into()],
+            &[],
+        )
+        .unwrap();
+
+    assert_eq!(outcome.output_hits, 2);
+    assert_eq!(outcome.results[0].global_id.local_id, "document:b");
+    assert_eq!(outcome.results[0].bm25_rank, 1);
+    assert_eq!(outcome.results[0].vector_rank, 2);
+    assert_eq!(outcome.results[1].global_id.local_id, "document:a");
+    assert_eq!(outcome.results[1].bm25_rank, 0);
+    assert_eq!(outcome.results[1].vector_rank, 1);
 }
 
 #[test]
