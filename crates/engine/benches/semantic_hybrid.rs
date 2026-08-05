@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 
 use copperdb_engine::{CopperDb, DatabaseConfig};
-use copperdb_search::SearchQuery;
+use copperdb_search::{merge_rrf_search_batches, RrfConfig, RrfSearchBatch, SearchQuery};
 use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind, NodeRecord, StorageEngine};
 use copperdb_topology::PlacementKey;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{
+    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
+};
 use tempfile::TempDir;
 
 const NODE_COUNT: usize = 9_000;
@@ -15,7 +17,11 @@ const QUERY: &str = "where are my prescriptions?";
 struct Workload {
     db: CopperDb,
     placement: PlacementKey,
-    query: SearchQuery,
+    hybrid_query: SearchQuery,
+    lexical_query: SearchQuery,
+    semantic_query: SearchQuery,
+    lexical_batch: RrfSearchBatch,
+    semantic_batch: RrfSearchBatch,
     _data_directory: TempDir,
 }
 
@@ -92,18 +98,34 @@ impl Workload {
         config.runtime_config.vector_enabled = true;
         let db = CopperDb::open(config).expect("benchmark engine must open");
         let placement = PlacementKey::default_for_database("copper");
-        let query = SearchQuery::Hybrid {
+        let hybrid_query = SearchQuery::Hybrid {
             text: QUERY.into(),
             vector: profile_query_vector(),
             k: LIMIT,
         };
+        let lexical_query = SearchQuery::FullText {
+            query: QUERY.into(),
+            fields: Vec::new(),
+            limit: LIMIT * 2,
+        };
+        let semantic_query = SearchQuery::Semantic {
+            vector: profile_query_vector(),
+            k: LIMIT,
+            min_score: f32::NEG_INFINITY,
+        };
         db.set_ranked_search_cache_enabled(false);
         let warmup = db
-            .search_fabric_ranked_batch_locally(&placement, &query)
+            .search_fabric_ranked_batch_locally(&placement, &hybrid_query)
             .expect("benchmark warmup search must succeed");
         assert_eq!(warmup.source, "hybrid");
         assert!(warmup.hits.iter().any(|hit| hit.source == "hybrid"));
         assert!(!warmup.hits.is_empty());
+        let lexical_batch = db
+            .search_fabric_ranked_batch_locally(&placement, &lexical_query)
+            .expect("benchmark lexical warmup search must succeed");
+        let semantic_batch = db
+            .search_fabric_ranked_batch_locally(&placement, &semantic_query)
+            .expect("benchmark semantic warmup search must succeed");
 
         eprintln!(
             "search profile RRF hybrid: nodes={NODE_COUNT}, dimensions={DIMENSIONS}, limit={LIMIT}, response_cache=disabled, profile=bench"
@@ -111,7 +133,11 @@ impl Workload {
         Self {
             db,
             placement,
-            query,
+            hybrid_query,
+            lexical_query,
+            semantic_query,
+            lexical_batch,
+            semantic_batch,
             _data_directory: data_directory,
         }
     }
@@ -145,12 +171,141 @@ fn bench_semantic_hybrid(criterion: &mut Criterion) {
                     .db
                     .search_fabric_ranked_batch_locally(
                         &workload.placement,
-                        black_box(&workload.query),
+                        black_box(&workload.hybrid_query),
                     )
                     .expect("benchmark hybrid search must succeed"),
             );
         });
     });
+    group.bench_with_input(
+        BenchmarkId::new("lexical_branch", format!("{NODE_COUNT}-d{DIMENSIONS}")),
+        &workload,
+        |bench, workload| {
+            bench.iter(|| {
+                black_box(
+                    workload
+                        .db
+                        .search_fabric_ranked_batch_locally(
+                            &workload.placement,
+                            black_box(&workload.lexical_query),
+                        )
+                        .expect("benchmark lexical search must succeed"),
+                );
+            });
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new("semantic_branch", format!("{NODE_COUNT}-d{DIMENSIONS}")),
+        &workload,
+        |bench, workload| {
+            bench.iter(|| {
+                black_box(
+                    workload
+                        .db
+                        .search_fabric_ranked_batch_locally(
+                            &workload.placement,
+                            black_box(&workload.semantic_query),
+                        )
+                        .expect("benchmark semantic search must succeed"),
+                );
+            });
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new("storage_fulltext", format!("{NODE_COUNT}-d{DIMENSIONS}")),
+        &workload,
+        |bench, workload| {
+            bench.iter(|| {
+                black_box(
+                    workload
+                        .db
+                        .storage_engine()
+                        .search_fulltext_nodes_by_properties(
+                            "Document",
+                            &["title".into(), "content".into()],
+                            QUERY,
+                            LIMIT * 2,
+                        )
+                        .expect("benchmark storage fulltext search must succeed"),
+                );
+            });
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new("policy_catalog_load", format!("{NODE_COUNT}-d{DIMENSIONS}")),
+        &workload,
+        |bench, workload| {
+            bench.iter(|| {
+                let storage = workload.db.storage_engine();
+                black_box((
+                    storage
+                        .load_decay_profile_schemas()
+                        .expect("benchmark decay profiles must load"),
+                    storage
+                        .load_decay_profile_binding_schemas()
+                        .expect("benchmark decay bindings must load"),
+                    storage
+                        .load_promotion_profile_schemas()
+                        .expect("benchmark promotion profiles must load"),
+                    storage
+                        .load_promotion_policy_schemas()
+                        .expect("benchmark promotion policies must load"),
+                ));
+            });
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new("index_schema_load", format!("{NODE_COUNT}-d{DIMENSIONS}")),
+        &workload,
+        |bench, workload| {
+            bench.iter(|| {
+                black_box(
+                    workload
+                        .db
+                        .storage_engine()
+                        .load_index_definitions()
+                        .expect("benchmark index definitions must load"),
+                );
+            });
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new("policy_metadata_40", format!("{NODE_COUNT}-d{DIMENSIONS}")),
+        &workload,
+        |bench, workload| {
+            bench.iter(|| {
+                let storage = workload.db.storage_engine();
+                for position in 0..LIMIT * 2 {
+                    black_box(
+                        storage
+                            .get_knowledge_policy_access_metadata(&format!("n-{position}"))
+                            .expect("benchmark access metadata must load"),
+                    );
+                }
+            });
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new("rrf_fusion", format!("{NODE_COUNT}-d{DIMENSIONS}")),
+        &workload,
+        |bench, workload| {
+            bench.iter_batched(
+                || {
+                    vec![
+                        workload.lexical_batch.clone(),
+                        workload.semantic_batch.clone(),
+                    ]
+                },
+                |batches| {
+                    black_box(merge_rrf_search_batches(
+                        batches,
+                        RrfConfig::new(60.0, LIMIT),
+                    ))
+                },
+                BatchSize::SmallInput,
+            );
+        },
+    );
     group.finish();
 }
 

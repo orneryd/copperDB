@@ -179,35 +179,45 @@ pub fn merge_rrf_search_hits(
     ranked_hits: Vec<Vec<RrfSearchHit>>,
     config: RrfConfig,
 ) -> Vec<RrfMergedHit> {
-    let mut merged: HashMap<String, RrfMergedHit> = HashMap::new();
+    let input_hit_count = ranked_hits.iter().map(Vec::len).sum();
+    let mut merged: HashMap<FabricGlobalId, RrfMergedHit> = HashMap::with_capacity(input_hit_count);
     for hit in ranked_hits.into_iter().flatten() {
-        let stable_id = hit.global_id.stable_id();
         let contribution = 1.0 / (config.k + hit.rank.max(1) as f32);
-        let entry = merged.entry(stable_id).or_insert_with(|| RrfMergedHit {
-            global_id: hit.global_id.clone(),
-            rrf_score: 0.0,
-            best_score: hit.score,
-            vector_rank: 0,
-            bm25_rank: 0,
-            sources: Vec::new(),
-            shard: hit.shard.clone(),
-            label: hit.label.clone(),
-            snippet: hit.snippet.clone(),
-        });
-        entry.rrf_score += contribution;
-        if hit.score > entry.best_score {
-            entry.best_score = hit.score;
-            entry.label = hit.label.clone();
-            entry.snippet = hit.snippet.clone();
-        }
-        match hit.source.as_str() {
-            "lexical" => entry.bm25_rank = hit.rank,
-            "semantic" | "vector" => entry.vector_rank = hit.rank,
-            _ => {}
-        }
-        if !entry.sources.iter().any(|source| source == &hit.source) {
-            entry.sources.push(hit.source);
-            entry.sources.sort();
+        if let Some(entry) = merged.get_mut(&hit.global_id) {
+            entry.rrf_score += contribution;
+            if hit.score > entry.best_score {
+                entry.best_score = hit.score;
+                entry.label = hit.label;
+                entry.snippet = hit.snippet;
+            }
+            match hit.source.as_str() {
+                "lexical" => entry.bm25_rank = hit.rank,
+                "semantic" | "vector" => entry.vector_rank = hit.rank,
+                _ => {}
+            }
+            if !entry.sources.iter().any(|source| source == &hit.source) {
+                entry.sources.push(hit.source);
+                entry.sources.sort();
+            }
+        } else {
+            let source = hit.source;
+            let mut merged_hit = RrfMergedHit {
+                global_id: hit.global_id.clone(),
+                rrf_score: contribution,
+                best_score: hit.score,
+                vector_rank: 0,
+                bm25_rank: 0,
+                sources: vec![source.clone()],
+                shard: hit.shard,
+                label: hit.label,
+                snippet: hit.snippet,
+            };
+            match source.as_str() {
+                "lexical" => merged_hit.bm25_rank = hit.rank,
+                "semantic" | "vector" => merged_hit.vector_rank = hit.rank,
+                _ => {}
+            }
+            merged.insert(hit.global_id, merged_hit);
         }
     }
 

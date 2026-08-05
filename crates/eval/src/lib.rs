@@ -223,6 +223,8 @@ impl KnowledgePolicyInspection {
 }
 
 /// The query executor.
+type KnowledgePolicyResolverCache = Arc<Mutex<Option<(u64, Arc<Resolver>)>>>;
+
 pub struct EvalEngine {
     storage: Arc<StorageEngine>,
     vector_indexes: Arc<HnswRegistry>,
@@ -236,6 +238,7 @@ pub struct EvalEngine {
     node_lookup_cache: Arc<Mutex<HashMap<String, Value>>>,
     fulltext_query_cache:
         Arc<Mutex<HashMap<(u64, String), copperdb_search::lucene::FulltextQuery>>>,
+    knowledge_policy_resolver_cache: KnowledgePolicyResolverCache,
     access_flusher: Arc<AccessFlusher>,
     hot_path_trace: Arc<HotPathTraceState>,
 }

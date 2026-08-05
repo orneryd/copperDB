@@ -1806,13 +1806,36 @@ pub struct StorageEngine {
 #[derive(Debug)]
 struct FulltextRuntimeIndex {
     document_ids: Vec<String>,
-    postings: HashMap<String, Vec<FulltextRuntimePosting>>,
+    document_lengths: Vec<u32>,
+    terms: HashMap<String, FulltextRuntimeTermState>,
+    lexicon: Vec<String>,
+    average_document_length: f64,
+    query_plans: Mutex<HashMap<String, FulltextRuntimeQueryPlan>>,
+}
+
+#[derive(Debug)]
+struct FulltextRuntimeTermState {
+    postings: Vec<FulltextRuntimePosting>,
+    inverse_document_frequency: f64,
 }
 
 #[derive(Debug)]
 struct FulltextRuntimePosting {
     document_number: u32,
-    term_frequency: usize,
+    term_frequency: u16,
+}
+
+#[derive(Clone, Debug)]
+struct FulltextRuntimeQueryPlan {
+    terms: Vec<FulltextRuntimeWeightedTerm>,
+    suffix_upper_bounds: Vec<f64>,
+}
+
+#[derive(Clone, Debug)]
+struct FulltextRuntimeWeightedTerm {
+    token: String,
+    weight: f64,
+    upper_bound: f64,
 }
 
 /// A storage-owned transaction with snapshot reads and a private write overlay.
@@ -3749,9 +3772,19 @@ impl StorageEngine {
         }
 
         let mut document_ids = Vec::new();
-        let mut postings = HashMap::<String, Vec<FulltextRuntimePosting>>::new();
+        let mut document_lengths = Vec::new();
+        let mut terms = HashMap::<String, FulltextRuntimeTermState>::new();
+        let mut total_document_length = 0_u64;
         for node in self.all_node_records()? {
             if !node.labels.iter().any(|node_label| node_label == label) {
+                continue;
+            }
+            let tokens = canonical_properties
+                .iter()
+                .filter_map(|property| node.properties.get(property))
+                .flat_map(fulltext_tokens_for_value)
+                .collect::<Vec<_>>();
+            if tokens.is_empty() {
                 continue;
             }
             let document_number = u32::try_from(document_ids.len()).map_err(|_| {
@@ -3759,35 +3792,59 @@ impl StorageEngine {
                     "fulltext runtime index exceeds u32 capacity".into(),
                 )
             })?;
+            let document_length = u32::try_from(tokens.len()).map_err(|_| {
+                StorageError::InvalidFulltextIndexKey(
+                    "fulltext runtime document exceeds u32 token capacity".into(),
+                )
+            })?;
             document_ids.push(node.id);
-            for property in &canonical_properties {
-                let Some(value) = node.properties.get(property) else {
-                    continue;
-                };
-                let unique_tokens = fulltext_tokens_for_value(value)
-                    .into_iter()
-                    .collect::<BTreeSet<_>>();
-                for token in unique_tokens {
-                    let token_postings = postings.entry(token).or_default();
-                    if let Some(last_posting) = token_postings.last_mut() {
-                        if last_posting.document_number == document_number {
-                            last_posting.term_frequency += 1;
-                            continue;
-                        }
-                    }
-                    {
-                        token_postings.push(FulltextRuntimePosting {
-                            document_number,
-                            term_frequency: 1,
-                        });
-                    }
-                }
+            document_lengths.push(document_length);
+            total_document_length += u64::from(document_length);
+            let mut term_frequencies = HashMap::<String, usize>::new();
+            for token in tokens {
+                *term_frequencies.entry(token).or_default() += 1;
+            }
+            for (token, term_frequency) in term_frequencies {
+                terms
+                    .entry(token)
+                    .or_insert_with(|| FulltextRuntimeTermState {
+                        postings: Vec::new(),
+                        inverse_document_frequency: 0.0,
+                    })
+                    .postings
+                    .push(FulltextRuntimePosting {
+                        document_number,
+                        term_frequency: u16::try_from(term_frequency).unwrap_or(u16::MAX),
+                    });
             }
         }
 
+        let document_count = document_ids.len();
+        for term_state in terms.values_mut() {
+            let document_frequency = term_state.postings.len() as f64;
+            term_state.inverse_document_frequency = if document_count == 0 {
+                0.0
+            } else {
+                (1.0 + (document_count as f64 - document_frequency + 0.5)
+                    / (document_frequency + 0.5))
+                    .ln()
+                    .max(0.0)
+            };
+        }
+        let mut lexicon = terms.keys().cloned().collect::<Vec<_>>();
+        lexicon.sort();
+
         let index = Arc::new(FulltextRuntimeIndex {
             document_ids,
-            postings,
+            document_lengths,
+            terms,
+            lexicon,
+            average_document_length: if document_count == 0 {
+                0.0
+            } else {
+                total_document_length as f64 / document_count as f64
+            },
+            query_plans: Mutex::new(HashMap::new()),
         });
         let mut indexes = self.fulltext_runtime_indexes.lock();
         Ok(Arc::clone(
@@ -3795,6 +3852,76 @@ impl StorageEngine {
                 .entry(cache_key)
                 .or_insert_with(|| Arc::clone(&index)),
         ))
+    }
+
+    fn fulltext_runtime_query_plan(
+        runtime_index: &FulltextRuntimeIndex,
+        query: &str,
+        query_tokens: &[String],
+    ) -> FulltextRuntimeQueryPlan {
+        if let Some(plan) = runtime_index.query_plans.lock().get(query).cloned() {
+            return plan;
+        }
+
+        let mut term_weights = HashMap::<String, f64>::new();
+        for token in query_tokens {
+            *term_weights.entry(token.clone()).or_default() += 1.0;
+            if token.len() < FULLTEXT_V2_PREFIX_MINIMUM_LENGTH {
+                continue;
+            }
+            let start = runtime_index
+                .lexicon
+                .partition_point(|candidate| candidate < token);
+            let mut expansions = 0;
+            for candidate in &runtime_index.lexicon[start..] {
+                if !candidate.starts_with(token) {
+                    break;
+                }
+                if candidate == token {
+                    continue;
+                }
+                *term_weights.entry(candidate.clone()).or_default() += FULLTEXT_V2_PREFIX_WEIGHT;
+                expansions += 1;
+                if expansions == FULLTEXT_V2_PREFIX_MAXIMUM_EXPANSIONS {
+                    break;
+                }
+            }
+        }
+
+        let mut terms = term_weights
+            .into_iter()
+            .filter_map(|(token, weight)| {
+                let term_state = runtime_index.terms.get(&token)?;
+                let upper_bound = weight * term_state.inverse_document_frequency * (BM25_K1 + 1.0);
+                (upper_bound > 0.0).then_some(FulltextRuntimeWeightedTerm {
+                    token,
+                    weight,
+                    upper_bound,
+                })
+            })
+            .collect::<Vec<_>>();
+        terms.sort_by(|left, right| {
+            right
+                .upper_bound
+                .total_cmp(&left.upper_bound)
+                .then(left.token.cmp(&right.token))
+        });
+        let mut suffix_upper_bounds = vec![0.0; terms.len() + 1];
+        for position in (0..terms.len()).rev() {
+            suffix_upper_bounds[position] =
+                suffix_upper_bounds[position + 1] + terms[position].upper_bound;
+        }
+        let plan = FulltextRuntimeQueryPlan {
+            terms,
+            suffix_upper_bounds,
+        };
+        if query.len() <= 256 {
+            runtime_index
+                .query_plans
+                .lock()
+                .insert(query.to_string(), plan.clone());
+        }
+        plan
     }
 
     pub fn search_fulltext_nodes_by_properties_with_cancellation(
@@ -3828,61 +3955,71 @@ impl StorageEngine {
             return Ok(Vec::new());
         }
         let runtime_index = self.fulltext_runtime_index(label, &indexed_properties)?;
-        let total_docs = runtime_index.document_ids.len().max(1) as f64;
+        if runtime_index.average_document_length <= 0.0 {
+            return Ok(Vec::new());
+        }
+        let query_plan = Self::fulltext_runtime_query_plan(&runtime_index, query, &tokens);
+        if query_plan.terms.is_empty() {
+            return Ok(Vec::new());
+        }
 
-        // Compact document numbers make dense score slots cheaper than per-query hash maps.
+        // Dense compact document numbers make V2 fan-in scoring cheaper than a string-keyed map.
         let mut doc_scores = vec![0.0; runtime_index.document_ids.len()];
-        let mut doc_lengths = vec![0_usize; runtime_index.document_ids.len()];
         let mut matched_document_numbers = Vec::new();
-
+        let mut matched = vec![false; runtime_index.document_ids.len()];
+        let mut discarded = vec![false; runtime_index.document_ids.len()];
         let mut scanned_entries = 0usize;
-        for token in &tokens {
-            let token_postings = runtime_index.postings.get(token);
-            let n_docs_with_term = token_postings.map_or(0, Vec::len).max(1) as f64;
-            // BM25 IDF: ln(1 + (N - df + 0.5) / (df + 0.5))  -- V2 formula
-            let idf = (1.0 + (total_docs - n_docs_with_term + 0.5) / (n_docs_with_term + 0.5))
-                .ln()
-                .max(0.0);
-
-            for posting in token_postings.into_iter().flatten() {
+        for (term_position, weighted_term) in query_plan.terms.iter().enumerate() {
+            let term_state = &runtime_index.terms[&weighted_term.token];
+            for posting in &term_state.postings {
                 scanned_entries += 1;
                 if scanned_entries.is_multiple_of(256) {
                     cancel.check_cancelled()?;
                 }
                 let document_number = posting.document_number as usize;
-                if doc_lengths[document_number] == 0 {
+                if discarded[document_number] {
+                    continue;
+                }
+                if !matched[document_number] {
+                    matched[document_number] = true;
                     matched_document_numbers.push(posting.document_number);
                 }
-                let term_frequency = posting.term_frequency as f64;
-                // Accumulate raw TF*IDF for now; length normalization applied below
-                doc_scores[document_number] += idf * (term_frequency * (BM25_K1 + 1.0));
-                // Also track document length for normalization denominator
-                doc_lengths[document_number] += posting.term_frequency;
+                let term_frequency = f64::from(posting.term_frequency);
+                let document_length = f64::from(runtime_index.document_lengths[document_number]);
+                let numerator = term_frequency * (BM25_K1 + 1.0);
+                let denominator = term_frequency
+                    + BM25_K1
+                        * (1.0 - BM25_B
+                            + BM25_B * document_length / runtime_index.average_document_length);
+                doc_scores[document_number] += weighted_term.weight
+                    * term_state.inverse_document_frequency
+                    * (numerator / denominator);
+            }
+            if limit > 0 && matched_document_numbers.len() > limit.saturating_mul(4) {
+                let mut competitive_scores = matched_document_numbers
+                    .iter()
+                    .map(|document_number| doc_scores[*document_number as usize])
+                    .collect::<Vec<_>>();
+                let cutoff_position = competitive_scores.len() - limit;
+                let minimum_competitive_score = *competitive_scores
+                    .select_nth_unstable_by(cutoff_position, f64::total_cmp)
+                    .1;
+                let remaining_upper_bound = query_plan.suffix_upper_bounds[term_position + 1];
+                matched_document_numbers.retain(|document_number| {
+                    let document_number = *document_number as usize;
+                    let keep = doc_scores[document_number] + remaining_upper_bound
+                        >= minimum_competitive_score;
+                    if !keep {
+                        discarded[document_number] = true;
+                    }
+                    keep
+                });
             }
         }
 
-        // Compute average document length across matched documents
-        let avg_dl = if matched_document_numbers.is_empty() {
-            1.0
-        } else {
-            matched_document_numbers
-                .iter()
-                .map(|document_number| doc_lengths[*document_number as usize])
-                .sum::<usize>() as f64
-                / matched_document_numbers.len() as f64
-        };
-
-        // Apply BM25 length normalization: score / (tf_sum + k1*(1-b + b*docLen/avg))
         let mut ranked: Vec<(u32, f64)> = matched_document_numbers
             .into_iter()
-            .map(|document_number| {
-                let document_number_usize = document_number as usize;
-                let doc_len = doc_lengths[document_number_usize] as f64;
-                let tf_sum = doc_len; // sum of TFs across all query terms for this doc
-                let denominator = tf_sum + BM25_K1 * (1.0 - BM25_B + BM25_B * doc_len / avg_dl);
-                let final_score = doc_scores[document_number_usize] / denominator;
-                (document_number, final_score)
-            })
+            .map(|document_number| (document_number, doc_scores[document_number as usize]))
             .collect();
 
         let compare_ranked = |a: &(u32, f64), b: &(u32, f64)| {
@@ -6000,6 +6137,9 @@ fn tokenize_fulltext(text: &str) -> Vec<String> {
 /// BM25 constants matching NornicDB's V2 engine.
 const BM25_K1: f64 = 1.2;
 const BM25_B: f64 = 0.75;
+const FULLTEXT_V2_PREFIX_WEIGHT: f64 = 0.8;
+const FULLTEXT_V2_PREFIX_MINIMUM_LENGTH: usize = 3;
+const FULLTEXT_V2_PREFIX_MAXIMUM_EXPANSIONS: usize = 32;
 
 /// English stop words matching NornicDB's `basicStopWords`.
 fn is_stop_word(word: &str) -> bool {

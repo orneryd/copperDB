@@ -8,7 +8,7 @@ use copperdb_storage::{NodeRecord, StorageEngine, StorageError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -73,11 +73,15 @@ pub enum ComplianceControl {
 
 pub struct ComplianceManager {
     storage: Arc<StorageEngine>,
+    policies_cache: RwLock<Option<(u64, Vec<CompliancePolicy>)>>,
 }
 
 impl ComplianceManager {
     pub fn new(storage: Arc<StorageEngine>) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            policies_cache: RwLock::new(None),
+        }
     }
 
     pub fn add_policy(&self, policy: CompliancePolicy) -> Result<(), ComplianceError> {
@@ -89,6 +93,10 @@ impl ComplianceManager {
 
     pub fn put_policy(&self, policy: CompliancePolicy) -> Result<(), ComplianceError> {
         self.storage.put_node_record(&policy_to_node(&policy)?)?;
+        *self
+            .policies_cache
+            .write()
+            .expect("compliance policy cache lock poisoned") = None;
         Ok(())
     }
 
@@ -104,15 +112,34 @@ impl ComplianceManager {
             return Err(ComplianceError::PolicyNotFound(id.into()));
         }
         self.storage.delete_node_record(&policy_node_id(id))?;
+        *self
+            .policies_cache
+            .write()
+            .expect("compliance policy cache lock poisoned") = None;
         Ok(())
     }
 
     pub fn policies(&self) -> Result<Vec<CompliancePolicy>, ComplianceError> {
+        let generation = self.storage.wal_applied_sequence()?;
+        if let Some((cached_generation, policies)) = self
+            .policies_cache
+            .read()
+            .expect("compliance policy cache lock poisoned")
+            .as_ref()
+        {
+            if *cached_generation == generation {
+                return Ok(policies.clone());
+            }
+        }
         let mut policies = Vec::new();
         for node in self.storage.get_nodes_by_label(POLICY_LABEL)? {
             policies.push(policy_from_node(&node)?);
         }
         policies.sort_by(|left, right| left.id.cmp(&right.id));
+        *self
+            .policies_cache
+            .write()
+            .expect("compliance policy cache lock poisoned") = Some((generation, policies.clone()));
         Ok(policies)
     }
 
@@ -121,7 +148,17 @@ impl ComplianceManager {
         property: &str,
         roles: &[String],
     ) -> Result<(), ComplianceError> {
-        for policy in self.enabled_policies()? {
+        let policies = self.enabled_policies()?;
+        self.check_property_access_with_policies(property, roles, &policies)
+    }
+
+    pub fn check_property_access_with_policies(
+        &self,
+        property: &str,
+        roles: &[String],
+        policies: &[CompliancePolicy],
+    ) -> Result<(), ComplianceError> {
+        for policy in policies {
             if let ComplianceControl::MaskProperty {
                 property: governed,
                 allowed_roles,
@@ -129,7 +166,7 @@ impl ComplianceManager {
             {
                 if governed == property && !role_allowed(roles, allowed_roles) {
                     return Err(ComplianceError::PolicyViolation {
-                        policy: policy.id,
+                        policy: policy.id.clone(),
                         message: format!("access to property '{property}' is restricted"),
                     });
                 }

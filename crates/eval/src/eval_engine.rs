@@ -73,6 +73,7 @@ impl EvalEngine {
             vector_index_artifact_refresh,
             node_lookup_cache: Arc::new(Mutex::new(HashMap::new())),
             fulltext_query_cache: Arc::new(Mutex::new(HashMap::new())),
+            knowledge_policy_resolver_cache: Arc::new(Mutex::new(None)),
             access_flusher: Arc::new(AccessFlusher::new()),
             hot_path_trace: HotPathTraceState::new(),
         }
@@ -193,7 +194,18 @@ impl EvalEngine {
         }
     }
 
-    pub fn knowledge_policy_resolver(&self) -> Result<Resolver, EvalError> {
+    pub fn knowledge_policy_resolver(&self) -> Result<Arc<Resolver>, EvalError> {
+        let generation = self.storage.wal_applied_sequence()?;
+        if let Some((cached_generation, resolver)) = self
+            .knowledge_policy_resolver_cache
+            .lock()
+            .expect("knowledge-policy resolver cache lock poisoned")
+            .as_ref()
+        {
+            if *cached_generation == generation {
+                return Ok(Arc::clone(resolver));
+            }
+        }
         let bundles = build_bundles_by_name(&self.storage.load_decay_profile_schemas()?)
             .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
         let bindings = build_decay_bindings(&self.storage.load_decay_profile_binding_schemas()?);
@@ -209,7 +221,13 @@ impl EvalEngine {
             &promotion_policies,
         )
         .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
-        Ok(Resolver::new(binding_table))
+        let resolver = Arc::new(Resolver::new(binding_table));
+        *self
+            .knowledge_policy_resolver_cache
+            .lock()
+            .expect("knowledge-policy resolver cache lock poisoned") =
+            Some((generation, Arc::clone(&resolver)));
+        Ok(resolver)
     }
 
     // ── MERGE node-lookup cache helpers ──────────────────────────────────────
@@ -3353,11 +3371,12 @@ impl EvalEngine {
 
         if seeded.is_empty() {
             // No matching rows from first MATCH — return empty
+            let resolver = self.knowledge_policy_resolver()?;
             return self.build_shortest_path_result(
                 query,
                 params,
                 Vec::new(),
-                &self.knowledge_policy_resolver()?,
+                resolver.as_ref(),
             );
         }
 
@@ -3424,11 +3443,12 @@ impl EvalEngine {
         let t_build = std::time::Instant::now();
         let path_count = all_paths.len();
         let seed_count = seeded.len();
+        let resolver = self.knowledge_policy_resolver()?;
         let result = self.build_shortest_path_result(
             query,
             params,
             all_paths,
-            &self.knowledge_policy_resolver()?,
+            resolver.as_ref(),
         );
         let t_build_elapsed = t_build.elapsed();
 

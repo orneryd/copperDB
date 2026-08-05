@@ -2,6 +2,13 @@ use super::*;
 use crate::vector_indexes::VectorIndexManager;
 use copperdb_knowledgepolicy::Resolver;
 use copperdb_util::RequestContext;
+
+struct SearchVisibilitySnapshot {
+    policy_resolver: Arc<Resolver>,
+    compliance_policies: Vec<copperdb_compliance::CompliancePolicy>,
+    index_definitions: Vec<copperdb_storage::IndexDefinition>,
+}
+
 impl CopperDb {
     fn ensure_ranked_search_query_enabled(&self, query: &SearchQuery) -> Result<(), CopperDbError> {
         match query {
@@ -222,20 +229,59 @@ impl CopperDb {
         roles: &[String],
         index_names: &[String],
     ) -> Result<RrfSearchBatch, CopperDbError> {
+        self.search_fabric_ranked_batch_locally_with_visibility_snapshot(
+            request_context,
+            placement,
+            query,
+            labels,
+            filters,
+            roles,
+            index_names,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn search_fabric_ranked_batch_locally_with_visibility_snapshot(
+        &self,
+        request_context: &RequestContext,
+        placement: &PlacementKey,
+        query: &SearchQuery,
+        labels: &[String],
+        filters: &BTreeMap<String, Vec<String>>,
+        roles: &[String],
+        index_names: &[String],
+        visibility_snapshot: Option<&SearchVisibilitySnapshot>,
+    ) -> Result<RrfSearchBatch, CopperDbError> {
         self.ensure_ranked_search_query_enabled(query)?;
-        for label in labels {
-            self.compliance.check_label_access(label, roles)?;
+        if visibility_snapshot.is_none() {
+            for label in labels {
+                self.compliance.check_label_access(label, roles)?;
+            }
+            for property in filters.keys() {
+                self.compliance.check_property_access(property, roles)?;
+            }
         }
-        for property in filters.keys() {
-            self.compliance.check_property_access(property, roles)?;
+        if !matches!(query, SearchQuery::Hybrid { .. }) && visibility_snapshot.is_none() {
+            self.selected_search_indexes(index_names)?;
         }
-        self.selected_search_indexes(index_names)?;
         request_context.check_active()?;
-        let cache_key =
-            self.ranked_search_cache_key(placement, query, labels, filters, roles, index_names)?;
-        if let Some(batch) = self.ranked_search_cache.get(cache_key) {
-            return Ok(batch);
-        }
+        let cache_key = if self.ranked_search_cache.is_enabled() {
+            let cache_key = self.ranked_search_cache_key(
+                placement,
+                query,
+                labels,
+                filters,
+                roles,
+                index_names,
+            )?;
+            if let Some(batch) = self.ranked_search_cache.get(cache_key) {
+                return Ok(batch);
+            }
+            Some(cache_key)
+        } else {
+            None
+        };
 
         let result = match query {
             SearchQuery::FullText {
@@ -243,14 +289,23 @@ impl CopperDb {
                 fields,
                 limit,
             } => {
-                let policy_resolver = self.eval.knowledge_policy_resolver()?;
-                let compliance_policies = self.compliance.enabled_policies_snapshot()?;
-                let index_definitions = self.selected_search_indexes(index_names)?;
+                let policy_resolver = match visibility_snapshot {
+                    Some(snapshot) => Arc::clone(&snapshot.policy_resolver),
+                    None => self.eval.knowledge_policy_resolver()?,
+                };
+                let compliance_policies = match visibility_snapshot {
+                    Some(snapshot) => snapshot.compliance_policies.clone(),
+                    None => self.compliance.enabled_policies_snapshot()?,
+                };
+                let index_definitions = match visibility_snapshot {
+                    Some(snapshot) => &snapshot.index_definitions,
+                    None => &self.selected_search_indexes(index_names)?,
+                };
                 let mut search_labels = Self::local_ranked_search_labels(
                     self.load_fabric_database(&placement.tenant, &placement.database)?
                         .as_ref(),
                     placement,
-                    &index_definitions,
+                    index_definitions,
                     fields,
                 );
                 if !labels.is_empty() {
@@ -262,15 +317,33 @@ impl CopperDb {
                 for label in search_labels {
                     request_context.check_active()?;
                     let matched_properties =
-                        matched_fulltext_properties(&index_definitions, &label, fields);
+                        matched_fulltext_properties(index_definitions, &label, fields);
                     if matched_properties.is_empty() {
                         continue;
                     }
-                    if self.compliance.check_label_access(&label, roles).is_err() {
+                    let label_is_allowed = match visibility_snapshot {
+                        Some(snapshot) => self
+                            .compliance
+                            .check_label_access_with_policies(
+                                &label,
+                                roles,
+                                &snapshot.compliance_policies,
+                            )
+                            .is_ok(),
+                        None => self.compliance.check_label_access(&label, roles).is_ok(),
+                    };
+                    if !label_is_allowed {
                         continue;
                     }
                     for property in &matched_properties {
-                        self.compliance.check_property_access(property, roles)?;
+                        match visibility_snapshot {
+                            Some(snapshot) => self.compliance.check_property_access_with_policies(
+                                property,
+                                roles,
+                                &snapshot.compliance_policies,
+                            )?,
+                            None => self.compliance.check_property_access(property, roles)?,
+                        }
                     }
 
                     for result in self.storage.search_fulltext_nodes_by_properties(
@@ -329,8 +402,14 @@ impl CopperDb {
                 min_score,
             } => {
                 request_context.check_active()?;
-                let policy_resolver = self.eval.knowledge_policy_resolver()?;
-                let compliance_policies = self.compliance.enabled_policies_snapshot()?;
+                let policy_resolver = match visibility_snapshot {
+                    Some(snapshot) => Arc::clone(&snapshot.policy_resolver),
+                    None => self.eval.knowledge_policy_resolver()?,
+                };
+                let compliance_policies = match visibility_snapshot {
+                    Some(snapshot) => snapshot.compliance_policies.clone(),
+                    None => self.compliance.enabled_policies_snapshot()?,
+                };
                 let matches = self.vector_indexes.query_node_indexes(
                     request_context.cancellation(),
                     vector,
@@ -374,34 +453,39 @@ impl CopperDb {
                 })
             }
             SearchQuery::Hybrid { text, vector, k } => {
-                let lexical = self
-                    .search_fabric_ranked_batch_locally_scoped_with_context_and_roles_and_indexes(
-                        request_context,
-                        placement,
-                        &SearchQuery::FullText {
-                            query: text.clone(),
-                            fields: Vec::new(),
-                            limit: hybrid_fulltext_candidate_limit(*k),
-                        },
-                        labels,
-                        filters,
-                        roles,
-                        index_names,
-                    )?;
-                let semantic = self
-                    .search_fabric_ranked_batch_locally_scoped_with_context_and_roles_and_indexes(
-                        request_context,
-                        placement,
-                        &SearchQuery::Semantic {
-                            vector: vector.clone(),
-                            k: *k,
-                            min_score: f32::NEG_INFINITY,
-                        },
-                        labels,
-                        filters,
-                        roles,
-                        index_names,
-                    )?;
+                let visibility_snapshot = SearchVisibilitySnapshot {
+                    policy_resolver: self.eval.knowledge_policy_resolver()?,
+                    compliance_policies: self.compliance.enabled_policies_snapshot()?,
+                    index_definitions: self.selected_search_indexes(index_names)?,
+                };
+                let lexical = self.search_fabric_ranked_batch_locally_with_visibility_snapshot(
+                    request_context,
+                    placement,
+                    &SearchQuery::FullText {
+                        query: text.clone(),
+                        fields: Vec::new(),
+                        limit: hybrid_fulltext_candidate_limit(*k),
+                    },
+                    labels,
+                    filters,
+                    roles,
+                    index_names,
+                    Some(&visibility_snapshot),
+                )?;
+                let semantic = self.search_fabric_ranked_batch_locally_with_visibility_snapshot(
+                    request_context,
+                    placement,
+                    &SearchQuery::Semantic {
+                        vector: vector.clone(),
+                        k: *k,
+                        min_score: f32::NEG_INFINITY,
+                    },
+                    labels,
+                    filters,
+                    roles,
+                    index_names,
+                    Some(&visibility_snapshot),
+                )?;
                 let outcome =
                     merge_rrf_search_batches(vec![lexical, semantic], RrfConfig::new(60.0, *k));
                 let hits = outcome
@@ -425,7 +509,7 @@ impl CopperDb {
                 })
             }
         };
-        if let Ok(batch) = &result {
+        if let (Some(cache_key), Ok(batch)) = (cache_key, &result) {
             self.ranked_search_cache.put(cache_key, batch.clone());
         }
         result
