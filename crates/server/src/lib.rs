@@ -1314,6 +1314,13 @@ async fn search_handler(
         Err(status) => return status.into_response(),
     };
     let roles = roles_for_claims(claims.as_ref());
+    if state.db_manager.get(&database).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("database not found: {database}")})),
+        )
+            .into_response();
+    }
     let limit = if request.limit == 0 {
         10
     } else {

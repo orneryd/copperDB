@@ -21,6 +21,39 @@ fn encode_bolt_chunks(message: &[u8]) -> Vec<u8> {
     chunks
 }
 
+#[tokio::test]
+async fn copperdb_search_returns_not_found_for_an_authorized_missing_database() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let mut state = AppState::default();
+    state.auth.security_enabled = false;
+    let response = build_router(Arc::new(state))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/copperdb/search")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "database": "missing-db",
+                        "query": "hello"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"], "database not found: missing-db");
+}
+
 async fn read_bolt_message(stream: &mut tokio::net::TcpStream) -> copperdb_bolt::packstream::Value {
     use tokio::io::AsyncReadExt;
 
