@@ -1469,7 +1469,7 @@ async fn search_handler(
                     .iter()
                     .flat_map(|index| index.properties.iter().cloned())
                     .collect(),
-                limit: k,
+                limit: GraphEngine::hybrid_fulltext_candidate_limit(k),
             },
             SearchQuery::Semantic {
                 vector,
@@ -1534,31 +1534,31 @@ async fn search_handler(
         })
         .collect::<Vec<_>>();
     let hydration_time_ms = hydration_started.elapsed().as_millis() as u64;
-        let result = if results.is_empty() {
-            "no_results"
-        } else {
-            "success"
-        };
-        let _ = state.telemetry.record_counter(
-            "nornicdb_search_requests_total",
-            &[("mode", search_method), ("result", result)],
+    let result = if results.is_empty() {
+        "no_results"
+    } else {
+        "success"
+    };
+    let _ = state.telemetry.record_counter(
+        "nornicdb_search_requests_total",
+        &[("mode", search_method), ("result", result)],
+    );
+    for (stage, duration_ms) in [
+        ("embedding", embedding_time_ms),
+        ("index", search_time_ms),
+        ("hydration", hydration_time_ms),
+    ] {
+        let _ = state.telemetry.observe_histogram(
+            "nornicdb_search_duration_seconds",
+            &[("mode", search_method), ("stage", stage)],
+            duration_ms as f64 / 1_000.0,
         );
-        for (stage, duration_ms) in [
-            ("embedding", embedding_time_ms),
-            ("index", search_time_ms),
-            ("hydration", hydration_time_ms),
-        ] {
-            let _ = state.telemetry.observe_histogram(
-                "nornicdb_search_duration_seconds",
-                &[("mode", search_method), ("stage", stage)],
-                duration_ms as f64 / 1_000.0,
-            );
-        }
-        let _ = state.telemetry.set_gauge(
-            "nornicdb_search_candidates_rows",
-            &[],
-            candidate_count as f64,
-        );
+    }
+    let _ = state.telemetry.set_gauge(
+        "nornicdb_search_candidates_rows",
+        &[],
+        candidate_count as f64,
+    );
     tracing::debug!(
         database,
         search_method,

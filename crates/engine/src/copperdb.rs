@@ -39,6 +39,19 @@ impl CopperDb {
         self.ensure_ranked_search_query_enabled(query)
     }
 
+    /// Bound lexical fan-out before hybrid reciprocal-rank fusion.
+    pub fn hybrid_fulltext_candidate_limit(limit: usize) -> usize {
+        limit.saturating_mul(2).max(20)
+    }
+
+    fn fulltext_candidate_limit(limit: usize, filters: &BTreeMap<String, Vec<String>>) -> usize {
+        if filters.is_empty() {
+            limit
+        } else {
+            Self::hybrid_fulltext_candidate_limit(limit)
+        }
+    }
+
     /// Enable or disable cached local ranked-search batches.
     ///
     /// Disabling drops resident batches while preserving durable indexes and the warmed pipeline.
@@ -311,7 +324,7 @@ impl CopperDb {
                 if !labels.is_empty() {
                     search_labels.retain(|label| labels.contains(label));
                 }
-                let candidate_limit = *limit;
+                let candidate_limit = Self::fulltext_candidate_limit(*limit, filters);
                 let mut hits = Vec::new();
 
                 for label in search_labels {
@@ -464,7 +477,7 @@ impl CopperDb {
                     &SearchQuery::FullText {
                         query: text.clone(),
                         fields: Vec::new(),
-                        limit: hybrid_fulltext_candidate_limit(*k),
+                        limit: Self::hybrid_fulltext_candidate_limit(*k),
                     },
                     labels,
                     filters,
@@ -906,10 +919,6 @@ const MAX_SEARCH_CANDIDATES: usize = 5_000;
 
 fn vector_candidate_limit(limit: usize) -> usize {
     limit.saturating_mul(10).clamp(50, MAX_SEARCH_CANDIDATES)
-}
-
-fn hybrid_fulltext_candidate_limit(limit: usize) -> usize {
-    limit.saturating_mul(2).max(20)
 }
 
 fn node_matches_search_filters(node: &NodeRecord, filters: &BTreeMap<String, Vec<String>>) -> bool {
