@@ -306,7 +306,7 @@ async fn copperdb_search_combines_text_and_direct_vector_when_embedding_is_disab
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/copperdb/search")
+                .uri("/db/direct-hybrid/search")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({
@@ -332,6 +332,16 @@ async fn copperdb_search_combines_text_and_direct_vector_when_embedding_is_disab
     assert_eq!(
         state
             .telemetry
+            .snapshot_metric("nornicdb_search_candidates_rows")
+            .unwrap(),
+        vec![copperdb_otel::MetricSample {
+            labels: Vec::new(),
+            value: copperdb_otel::MetricValue::Gauge(2.0),
+        }]
+    );
+    assert_eq!(
+        state
+            .telemetry
             .snapshot_metric("nornicdb_search_requests_total")
             .unwrap(),
         vec![copperdb_otel::MetricSample {
@@ -342,6 +352,25 @@ async fn copperdb_search_combines_text_and_direct_vector_when_embedding_is_disab
             value: copperdb_otel::MetricValue::Counter(1.0),
         }]
     );
+    let durations = state
+        .telemetry
+        .snapshot_metric("nornicdb_search_duration_seconds")
+        .unwrap();
+    assert_eq!(durations.len(), 3);
+    for stage in ["embedding", "index", "hydration"] {
+        assert!(durations.iter().any(|sample| {
+            matches!(
+                sample,
+                copperdb_otel::MetricSample {
+                    labels,
+                    value: copperdb_otel::MetricValue::Histogram(values),
+                } if labels == &vec![
+                    ("mode".to_string(), "hybrid".to_string()),
+                    ("stage".to_string(), stage.to_string()),
+                ] && values.len() == 1
+            )
+        }));
+    }
 }
 
 #[tokio::test]
@@ -386,6 +415,98 @@ async fn copperdb_search_rejects_empty_text_without_a_direct_vector() {
                 .uri("/copperdb/search")
                 .header("content-type", "application/json")
                 .body(Body::from(serde_json::json!({}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["error"],
+        "search requires non-empty query text or a query vector"
+    );
+    assert_eq!(
+        state
+            .telemetry
+            .snapshot_metric("nornicdb_search_requests_total")
+            .unwrap(),
+        vec![copperdb_otel::MetricSample {
+            labels: vec![
+                ("mode".to_string(), "unknown".to_string()),
+                ("result".to_string(), "error".to_string()),
+            ],
+            value: copperdb_otel::MetricValue::Counter(1.0),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn copperdb_search_records_unavailable_query_embedding_before_mode_selection() {
+    use axum::{body::Body, http::Request};
+    use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind, StorageEngine};
+    use tower::ServiceExt;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage_path = temp_dir
+        .path()
+        .join("embedding-failure")
+        .to_string_lossy()
+        .into_owned();
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager
+        .create("embedding-failure", storage_path.clone())
+        .unwrap();
+    db_manager
+        .set_config_overrides(
+            "embedding-failure",
+            BTreeMap::from([
+                ("COPPERDB_SEARCH_BM25_ENABLED".into(), "false".into()),
+                ("COPPERDB_SEARCH_VECTOR_ENABLED".into(), "true".into()),
+                ("COPPERDB_EMBEDDING_ENABLED".into(), "false".into()),
+            ]),
+        )
+        .unwrap();
+    let mut state = AppState {
+        db_name: "embedding-failure".into(),
+        db_manager,
+        ..Default::default()
+    };
+    state.auth.security_enabled = false;
+
+    let storage = StorageEngine::open(&storage_path).unwrap();
+    storage
+        .persist_index_definition(&IndexDefinition {
+            name: "document_embedding".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Document".into(),
+            properties: vec!["embedding".into()],
+            kind: IndexKind::Vector,
+        })
+        .unwrap();
+    storage
+        .persist_index_options(
+            "document_embedding",
+            &std::collections::HashMap::from([(
+                "indexConfig".into(),
+                serde_json::json!({"vector.dimensions": 3}),
+            )]),
+        )
+        .unwrap();
+    drop(storage);
+
+    let response = build_router(Arc::new(state.clone()))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/copperdb/search")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"query": "graph"}).to_string(),
+                ))
                 .unwrap(),
         )
         .await
