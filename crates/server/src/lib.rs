@@ -1492,7 +1492,7 @@ async fn search_handler(
     };
     let search_time_ms = search_started.elapsed().as_millis() as u64;
     let hydration_started = std::time::Instant::now();
-    let candidate_count = outcome.output_hits;
+    let candidate_count = outcome.input_hits;
     let results = outcome
         .results
         .into_iter()

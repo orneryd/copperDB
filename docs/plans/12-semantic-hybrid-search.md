@@ -54,6 +54,7 @@ Requests identify database, mode (`lexical`, `semantic`, `hybrid`), text or vect
 - Complete: authorized HTTP search requests for a database that does not exist return NornicDB-compatible `404` before engine opening; authorization still runs first, so unauthenticated callers cannot use search to probe database existence.
 - Complete: a database with no declared node FULLTEXT or VECTOR search index returns NornicDB-compatible `503` readiness diagnostics: its database name, `retryable: true`, and `request_status: "search_not_ready"`. In CopperDB's explicit-index model, creating a compatible index makes this state ready.
 - Validated: HTTP search accepts an explicitly selected compatible index and rejects an unknown selection with `400`, rather than silently falling back to all indexes or reporting the database as not ready.
+- Complete: the HTTP candidate gauge reports bounded source candidates before RRF duplicate collapse and final pagination (`input_hits`), not only the returned merged rows (`output_hits`); hybrid diagnostics therefore expose actual lexical/vector candidate work.
 - Remaining: Plan 12 still requires broader parity evidence for the request/response diagnostics and production workload variation before its overall status can change. The NornicDB-equivalent CPU benchmark target is now met under the documented harness; reprofile before retaining future changes.
 
 ## Tests And Performance

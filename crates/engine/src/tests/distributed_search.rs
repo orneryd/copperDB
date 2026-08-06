@@ -302,6 +302,7 @@ fn local_hybrid_search_fuses_duplicate_lexical_and_semantic_hits() {
         )
         .unwrap();
 
+    assert_eq!(outcome.input_hits, 3);
     assert_eq!(outcome.output_hits, 2);
     assert_eq!(outcome.results[0].global_id.local_id, "document:b");
     assert_eq!(outcome.results[0].bm25_rank, 1);
