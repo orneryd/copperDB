@@ -1364,6 +1364,10 @@ async fn search_handler(
                     )
             })
         {
+            let _ = state.telemetry.record_counter(
+                "nornicdb_search_requests_total",
+                &[("mode", "unknown"), ("result", "error")],
+            );
             return (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({

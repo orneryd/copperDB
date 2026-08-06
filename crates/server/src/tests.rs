@@ -377,13 +377,22 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
             .telemetry
             .snapshot_metric("nornicdb_search_requests_total")
             .unwrap(),
-        vec![copperdb_otel::MetricSample {
-            labels: vec![
-                ("mode".to_string(), "bm25".to_string()),
-                ("result".to_string(), "success".to_string()),
-            ],
-            value: copperdb_otel::MetricValue::Counter(3.0),
-        }]
+        vec![
+            copperdb_otel::MetricSample {
+                labels: vec![
+                    ("mode".to_string(), "bm25".to_string()),
+                    ("result".to_string(), "success".to_string()),
+                ],
+                value: copperdb_otel::MetricValue::Counter(3.0),
+            },
+            copperdb_otel::MetricSample {
+                labels: vec![
+                    ("mode".to_string(), "unknown".to_string()),
+                    ("result".to_string(), "error".to_string()),
+                ],
+                value: copperdb_otel::MetricValue::Counter(1.0),
+            }
+        ]
     );
     assert_eq!(
         state
