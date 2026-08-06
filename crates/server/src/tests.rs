@@ -28,7 +28,7 @@ async fn copperdb_search_returns_not_found_for_an_authorized_missing_database() 
 
     let mut state = AppState::default();
     state.auth.security_enabled = false;
-    let response = build_router(Arc::new(state))
+    let response = build_router(Arc::new(state.clone()))
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -74,7 +74,7 @@ async fn copperdb_search_reports_not_ready_when_no_search_indexes_are_declared()
     };
     state.auth.security_enabled = false;
 
-    let response = build_router(Arc::new(state))
+    let response = build_router(Arc::new(state.clone()))
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -96,6 +96,19 @@ async fn copperdb_search_reports_not_ready_when_no_search_indexes_are_declared()
     assert_eq!(payload["database"], "cold-db");
     assert_eq!(payload["retryable"], true);
     assert_eq!(payload["request_status"], "search_not_ready");
+    assert_eq!(
+        state
+            .telemetry
+            .snapshot_metric("nornicdb_search_requests_total")
+            .unwrap(),
+        vec![copperdb_otel::MetricSample {
+            labels: vec![
+                ("mode".to_string(), "unknown".to_string()),
+                ("result".to_string(), "error".to_string()),
+            ],
+            value: copperdb_otel::MetricValue::Counter(1.0),
+        }]
+    );
 }
 
 async fn read_bolt_message(stream: &mut tokio::net::TcpStream) -> copperdb_bolt::packstream::Value {

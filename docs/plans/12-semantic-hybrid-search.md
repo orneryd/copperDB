@@ -56,6 +56,7 @@ Requests identify database, mode (`lexical`, `semantic`, `hybrid`), text or vect
 - Validated: HTTP search accepts an explicitly selected compatible index and rejects an unknown selection with `400`, rather than silently falling back to all indexes or reporting the database as not ready.
 - Complete: the HTTP candidate gauge reports bounded source candidates before RRF duplicate collapse and final pagination (`input_hits`), not only the returned merged rows (`output_hits`); hybrid diagnostics therefore expose actual lexical/vector candidate work.
 - Complete: HTTP search stage histograms export each `Instant` duration with sub-millisecond seconds precision, matching the full-text procedure and generic HTTP metrics instead of truncating fast embedding, index, or hydration stages to whole milliseconds.
+- Complete: a public search request rejected before mode selection because no compatible index exists emits `nornicdb_search_requests_total` with `mode: "unknown"` and `result: "error"`; readiness failures are therefore observable without inventing a lexical or vector mode.
 - Remaining: Plan 12 still requires broader parity evidence for the request/response diagnostics and production workload variation before its overall status can change. The NornicDB-equivalent CPU benchmark target is now met under the documented harness; reprofile before retaining future changes.
 
 ## Tests And Performance

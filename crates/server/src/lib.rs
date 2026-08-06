@@ -1396,6 +1396,10 @@ async fn search_handler(
         .collect();
 
     if bm25_indexes.is_empty() && vector_indexes.is_empty() {
+        let _ = state.telemetry.record_counter(
+            "nornicdb_search_requests_total",
+            &[("mode", "unknown"), ("result", "error")],
+        );
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({
