@@ -1496,6 +1496,10 @@ async fn search_handler(
         ) {
         Ok(outcome) => outcome,
         Err(error) => {
+            let _ = state.telemetry.record_counter(
+                "nornicdb_search_requests_total",
+                &[("mode", search_method), ("result", "error")],
+            );
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({"error": error.to_string()})),

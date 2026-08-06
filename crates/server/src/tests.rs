@@ -191,6 +191,82 @@ async fn copperdb_search_records_vector_only_embedding_unavailability() {
     );
 }
 
+#[tokio::test]
+async fn copperdb_search_records_selected_bm25_engine_failures() {
+    use axum::{body::Body, http::Request};
+    use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind};
+    use tower::ServiceExt;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage_path = temp_dir
+        .path()
+        .join("bm25-disabled")
+        .to_string_lossy()
+        .into_owned();
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager.create("bm25-disabled", storage_path).unwrap();
+    db_manager
+        .set_config_overrides(
+            "bm25-disabled",
+            BTreeMap::from([("COPPERDB_SEARCH_BM25_ENABLED".into(), "false".into())]),
+        )
+        .unwrap();
+    let mut state = AppState {
+        db_name: "bm25-disabled".into(),
+        db_manager,
+        ..Default::default()
+    };
+    state.auth.security_enabled = false;
+    open_engine(&state, "bm25-disabled")
+        .unwrap()
+        .storage()
+        .persist_index_definition(&IndexDefinition {
+            name: "document_title".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Document".into(),
+            properties: vec!["title".into()],
+            kind: IndexKind::FullText,
+        })
+        .unwrap();
+
+    let response = build_router(Arc::new(state.clone()))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/copperdb/search")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"query": "hello"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["error"],
+        "configuration error: fulltext search is disabled for this database"
+    );
+    assert_eq!(
+        state
+            .telemetry
+            .snapshot_metric("nornicdb_search_requests_total")
+            .unwrap(),
+        vec![copperdb_otel::MetricSample {
+            labels: vec![
+                ("mode".to_string(), "bm25".to_string()),
+                ("result".to_string(), "error".to_string()),
+            ],
+            value: copperdb_otel::MetricValue::Counter(1.0),
+        }]
+    );
+}
+
 async fn read_bolt_message(stream: &mut tokio::net::TcpStream) -> copperdb_bolt::packstream::Value {
     use tokio::io::AsyncReadExt;
 
