@@ -58,6 +58,7 @@ Requests identify database, mode (`lexical`, `semantic`, `hybrid`), text or vect
 - Complete: HTTP search stage histograms export each `Instant` duration with sub-millisecond seconds precision, matching the full-text procedure and generic HTTP metrics instead of truncating fast embedding, index, or hydration stages to whole milliseconds.
 - Complete: a public search request rejected before mode selection because no compatible index exists emits `nornicdb_search_requests_total` with `mode: "unknown"` and `result: "error"`; readiness failures are therefore observable without inventing a lexical or vector mode.
 - Complete: an unknown or incompatible explicitly selected index is likewise counted as an `unknown/error` search request before mode selection, while successful selected-index searches retain their actual mode metrics.
+- Complete: a vector-only request whose query embedding is unavailable returns its existing `503` and emits the same `unknown/error` request sample, because semantic mode cannot be selected without a query vector.
 - Remaining: Plan 12 still requires broader parity evidence for the request/response diagnostics and production workload variation before its overall status can change. The NornicDB-equivalent CPU benchmark target is now met under the documented harness; reprofile before retaining future changes.
 
 ## Tests And Performance

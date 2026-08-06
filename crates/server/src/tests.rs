@@ -111,6 +111,86 @@ async fn copperdb_search_reports_not_ready_when_no_search_indexes_are_declared()
     );
 }
 
+#[tokio::test]
+async fn copperdb_search_records_vector_only_embedding_unavailability() {
+    use axum::{body::Body, http::Request};
+    use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind};
+    use tower::ServiceExt;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage_path = temp_dir
+        .path()
+        .join("vector-only")
+        .to_string_lossy()
+        .into_owned();
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager.create("vector-only", storage_path).unwrap();
+    db_manager
+        .set_config_overrides(
+            "vector-only",
+            BTreeMap::from([
+                ("COPPERDB_SEARCH_BM25_ENABLED".into(), "false".into()),
+                ("COPPERDB_SEARCH_VECTOR_ENABLED".into(), "true".into()),
+                ("COPPERDB_EMBEDDING_ENABLED".into(), "false".into()),
+            ]),
+        )
+        .unwrap();
+    let mut state = AppState {
+        db_name: "vector-only".into(),
+        db_manager,
+        ..Default::default()
+    };
+    state.auth.security_enabled = false;
+    open_engine(&state, "vector-only")
+        .unwrap()
+        .storage()
+        .persist_index_definition(&IndexDefinition {
+            name: "document_embedding".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Document".into(),
+            properties: vec!["embedding".into()],
+            kind: IndexKind::Vector,
+        })
+        .unwrap();
+
+    let response = build_router(Arc::new(state.clone()))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/copperdb/search")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"query": "hello"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["error"],
+        "query embedding is unavailable for vector-only search"
+    );
+    assert_eq!(
+        state
+            .telemetry
+            .snapshot_metric("nornicdb_search_requests_total")
+            .unwrap(),
+        vec![copperdb_otel::MetricSample {
+            labels: vec![
+                ("mode".to_string(), "unknown".to_string()),
+                ("result".to_string(), "error".to_string()),
+            ],
+            value: copperdb_otel::MetricValue::Counter(1.0),
+        }]
+    );
+}
+
 async fn read_bolt_message(stream: &mut tokio::net::TcpStream) -> copperdb_bolt::packstream::Value {
     use tokio::io::AsyncReadExt;
 
