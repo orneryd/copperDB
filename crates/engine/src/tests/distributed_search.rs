@@ -92,6 +92,40 @@ fn local_semantic_search_uses_compatible_maintained_node_indexes() {
     assert_eq!(cached_batch, batch);
     assert_eq!(db.ranked_search_cache.stats().hits, 1);
 
+    db.storage()
+        .persist_index_definition(&IndexDefinition {
+            name: "document_embedding_empty".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Document".into(),
+            properties: vec!["alternate_embedding".into()],
+            kind: IndexKind::Vector,
+        })
+        .unwrap();
+    db.storage()
+        .persist_index_options(
+            "document_embedding_empty",
+            &HashMap::from([(
+                "indexConfig".into(),
+                serde_json::json!({
+                    "vector.dimensions": 2,
+                    "vector.similarity_function": "cosine"
+                }),
+            )]),
+        )
+        .unwrap();
+    let schema_refreshed_batch = db
+        .search_fabric_ranked_batch_locally(
+            &PlacementKey::default_for_database("copper"),
+            &SearchQuery::Semantic {
+                vector: vec![1.0, 0.0],
+                k: 3,
+                min_score: 0.9,
+            },
+        )
+        .unwrap();
+    assert_eq!(schema_refreshed_batch, batch);
+    assert_eq!(db.ranked_search_cache.stats().misses, 2);
+
     drop(db);
 
     let reopened = CopperDb::open(config).unwrap();
