@@ -1270,7 +1270,10 @@ struct DatabaseConfigUpdateRequest {
 struct SearchRequest {
     #[serde(default)]
     database: String,
+    #[serde(default)]
     query: String,
+    #[serde(default)]
+    vector: Option<Vec<f32>>,
     #[serde(default)]
     labels: Vec<String>,
     #[serde(default)]
@@ -1419,7 +1422,9 @@ async fn search_handler(
 
     let (request_context, _request_guard) = RequestContext::root(None);
     let embedding_started = std::time::Instant::now();
-    let query_vector = if vector_indexes.is_empty() {
+    let query_vector = if request.vector.is_some() {
+        request.vector.clone()
+    } else if vector_indexes.is_empty() {
         None
     } else {
         match engine.embed_search_query(&request.query) {
@@ -1439,8 +1444,12 @@ async fn search_handler(
     };
     let embedding_elapsed = embedding_started.elapsed();
     let embedding_time_ms = embedding_elapsed.as_millis() as u64;
-    let (query, search_method) = match (bm25_indexes.is_empty(), query_vector) {
-        (false, Some(vector)) => (
+    let (query, search_method) = match (
+        bm25_indexes.is_empty(),
+        request.query.is_empty(),
+        query_vector,
+    ) {
+        (false, false, Some(vector)) => (
             SearchQuery::Hybrid {
                 text: request.query.clone(),
                 vector,
@@ -1448,7 +1457,7 @@ async fn search_handler(
             },
             "hybrid",
         ),
-        (true, Some(vector)) => (
+        (_, true, Some(vector)) => (
             SearchQuery::Semantic {
                 vector,
                 k: limit,
@@ -1456,7 +1465,7 @@ async fn search_handler(
             },
             "semantic",
         ),
-        (false, None) => (
+        (false, false, None) => (
             SearchQuery::FullText {
                 query: request.query.clone(),
                 fields: bm25_indexes
@@ -1467,7 +1476,7 @@ async fn search_handler(
             },
             "bm25",
         ),
-        (true, None) => {
+        _ => {
             let _ = state.telemetry.record_counter(
                 "nornicdb_search_requests_total",
                 &[("mode", "unknown"), ("result", "error")],
@@ -1475,7 +1484,7 @@ async fn search_handler(
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(serde_json::json!({
-                    "error": "query embedding is unavailable for vector-only search"
+                    "error": "search requires non-empty query text or a query vector"
                 })),
             )
                 .into_response();
@@ -1580,9 +1589,25 @@ async fn database_info_handler(
 
     match state.db_manager.get(&database) {
         Some(db) => {
-            let storage_bytes = open_engine(&state, &database)
+            let engine = open_engine(&state, &database).ok();
+            let storage_bytes = engine
+                .as_ref()
                 .map(|engine| engine.size_on_disk())
                 .unwrap_or(0);
+            let search_initialized = engine
+                .as_ref()
+                .and_then(|engine| engine.list_index_definitions().ok())
+                .is_some_and(|definitions| {
+                    definitions.iter().any(|definition| {
+                        definition.entity_type == copperdb_storage::IndexEntityType::Node
+                            && matches!(
+                                definition.kind,
+                                copperdb_storage::IndexKind::FullText
+                                    | copperdb_storage::IndexKind::Vector
+                            )
+                    })
+                });
+            let search_ready = db.status == DatabaseStatus::Online && search_initialized;
             Json(serde_json::json!({
                 "name": db.name,
                 "status": database_status_name(db.status),
@@ -1592,9 +1617,9 @@ async fn database_info_handler(
                 "edgeCount": 0,
                 "nodeStorageBytes": storage_bytes,
                 "managedEmbeddingBytes": 0,
-                "searchReady": false,
+                "searchReady": search_ready,
                 "searchBuilding": false,
-                "searchInitialized": false,
+                "searchInitialized": search_initialized,
             }))
             .into_response()
         }

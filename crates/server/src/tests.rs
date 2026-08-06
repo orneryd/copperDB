@@ -112,9 +112,11 @@ async fn copperdb_search_reports_not_ready_when_no_search_indexes_are_declared()
 }
 
 #[tokio::test]
-async fn copperdb_search_records_vector_only_embedding_unavailability() {
+async fn copperdb_search_accepts_direct_vector_when_embedding_is_disabled() {
     use axum::{body::Body, http::Request};
-    use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind};
+    use copperdb_storage::{
+        IndexDefinition, IndexEntityType, IndexKind, NodeRecord, StorageEngine,
+    };
     use tower::ServiceExt;
 
     let temp_dir = tempfile::tempdir().unwrap();
@@ -124,7 +126,9 @@ async fn copperdb_search_records_vector_only_embedding_unavailability() {
         .to_string_lossy()
         .into_owned();
     let db_manager = Arc::new(DatabaseManager::new());
-    db_manager.create("vector-only", storage_path).unwrap();
+    db_manager
+        .create("vector-only", storage_path.clone())
+        .unwrap();
     db_manager
         .set_config_overrides(
             "vector-only",
@@ -141,9 +145,8 @@ async fn copperdb_search_records_vector_only_embedding_unavailability() {
         ..Default::default()
     };
     state.auth.security_enabled = false;
-    open_engine(&state, "vector-only")
-        .unwrap()
-        .storage()
+    let storage = StorageEngine::open(&storage_path).unwrap();
+    storage
         .persist_index_definition(&IndexDefinition {
             name: "document_embedding".into(),
             entity_type: IndexEntityType::Node,
@@ -152,6 +155,31 @@ async fn copperdb_search_records_vector_only_embedding_unavailability() {
             kind: IndexKind::Vector,
         })
         .unwrap();
+    storage
+        .persist_index_options(
+            "document_embedding",
+            &std::collections::HashMap::from([(
+                "indexConfig".into(),
+                serde_json::json!({
+                    "vector.dimensions": 3,
+                    "vector.similarity_function": "cosine"
+                }),
+            )]),
+        )
+        .unwrap();
+    storage
+        .put_node_record(&NodeRecord {
+            id: "document:vector".into(),
+            labels: vec!["Document".into()],
+            properties: BTreeMap::new(),
+            named_embeddings: BTreeMap::from([("embedding".into(), vec![1.0, 0.0, 0.0])]),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        })
+        .unwrap();
+    drop(storage);
 
     let response = build_router(Arc::new(state.clone()))
         .oneshot(
@@ -160,8 +188,204 @@ async fn copperdb_search_records_vector_only_embedding_unavailability() {
                 .uri("/copperdb/search")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    serde_json::json!({"query": "hello"}).to_string(),
+                    serde_json::json!({"vector": [1.0, 0.0, 0.0]}).to_string(),
                 ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload.as_array().unwrap().len(), 1);
+    assert_eq!(payload[0]["node"]["id"], "document:vector");
+    assert_eq!(payload[0]["vector_rank"], 1);
+    assert_eq!(payload[0]["bm25_rank"], 0);
+    assert_eq!(
+        state
+            .telemetry
+            .snapshot_metric("nornicdb_search_requests_total")
+            .unwrap(),
+        vec![copperdb_otel::MetricSample {
+            labels: vec![
+                ("mode".to_string(), "semantic".to_string()),
+                ("result".to_string(), "success".to_string()),
+            ],
+            value: copperdb_otel::MetricValue::Counter(1.0),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn copperdb_search_combines_text_and_direct_vector_when_embedding_is_disabled() {
+    use axum::{body::Body, http::Request};
+    use copperdb_storage::{
+        IndexDefinition, IndexEntityType, IndexKind, NodeRecord, StorageEngine,
+    };
+    use tower::ServiceExt;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage_path = temp_dir
+        .path()
+        .join("direct-hybrid")
+        .to_string_lossy()
+        .into_owned();
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager
+        .create("direct-hybrid", storage_path.clone())
+        .unwrap();
+    db_manager
+        .set_config_overrides(
+            "direct-hybrid",
+            BTreeMap::from([
+                ("COPPERDB_SEARCH_BM25_ENABLED".into(), "true".into()),
+                ("COPPERDB_SEARCH_VECTOR_ENABLED".into(), "true".into()),
+                ("COPPERDB_EMBEDDING_ENABLED".into(), "false".into()),
+            ]),
+        )
+        .unwrap();
+    let mut state = AppState {
+        db_name: "direct-hybrid".into(),
+        db_manager,
+        ..Default::default()
+    };
+    state.auth.security_enabled = false;
+
+    let storage = StorageEngine::open(&storage_path).unwrap();
+    storage
+        .persist_index_definition(&IndexDefinition {
+            name: "document_title".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Document".into(),
+            properties: vec!["title".into()],
+            kind: IndexKind::FullText,
+        })
+        .unwrap();
+    storage
+        .persist_index_definition(&IndexDefinition {
+            name: "document_embedding".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Document".into(),
+            properties: vec!["embedding".into()],
+            kind: IndexKind::Vector,
+        })
+        .unwrap();
+    storage
+        .persist_index_options(
+            "document_embedding",
+            &std::collections::HashMap::from([(
+                "indexConfig".into(),
+                serde_json::json!({
+                    "vector.dimensions": 3,
+                    "vector.similarity_function": "cosine"
+                }),
+            )]),
+        )
+        .unwrap();
+    storage
+        .put_node_record(&NodeRecord {
+            id: "document:hybrid".into(),
+            labels: vec!["Document".into()],
+            properties: BTreeMap::from([(
+                "title".into(),
+                serde_json::Value::String("graph database".into()),
+            )]),
+            named_embeddings: BTreeMap::from([("embedding".into(), vec![1.0, 0.0, 0.0])]),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        })
+        .unwrap();
+    drop(storage);
+
+    let response = build_router(Arc::new(state.clone()))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/copperdb/search")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "query": "graph",
+                        "vector": [1.0, 0.0, 0.0]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload.as_array().unwrap().len(), 1);
+    assert_eq!(payload[0]["node"]["id"], "document:hybrid");
+    assert_eq!(payload[0]["bm25_rank"], 1);
+    assert_eq!(payload[0]["vector_rank"], 1);
+    assert_eq!(
+        state
+            .telemetry
+            .snapshot_metric("nornicdb_search_requests_total")
+            .unwrap(),
+        vec![copperdb_otel::MetricSample {
+            labels: vec![
+                ("mode".to_string(), "hybrid".to_string()),
+                ("result".to_string(), "success".to_string()),
+            ],
+            value: copperdb_otel::MetricValue::Counter(1.0),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn copperdb_search_rejects_empty_text_without_a_direct_vector() {
+    use axum::{body::Body, http::Request};
+    use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind, StorageEngine};
+    use tower::ServiceExt;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage_path = temp_dir
+        .path()
+        .join("empty-query")
+        .to_string_lossy()
+        .into_owned();
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager
+        .create("empty-query", storage_path.clone())
+        .unwrap();
+    let mut state = AppState {
+        db_name: "empty-query".into(),
+        db_manager,
+        ..Default::default()
+    };
+    state.auth.security_enabled = false;
+
+    let storage = StorageEngine::open(&storage_path).unwrap();
+    storage
+        .persist_index_definition(&IndexDefinition {
+            name: "document_title".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Document".into(),
+            properties: vec!["title".into()],
+            kind: IndexKind::FullText,
+        })
+        .unwrap();
+    drop(storage);
+
+    let response = build_router(Arc::new(state.clone()))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/copperdb/search")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({}).to_string()))
                 .unwrap(),
         )
         .await
@@ -174,7 +398,7 @@ async fn copperdb_search_records_vector_only_embedding_unavailability() {
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
         payload["error"],
-        "query embedding is unavailable for vector-only search"
+        "search requires non-empty query text or a query vector"
     );
     assert_eq!(
         state
@@ -3875,10 +4099,34 @@ async fn test_discovery_served_to_api_clients_by_default() {
 async fn database_info_allows_unauthenticated_access_when_security_disabled() {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind};
     use tower::ServiceExt;
 
-    let mut state = AppState::default();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage_path = temp_dir
+        .path()
+        .join("copperdb")
+        .to_string_lossy()
+        .into_owned();
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager.create("copperdb", storage_path).unwrap();
+    let mut state = AppState {
+        db_name: "copperdb".into(),
+        db_manager,
+        ..Default::default()
+    };
     state.auth.security_enabled = false;
+    open_engine(&state, "copperdb")
+        .unwrap()
+        .storage()
+        .persist_index_definition(&IndexDefinition {
+            name: "document_title".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Document".into(),
+            properties: vec!["title".into()],
+            kind: IndexKind::FullText,
+        })
+        .unwrap();
     let app = build_router(Arc::new(state));
 
     let response = app
@@ -3891,6 +4139,54 @@ async fn database_info_allows_unauthenticated_access_when_security_disabled() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["searchReady"], true);
+    assert_eq!(payload["searchBuilding"], false);
+    assert_eq!(payload["searchInitialized"], true);
+}
+
+#[tokio::test]
+async fn database_info_reports_search_unready_without_declared_search_indexes() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let storage_path = temp_dir
+        .path()
+        .join("copperdb")
+        .to_string_lossy()
+        .into_owned();
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager.create("copperdb", storage_path).unwrap();
+    let mut state = AppState {
+        db_name: "copperdb".into(),
+        db_manager,
+        ..Default::default()
+    };
+    state.auth.security_enabled = false;
+
+    let response = build_router(Arc::new(state))
+        .oneshot(
+            Request::builder()
+                .uri("/db/copperdb")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["searchReady"], false);
+    assert_eq!(payload["searchBuilding"], false);
+    assert_eq!(payload["searchInitialized"], false);
 }
 
 // ─── Demo page e2e ─────────────────────────────────────────────────────
