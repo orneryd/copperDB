@@ -12,12 +12,14 @@ use tempfile::TempDir;
 const NODE_COUNT: usize = 9_000;
 const DIMENSIONS: usize = 64;
 const LIMIT: usize = 20;
+const HIGH_LIMIT: usize = 100;
 const QUERY: &str = "where are my prescriptions?";
 
 struct Workload {
     db: CopperDb,
     placement: PlacementKey,
     hybrid_query: SearchQuery,
+    high_limit_hybrid_query: SearchQuery,
     lexical_query: SearchQuery,
     semantic_query: SearchQuery,
     lexical_batch: RrfSearchBatch,
@@ -103,6 +105,11 @@ impl Workload {
             vector: profile_query_vector(),
             k: LIMIT,
         };
+        let high_limit_hybrid_query = SearchQuery::Hybrid {
+            text: QUERY.into(),
+            vector: profile_query_vector(),
+            k: HIGH_LIMIT,
+        };
         let lexical_query = SearchQuery::FullText {
             query: QUERY.into(),
             fields: Vec::new(),
@@ -134,6 +141,7 @@ impl Workload {
             db,
             placement,
             hybrid_query,
+            high_limit_hybrid_query,
             lexical_query,
             semantic_query,
             lexical_batch,
@@ -177,6 +185,26 @@ fn bench_semantic_hybrid(criterion: &mut Criterion) {
             );
         });
     });
+    group.bench_with_input(
+        BenchmarkId::new(
+            "rrf_hybrid_high_limit",
+            format!("{NODE_COUNT}-d{DIMENSIONS}-k{HIGH_LIMIT}"),
+        ),
+        &workload,
+        |bench, workload| {
+            bench.iter(|| {
+                black_box(
+                    workload
+                        .db
+                        .search_fabric_ranked_batch_locally(
+                            &workload.placement,
+                            black_box(&workload.high_limit_hybrid_query),
+                        )
+                        .expect("benchmark high-limit hybrid search must succeed"),
+                );
+            });
+        },
+    );
     group.bench_with_input(
         BenchmarkId::new("rrf_hybrid_reopen", format!("{NODE_COUNT}-d{DIMENSIONS}")),
         &workload,
