@@ -1429,7 +1429,8 @@ async fn search_handler(
             }
         }
     };
-    let embedding_time_ms = embedding_started.elapsed().as_millis() as u64;
+    let embedding_elapsed = embedding_started.elapsed();
+    let embedding_time_ms = embedding_elapsed.as_millis() as u64;
     let (query, search_method) = match (bm25_indexes.is_empty(), query_vector) {
         (false, Some(vector)) => (
             SearchQuery::Hybrid {
@@ -1490,7 +1491,8 @@ async fn search_handler(
                 .into_response();
         }
     };
-    let search_time_ms = search_started.elapsed().as_millis() as u64;
+    let search_elapsed = search_started.elapsed();
+    let search_time_ms = search_elapsed.as_millis() as u64;
     let hydration_started = std::time::Instant::now();
     let candidate_count = outcome.input_hits;
     let results = outcome
@@ -1511,7 +1513,8 @@ async fn search_handler(
             }))
         })
         .collect::<Vec<_>>();
-    let hydration_time_ms = hydration_started.elapsed().as_millis() as u64;
+    let hydration_elapsed = hydration_started.elapsed();
+    let hydration_time_ms = hydration_elapsed.as_millis() as u64;
     let result = if results.is_empty() {
         "no_results"
     } else {
@@ -1521,15 +1524,15 @@ async fn search_handler(
         "nornicdb_search_requests_total",
         &[("mode", search_method), ("result", result)],
     );
-    for (stage, duration_ms) in [
-        ("embedding", embedding_time_ms),
-        ("index", search_time_ms),
-        ("hydration", hydration_time_ms),
+    for (stage, elapsed) in [
+        ("embedding", embedding_elapsed),
+        ("index", search_elapsed),
+        ("hydration", hydration_elapsed),
     ] {
         let _ = state.telemetry.observe_histogram(
             "nornicdb_search_duration_seconds",
             &[("mode", search_method), ("stage", stage)],
-            duration_ms as f64 / 1_000.0,
+            elapsed.as_secs_f64(),
         );
     }
     let _ = state.telemetry.set_gauge(
