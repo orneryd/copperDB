@@ -178,10 +178,7 @@ fn bench_semantic_hybrid(criterion: &mut Criterion) {
         });
     });
     group.bench_with_input(
-        BenchmarkId::new(
-            "rrf_hybrid_from_disk",
-            format!("{NODE_COUNT}-d{DIMENSIONS}"),
-        ),
+        BenchmarkId::new("rrf_hybrid_reopen", format!("{NODE_COUNT}-d{DIMENSIONS}")),
         &workload,
         |bench, workload| {
             bench.iter(|| {
