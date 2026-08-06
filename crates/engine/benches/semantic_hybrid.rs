@@ -222,6 +222,32 @@ fn bench_semantic_hybrid(criterion: &mut Criterion) {
             });
         },
     );
+    workload.db.set_ranked_search_cache_enabled(true);
+    workload
+        .db
+        .search_fabric_ranked_batch_locally(&workload.placement, &workload.hybrid_query)
+        .expect("benchmark cache warmup search must succeed");
+    group.bench_with_input(
+        BenchmarkId::new(
+            "rrf_hybrid_cache_hit",
+            format!("{NODE_COUNT}-d{DIMENSIONS}"),
+        ),
+        &workload,
+        |bench, workload| {
+            bench.iter(|| {
+                black_box(
+                    workload
+                        .db
+                        .search_fabric_ranked_batch_locally(
+                            &workload.placement,
+                            black_box(&workload.hybrid_query),
+                        )
+                        .expect("benchmark cached hybrid search must succeed"),
+                );
+            });
+        },
+    );
+    workload.db.set_ranked_search_cache_enabled(false);
     group.bench_with_input(
         BenchmarkId::new("lexical_branch", format!("{NODE_COUNT}-d{DIMENSIONS}")),
         &workload,
