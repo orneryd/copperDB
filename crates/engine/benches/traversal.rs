@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use copperdb_cypher::Parser;
 use copperdb_engine::CopperDb;
-use copperdb_eval::EvalEngine;
+use copperdb_eval::{EvalEngine, EvalResult};
 use copperdb_storage::{EdgeRecord, NodeRecord, StorageEngine};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use serde_json::Value;
 
 const NODE_COUNT: usize = 1_000;
 const EDGE_COUNT: usize = NODE_COUNT - 1;
@@ -40,6 +41,15 @@ fn seed_traversal_fixture(storage: &StorageEngine) {
             })
             .expect("benchmark edge must persist");
     }
+}
+
+fn assert_count_all_result(result: &EvalResult) {
+    assert_eq!(result.columns, vec!["count".to_owned()]);
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+        result.rows[0].get("count"),
+        Some(&Value::from(EDGE_COUNT as u64))
+    );
 }
 
 fn traversal_fixture(memory_backed: bool) -> CopperDb {
@@ -115,9 +125,10 @@ fn bench_memory_storage_executor_count_all_relationships(criterion: &mut Criteri
     let warmup = parser
         .parse(COUNT_ALL_RELATIONSHIPS)
         .expect("benchmark query must parse");
-    evaluator
+    let result = evaluator
         .execute(&warmup, &HashMap::new())
         .expect("benchmark traversal warmup must succeed");
+    assert_count_all_result(&result);
 
     let mut group = criterion.benchmark_group("traversal_memory_storage_executor");
     group.throughput(Throughput::Elements(EDGE_COUNT as u64));

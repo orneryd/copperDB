@@ -6,7 +6,9 @@ use std::{path::PathBuf, sync::Mutex};
 
 const VECTOR_REGISTRY_ARTIFACT_FILE: &str = "vectors.hnsw";
 const VECTOR_FILE_STORE_DIRECTORY: &str = "vectors";
-const EXACT_RERANK_CANDIDATE_MULTIPLIER: usize = 4;
+const HNSW_CANDIDATE_MULTIPLIER: usize = 20;
+const HNSW_MIN_CANDIDATES: usize = 200;
+const HNSW_MAX_CANDIDATES: usize = 5_000;
 
 #[derive(Debug, Clone)]
 struct VectorIndexBinding {
@@ -249,8 +251,8 @@ impl VectorIndexManager {
                 .knn_with_cancellation(name, query, limit, cancellation);
         }
         let candidate_limit = limit
-            .saturating_mul(EXACT_RERANK_CANDIDATE_MULTIPLIER)
-            .max(limit);
+            .saturating_mul(HNSW_CANDIDATE_MULTIPLIER)
+            .clamp(HNSW_MIN_CANDIDATES, HNSW_MAX_CANDIDATES);
         let (candidates, mut stats) =
             self.registry
                 .knn_with_cancellation(name, query, candidate_limit, cancellation)?;
