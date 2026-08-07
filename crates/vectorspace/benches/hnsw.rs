@@ -25,6 +25,7 @@ struct Workload {
 
 impl Workload {
     fn new(dimensions: usize, vector_count: usize) -> Self {
+        let hnsw_config = configured_hnsw_config();
         let vectors = (0..vector_count)
             .map(|position| {
                 (
@@ -33,7 +34,7 @@ impl Workload {
                 )
             })
             .collect::<Vec<_>>();
-        let mut hnsw = HnswIndex::new(dimensions, HnswConfig::default())
+        let mut hnsw = HnswIndex::new(dimensions, hnsw_config)
             .expect("benchmark HNSW configuration must be valid");
         let mut exact = VectorSpace::new("exact", dimensions);
         for (id, vector) in &vectors {
@@ -56,7 +57,7 @@ impl Workload {
         .expect("benchmark vector file store must be created");
         let registry = HnswRegistry::new();
         registry
-            .create_index("benchmark", dimensions, HnswConfig::default())
+            .create_index("benchmark", dimensions, hnsw_config)
             .expect("benchmark HNSW configuration must be valid");
         for (id, vector) in &vectors {
             registry
@@ -118,7 +119,7 @@ impl Workload {
     }
 
     fn build_hnsw(&self) -> HnswIndex {
-        let mut index = HnswIndex::new(self.dimensions, HnswConfig::default())
+        let mut index = HnswIndex::new(self.dimensions, configured_hnsw_config())
             .expect("benchmark HNSW configuration must be valid");
         for (id, vector) in &self.vectors {
             index
@@ -153,6 +154,25 @@ fn configured_dimensions() -> Vec<usize> {
 
 fn configured_scale_gate() -> bool {
     env::var("COPPERDB_HNSW_BENCH_SCALE_GATE").is_ok_and(|value| value == "1")
+}
+
+fn configured_hnsw_config() -> HnswConfig {
+    let mut config = HnswConfig::default();
+    if let Some(value) = env::var("COPPERDB_HNSW_BENCH_EF_CONSTRUCTION")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+    {
+        config.ef_construction = value;
+    }
+    if let Some(value) = env::var("COPPERDB_HNSW_BENCH_EF_SEARCH")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+    {
+        config.ef_search = value;
+    }
+    config
 }
 
 fn deterministic_vector(seed: usize, dimensions: usize) -> Vec<f32> {

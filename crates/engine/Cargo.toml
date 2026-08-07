@@ -57,3 +57,7 @@ copperdb-server = { workspace = true }
 [[bench]]
 name = "semantic_hybrid"
 harness = false
+
+[[bench]]
+name = "traversal"
+harness = false
