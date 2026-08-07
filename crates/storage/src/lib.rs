@@ -24,121 +24,18 @@ use uuid::Uuid;
 
 use crate::storage_edge_property_index::edge_property_index_definition_prefix;
 
-// ── fjall→Fjall compatibility layer ──────────────────────────────────────────
-
-/// Re-export for backward compatibility: fjall Keyspace replaces fjall Tree.
-pub type Tree = Keyspace;
-
 /// A batch of key-value operations: (key, optional_value). None = delete.
 pub type Batch = Vec<(Vec<u8>, Option<Vec<u8>>)>;
 
-type StorageIterator<'a> = Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StorageError>> + 'a>;
+pub(crate) type StorageIterator<'a> =
+    Box<dyn Iterator<Item = Result<(Vec<u8>, Vec<u8>), StorageError>> + 'a>;
 
-/// Extension trait making fjall's Keyspace behave like fjall's Tree.
-trait KeyspaceExt {
-    fn scan_prefix<'a>(&'a self, prefix: &'a [u8]) -> StorageIterator<'a>;
-
-    fn fjall_iter<'a>(&'a self) -> StorageIterator<'a>;
-
-    fn fjall_get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError>;
-
-    /// Insert and return the previous value.
-    fn fjall_insert(
-        &self,
-        key: impl AsRef<[u8]>,
-        value: impl AsRef<[u8]>,
-    ) -> Result<Option<Vec<u8>>, StorageError>;
-
-    /// Remove and return the previous value.
-    fn fjall_remove(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError>;
-
-    fn fjall_apply_batch(&self, batch: &[(Vec<u8>, Option<Vec<u8>>)]) -> Result<(), StorageError>;
-
-    /// Range scan returning fjall-compatible iterator.
-    fn fjall_range<'a, R: std::ops::RangeBounds<Vec<u8>> + 'a>(
-        &'a self,
-        range: R,
-    ) -> StorageIterator<'a>;
-}
-
-impl KeyspaceExt for Keyspace {
-    fn scan_prefix<'a>(&'a self, prefix: &'a [u8]) -> StorageIterator<'a> {
-        Box::new(self.prefix(prefix).map(|guard| {
-            guard
-                .into_inner()
-                .map(|(k, v)| (k.to_vec(), v.to_vec()))
-                .map_err(StorageError::Fjall)
-        }))
-    }
-
-    fn fjall_iter<'a>(&'a self) -> StorageIterator<'a> {
-        Box::new(self.iter().map(|guard| {
-            guard
-                .into_inner()
-                .map(|(k, v)| (k.to_vec(), v.to_vec()))
-                .map_err(StorageError::Fjall)
-        }))
-    }
-
-    fn fjall_get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self
-            .get(key.as_ref())
-            .map_err(StorageError::Fjall)?
-            .map(|v| v.to_vec()))
-    }
-
-    fn fjall_insert(
-        &self,
-        key: impl AsRef<[u8]>,
-        value: impl AsRef<[u8]>,
-    ) -> Result<Option<Vec<u8>>, StorageError> {
-        let k = key.as_ref();
-        let old = self
-            .get(k)
-            .map_err(StorageError::Fjall)?
-            .map(|v| v.to_vec());
-        self.insert(k, value.as_ref())
-            .map_err(StorageError::Fjall)?;
-        Ok(old)
-    }
-
-    fn fjall_remove(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>, StorageError> {
-        let k = key.as_ref();
-        let old = self
-            .get(k)
-            .map_err(StorageError::Fjall)?
-            .map(|v| v.to_vec());
-        self.remove(k).map_err(StorageError::Fjall)?;
-        Ok(old)
-    }
-
-    fn fjall_apply_batch(&self, batch: &[(Vec<u8>, Option<Vec<u8>>)]) -> Result<(), StorageError> {
-        for (key, value) in batch {
-            match value {
-                Some(v) => self
-                    .insert(key.as_slice(), v.as_slice())
-                    .map_err(StorageError::Fjall)?,
-                None => self.remove(key.as_slice()).map_err(StorageError::Fjall)?,
-            }
-        }
-        Ok(())
-    }
-
-    fn fjall_range<'a, R: std::ops::RangeBounds<Vec<u8>> + 'a>(
-        &'a self,
-        range: R,
-    ) -> StorageIterator<'a> {
-        // Convert Vec<u8> bounds to &[u8] bounds
-        let start = std::ops::Bound::map(range.start_bound(), |v: &Vec<u8>| v.as_slice());
-        let end = std::ops::Bound::map(range.end_bound(), |v: &Vec<u8>| v.as_slice());
-        Box::new(self.range::<&[u8], _>((start, end)).map(|guard| {
-            guard
-                .into_inner()
-                .map(|(k, v)| (k.to_vec(), v.to_vec()))
-                .map_err(StorageError::Fjall)
-        }))
-    }
-}
+mod backend;
+use crate::backend::StorageBackendBatch;
+pub use crate::backend::{
+    FjallStorageBackend, MemoryStorageBackend, StorageBackend, StorageBackendOperation,
+    StorageKeyspace, StorageKeyspaceId,
+};
 
 mod async_engine;
 mod mvcc;
@@ -246,7 +143,10 @@ pub struct StorageSnapshot {
 }
 
 fn wal_applied_sequence_from_meta(meta: &Keyspace) -> Result<u64, StorageError> {
-    match meta.fjall_get(META_WAL_APPLIED_SEQUENCE_KEY)? {
+    match meta
+        .get(META_WAL_APPLIED_SEQUENCE_KEY)?
+        .map(|value| value.to_vec())
+    {
         Some(raw) => Ok(rmp_serde::from_slice(raw.as_slice())?),
         None => Ok(0),
     }
@@ -1778,11 +1678,11 @@ pub type CommitEventCallback = Arc<dyn Fn() + Send + Sync>;
 
 /// A single opened copperdb storage instance.
 pub struct StorageEngine {
-    db: Database,
-    meta: Keyspace,
-    nodes: Keyspace,
-    edges: Keyspace,
-    indexes: Keyspace,
+    backend: Arc<dyn StorageBackend>,
+    meta: StorageKeyspace,
+    nodes: StorageKeyspace,
+    edges: StorageKeyspace,
+    indexes: StorageKeyspace,
     mvcc: MvccStore,
     wal: WAL,
     batch_commit_lock: Mutex<()>,
@@ -1874,7 +1774,7 @@ impl StorageTransactionEngine<'_> {
 impl fmt::Debug for StorageEngine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StorageEngine")
-            .field("db", &"<fjall::Database>")
+            .field("backend", &self.backend.name())
             .field("encryption", &self.encryption)
             .field("temp_dir", &self.temp_dir)
             .finish_non_exhaustive()
@@ -2023,12 +1923,12 @@ impl StorageEngine {
         wal_config: WALConfig,
     ) -> Result<Self, StorageError> {
         let path = path.as_ref();
-        fs::create_dir_all(path).map_err(StorageError::Io)?;
-        let db = Database::open(fjall::Config::new(path)).map_err(StorageError::Fjall)?;
-        Self::open_with_db(
-            db,
+        let backend = Arc::new(FjallStorageBackend::open(path)?);
+        Self::from_backend_with_options(
+            backend,
             None,
             WAL::open(path.join(STORAGE_WAL_FILENAME), wal_config)?,
+            true,
             Some(path.to_path_buf()),
         )
     }
@@ -2039,7 +1939,7 @@ impl StorageEngine {
     /// a new WAL sequence, so its applied marker is normalized during import.
     pub fn write_snapshot<W: Write>(&self, mut writer: W) -> Result<(), StorageError> {
         let _commit_guard = self.batch_commit_lock.lock();
-        self.db.persist(fjall::PersistMode::SyncAll)?;
+        self.backend.flush()?;
         let mut entries = Vec::new();
         for (keyspace, source) in [
             (StorageSnapshotKeyspace::Meta, &self.meta),
@@ -2198,7 +2098,7 @@ impl StorageEngine {
         engine
             .meta
             .fjall_insert(META_WAL_APPLIED_SEQUENCE_KEY, rmp_serde::to_vec(&0_u64)?)?;
-        engine.db.persist(fjall::PersistMode::SyncAll)?;
+        engine.backend.flush()?;
         Ok(())
     }
     /// Discard a corrupt WAL only when Fjall has already applied every entry.
@@ -2254,9 +2154,8 @@ impl StorageEngine {
     /// graph transactions against the opened engine.
     pub fn open_metadata(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         let path = path.as_ref();
-        let db = Database::open(fjall::Config::new(path)).map_err(StorageError::Fjall)?;
-        Self::open_with_db_options(
-            db,
+        Self::from_backend_with_options(
+            Arc::new(FjallStorageBackend::open(path)?),
             None,
             WAL::open(path.join(STORAGE_WAL_FILENAME), WALConfig::default())?,
             false,
@@ -2282,81 +2181,59 @@ impl StorageEngine {
         wal_config: WALConfig,
     ) -> Result<Self, StorageError> {
         let path = path.as_ref();
-        let db = Database::open(fjall::Config::new(path)).map_err(StorageError::Fjall)?;
         let encryption = StorageEncryption::new(provider, key_uri.into())?;
-        Self::open_with_db(
-            db,
+        Self::from_backend_with_options(
+            Arc::new(FjallStorageBackend::open(path)?),
             Some(encryption),
             WAL::open(path.join(STORAGE_WAL_FILENAME), wal_config)?,
+            true,
             Some(path.to_path_buf()),
         )
     }
 
-    /// Open an in-memory (temporary) storage engine for testing.
+    /// Open a temporary Fjall-backed storage engine.
+    ///
+    /// Use [`StorageEngine::open_memory`] when tests or benchmarks require an
+    /// in-process backend without filesystem access.
     pub fn open_temporary() -> Result<Self, StorageError> {
         let temp_dir = tempfile::tempdir()?;
         let db = Database::open(fjall::Config::new(temp_dir.path()))?;
-        let meta = db.keyspace("meta", KeyspaceCreateOptions::default)?;
-        let nodes = db.keyspace("nodes", KeyspaceCreateOptions::default)?;
-        let edges = db.keyspace("edges", KeyspaceCreateOptions::default)?;
-        let indexes = db.keyspace("indexes", KeyspaceCreateOptions::default)?;
-        let engine = Self {
-            db,
-            meta,
-            nodes,
-            edges,
-            indexes,
-            mvcc: MvccStore::new(),
-            wal: WAL::new(WALConfig::default()),
-            batch_commit_lock: Mutex::new(()),
-            embedding_claims: Mutex::new(BTreeSet::new()),
-            fulltext_runtime_indexes: Mutex::new(HashMap::new()),
-            schema_manager: RwLock::new(Arc::new(SchemaManager::new())),
-            index_schema_generation: AtomicU64::new(0),
-            encryption: None,
-            data_dir: None,
-            temp_dir: Some(temp_dir),
-            on_node_created_cb: RwLock::new(Vec::new()),
-            on_node_updated_cb: RwLock::new(Vec::new()),
-            on_node_deleted_cb: RwLock::new(Vec::new()),
-            on_edge_created_cb: RwLock::new(Vec::new()),
-            on_edge_updated_cb: RwLock::new(Vec::new()),
-            on_edge_deleted_cb: RwLock::new(Vec::new()),
-            on_commit_completed_cb: RwLock::new(Vec::new()),
-        };
-        engine.ensure_layout_manifest()?;
-        engine.ensure_encryption_manifest()?;
-        engine.restore_or_bootstrap_mvcc()?;
-        engine.rebuild_schema_manager()?;
-        Ok(engine)
+        Self::from_backend_with_options(
+            Arc::new(FjallStorageBackend::from_database(db)?),
+            None,
+            WAL::new(WALConfig::default()),
+            true,
+            None,
+        )
+        .map(|mut engine| {
+            engine.temp_dir = Some(temp_dir);
+            engine
+        })
     }
 
-    fn open_with_db(
-        db: Database,
-        encryption: Option<StorageEncryption>,
-        wal: WAL,
-        data_dir: Option<PathBuf>,
-    ) -> Result<Self, StorageError> {
-        Self::open_with_db_options(db, encryption, wal, true, data_dir)
+    /// Open a true in-process memory storage engine.
+    pub fn open_memory() -> Result<Self, StorageError> {
+        Self::from_backend(Arc::new(MemoryStorageBackend::new()))
     }
 
-    fn open_with_db_options(
-        db: Database,
+    /// Construct graph storage over an injected ordered key-value backend.
+    pub fn from_backend(backend: Arc<dyn StorageBackend>) -> Result<Self, StorageError> {
+        Self::from_backend_with_options(backend, None, WAL::new(WALConfig::default()), true, None)
+    }
+
+    fn from_backend_with_options(
+        backend: Arc<dyn StorageBackend>,
         encryption: Option<StorageEncryption>,
         wal: WAL,
         bootstrap_mvcc: bool,
         data_dir: Option<PathBuf>,
     ) -> Result<Self, StorageError> {
-        let meta = db.keyspace("meta", KeyspaceCreateOptions::default)?;
-        let nodes = db.keyspace("nodes", KeyspaceCreateOptions::default)?;
-        let edges = db.keyspace("edges", KeyspaceCreateOptions::default)?;
-        let indexes = db.keyspace("indexes", KeyspaceCreateOptions::default)?;
         let engine = Self {
-            db,
-            meta,
-            nodes,
-            edges,
-            indexes,
+            meta: backend.keyspace(StorageKeyspaceId::Meta),
+            nodes: backend.keyspace(StorageKeyspaceId::Nodes),
+            edges: backend.keyspace(StorageKeyspaceId::Edges),
+            indexes: backend.keyspace(StorageKeyspaceId::Indexes),
+            backend,
             mvcc: MvccStore::new(),
             wal,
             batch_commit_lock: Mutex::new(()),
@@ -2557,6 +2434,11 @@ impl StorageEngine {
         self.data_dir.as_deref()
     }
 
+    /// Name of the injected key-value backend serving this storage instance.
+    pub fn backend_name(&self) -> &'static str {
+        self.backend.name()
+    }
+
     pub fn is_encrypted(&self) -> bool {
         self.encryption.is_some()
     }
@@ -2626,7 +2508,7 @@ impl StorageEngine {
             return Ok(false);
         }
         self.wal.sync_persistent_file()?;
-        self.db.persist(fjall::PersistMode::SyncAll)?;
+        self.backend.flush()?;
         self.wal.record_batch_sync_complete();
         Ok(true)
     }
@@ -5368,10 +5250,7 @@ impl StorageEngine {
 
     /// Flush all pending writes to disk.
     pub fn flush(&self) -> Result<(), StorageError> {
-        self.db
-            .persist(fjall::PersistMode::SyncAll)
-            .map_err(StorageError::Fjall)?;
-        Ok(())
+        self.backend.flush()
     }
 
     /// Acquire a flush guard. When dropped, flushes all pending writes to disk.
@@ -5383,10 +5262,7 @@ impl StorageEngine {
 
     /// Return the on-disk size in bytes.
     pub fn size_on_disk(&self) -> u64 {
-        self.db
-            .disk_space()
-            .map_err(StorageError::Fjall)
-            .unwrap_or(0)
+        self.backend.size_on_disk()
     }
 
     fn has_node_property_index(&self, label: &str, property: &str) -> Result<bool, StorageError> {
@@ -5687,7 +5563,11 @@ impl StorageEngine {
         }
     }
 
-    fn ids_with_prefix(&self, tree: &Tree, prefix: &str) -> Result<Vec<String>, StorageError> {
+    fn ids_with_prefix(
+        &self,
+        tree: &StorageKeyspace,
+        prefix: &str,
+    ) -> Result<Vec<String>, StorageError> {
         tree.scan_prefix(prefix.as_bytes())
             .map(|entry| {
                 let (key, _) = entry?;
@@ -5771,15 +5651,10 @@ pub struct FlushGuard {
 
 impl Drop for FlushGuard {
     fn drop(&mut self) {
-        // Flush fjall to disk. Failures are logged but do not panic — a flush
+        // Flush the configured backend. Failures are logged but do not panic — a flush
         // failure should not crash the server.
-        if let Err(e) = self
-            .storage
-            .db
-            .persist(fjall::PersistMode::SyncAll)
-            .map_err(StorageError::Fjall)
-        {
-            tracing::warn!(error = %e, "fjall flush failed during FlushGuard drop");
+        if let Err(e) = self.storage.backend.flush() {
+            tracing::warn!(error = %e, "storage flush failed during FlushGuard drop");
         }
     }
 }
@@ -7725,7 +7600,7 @@ impl<'a> BatchWriter<'a> {
                 .map(|entry| entry.seq),
         };
 
-        let mut batch = self.engine.db.batch();
+        let mut batch = StorageBackendBatch::new(self.engine.backend.as_ref());
         let mut counter_deltas = HashMap::<Vec<u8>, i64>::new();
         for (name, constraint) in constraints {
             let key = [META_SCHEMA_CONSTRAINT_PREFIX, name.as_bytes()].concat();
@@ -7910,7 +7785,7 @@ impl<'a> BatchWriter<'a> {
             if replacement_schema_manager.is_none() && (!nodes.is_empty() || !edges.is_empty()) {
                 self.engine.rebuild_schema_manager()?;
             }
-            return Err(error.into());
+            return Err(error);
         }
         if let Some(manager) = replacement_schema_manager {
             *self.engine.schema_manager.write() = manager;
@@ -7924,7 +7799,7 @@ impl<'a> BatchWriter<'a> {
                 .fetch_add(1, Ordering::Release);
         }
         if self.engine.wal.sync_mode() == WALSyncMode::Immediate {
-            self.engine.db.persist(fjall::PersistMode::SyncAll)?;
+            self.engine.backend.flush()?;
         } else if self.engine.wal.batch_sync_due() {
             self.engine.sync_wal_if_due()?;
         }

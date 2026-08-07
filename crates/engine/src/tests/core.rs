@@ -3,7 +3,7 @@ use copperdb_storage::{EdgeRecord, MvccPruneOptions, NodeRecord};
 use copperdb_txsession::{BookmarkMode, SessionConfig};
 use std::collections::BTreeMap;
 
-// ── Legacy tests ──────────────────────────────────────────────────────────
+// ── Server tests ──────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn test_start_with_default_config() {
@@ -18,6 +18,15 @@ async fn test_start_with_default_config() {
 fn test_open_temporary() {
     let db = CopperDb::open_temporary().unwrap();
     assert_eq!(db.config.default_database, "copperdb");
+    assert_eq!(db.storage_engine().backend_name(), "fjall");
+}
+
+#[test]
+fn test_open_memory() {
+    let db = CopperDb::open_memory().unwrap();
+    assert_eq!(db.config.default_database, "copperdb");
+    assert_eq!(db.storage_engine().backend_name(), "memory");
+    assert!(db.storage_engine().data_dir().is_none());
 }
 
 #[test]

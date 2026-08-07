@@ -718,10 +718,17 @@ impl CopperDb {
         Ok(records)
     }
 
-    /// Create a new in-memory (temporary) database instance.
+    /// Create a temporary Fjall-backed database instance.
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn open_temporary() -> Result<Self, CopperDbError> {
         let storage = Arc::new(StorageEngine::open_temporary()?);
+        Self::from_storage(storage, DatabaseConfig::default())
+    }
+
+    /// Create a database instance over a true process-memory storage backend.
+    #[allow(clippy::arc_with_non_send_sync)]
+    pub fn open_memory() -> Result<Self, CopperDbError> {
+        let storage = Arc::new(StorageEngine::open_memory()?);
         Self::from_storage(storage, DatabaseConfig::default())
     }
 
@@ -733,7 +740,11 @@ impl CopperDb {
     }
 
     #[allow(clippy::arc_with_non_send_sync)]
-    fn from_storage(
+    /// Construct a database over an injected storage instance.
+    ///
+    /// The caller owns backend selection; CopperDB wires the same evaluation,
+    /// indexing, audit, compliance, and embedding services around it.
+    pub fn from_storage(
         storage: Arc<StorageEngine>,
         config: DatabaseConfig,
     ) -> Result<Self, CopperDbError> {

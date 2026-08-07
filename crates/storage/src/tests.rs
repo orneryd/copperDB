@@ -77,10 +77,27 @@ fn ensure_database_prefix_preserves_existing_valid_prefixes() {
 fn creates_and_reads_layout_manifest_v0() {
     let engine = StorageEngine::open_temporary().unwrap();
     assert!(engine.is_temporary());
+    assert_eq!(engine.backend_name(), "fjall");
     let manifest = engine.layout_manifest().unwrap();
     assert_eq!(manifest.version, STORAGE_LAYOUT_VERSION);
     assert!(manifest.created_at_unix_ms > 0);
     assert_eq!(engine.storage_layout_version().unwrap(), 0);
+}
+
+#[test]
+fn memory_backend_keeps_graph_state_in_process() {
+    let engine = StorageEngine::open_memory().unwrap();
+    assert!(!engine.is_temporary());
+    assert_eq!(engine.backend_name(), "memory");
+    assert!(engine.data_dir().is_none());
+    assert_eq!(engine.size_on_disk(), 0);
+
+    let node = sample_node("memory-node", &["Person"]);
+    engine.put_node_record(&node).unwrap();
+
+    assert_eq!(engine.get_node_record(&node.id).unwrap(), Some(node));
+    assert_eq!(engine.all_node_records().unwrap().len(), 1);
+    engine.flush().unwrap();
 }
 
 #[test]

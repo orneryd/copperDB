@@ -7,6 +7,7 @@ use copperdb_topology::PlacementKey;
 use criterion::{
     black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
 };
+use std::sync::Arc;
 use tempfile::TempDir;
 
 const NODE_COUNT: usize = 9_000;
@@ -14,6 +15,12 @@ const DIMENSIONS: usize = 64;
 const LIMIT: usize = 20;
 const HIGH_LIMIT: usize = 100;
 const QUERY: &str = "where are my prescriptions?";
+
+#[derive(Clone, Copy)]
+enum StorageMode {
+    Fjall,
+    Memory,
+}
 
 struct Workload {
     db: CopperDb,
@@ -24,14 +31,22 @@ struct Workload {
     semantic_query: SearchQuery,
     lexical_batch: RrfSearchBatch,
     semantic_batch: RrfSearchBatch,
-    _data_directory: TempDir,
+    _data_directory: Option<TempDir>,
 }
 
 impl Workload {
-    fn new() -> Self {
-        let data_directory = tempfile::tempdir().expect("benchmark data directory must exist");
-        let data_dir = data_directory.path().join("db");
-        let storage = StorageEngine::open(&data_dir).expect("benchmark storage must open");
+    fn new(storage_mode: StorageMode) -> Self {
+        let data_directory = match storage_mode {
+            StorageMode::Fjall => {
+                Some(tempfile::tempdir().expect("benchmark data directory must exist"))
+            }
+            StorageMode::Memory => None,
+        };
+        let storage = match &data_directory {
+            Some(directory) => StorageEngine::open(directory.path().join("db"))
+                .expect("durable benchmark storage must open"),
+            None => StorageEngine::open_memory().expect("memory benchmark storage must open"),
+        };
         storage
             .persist_index_definition(&IndexDefinition {
                 name: "document_title".into(),
@@ -79,26 +94,28 @@ impl Workload {
                             ),
                         ),
                     ]),
-                    named_embeddings: BTreeMap::from([(
-                        "embedding".into(),
-                        profile_vector(position),
-                    )]),
-                    chunk_embeddings: Vec::new(),
+                    named_embeddings: BTreeMap::new(),
+                    chunk_embeddings: vec![profile_vector(position)],
                     embed_meta: Default::default(),
                     created_at_unix_ms: 0,
                     updated_at_unix_ms: 0,
                 })
                 .expect("benchmark node must persist");
         }
-        drop(storage);
-
         let mut config = DatabaseConfig {
-            data_dir: data_dir.to_string_lossy().into_owned(),
             ..Default::default()
         };
         config.runtime_config.bm25_enabled = true;
         config.runtime_config.vector_enabled = true;
-        let db = CopperDb::open(config).expect("benchmark engine must open");
+        let db = match data_directory.as_ref() {
+            Some(directory) => {
+                drop(storage);
+                config.data_dir = directory.path().join("db").to_string_lossy().into_owned();
+                CopperDb::open(config).expect("durable benchmark engine must open")
+            }
+            None => CopperDb::from_storage(Arc::new(storage), config)
+                .expect("memory benchmark engine must open"),
+        };
         let placement = PlacementKey::default_for_database("copper");
         let hybrid_query = SearchQuery::Hybrid {
             text: QUERY.into(),
@@ -135,7 +152,8 @@ impl Workload {
             .expect("benchmark semantic warmup search must succeed");
 
         eprintln!(
-            "search profile RRF hybrid: nodes={NODE_COUNT}, dimensions={DIMENSIONS}, limit={LIMIT}, response_cache=disabled, profile=bench"
+            "search profile RRF hybrid: nodes={NODE_COUNT}, dimensions={DIMENSIONS}, limit={LIMIT}, response_cache=disabled, storage={}"
+            , db.storage_engine().backend_name()
         );
         Self {
             db,
@@ -168,7 +186,7 @@ fn profile_query_vector() -> Vec<f32> {
 }
 
 fn bench_semantic_hybrid(criterion: &mut Criterion) {
-    let workload = Workload::new();
+    let workload = Workload::new(StorageMode::Fjall);
     let benchmark_id = BenchmarkId::new("rrf_hybrid", format!("{NODE_COUNT}-d{DIMENSIONS}"));
     let mut group = criterion.benchmark_group("search_profile");
     group.throughput(Throughput::Elements(LIMIT as u64));
@@ -378,6 +396,28 @@ fn bench_semantic_hybrid(criterion: &mut Criterion) {
         },
     );
     group.finish();
+
+    let memory_workload = Workload::new(StorageMode::Memory);
+    let mut memory_group = criterion.benchmark_group("search_profile_memory");
+    memory_group.throughput(Throughput::Elements(LIMIT as u64));
+    memory_group.bench_with_input(
+        BenchmarkId::new("rrf_hybrid", format!("{NODE_COUNT}-d{DIMENSIONS}")),
+        &memory_workload,
+        |bench, workload| {
+            bench.iter(|| {
+                black_box(
+                    workload
+                        .db
+                        .search_fabric_ranked_batch_locally(
+                            &workload.placement,
+                            black_box(&workload.hybrid_query),
+                        )
+                        .expect("memory benchmark hybrid search must succeed"),
+                );
+            });
+        },
+    );
+    memory_group.finish();
 }
 
 criterion_group!(benches, bench_semantic_hybrid);
