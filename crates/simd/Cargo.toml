@@ -13,3 +13,10 @@ wide.workspace = true
 nalgebra.workspace = true
 tracing.workspace = true
 copperdb-math = { workspace = true }
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "dot_product"
+harness = false

@@ -851,11 +851,18 @@ impl HnswIndex {
             }
             entry = self.greedy_search(&query, entry, current_level);
         }
-        let (candidates, visited_nodes) =
+        let (mut candidates, visited_nodes) =
             self.search_layer(&query, entry, self.config.ef_search.max(k), 0, cancellation)?;
-        let mut results = candidates
+        candidates.retain(|candidate| !self.deleted[candidate.internal_id as usize]);
+        candidates.sort_by(|left, right| {
+            right.score.total_cmp(&left.score).then_with(|| {
+                self.external_ids[left.internal_id as usize]
+                    .cmp(&self.external_ids[right.internal_id as usize])
+            })
+        });
+        candidates.truncate(k);
+        let results = candidates
             .into_iter()
-            .filter(|candidate| !self.deleted[candidate.internal_id as usize])
             .map(|candidate| {
                 (
                     self.external_ids[candidate.internal_id as usize].clone(),
@@ -863,8 +870,6 @@ impl HnswIndex {
                 )
             })
             .collect::<Vec<_>>();
-        results.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
-        results.truncate(k);
         let returned_candidates = results.len();
         Ok((
             results,

@@ -12,8 +12,14 @@
 //! Uses `wide` for stable cross-platform SIMD (x86 SSE2/AVX2 and ARM NEON
 //! via portable SIMD abstractions).
 
+use std::sync::OnceLock;
+
 use thiserror::Error;
 use wide::f32x8;
+
+type DotF32Kernel = fn(&[f32], &[f32]) -> f32;
+
+static DOT_F32_KERNEL: OnceLock<DotF32Kernel> = OnceLock::new();
 
 #[derive(Debug, Error)]
 pub enum SimdError {
@@ -32,13 +38,26 @@ pub fn dot_f32(a: &[f32], b: &[f32]) -> Result<f32, SimdError> {
         });
     }
 
+    Ok(DOT_F32_KERNEL.get_or_init(select_dot_f32_kernel)(a, b))
+}
+
+fn select_dot_f32_kernel() -> DotF32Kernel {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+        return |a, b| {
+            // SAFETY: this kernel is selected only after detecting AVX2 and FMA support.
+            unsafe { dot_f32_avx2_fma(a, b) }
+        };
+    }
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     if is_x86_feature_detected!("avx2") {
-        // SAFETY: AVX2 support was detected above and both slices have equal length.
-        return Ok(unsafe { dot_f32_avx2(a, b) });
+        return |a, b| {
+            // SAFETY: this kernel is selected only after detecting AVX2 support.
+            unsafe { dot_f32_avx2(a, b) }
+        };
     }
 
-    Ok(dot_f32_portable(a, b))
+    dot_f32_portable
 }
 
 fn dot_f32_portable(a: &[f32], b: &[f32]) -> f32 {
@@ -85,29 +104,106 @@ fn dot_f32_portable(a: &[f32], b: &[f32]) -> f32 {
 
 #[cfg(target_arch = "x86")]
 use std::arch::x86::{
-    _mm256_add_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_setzero_ps, _mm256_storeu_ps,
+    __m256, _mm256_add_ps, _mm256_castps256_ps128, _mm256_extractf128_ps, _mm256_fmadd_ps,
+    _mm256_loadu_ps, _mm256_mul_ps, _mm256_setzero_ps, _mm_add_ps, _mm_add_ss, _mm_cvtss_f32,
+    _mm_movehdup_ps, _mm_movehl_ps,
 };
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::{
-    _mm256_add_ps, _mm256_loadu_ps, _mm256_mul_ps, _mm256_setzero_ps, _mm256_storeu_ps,
+    __m256, _mm256_add_ps, _mm256_castps256_ps128, _mm256_extractf128_ps, _mm256_fmadd_ps,
+    _mm256_loadu_ps, _mm256_mul_ps, _mm256_setzero_ps, _mm_add_ps, _mm_add_ss, _mm_cvtss_f32,
+    _mm_movehdup_ps, _mm_movehl_ps,
 };
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx")]
+unsafe fn horizontal_sum_f32x8(value: __m256) -> f32 {
+    let low = _mm256_castps256_ps128(value);
+    let high = _mm256_extractf128_ps(value, 1);
+    let sum = _mm_add_ps(low, high);
+    let pairs = _mm_add_ps(sum, _mm_movehdup_ps(sum));
+    _mm_cvtss_f32(_mm_add_ss(pairs, _mm_movehl_ps(pairs, pairs)))
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_f32_avx2_fma(a: &[f32], b: &[f32]) -> f32 {
+    let unrolled_len = a.len() / 32 * 32;
+    let vectorized_len = a.len() / 8 * 8;
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
+    let mut acc2 = _mm256_setzero_ps();
+    let mut acc3 = _mm256_setzero_ps();
+    let mut index = 0;
+    while index < unrolled_len {
+        let left = _mm256_loadu_ps(a.as_ptr().add(index));
+        let right = _mm256_loadu_ps(b.as_ptr().add(index));
+        acc0 = _mm256_fmadd_ps(left, right, acc0);
+        let left = _mm256_loadu_ps(a.as_ptr().add(index + 8));
+        let right = _mm256_loadu_ps(b.as_ptr().add(index + 8));
+        acc1 = _mm256_fmadd_ps(left, right, acc1);
+        let left = _mm256_loadu_ps(a.as_ptr().add(index + 16));
+        let right = _mm256_loadu_ps(b.as_ptr().add(index + 16));
+        acc2 = _mm256_fmadd_ps(left, right, acc2);
+        let left = _mm256_loadu_ps(a.as_ptr().add(index + 24));
+        let right = _mm256_loadu_ps(b.as_ptr().add(index + 24));
+        acc3 = _mm256_fmadd_ps(left, right, acc3);
+        index += 32;
+    }
+    acc0 = _mm256_add_ps(acc0, acc1);
+    acc2 = _mm256_add_ps(acc2, acc3);
+    acc0 = _mm256_add_ps(acc0, acc2);
+    while index < vectorized_len {
+        let left = _mm256_loadu_ps(a.as_ptr().add(index));
+        let right = _mm256_loadu_ps(b.as_ptr().add(index));
+        acc0 = _mm256_fmadd_ps(left, right, acc0);
+        index += 8;
+    }
+
+    horizontal_sum_f32x8(acc0)
+        + a[vectorized_len..]
+            .iter()
+            .zip(&b[vectorized_len..])
+            .map(|(left, right)| left * right)
+            .sum::<f32>()
+}
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 unsafe fn dot_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
+    let unrolled_len = a.len() / 32 * 32;
     let vectorized_len = a.len() / 8 * 8;
-    let mut acc = _mm256_setzero_ps();
+    let mut acc0 = _mm256_setzero_ps();
+    let mut acc1 = _mm256_setzero_ps();
+    let mut acc2 = _mm256_setzero_ps();
+    let mut acc3 = _mm256_setzero_ps();
     let mut index = 0;
+    while index < unrolled_len {
+        let left = _mm256_loadu_ps(a.as_ptr().add(index));
+        let right = _mm256_loadu_ps(b.as_ptr().add(index));
+        acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(left, right));
+        let left = _mm256_loadu_ps(a.as_ptr().add(index + 8));
+        let right = _mm256_loadu_ps(b.as_ptr().add(index + 8));
+        acc1 = _mm256_add_ps(acc1, _mm256_mul_ps(left, right));
+        let left = _mm256_loadu_ps(a.as_ptr().add(index + 16));
+        let right = _mm256_loadu_ps(b.as_ptr().add(index + 16));
+        acc2 = _mm256_add_ps(acc2, _mm256_mul_ps(left, right));
+        let left = _mm256_loadu_ps(a.as_ptr().add(index + 24));
+        let right = _mm256_loadu_ps(b.as_ptr().add(index + 24));
+        acc3 = _mm256_add_ps(acc3, _mm256_mul_ps(left, right));
+        index += 32;
+    }
+    acc0 = _mm256_add_ps(acc0, acc1);
+    acc2 = _mm256_add_ps(acc2, acc3);
+    acc0 = _mm256_add_ps(acc0, acc2);
     while index < vectorized_len {
         let left = _mm256_loadu_ps(a.as_ptr().add(index));
         let right = _mm256_loadu_ps(b.as_ptr().add(index));
-        acc = _mm256_add_ps(acc, _mm256_mul_ps(left, right));
+        acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(left, right));
         index += 8;
     }
 
-    let mut lanes = [0.0_f32; 8];
-    _mm256_storeu_ps(lanes.as_mut_ptr(), acc);
-    lanes.into_iter().sum::<f32>()
+    horizontal_sum_f32x8(acc0)
         + a[vectorized_len..]
             .iter()
             .zip(&b[vectorized_len..])

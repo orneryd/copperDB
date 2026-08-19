@@ -10,12 +10,12 @@ Lower latency is better unless noted. A winner is named only when fixtures, exec
 | Traversal: optional match count | 2.919 µs | 0.547 µs | **CopperDB**, 81.3% lower latency |
 | Traversal: two-hop match count | 2.612 µs | 0.583 µs | **CopperDB**, 77.7% lower latency |
 | Traversal: shortest path length | 3.750 µs | 0.620 µs | **CopperDB**, 83.5% lower latency |
-| HNSW query, 10k × 128D | 74.515 µs | 66.892 µs | **CopperDB**, 10.2% lower latency |
-| HNSW query, 10k × 384D | 109.980 µs | 123.790 µs | **NornicDB**, 11.2% lower latency |
-| HNSW query, 10k × 1024D | 161.742 µs | 235.880 µs | **NornicDB**, 31.4% lower latency |
-| HNSW build, 10k × 128D | 1.7362 s | 1.3482 s | **CopperDB**, 22.3% lower latency |
-| HNSW build, 10k × 384D | 2.8877 s | 2.6508 s | **No valid winner**, Nornic recall varied from 0.4–0.5 |
-| HNSW build, 10k × 1024D | 5.3592 s | 5.7434 s | **NornicDB**, 6.7% lower latency |
+| HNSW query, 10k × 128D | 74.515 µs | 48.924 µs | **CopperDB**, 34.3% lower latency |
+| HNSW query, 10k × 384D | 109.980 µs | 96.254 µs | **CopperDB**, 12.5% lower latency |
+| HNSW query, 10k × 1024D | 161.742 µs | 176.500 µs | **NornicDB**, 8.4% lower latency |
+| HNSW build, 10k × 128D | 1.7362 s | 1.0514 s | **CopperDB**, 39.4% lower latency |
+| HNSW build, 10k × 384D | 2.8877 s | 1.7235 s | **No valid winner**, CopperDB timing is 40.3% lower but Nornic recall varied from 0.4–0.5 |
+| HNSW build, 10k × 1024D | 5.3592 s | 3.5796 s | **CopperDB**, 33.2% lower latency |
 | Exact cosine, 10k × 128D | 2.6917 ms | 680.64 µs | **CopperDB**, 74.7% lower latency |
 | Exact cosine, 10k × 384D | 3.5061 ms | 1.9101 ms | **CopperDB**, 45.5% lower latency |
 | Exact cosine, 10k × 1024D | 4.7982 ms | 3.6236 ms | **CopperDB**, 24.5% lower latency |
@@ -25,7 +25,7 @@ Lower latency is better unless noted. A winner is named only when fixtures, exec
 | Hybrid RRF, durable | 1.1380 ms | 1.0773 ms | **No valid winner**, ANN candidate identities differ |
 | Hybrid RRF, memory | Not collected | 783.36 µs | **No valid winner** |
 
-CopperDB wins 10 of the 14 cleanly comparable rows. NornicDB wins three; the 384D build is excluded because result quality was unstable.
+CopperDB wins 12 of the 13 cleanly comparable rows. NornicDB wins the 1024D HNSW query; the 384D build is excluded because result quality was unstable.
 
 ### Supplemental Benchmarks
 
@@ -43,6 +43,7 @@ CopperDB wins 10 of the 14 cleanly comparable rows. NornicDB wins three; the 384
 | Isolated policy catalog load | Not collected | 9.0762 ms | No valid winner |
 | HNSW artifact load, 128D / 384D / 1024D | Not collected | 26.27 / 63.75 / 155.56 ms | No valid winner |
 | HNSW update, 128D / 384D / 1024D | Not collected | 2.972 / 6.226 / 14.219 ms | No valid winner |
+| SIMD dot product, 128D / 384D / 1024D | 10.72 / 20.00 / 41.96 ns | 10.836 / 20.304 / 51.674 ns | No HNSW winner; standalone diagnostic |
 | HNSW rerank-only, 128D / 384D / 1024D | Not collected | 574.09 / 738.72 / 1,089.15 µs | No valid winner |
 | HNSW full rerank pipeline, 128D / 384D / 1024D | Not collected | 846.58 / 1,122.54 / 1,693.78 µs | No valid winner |
 | Lucene exact terms, vocab 256 / 2048 | Not collected | 57.35 / 442.78 µs | No valid winner |
@@ -58,6 +59,6 @@ CopperDB wins 10 of the 14 cleanly comparable rows. NornicDB wins three; the 384
 
 The traversal head-to-head numbers are warm result-cache hits in both engines, matching NornicDB’s benchmark boundary. CopperDB’s graph-resident cache-miss diagnostics remain `1.91 ms` for two-hop and `2.26 ms` for shortest path; those are profiling measurements, not cross-engine ratios.
 
-The remaining valid optimization targets are HNSW query at 384D and 1024D, followed by HNSW build at 1024D.
+The remaining valid optimization target is HNSW query at 1024D. CopperDB now wins the 128D and 384D query rows and all quality-stable build rows.
 
-Validation is clean: storage `206/206`, evaluator `344/344`, warning-denied Clippy passed, and `git diff --check` found no whitespace errors. Local scope is 13 files with 1,534 insertions and 85 deletions.
+Validation is clean: storage `206/206`, evaluator `344/344`, SIMD `5/5`, vectorspace `18/18`, warning-denied Clippy passed, and `git diff --check` found no whitespace errors. The current uncommitted performance phase touches six files, including the new standalone SIMD benchmark.
