@@ -11,9 +11,10 @@ use copperdb_util::{RequestCancellation, RequestCancelled};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::fs;
+use std::hash::Hash;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -86,6 +87,8 @@ const META_LAYOUT_MANIFEST_KEY: &[u8] = b"layout_manifest";
 const META_ENCRYPTION_MANIFEST_KEY: &[u8] = b"encryption_manifest";
 const META_MVCC_STATE_KEY: &[u8] = b"mvcc_state";
 const META_WAL_APPLIED_SEQUENCE_KEY: &[u8] = b"wal_applied_sequence";
+const META_GLOBAL_EDGE_COUNT_KEY: &[u8] = b"global_edge_count";
+const META_EDGE_TYPE_COUNT_PREFIX: &[u8] = b"edge_type_count/";
 const STORAGE_WAL_FILENAME: &str = "copperdb.wal.rmp";
 const STORAGE_WAL_SNAPSHOT_FILENAME: &str = "copperdb.wal.snap";
 const META_TOPOLOGY_PEER_PREFIX: &[u8] = b"topology_peer/";
@@ -110,6 +113,9 @@ const META_KP_DECAY_BINDING_PREFIX: &[u8] = b"kp_decay_binding/";
 const META_KP_PROMOTION_PROFILE_PREFIX: &[u8] = b"kp_promotion_profile/";
 const META_KP_PROMOTION_POLICY_PREFIX: &[u8] = b"kp_promotion_policy/";
 const META_KP_ACCESS_METADATA_PREFIX: &[u8] = b"kp_access_metadata/";
+const GRAPH_NODE_CACHE_CAPACITY: usize = 16_384;
+const GRAPH_EDGE_CACHE_CAPACITY: usize = 32_768;
+const GRAPH_QUERY_CACHE_CAPACITY: usize = 16_384;
 const IDX_LABEL_PREFIX: &str = "label_nodes";
 const IDX_EDGE_TYPE_PREFIX: &str = "edge_type";
 const IDX_EDGE_START_PREFIX: &str = "edge_start";
@@ -1676,6 +1682,51 @@ pub trait StorageEventNotifier {
 
 pub type CommitEventCallback = Arc<dyn Fn() + Send + Sync>;
 
+struct BoundedCache<K, V> {
+    entries: HashMap<K, V>,
+    insertion_order: VecDeque<K>,
+    capacity: usize,
+}
+
+impl<K, V> BoundedCache<K, V>
+where
+    K: Clone + Eq + Hash,
+    V: Clone,
+{
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::with_capacity(capacity),
+            insertion_order: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn get(&self, key: &K) -> Option<V> {
+        self.entries.get(key).cloned()
+    }
+
+    fn insert(&mut self, key: K, value: V) {
+        if let std::collections::hash_map::Entry::Occupied(mut entry) =
+            self.entries.entry(key.clone())
+        {
+            entry.insert(value);
+            return;
+        }
+        if self.entries.len() >= self.capacity {
+            if let Some(oldest) = self.insertion_order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.insertion_order.push_back(key.clone());
+        self.entries.insert(key, value);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.insertion_order.clear();
+    }
+}
+
 /// A single opened copperdb storage instance.
 pub struct StorageEngine {
     backend: Arc<dyn StorageBackend>,
@@ -1688,8 +1739,12 @@ pub struct StorageEngine {
     batch_commit_lock: Mutex<()>,
     embedding_claims: Mutex<BTreeSet<String>>,
     fulltext_runtime_indexes: Mutex<HashMap<String, Arc<FulltextRuntimeIndex>>>,
+    graph_node_cache: Mutex<BoundedCache<String, Option<NodeRecord>>>,
+    graph_edge_cache: Mutex<BoundedCache<String, Option<EdgeRecord>>>,
+    graph_query_cache: Mutex<BoundedCache<String, Vec<EdgeRecord>>>,
     schema_manager: RwLock<Arc<SchemaManager>>,
     index_schema_generation: AtomicU64,
+    knowledge_policy_schema_generation: AtomicU64,
     encryption: Option<StorageEncryption>,
     data_dir: Option<PathBuf>,
     temp_dir: Option<tempfile::TempDir>,
@@ -2239,8 +2294,12 @@ impl StorageEngine {
             batch_commit_lock: Mutex::new(()),
             embedding_claims: Mutex::new(BTreeSet::new()),
             fulltext_runtime_indexes: Mutex::new(HashMap::new()),
+            graph_node_cache: Mutex::new(BoundedCache::new(GRAPH_NODE_CACHE_CAPACITY)),
+            graph_edge_cache: Mutex::new(BoundedCache::new(GRAPH_EDGE_CACHE_CAPACITY)),
+            graph_query_cache: Mutex::new(BoundedCache::new(GRAPH_QUERY_CACHE_CAPACITY)),
             schema_manager: RwLock::new(Arc::new(SchemaManager::new())),
             index_schema_generation: AtomicU64::new(0),
+            knowledge_policy_schema_generation: AtomicU64::new(0),
             encryption,
             data_dir,
             temp_dir: None,
@@ -2534,6 +2593,12 @@ impl StorageEngine {
         }
     }
 
+    fn invalidate_graph_caches(&self) {
+        self.graph_node_cache.lock().clear();
+        self.graph_edge_cache.lock().clear();
+        self.graph_query_cache.lock().clear();
+    }
+
     // --- Raw node operations ---
 
     /// Store a node's serialized properties.
@@ -2544,6 +2609,7 @@ impl StorageEngine {
 
         self.nodes
             .insert(id.as_bytes(), self.encode_record_bytes(value.to_vec())?)?;
+        self.invalidate_graph_caches();
         Ok(())
     }
 
@@ -2566,6 +2632,7 @@ impl StorageEngine {
     /// Delete a node.
     pub fn delete_node(&self, id: &str) -> Result<(), StorageError> {
         self.nodes.fjall_remove(id.as_bytes())?;
+        self.invalidate_graph_caches();
         Ok(())
     }
 
@@ -2593,6 +2660,7 @@ impl StorageEngine {
     pub fn put_edge(&self, id: &str, value: &[u8]) -> Result<(), StorageError> {
         self.edges
             .insert(id.as_bytes(), self.encode_record_bytes(value.to_vec())?)?;
+        self.invalidate_graph_caches();
         Ok(())
     }
 
@@ -2607,6 +2675,7 @@ impl StorageEngine {
     /// Delete an edge.
     pub fn delete_edge(&self, id: &str) -> Result<(), StorageError> {
         self.edges.fjall_remove(id.as_bytes())?;
+        self.invalidate_graph_caches();
         Ok(())
     }
 
@@ -2629,12 +2698,20 @@ impl StorageEngine {
     }
 
     pub fn get_node_record(&self, id: &str) -> Result<Option<NodeRecord>, StorageError> {
-        match self.nodes.fjall_get(id.as_bytes())? {
+        let cache_key = id.to_string();
+        if let Some(cached) = self.graph_node_cache.lock().get(&cache_key) {
+            return Ok(cached);
+        }
+        let record = match self.nodes.fjall_get(id.as_bytes())? {
             Some(v) => {
                 compat_node_record_from_bytes(id, self.decode_record_bytes(v.as_ref())?.as_slice())
             }
             None => Ok(None),
-        }
+        }?;
+        self.graph_node_cache
+            .lock()
+            .insert(cache_key, record.clone());
+        Ok(record)
     }
 
     pub fn delete_node_record(&self, id: &str) -> Result<(), StorageError> {
@@ -3318,6 +3395,7 @@ impl StorageEngine {
         for key in index_keys {
             self.meta.fjall_insert(tombstone_key(key), [])?;
         }
+        self.graph_query_cache.lock().clear();
         Ok(())
     }
 
@@ -3327,6 +3405,7 @@ impl StorageEngine {
         for key in index_keys {
             self.meta.fjall_remove(tombstone_key(key))?;
         }
+        self.graph_query_cache.lock().clear();
         Ok(())
     }
 
@@ -3352,6 +3431,9 @@ impl StorageEngine {
                 self.meta.fjall_remove(&key[..])?;
                 removed += 1;
             }
+        }
+        if removed > 0 {
+            self.graph_query_cache.lock().clear();
         }
         Ok(removed)
     }
@@ -4102,28 +4184,24 @@ impl StorageEngine {
         max_terms: usize,
         per_term: usize,
     ) -> Result<Vec<String>, StorageError> {
-        if properties.is_empty() {
+        if properties.is_empty() || max_terms == 0 || per_term == 0 {
             return Ok(Vec::new());
         }
 
-        let total_docs = self
-            .node_count_by_label_in_namespace("", label)
-            .unwrap_or(1)
-            .max(1) as f64;
-
         // Collect term → (node_id → tf) across all properties
         let mut term_docs: HashMap<String, HashMap<String, usize>> = HashMap::new();
+        let mut document_ids = BTreeSet::new();
         for property in properties {
-            let prefix = format!("idx:f:{}:{}:", label, property);
+            let prefix = node_fulltext_property_prefix(label, property);
             for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
                 let (key, _) = entry?;
                 let key_str =
                     std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
-                // Key format: idx:f:label:property:token/node_id
                 if let Some(rest) = key_str.strip_prefix(&prefix) {
-                    if let Some((token, node_id)) = rest.split_once('/') {
-                        let token = token.to_lowercase();
+                    if let Some((encoded_token, node_id)) = rest.split_once('/') {
+                        let token = unescape_index_component(encoded_token)?;
                         if token.len() >= 2 && !is_stop_word(&token) {
+                            document_ids.insert(node_id.to_string());
                             *term_docs
                                 .entry(token)
                                 .or_default()
@@ -4134,25 +4212,35 @@ impl StorageEngine {
                 }
             }
         }
+        let total_docs = document_ids.len().max(1) as f64;
 
         // Compute IDF for each term and select top max_terms by IDF
         let mut scored_terms: Vec<(String, f64, HashMap<String, usize>)> = term_docs
             .into_iter()
             .map(|(term, doc_tfs)| {
                 let df = doc_tfs.len().max(1) as f64;
-                let idf = (1.0 + (total_docs - df + 0.5) / (df + 0.5)).ln().max(0.0);
+                let idf = (1.0_f64 + (total_docs - df + 0.5) / (df + 0.5))
+                    .ln()
+                    .max(0.0);
                 (term, idf, doc_tfs)
             })
-            .filter(|(_, idf, _)| *idf > 0.0)
+            .filter(|(_, idf, doc_tfs)| *idf > 0.0 && doc_tfs.len() >= 2)
             .collect();
-        scored_terms.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored_terms.sort_by(|left, right| {
+            right
+                .1
+                .partial_cmp(&left.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.2.len().cmp(&right.2.len()))
+                .then_with(|| left.0.cmp(&right.0))
+        });
 
         // Take top max_terms terms, then top per_term documents per term (by TF)
         let mut seed_ids = std::collections::HashSet::new();
         let mut result = Vec::new();
         for (_term, _idf, doc_tfs) in scored_terms.into_iter().take(max_terms) {
             let mut docs: Vec<(String, usize)> = doc_tfs.into_iter().collect();
-            docs.sort_by_key(|doc| std::cmp::Reverse(doc.1));
+            docs.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
             for (node_id, _tf) in docs.into_iter().take(per_term) {
                 if seed_ids.insert(node_id.clone()) {
                     result.push(node_id);
@@ -4203,12 +4291,20 @@ impl StorageEngine {
     }
 
     pub fn get_edge_record(&self, id: &str) -> Result<Option<EdgeRecord>, StorageError> {
-        match self.edges.fjall_get(id.as_bytes())? {
-            Some(v) => Ok(Some(rmp_serde::from_slice(
-                self.decode_record_bytes(v.as_ref())?.as_slice(),
-            )?)),
-            None => Ok(None),
+        let cache_key = id.to_string();
+        if let Some(cached) = self.graph_edge_cache.lock().get(&cache_key) {
+            return Ok(cached);
         }
+        let record = match self.edges.fjall_get(id.as_bytes())? {
+            Some(v) => Some(rmp_serde::from_slice(
+                self.decode_record_bytes(v.as_ref())?.as_slice(),
+            )?),
+            None => None,
+        };
+        self.graph_edge_cache
+            .lock()
+            .insert(cache_key, record.clone());
+        Ok(record)
     }
 
     pub fn delete_edge_record(&self, id: &str) -> Result<(), StorageError> {
@@ -4311,6 +4407,9 @@ impl StorageEngine {
 
     pub fn get_edges_by_type(&self, edge_type: &str) -> Result<Vec<EdgeRecord>, StorageError> {
         let prefix = edge_type_index_prefix(edge_type);
+        if let Some(cached) = self.graph_query_cache.lock().get(&prefix) {
+            return Ok(cached);
+        }
         let mut out = Vec::new();
 
         for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
@@ -4330,7 +4429,21 @@ impl StorageEngine {
         }
 
         out.sort_by(|a, b| a.id.cmp(&b.id));
+        self.graph_query_cache
+            .lock()
+            .insert(prefix, out.clone());
         Ok(out)
+    }
+
+    /// Count live relationships of one type without materializing their records.
+    ///
+    /// Databases created before this counter was introduced fall back to the
+    /// existing type lookup until their first mutation of that relationship type.
+    pub fn edge_type_count(&self, edge_type: &str) -> Result<u64, StorageError> {
+        match self.meta.fjall_get(edge_type_count_key(edge_type))? {
+            Some(raw) => Ok(rmp_serde::from_slice(raw.as_ref())?),
+            None => Ok(self.get_edges_by_type(edge_type)?.len() as u64),
+        }
     }
 
     pub fn find_edge_between(
@@ -4526,6 +4639,16 @@ impl StorageEngine {
             return self.meta_counter(namespace_edge_count_key(namespace));
         }
         Ok(self.edges.scan_prefix(prefix.as_bytes()).count() as u64)
+    }
+
+    /// Count all relationships without deserializing their records.
+    ///
+    /// Databases created before the counter was introduced fall back to a scan.
+    pub fn total_edge_count(&self) -> Result<u64, StorageError> {
+        match self.meta.fjall_get(META_GLOBAL_EDGE_COUNT_KEY)? {
+            Some(raw) => Ok(rmp_serde::from_slice(raw.as_ref())?),
+            None => Ok(self.edges.fjall_iter().count() as u64),
+        }
     }
 
     pub fn node_count_by_label_in_namespace(
@@ -4935,6 +5058,8 @@ impl StorageEngine {
             )));
         }
         self.meta.fjall_insert(key, rmp_serde::to_vec(profile)?)?;
+        self.knowledge_policy_schema_generation
+            .fetch_add(1, Ordering::Release);
         Ok(())
     }
 
@@ -4966,6 +5091,8 @@ impl StorageEngine {
         persisted.target_labels.sort();
         self.meta
             .fjall_insert(key, rmp_serde::to_vec(&persisted)?)?;
+        self.knowledge_policy_schema_generation
+            .fetch_add(1, Ordering::Release);
         Ok(())
     }
 
@@ -5004,6 +5131,8 @@ impl StorageEngine {
         apply_decay_profile_updates(&mut profile, updates)?;
         validate_decay_profile(&profile)?;
         self.meta.fjall_insert(key, rmp_serde::to_vec(&profile)?)?;
+        self.knowledge_policy_schema_generation
+            .fetch_add(1, Ordering::Release);
         Ok(())
     }
 
@@ -5028,6 +5157,10 @@ impl StorageEngine {
                 name
             )));
         }
+        if deleted {
+            self.knowledge_policy_schema_generation
+                .fetch_add(1, Ordering::Release);
+        }
         Ok(())
     }
 
@@ -5043,6 +5176,10 @@ impl StorageEngine {
                 "decay profile {}",
                 name
             )));
+        }
+        if deleted {
+            self.knowledge_policy_schema_generation
+                .fetch_add(1, Ordering::Release);
         }
         Ok(())
     }
@@ -5091,6 +5228,8 @@ impl StorageEngine {
             )));
         }
         self.meta.fjall_insert(key, rmp_serde::to_vec(profile)?)?;
+        self.knowledge_policy_schema_generation
+            .fetch_add(1, Ordering::Release);
         Ok(())
     }
 
@@ -5119,6 +5258,8 @@ impl StorageEngine {
         apply_promotion_profile_updates(&mut profile, updates)?;
         validate_promotion_profile(&profile)?;
         self.meta.fjall_insert(key, rmp_serde::to_vec(&profile)?)?;
+        self.knowledge_policy_schema_generation
+            .fetch_add(1, Ordering::Release);
         Ok(())
     }
 
@@ -5145,6 +5286,10 @@ impl StorageEngine {
                 name
             )));
         }
+        if deleted {
+            self.knowledge_policy_schema_generation
+                .fetch_add(1, Ordering::Release);
+        }
         Ok(())
     }
 
@@ -5163,6 +5308,8 @@ impl StorageEngine {
             )));
         }
         self.meta.fjall_insert(key, rmp_serde::to_vec(policy)?)?;
+        self.knowledge_policy_schema_generation
+            .fetch_add(1, Ordering::Release);
         Ok(())
     }
 
@@ -5216,6 +5363,8 @@ impl StorageEngine {
             .collect::<Vec<_>>();
         validate_promotion_policy(&policy, &profiles, &existing_policies)?;
         self.meta.fjall_insert(key, rmp_serde::to_vec(&policy)?)?;
+        self.knowledge_policy_schema_generation
+            .fetch_add(1, Ordering::Release);
         Ok(())
     }
 
@@ -5232,7 +5381,16 @@ impl StorageEngine {
                 name
             )));
         }
+        if deleted {
+            self.knowledge_policy_schema_generation
+                .fetch_add(1, Ordering::Release);
+        }
         Ok(())
+    }
+
+    pub fn knowledge_policy_schema_generation(&self) -> u64 {
+        self.knowledge_policy_schema_generation
+            .load(Ordering::Acquire)
     }
 
     // --- Generic index operations ---
@@ -5515,6 +5673,10 @@ impl StorageEngine {
     }
 
     fn get_edges_by_adjacency_prefix(&self, prefix: &str) -> Result<Vec<EdgeRecord>, StorageError> {
+        let cache_key = prefix.to_string();
+        if let Some(cached) = self.graph_query_cache.lock().get(&cache_key) {
+            return Ok(cached);
+        }
         let mut out = Vec::new();
         for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
             let (key, _) = entry?;
@@ -5531,6 +5693,9 @@ impl StorageEngine {
             }
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
+        self.graph_query_cache
+            .lock()
+            .insert(cache_key, out.clone());
         Ok(out)
     }
 
@@ -5702,6 +5867,19 @@ fn namespace_edge_count_key(namespace: &str) -> Vec<u8> {
         escape_index_component(namespace).as_bytes(),
     ]
     .concat()
+}
+
+fn edge_type_count_key(edge_type: &str) -> Vec<u8> {
+    [META_EDGE_TYPE_COUNT_PREFIX, escape_index_component(edge_type).as_bytes()].concat()
+}
+
+fn edge_type_from_count_key(key: &[u8]) -> Result<Option<String>, StorageError> {
+    let Some(encoded) = key.strip_prefix(META_EDGE_TYPE_COUNT_PREFIX) else {
+        return Ok(None);
+    };
+    Ok(Some(unescape_index_component(
+        std::str::from_utf8(encoded).map_err(|_| StorageError::InvalidUtf8)?,
+    )?))
 }
 
 fn namespace_label_count_key(namespace: &str, label: &str) -> Vec<u8> {
@@ -5999,6 +6177,12 @@ fn node_property_index_key_for_node(index: &IndexDefinition, node: &NodeRecord) 
 
 fn escape_index_component(value: &str) -> String {
     hex::encode(value.as_bytes())
+}
+
+fn unescape_index_component(value: &str) -> Result<String, StorageError> {
+    let bytes = hex::decode(value)
+        .map_err(|error| StorageError::InvalidFulltextIndexKey(error.to_string()))?;
+    String::from_utf8(bytes).map_err(|_| StorageError::InvalidUtf8)
 }
 
 fn tokenize_fulltext(text: &str) -> Vec<String> {
@@ -7657,6 +7841,7 @@ impl<'a> BatchWriter<'a> {
                 None => batch.remove(&self.engine.meta, key),
             }
         }
+        let has_knowledge_policy_change = knowledge_policy.is_some();
         if let Some(catalog) = knowledge_policy {
             for (key, value) in self.stage_knowledge_policy_catalog(&catalog)? {
                 match value {
@@ -7757,7 +7942,13 @@ impl<'a> BatchWriter<'a> {
             }
         }
         for (key, delta) in counter_deltas {
-            let current = self.engine.meta_counter(key.clone())?;
+            let current = if key.as_slice() == META_GLOBAL_EDGE_COUNT_KEY {
+                self.engine.total_edge_count()?
+            } else if let Some(edge_type) = edge_type_from_count_key(&key)? {
+                self.engine.edge_type_count(&edge_type)?
+            } else {
+                self.engine.meta_counter(key.clone())?
+            };
             let updated = if delta >= 0 {
                 current.saturating_add(delta as u64)
             } else {
@@ -7789,6 +7980,14 @@ impl<'a> BatchWriter<'a> {
         }
         if let Some(manager) = replacement_schema_manager {
             *self.engine.schema_manager.write() = manager;
+        }
+        if has_knowledge_policy_change {
+            self.engine
+                .knowledge_policy_schema_generation
+                .fetch_add(1, Ordering::Release);
+        }
+        if !nodes.is_empty() || !edges.is_empty() {
+            self.engine.invalidate_graph_caches();
         }
         if !nodes.is_empty() {
             self.engine.fulltext_runtime_indexes.lock().clear();
@@ -8039,6 +8238,12 @@ fn stage_node_counter_deltas(deltas: &mut HashMap<Vec<u8>, i64>, node: &NodeReco
 }
 
 fn stage_edge_counter_deltas(deltas: &mut HashMap<Vec<u8>, i64>, edge: &EdgeRecord, delta: i64) {
+    *deltas
+        .entry(META_GLOBAL_EDGE_COUNT_KEY.to_vec())
+        .or_default() += delta;
+    *deltas
+        .entry(edge_type_count_key(&edge.edge_type))
+        .or_default() += delta;
     if let Some(namespace) = namespace_from_str(&edge.id) {
         *deltas
             .entry(namespace_edge_count_key(namespace))

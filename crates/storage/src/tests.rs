@@ -541,6 +541,7 @@ fn prefix_scan_counts_and_namespace_listing_are_deterministic() {
     assert_eq!(engine.node_count_by_prefix("beta:").unwrap(), 1);
     assert_eq!(engine.edge_count_by_prefix("alpha:").unwrap(), 1);
     assert_eq!(engine.edge_count_by_prefix("beta:").unwrap(), 1);
+    assert_eq!(engine.total_edge_count().unwrap(), 2);
     assert_eq!(
         engine
             .node_count_by_label_in_namespace("alpha", "Person")
@@ -566,6 +567,10 @@ fn prefix_scan_counts_and_namespace_listing_are_deterministic() {
     engine
         .put_node_record(&sample_node("alpha:n1", &["Robot"]))
         .unwrap();
+    engine
+        .put_edge_record(&sample_edge("alpha:e1", "KNOWS", "alpha:n1", "alpha:n2"))
+        .unwrap();
+    assert_eq!(engine.total_edge_count().unwrap(), 2);
     assert_eq!(engine.node_count_by_prefix("alpha:").unwrap(), 2);
     assert_eq!(
         engine
@@ -582,6 +587,7 @@ fn prefix_scan_counts_and_namespace_listing_are_deterministic() {
 
     engine.delete_node_record("beta:n1").unwrap();
     engine.delete_edge_record("beta:e1").unwrap();
+    assert_eq!(engine.total_edge_count().unwrap(), 1);
     assert_eq!(engine.node_count_by_prefix("beta:").unwrap(), 0);
     assert_eq!(engine.edge_count_by_prefix("beta:").unwrap(), 0);
     assert_eq!(
@@ -591,6 +597,62 @@ fn prefix_scan_counts_and_namespace_listing_are_deterministic() {
         0
     );
     assert_eq!(engine.list_namespaces().unwrap(), vec!["alpha".to_string()]);
+}
+
+#[test]
+fn edge_counter_initializes_from_legacy_edges_on_first_mutation() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    engine
+        .put_edge_record(&sample_edge("legacy:e1", "LINKS", "legacy:n1", "legacy:n2"))
+        .unwrap();
+    engine
+        .put_edge_record(&sample_edge("legacy:e2", "LINKS", "legacy:n2", "legacy:n3"))
+        .unwrap();
+
+    engine.meta.remove(META_GLOBAL_EDGE_COUNT_KEY).unwrap();
+    assert_eq!(engine.total_edge_count().unwrap(), 2);
+
+    engine
+        .put_edge_record(&sample_edge("legacy:e3", "LINKS", "legacy:n3", "legacy:n4"))
+        .unwrap();
+    assert_eq!(engine.total_edge_count().unwrap(), 3);
+    assert_eq!(
+        rmp_serde::from_slice::<u64>(
+            &engine
+                .meta
+                .fjall_get(META_GLOBAL_EDGE_COUNT_KEY)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap(),
+        3
+    );
+
+    engine.delete_edge_record("legacy:e1").unwrap();
+    assert_eq!(engine.total_edge_count().unwrap(), 2);
+}
+
+#[test]
+fn edge_type_counter_initializes_from_legacy_edges_and_tracks_type_changes() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    engine
+        .put_edge_record(&sample_edge("legacy:e1", "LINKS", "legacy:n1", "legacy:n2"))
+        .unwrap();
+    engine
+        .put_edge_record(&sample_edge("legacy:e2", "LINKS", "legacy:n2", "legacy:n3"))
+        .unwrap();
+
+    engine.meta.remove(edge_type_count_key("LINKS")).unwrap();
+    assert_eq!(engine.edge_type_count("LINKS").unwrap(), 2);
+
+    engine
+        .put_edge_record(&sample_edge("legacy:e1", "KNOWS", "legacy:n1", "legacy:n2"))
+        .unwrap();
+    assert_eq!(engine.edge_type_count("LINKS").unwrap(), 1);
+    assert_eq!(engine.edge_type_count("KNOWS").unwrap(), 1);
+
+    engine.delete_edge_record("legacy:e2").unwrap();
+    assert_eq!(engine.edge_type_count("LINKS").unwrap(), 0);
 }
 
 #[test]
@@ -6544,6 +6606,32 @@ fn fulltext_vocabulary_is_bounded_deterministic_and_cancellable() {
         ),
         Err(StorageError::RequestCancelled(_))
     ));
+}
+
+#[test]
+fn lexical_seed_doc_ids_uses_repeated_live_fulltext_terms() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    for id in ["n1", "n2", "n3"] {
+        let mut node = sample_node(id, &["Document"]);
+        node.properties
+            .insert("title".into(), json!(format!("shared topic {id}")));
+        engine.put_node_record(&node).unwrap();
+    }
+    engine
+        .persist_index_definition(&IndexDefinition {
+            name: "document_title_fulltext_idx".to_string(),
+            entity_type: IndexEntityType::Node,
+            kind: IndexKind::FullText,
+            label: "Document".to_string(),
+            properties: vec!["title".to_string()],
+        })
+        .unwrap();
+
+    let seeds = engine
+        .lexical_seed_doc_ids("Document", &["title".into()], 1, 2)
+        .unwrap();
+
+    assert_eq!(seeds, vec!["n1", "n2"]);
 }
 
 #[test]

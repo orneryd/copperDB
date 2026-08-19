@@ -9,6 +9,7 @@ use tempfile::TempDir;
 const DEFAULT_VECTOR_COUNT: usize = 10_000;
 const K: usize = 10;
 const RERANK_CANDIDATE_MULTIPLIER: usize = 4;
+const PIPELINE_RERANK_CANDIDATE_MULTIPLIER: usize = 20;
 const DIMENSIONS: [usize; 3] = [128, 384, 1_024];
 const NORNICDB_BENCH_EF_CONSTRUCTION: usize = 200;
 const NORNICDB_BENCH_EF_SEARCH: usize = 100;
@@ -84,6 +85,7 @@ impl Workload {
 
     fn print_calibration(&self) {
         let mut recall_sum = 0.0_f64;
+        let mut rerank_recall_sum = 0.0_f64;
         let mut visited_sum = 0_usize;
         let (approximate, stats) = self
             .hnsw
@@ -102,15 +104,29 @@ impl Workload {
             .filter(|(id, _)| exact_ids.contains(id))
             .count();
         recall_sum += matches as f64 / K as f64;
+        let (candidates, _) = self
+            .hnsw
+            .knn(&self.query, K.saturating_mul(PIPELINE_RERANK_CANDIDATE_MULTIPLIER))
+            .expect("benchmark query dimensions must match");
+        let reranked = self
+            .exact_store
+            .score_candidates(&self.query, candidates.iter().map(|(id, _)| id.as_str()), K)
+            .expect("benchmark candidates must be readable");
+        rerank_recall_sum += reranked
+            .iter()
+            .filter(|(id, _)| exact_ids.contains(id))
+            .count() as f64
+            / K as f64;
         visited_sum += stats.visited_nodes;
         let query_count = 1.0;
         let vector_bytes = self.vector_count * self.dimensions * std::mem::size_of::<f32>();
         let estimated_memory_bytes = self.hnsw.estimated_memory_bytes();
         eprintln!(
-            "hnsw calibration: vectors={}, dimensions={}, recall@{K}={:.4}, average_visited_nodes={:.1}, vector_bytes={vector_bytes}, estimated_memory_bytes={estimated_memory_bytes}",
+            "hnsw calibration: vectors={}, dimensions={}, recall@{K}={:.4}, pipeline_rerank_recall@{K}={:.4}, average_visited_nodes={:.1}, vector_bytes={vector_bytes}, estimated_memory_bytes={estimated_memory_bytes}",
             self.vector_count,
             self.dimensions,
             recall_sum / query_count,
+            rerank_recall_sum / query_count,
             visited_sum as f64 / query_count,
         );
     }
@@ -473,6 +489,32 @@ fn bench_hnsw(criterion: &mut Criterion) {
             });
         });
         rerank_group.finish();
+
+        let mut rerank_pipeline_group =
+            criterion.benchmark_group("hnsw_file_rerank_pipeline_query");
+        rerank_pipeline_group.throughput(Throughput::Elements(1));
+        rerank_pipeline_group.bench_function(benchmark_id(), |bench| {
+            bench.iter(|| {
+                let (candidates, _) = workload
+                    .hnsw
+                    .knn(
+                        black_box(&workload.query),
+                        K.saturating_mul(PIPELINE_RERANK_CANDIDATE_MULTIPLIER),
+                    )
+                    .expect("benchmark query dimensions must match");
+                black_box(
+                    workload
+                        .exact_store
+                        .score_candidates(
+                            &workload.query,
+                            candidates.iter().map(|(id, _)| id.as_str()),
+                            K,
+                        )
+                        .expect("benchmark candidates must be readable"),
+                );
+            });
+        });
+        rerank_pipeline_group.finish();
 
         let mut exact_group = criterion.benchmark_group("exact_cosine_query");
         exact_group.throughput(Throughput::Elements(1));

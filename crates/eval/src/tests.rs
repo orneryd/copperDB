@@ -3,7 +3,9 @@
         can_execute_as_pipeline, detect_query_pattern, match_compound_query_shape, Parser,
         QueryPattern,
     };
-    use copperdb_storage::{EdgeRecord, NodeRecord, StorageEngine};
+    use copperdb_storage::{
+        EdgeRecord, IndexDefinition, IndexEntityType, IndexKind, NodeRecord, StorageEngine,
+    };
 
     fn node_props(name: &str) -> HashMap<String, Value> {
         [("name".to_string(), Value::String(name.to_string()))]
@@ -771,6 +773,233 @@
             Some(&Value::String("Alice".into()))
         );
         assert_eq!(result.rows[0].get("followers"), Some(&Value::from(3)));
+    }
+
+    #[test]
+    fn count_all_relationships_uses_the_unfiltered_storage_count() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        seed_social_graph(&engine);
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH ()-[r]->() RETURN count(r) AS count")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["count"]);
+        assert_eq!(
+            result.rows,
+            vec![HashMap::from([("count".into(), Value::from(5_u64))])]
+        );
+    }
+
+    #[test]
+    fn count_all_relationships_fast_path_rejects_typed_patterns() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        seed_social_graph(&engine);
+
+        let result = engine
+            .execute(
+                &parser
+                    .parse("MATCH ()-[r:FOLLOWS]->() RETURN count(r) AS count")
+                    .unwrap(),
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows[0].get("count"), Some(&Value::from(5)));
+    }
+
+    #[test]
+    fn raw_count_all_relationships_uses_the_storage_executor_fast_path() {
+        let engine = make_engine();
+        seed_social_graph(&engine);
+
+        let result = engine
+            .execute_cypher(
+                "MATCH ()-[r]->() RETURN count(r) AS count",
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["count"]);
+        assert_eq!(result.rows[0].get("count"), Some(&Value::from(5_u64)));
+    }
+
+    #[test]
+    fn raw_optional_match_count_uses_the_typed_edge_fast_path() {
+        let engine = make_engine();
+        seed_social_graph(&engine);
+
+        let result = engine
+            .execute_cypher(
+                "MATCH (p) OPTIONAL MATCH (p)-[:FOLLOWS]->(friend) RETURN count(friend) AS count",
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["count"]);
+        assert_eq!(result.rows[0].get("count"), Some(&Value::from(5_u64)));
+    }
+
+    #[test]
+    fn raw_two_hop_match_count_uses_the_typed_adjacency_fast_path() {
+        let engine = make_engine();
+        seed_social_graph(&engine);
+
+        let result = engine
+            .execute_cypher(
+                "MATCH (a)-[:FOLLOWS]->(b)-[:FOLLOWS]->(c) RETURN count(c) AS count",
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["count"]);
+        assert_eq!(result.rows[0].get("count"), Some(&Value::from(8_u64)));
+    }
+
+    #[test]
+    fn raw_two_hop_match_count_excludes_dangling_endpoints() {
+        let engine = make_engine();
+        seed_social_graph(&engine);
+        engine
+            .storage
+            .put_edge_record(&EdgeRecord {
+                id: "follows:dangling".into(),
+                start_node: "person:1".into(),
+                end_node: "person:missing".into(),
+                edge_type: "FOLLOWS".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let result = engine
+            .execute_cypher(
+                "MATCH (a)-[:FOLLOWS]->(b)-[:FOLLOWS]->(c) RETURN count(c) AS count",
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows[0].get("count"), Some(&Value::from(8_u64)));
+    }
+
+    #[test]
+    fn prof_raw_two_hop_match_count_benchmark_breakdown() {
+        const NODE_COUNT: usize = 1_000;
+        const QUERY: &str =
+            "MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN count(c) AS count";
+
+        let engine = make_engine();
+        let nodes = (0..NODE_COUNT)
+            .map(|index| NodeRecord {
+                id: format!("n{index}"),
+                labels: Vec::new(),
+                properties: BTreeMap::new(),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .collect::<Vec<_>>();
+        engine.storage.put_node_records_batch(&nodes).unwrap();
+        let edges = (0..NODE_COUNT - 1)
+            .map(|index| EdgeRecord {
+                id: format!("e{index}"),
+                start_node: format!("n{index}"),
+                end_node: format!("n{}", index + 1),
+                edge_type: "KNOWS".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .collect::<Vec<_>>();
+        engine.storage.put_edge_records_batch(&edges).unwrap();
+
+        let parser = Parser::new();
+        let parse_started = std::time::Instant::now();
+        let _query = parser.parse(QUERY).unwrap();
+        let parse_elapsed = parse_started.elapsed();
+
+        let first_hop_started = std::time::Instant::now();
+        let first_hop_edges = engine.storage.get_edges_by_type("KNOWS").unwrap();
+        let first_hop_elapsed = first_hop_started.elapsed();
+
+        let expansion_started = std::time::Instant::now();
+        let mut count = 0_u64;
+        for edge in &first_hop_edges {
+            if engine.storage.get_node_record(&edge.start_node).unwrap().is_none()
+                || engine.storage.get_node_record(&edge.end_node).unwrap().is_none()
+            {
+                continue;
+            }
+            for next_edge in engine
+                .storage
+                .get_edges_from_node_by_type(&edge.end_node, "KNOWS")
+                .unwrap()
+            {
+                if engine
+                    .storage
+                    .get_node_record(&next_edge.end_node)
+                    .unwrap()
+                    .is_some()
+                {
+                    count += 1;
+                }
+            }
+        }
+        let expansion_elapsed = expansion_started.elapsed();
+
+        let raw_started = std::time::Instant::now();
+        let result = engine.execute_cypher(QUERY, &HashMap::new()).unwrap();
+        let raw_elapsed = raw_started.elapsed();
+        let cache_hit_started = std::time::Instant::now();
+        let cached_result = engine.execute_cypher(QUERY, &HashMap::new()).unwrap();
+        let cache_hit_elapsed = cache_hit_started.elapsed();
+
+        assert_eq!(count, (NODE_COUNT - 2) as u64);
+        assert_eq!(result.rows[0].get("count"), Some(&Value::from(count)));
+        assert_eq!(cached_result.rows[0].get("count"), Some(&Value::from(count)));
+        eprintln!(
+            "raw_two_hop_match_count_1000: parse={parse_elapsed:.2?} first_hop_type_scan={first_hop_elapsed:.2?} per_edge_expansion={expansion_elapsed:.2?} result_cache_miss_graph_warm={raw_elapsed:.2?} result_cache_hit={cache_hit_elapsed:.2?}"
+        );
+    }
+
+    #[test]
+    fn two_hop_match_count_with_source_label_falls_back_to_general_evaluation() {
+        let engine = make_engine();
+        seed_social_graph(&engine);
+
+        let result = engine
+            .execute_cypher(
+                "MATCH (a:person)-[:FOLLOWS]->(b)-[:FOLLOWS]->(c) RETURN count(c) AS count",
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows[0].get("count"), Some(&Value::from(8)));
+    }
+
+    #[test]
+    fn optional_match_count_with_source_label_falls_back_to_general_evaluation() {
+        let engine = make_engine();
+        seed_social_graph(&engine);
+
+        let result = engine
+            .execute_cypher(
+                "MATCH (p:person) OPTIONAL MATCH (p)-[:FOLLOWS]->(friend) RETURN count(friend) AS count",
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.rows[0].get("count"), Some(&Value::from(5)));
     }
 
     #[test]
@@ -1941,6 +2170,206 @@
             })
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["a", "b", "d"]);
+    }
+
+    #[test]
+    fn raw_shortest_path_uses_the_dedicated_bfs_executor() {
+        let engine = make_engine();
+        for name in ["a", "b", "c"] {
+            store_node(
+                engine.storage.as_ref(),
+                name,
+                &["Node"],
+                HashMap::from([("name".into(), Value::String(name.into()))]),
+            );
+        }
+        for (id, start_node, end_node) in [("link:ab", "a", "b"), ("link:bc", "b", "c")] {
+            engine
+                .storage
+                .put_edge_record(&EdgeRecord {
+                    id: id.into(),
+                    start_node: start_node.into(),
+                    end_node: end_node.into(),
+                    edge_type: "LINK".into(),
+                    properties: BTreeMap::new(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+
+        let result = engine
+            .execute_cypher(
+                "MATCH (start:Node {name: 'a'}), (end:Node {name: 'c'}) MATCH p = shortestPath((start)-[:LINK*]->(end)) RETURN length(p) AS hops",
+                &HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(result.columns, vec!["hops"]);
+        assert_eq!(result.rows[0].get("hops"), Some(&Value::from(2)));
+    }
+
+    #[test]
+    fn raw_read_result_cache_is_invalidated_by_graph_mutation() {
+        let engine = make_engine();
+        for name in ["a", "b", "c"] {
+            store_node(
+                engine.storage.as_ref(),
+                name,
+                &["Node"],
+                HashMap::from([("name".into(), Value::String(name.into()))]),
+            );
+        }
+        for (id, start_node, end_node) in [("link:ab", "a", "b"), ("link:bc", "b", "c")] {
+            engine
+                .storage
+                .put_edge_record(&EdgeRecord {
+                    id: id.into(),
+                    start_node: start_node.into(),
+                    end_node: end_node.into(),
+                    edge_type: "LINK".into(),
+                    properties: BTreeMap::new(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+
+        const QUERY: &str =
+            "MATCH (a)-[:LINK]->(b)-[:LINK]->(c) RETURN count(c) AS count";
+        let first = engine.execute_cypher(QUERY, &HashMap::new()).unwrap();
+        let cached = engine.execute_cypher(QUERY, &HashMap::new()).unwrap();
+        assert_eq!(first.rows[0].get("count"), Some(&Value::from(1)));
+        assert_eq!(cached.rows[0].get("count"), Some(&Value::from(1)));
+        assert_eq!(engine.query_result_cache.stats().hits, 1);
+
+        engine.storage.delete_edge_record("link:bc").unwrap();
+        let after_delete = engine.execute_cypher(QUERY, &HashMap::new()).unwrap();
+        assert_eq!(after_delete.rows[0].get("count"), Some(&Value::from(0)));
+    }
+
+    #[test]
+    fn policy_schema_change_invalidates_resolver_and_raw_result_cache() {
+        let engine = make_engine();
+        let parser = Parser::new();
+        let stale_time = now_unix_ms() - 5_000;
+        engine
+            .storage
+            .put_node_record(&NodeRecord {
+                id: "memory:cached-before-policy".into(),
+                labels: vec!["MemoryEpisode".into()],
+                properties: BTreeMap::new(),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: stale_time,
+                updated_at_unix_ms: stale_time,
+            })
+            .unwrap();
+
+        const QUERY: &str = "MATCH (n:MemoryEpisode) RETURN n";
+        let visible = engine.execute_cypher(QUERY, &HashMap::new()).unwrap();
+        let cached = engine.execute_cypher(QUERY, &HashMap::new()).unwrap();
+        assert_eq!(visible.rows.len(), 1);
+        assert_eq!(cached.rows.len(), 1);
+
+        for cypher in [
+            "CREATE DECAY PROFILE cached_decay OPTIONS { halfLifeSeconds: 1, visibilityThreshold: 0.75, scoreFloor: 0.0, function: 'step', scope: 'NODE', scoreFrom: 'CREATED', enabled: true }",
+            "CREATE DECAY PROFILE cached_binding FOR (n:MemoryEpisode) APPLY { DECAY PROFILE cached_decay, order: 10 }",
+        ] {
+            engine
+                .execute(&parser.parse(cypher).unwrap(), &HashMap::new())
+                .unwrap();
+        }
+
+        let hidden = engine.execute_cypher(QUERY, &HashMap::new()).unwrap();
+        assert!(hidden.rows.is_empty());
+    }
+
+    #[test]
+    fn prof_raw_shortest_path_benchmark_breakdown() {
+        const NODE_COUNT: usize = 1_000;
+        const QUERY: &str = "MATCH (start:Star {starId: 's0'}), (end:Star {starId: 's999'}) MATCH p = shortestPath((start)-[:HYPERLANE*]->(end)) RETURN length(p) AS hops";
+
+        let engine = make_engine();
+        engine
+            .storage
+            .persist_index_definition(&IndexDefinition {
+                name: "star_id".into(),
+                entity_type: IndexEntityType::Node,
+                label: "Star".into(),
+                properties: vec!["starId".into()],
+                kind: IndexKind::Range,
+            })
+            .unwrap();
+        let nodes = (0..NODE_COUNT)
+            .map(|index| NodeRecord {
+                id: format!("s{index}"),
+                labels: vec!["Star".into()],
+                properties: BTreeMap::from([(
+                    "starId".into(),
+                    Value::String(format!("s{index}")),
+                )]),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .collect::<Vec<_>>();
+        engine.storage.put_node_records_batch(&nodes).unwrap();
+        let edges = (0..NODE_COUNT - 1)
+            .map(|index| EdgeRecord {
+                id: format!("hyperlane:{index}"),
+                start_node: format!("s{index}"),
+                end_node: format!("s{}", index + 1),
+                edge_type: "HYPERLANE".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .collect::<Vec<_>>();
+        engine.storage.put_edge_records_batch(&edges).unwrap();
+
+        let parser = Parser::new();
+        let parse_started = std::time::Instant::now();
+        let _query = parser.parse(QUERY).unwrap();
+        let parse_elapsed = parse_started.elapsed();
+
+        let resolver = engine.knowledge_policy_resolver().unwrap();
+        let adjacency_started = std::time::Instant::now();
+        let adjacency = engine
+            .bfs_adjacency_map(&["HYPERLANE".into()], &EdgeDirection::Outgoing, &resolver)
+            .unwrap();
+        let adjacency_elapsed = adjacency_started.elapsed();
+
+        let bfs_started = std::time::Instant::now();
+        let path = engine
+            .bfs_shortest_path(
+                "s0",
+                "s999",
+                &["HYPERLANE".into()],
+                &EdgeDirection::Outgoing,
+                NODE_COUNT,
+            )
+            .unwrap()
+            .unwrap();
+        let bfs_and_reconstruction_elapsed = bfs_started.elapsed();
+
+        let raw_started = std::time::Instant::now();
+        let raw_result = engine.execute_cypher(QUERY, &HashMap::new()).unwrap();
+        let raw_elapsed = raw_started.elapsed();
+        let cache_hit_started = std::time::Instant::now();
+        let cached_result = engine.execute_cypher(QUERY, &HashMap::new()).unwrap();
+        let cache_hit_elapsed = cache_hit_started.elapsed();
+
+        assert_eq!(adjacency.len(), NODE_COUNT - 1);
+        assert_eq!(path.hops, NODE_COUNT - 1);
+        assert_eq!(raw_result.rows[0].get("hops"), Some(&Value::from(999)));
+        assert_eq!(cached_result.rows[0].get("hops"), Some(&Value::from(999)));
+        eprintln!(
+            "raw_shortest_path_1000: parse={parse_elapsed:.2?} adjacency={adjacency_elapsed:.2?} bfs_plus_reconstruction={bfs_and_reconstruction_elapsed:.2?} result_cache_miss_graph_warm={raw_elapsed:.2?} result_cache_hit={cache_hit_elapsed:.2?}"
+        );
     }
 
     #[test]

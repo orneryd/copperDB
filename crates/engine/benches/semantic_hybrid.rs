@@ -135,7 +135,7 @@ impl Workload {
         let semantic_query = SearchQuery::Semantic {
             vector: profile_query_vector(),
             k: LIMIT,
-            min_score: f32::NEG_INFINITY,
+            min_score: 0.5,
         };
         db.set_ranked_search_cache_enabled(false);
         let warmup = db
@@ -150,6 +150,19 @@ impl Workload {
         let semantic_batch = db
             .search_fabric_ranked_batch_locally(&placement, &semantic_query)
             .expect("benchmark semantic warmup search must succeed");
+        let fused_candidate_count = merge_rrf_search_batches(
+            vec![lexical_batch.clone(), semantic_batch.clone()],
+            RrfConfig::new(60.0, usize::MAX).with_min_score(0.01),
+        )
+        .fused_hits;
+
+        eprintln!(
+            "search profile RRF contract: lexical_candidates={}, semantic_candidates={}, fused_candidates={}, returned_results={}",
+            lexical_batch.hits.len(),
+            semantic_batch.hits.len(),
+            fused_candidate_count,
+            warmup.hits.len(),
+        );
 
         eprintln!(
             "search profile RRF hybrid: nodes={NODE_COUNT}, dimensions={DIMENSIONS}, limit={LIMIT}, response_cache=disabled, storage={}"

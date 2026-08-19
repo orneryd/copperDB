@@ -310,28 +310,40 @@ impl VectorFileStore {
         candidate_offsets.sort_by_key(|(_, offset)| *offset);
         let mut file = fs::File::open(&self.path).map_err(VectorSpaceError::VectorFileStoreIo)?;
         let mut scores = Vec::new();
+        let mut record = Vec::new();
+        let mut vector = vec![0.0; self.dimensions];
         for (position, (id, offset)) in candidate_offsets.into_iter().enumerate() {
             if position & 0xFF == 0 && cancellation.is_some_and(RequestCancellation::is_cancelled) {
                 return Err(VectorSpaceError::RequestCancelled);
             }
             file.seek(SeekFrom::Start(offset))
                 .map_err(VectorSpaceError::VectorFileStoreIo)?;
-            if read_vector_file_byte(&mut file)? != VECTOR_FILE_STORE_UPSERT {
+            let id_bytes = id.as_bytes();
+            let record_length = 1 + std::mem::size_of::<u32>() + id_bytes.len()
+                + self.dimensions * std::mem::size_of::<f32>();
+            record.resize(record_length, 0);
+            file.read_exact(&mut record)
+                .map_err(VectorSpaceError::VectorFileStoreIo)?;
+            if record[0] != VECTOR_FILE_STORE_UPSERT {
                 return Err(VectorSpaceError::CorruptVectorFileStore(
                     "live offset does not reference an upsert record",
                 ));
             }
-            if read_vector_file_id(&mut file)? != id {
+            let stored_id_length = u32::from_le_bytes(record[1..5].try_into().expect("u32 bytes"))
+                as usize;
+            let values_offset = 1 + std::mem::size_of::<u32>() + stored_id_length;
+            if stored_id_length != id_bytes.len()
+                || record.get(5..values_offset) != Some(id_bytes)
+            {
                 return Err(VectorSpaceError::CorruptVectorFileStore(
                     "live offset points to another vector ID",
                 ));
             }
-            let vector = read_vector_file_values(&mut file, self.dimensions)?;
-            let score = query
-                .iter()
-                .zip(vector.iter())
-                .map(|(left, right)| left * right)
-                .sum::<f32>();
+            for (value, bytes) in vector.iter_mut().zip(record[values_offset..].chunks_exact(4)) {
+                *value = f32::from_le_bytes(bytes.try_into().expect("f32 bytes"));
+            }
+            let score = copperdb_simd::dot_f32(&query, &vector)
+                .expect("validated vector dimensions must match");
             scores.push((id, score));
         }
         scores.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));

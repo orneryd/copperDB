@@ -10,6 +10,7 @@ use copperdb_cypher::{
     ReturnClause, ReturnItem, SetItem, ShapeKind, ShapeMatch, ShapeValue, SubqueryClause,
     WithClause,
 };
+use copperdb_cache::QueryResultCache;
 use copperdb_filter::{eval_expression, eval_predicate};
 use copperdb_indexing::{CatalogRangeIndexComparison, IndexCatalog, IndexError};
 use copperdb_knowledgepolicy::{
@@ -29,6 +30,7 @@ use copperdb_util::{RequestCancellation, RequestCancelled, RequestContext};
 use copperdb_vectorspace::{HnswConfig, HnswRegistry, HnswSearchStats, VectorSpaceError};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -95,7 +97,7 @@ pub struct QueryStats {
 }
 
 /// The result of executing a query.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EvalResult {
     pub columns: Vec<String>,
     pub rows: Vec<Row>,
@@ -236,6 +238,8 @@ pub struct EvalEngine {
     /// Invalidated on any write operation (CREATE / SET / DELETE) and on query error
     /// to prevent stale entries from masking newly created or deleted nodes.
     node_lookup_cache: Arc<Mutex<HashMap<String, Value>>>,
+    query_result_cache: Arc<QueryResultCache<EvalResult>>,
+    query_result_policy_generation: Arc<AtomicU64>,
     fulltext_query_cache:
         Arc<Mutex<HashMap<(u64, String), copperdb_search::lucene::FulltextQuery>>>,
     knowledge_policy_resolver_cache: KnowledgePolicyResolverCache,

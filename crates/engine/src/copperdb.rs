@@ -9,6 +9,9 @@ struct SearchVisibilitySnapshot {
     index_definitions: Vec<copperdb_storage::IndexDefinition>,
 }
 
+const NORNICDB_HYBRID_MIN_SIMILARITY: f32 = 0.5;
+const NORNICDB_HYBRID_MIN_RRF_SCORE: f32 = 0.01;
+
 impl CopperDb {
     fn ensure_ranked_search_query_enabled(&self, query: &SearchQuery) -> Result<(), CopperDbError> {
         match query {
@@ -321,7 +324,7 @@ impl CopperDb {
             &SearchQuery::Semantic {
                 vector: vector.clone(),
                 k: *k,
-                min_score: f32::NEG_INFINITY,
+                min_score: NORNICDB_HYBRID_MIN_SIMILARITY,
             },
             labels,
             filters,
@@ -331,7 +334,7 @@ impl CopperDb {
         )?;
         Ok(merge_rrf_search_batches(
             vec![lexical, semantic],
-            RrfConfig::new(60.0, *k),
+            RrfConfig::new(60.0, *k).with_min_score(NORNICDB_HYBRID_MIN_RRF_SCORE),
         ))
     }
 
@@ -572,7 +575,7 @@ impl CopperDb {
                     &SearchQuery::Semantic {
                         vector: vector.clone(),
                         k: *k,
-                        min_score: f32::NEG_INFINITY,
+                        min_score: NORNICDB_HYBRID_MIN_SIMILARITY,
                     },
                     labels,
                     filters,
@@ -580,8 +583,10 @@ impl CopperDb {
                     index_names,
                     Some(&visibility_snapshot),
                 )?;
-                let outcome =
-                    merge_rrf_search_batches(vec![lexical, semantic], RrfConfig::new(60.0, *k));
+                let outcome = merge_rrf_search_batches(
+                    vec![lexical, semantic],
+                    RrfConfig::new(60.0, *k).with_min_score(NORNICDB_HYBRID_MIN_RRF_SCORE),
+                );
                 let hits = outcome
                     .results
                     .into_iter()

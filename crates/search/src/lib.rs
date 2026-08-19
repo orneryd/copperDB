@@ -72,6 +72,8 @@ pub struct RrfMergedHit {
 pub struct RrfConfig {
     pub k: f32,
     pub limit: usize,
+    #[serde(default)]
+    pub min_score: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -87,6 +89,8 @@ pub struct RrfSearchOutcome {
     pub touched_shards: Vec<PlacementKey>,
     pub sources: Vec<String>,
     pub input_hits: usize,
+    #[serde(default)]
+    pub fused_hits: usize,
     pub output_hits: usize,
 }
 
@@ -165,17 +169,36 @@ impl RrfConfig {
         Self {
             k: k.max(1.0),
             limit,
+            min_score: 0.0,
         }
+    }
+
+    pub fn with_min_score(mut self, min_score: f32) -> Self {
+        self.min_score = min_score.max(0.0);
+        self
     }
 }
 
 impl Default for RrfConfig {
     fn default() -> Self {
-        Self { k: 60.0, limit: 10 }
+        Self {
+            k: 60.0,
+            limit: 10,
+            min_score: 0.0,
+        }
     }
 }
 
 pub fn merge_rrf_search_hits(
+    ranked_hits: Vec<Vec<RrfSearchHit>>,
+    config: RrfConfig,
+) -> Vec<RrfMergedHit> {
+    let mut out = merge_rrf_search_hits_before_limit(ranked_hits, config);
+    out.truncate(config.limit);
+    out
+}
+
+fn merge_rrf_search_hits_before_limit(
     ranked_hits: Vec<Vec<RrfSearchHit>>,
     config: RrfConfig,
 ) -> Vec<RrfMergedHit> {
@@ -222,6 +245,7 @@ pub fn merge_rrf_search_hits(
     }
 
     let mut out = merged.into_values().collect::<Vec<_>>();
+    out.retain(|hit| hit.rrf_score >= config.min_score);
     out.sort_by(|left, right| {
         right
             .rrf_score
@@ -229,7 +253,6 @@ pub fn merge_rrf_search_hits(
             .then(right.best_score.total_cmp(&left.best_score))
             .then(left.global_id.stable_id().cmp(&right.global_id.stable_id()))
     });
-    out.truncate(config.limit);
     out
 }
 
@@ -258,13 +281,16 @@ pub fn merge_rrf_search_batches(
         ranked_hits.push(batch.hits);
     }
 
-    let results = merge_rrf_search_hits(ranked_hits, config);
+    let mut results = merge_rrf_search_hits_before_limit(ranked_hits, config);
+    let fused_hits = results.len();
+    results.truncate(config.limit);
     let output_hits = results.len();
     RrfSearchOutcome {
         results,
         touched_shards,
         sources: sources.into_iter().collect(),
         input_hits,
+        fused_hits,
         output_hits,
     }
 }
@@ -1381,6 +1407,25 @@ mod tests {
     }
 
     #[test]
+    fn rrf_merge_applies_the_configured_minimum_score() {
+        let shard = PlacementKey::new("default", "copper", "primary");
+        let hits = vec![RrfSearchHit {
+            global_id: FabricGlobalId::new(shard.clone(), "node", "low-score"),
+            rank: 100,
+            score: 0.9,
+            source: "vector".into(),
+            shard,
+            label: "Document".into(),
+            snippet: None,
+        }];
+
+        let merged =
+            merge_rrf_search_hits(vec![hits], RrfConfig::new(60.0, 10).with_min_score(0.01));
+
+        assert!(merged.is_empty());
+    }
+
+    #[test]
     fn rrf_hydration_filters_and_redacts_ranked_results() {
         let primary = PlacementKey::new("default", "copper", "primary");
         let doc_a = FabricGlobalId::new(primary.clone(), "node", "Person:1");
@@ -1413,6 +1458,7 @@ mod tests {
             touched_shards: vec![primary.clone()],
             sources: vec!["lexical".into(), "vector".into()],
             input_hits: 3,
+            fused_hits: 2,
             output_hits: 2,
         };
 

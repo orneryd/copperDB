@@ -24,6 +24,14 @@ impl EvalEngine {
         vector_index_artifact_refresh: Option<Arc<dyn Fn() + Send + Sync>>,
         vector_index_query: VectorIndexQuery,
     ) -> Self {
+        let query_result_cache = Arc::new(QueryResultCache::new(1_000, None));
+        let query_result_policy_generation = Arc::new(AtomicU64::new(
+            storage.knowledge_policy_schema_generation(),
+        ));
+        let invalidated_query_result_cache = Arc::clone(&query_result_cache);
+        storage.on_commit_completed(Arc::new(move || {
+            invalidated_query_result_cache.invalidate();
+        }));
         let created_storage = Arc::downgrade(&storage);
         let created_indexes = Arc::clone(&vector_indexes);
         storage.on_node_created(Arc::new(move |node| {
@@ -72,6 +80,8 @@ impl EvalEngine {
             vector_index_query,
             vector_index_artifact_refresh,
             node_lookup_cache: Arc::new(Mutex::new(HashMap::new())),
+            query_result_cache,
+            query_result_policy_generation,
             fulltext_query_cache: Arc::new(Mutex::new(HashMap::new())),
             knowledge_policy_resolver_cache: Arc::new(Mutex::new(None)),
             access_flusher: Arc::new(AccessFlusher::new()),
@@ -195,7 +205,7 @@ impl EvalEngine {
     }
 
     pub fn knowledge_policy_resolver(&self) -> Result<Arc<Resolver>, EvalError> {
-        let generation = self.storage.wal_applied_sequence()?;
+        let generation = self.storage.knowledge_policy_schema_generation();
         if let Some((cached_generation, resolver)) = self
             .knowledge_policy_resolver_cache
             .lock()
@@ -426,6 +436,79 @@ impl EvalEngine {
         self.execute_with_context(&request_context, query, params)
     }
 
+    /// Execute raw Cypher at the storage-executor boundary.
+    pub fn execute_cypher(
+        &self,
+        cypher: &str,
+        params: &HashMap<String, Value>,
+    ) -> Result<EvalResult, EvalError> {
+        let request_context = RequestContext::detached();
+        self.execute_cypher_with_context(&request_context, cypher, params)
+    }
+
+    pub fn execute_cypher_with_context(
+        &self,
+        request_context: &RequestContext,
+        cypher: &str,
+        params: &HashMap<String, Value>,
+    ) -> Result<EvalResult, EvalError> {
+        request_context.check_active()?;
+        let policy_generation = self.storage.knowledge_policy_schema_generation();
+        if self
+            .query_result_policy_generation
+            .swap(policy_generation, Ordering::AcqRel)
+            != policy_generation
+        {
+            self.query_result_cache.invalidate();
+        }
+        let ordered_params = params
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(result) = self.query_result_cache.get(cypher, &ordered_params) {
+            return Ok(result);
+        }
+
+        let is_canonical_count_all = cypher
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .eq_ignore_ascii_case("MATCH ()-[r]->() RETURN count(r) AS count");
+        if params.is_empty()
+            && is_canonical_count_all
+            && self.count_all_relationships_has_no_policies()?
+        {
+            self.hot_path_trace.reset();
+            return self.with_request_context(request_context, || {
+                self.with_access_buffer(|| {
+                    self.execute_count_all_relationships_storage_fast_path(request_context, "count")
+                })
+            });
+        }
+
+        let query = copperdb_cypher::Parser::new()
+            .parse(cypher)
+            .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
+        let cacheable_read = query.clauses.iter().all(|clause| {
+            matches!(
+                clause,
+                Clause::Match(_)
+                    | Clause::OptionalMatch(_)
+                    | Clause::Return(_)
+                    | Clause::With(_)
+                    | Clause::Where(_)
+                    | Clause::WhereExists(_)
+                    | Clause::Unwind(_)
+            )
+        }) && self.count_all_relationships_has_no_policies()?;
+        let result = self.execute_with_context(request_context, &query, params)?;
+        if cacheable_read {
+            self.query_result_cache
+                .put(cypher, &ordered_params, result.clone());
+        }
+        Ok(result)
+    }
+
     pub fn execute_with_context(
         &self,
         request_context: &RequestContext,
@@ -435,6 +518,21 @@ impl EvalEngine {
         self.hot_path_trace.reset();
         self.with_request_context(request_context, || {
             self.with_access_buffer(|| {
+                if let Some(result) =
+                    self.execute_count_all_relationships_fast_path(request_context, query)?
+                {
+                    return Ok(result);
+                }
+                if let Some(result) =
+                    self.execute_optional_match_count_fast_path(request_context, query)?
+                {
+                    return Ok(result);
+                }
+                if let Some(result) =
+                    self.execute_two_hop_match_count_fast_path(request_context, query)?
+                {
+                    return Ok(result);
+                }
                 // Try dedicated shortestPath BFS before falling back to general evaluator
                 if let Some(result) =
                     self.execute_dedicated_shortest_path(request_context, query, params)?
@@ -3119,6 +3217,11 @@ impl EvalEngine {
         self.hot_path_trace.reset();
         self.with_access_buffer(|| {
             request_context.check_active()?;
+            if let Some(result) =
+                self.execute_count_all_relationships_fast_path(request_context, query)?
+            {
+                return Ok(result);
+            }
             match pattern_info.pattern {
                 QueryPattern::SimpleMatchLimit if self.can_execute_simple_match_limit(query) => {
                     return self.execute_simple_match_limit_optimized(
@@ -3173,6 +3276,262 @@ impl EvalEngine {
             .clauses
             .iter()
             .all(|clause| matches!(clause, Clause::Match(_) | Clause::Return(_)))
+    }
+
+    fn execute_count_all_relationships_fast_path(
+        &self,
+        request_context: &RequestContext,
+        query: &Query,
+    ) -> Result<Option<EvalResult>, EvalError> {
+        if query.clauses.len() != 2 {
+            return Ok(None);
+        }
+        let (Some(Clause::Match(match_clause)), Some(Clause::Return(ret))) =
+            (query.clauses.first(), query.clauses.get(1))
+        else {
+            return Ok(None);
+        };
+        let pattern = &match_clause.pattern;
+        if pattern.path_variable.is_some()
+            || pattern.shortest_path
+            || pattern.all_shortest_paths
+            || pattern.nodes.len() != 2
+            || pattern.edges.len() != 1
+            || !pattern.segment_edge_counts.is_empty() && pattern.segment_edge_counts != [1]
+            || pattern.nodes.iter().any(|node| {
+                node.variable.is_some() || !node.labels.is_empty() || !node.properties.is_empty()
+            })
+        {
+            return Ok(None);
+        }
+        let edge = &pattern.edges[0];
+        let Some(edge_variable) = edge.variable.as_ref() else {
+            return Ok(None);
+        };
+        if edge.rel_type.is_some()
+            || edge.direction != EdgeDirection::Outgoing
+            || !edge.properties.is_empty()
+            || edge.min_hops.is_some()
+            || edge.max_hops.is_some()
+            || ret.distinct
+            || !ret.order_by.is_empty()
+            || ret.skip.is_some()
+            || ret.limit.is_some()
+            || ret.items.len() != 1
+        {
+            return Ok(None);
+        }
+        let ReturnItem { expression, .. } = &ret.items[0];
+        if !matches!(
+            expression,
+            Expression::FunctionCall { name, args, distinct: false }
+                if name.eq_ignore_ascii_case("count")
+                    && matches!(args.as_slice(), [Expression::Variable(variable)] if variable == edge_variable)
+        ) {
+            return Ok(None);
+        }
+
+        if !self.count_all_relationships_has_no_policies()? {
+            return Ok(None);
+        }
+
+        Ok(Some(
+            self.execute_count_all_relationships_storage_fast_path(
+                request_context,
+                &column_name(&ret.items[0]),
+            )?,
+        ))
+    }
+
+    fn count_all_relationships_has_no_policies(&self) -> Result<bool, EvalError> {
+        // A configured edge policy may exclude otherwise matching relationships.
+        Ok(self
+            .storage
+            .load_decay_profile_binding_schemas()?
+            .is_empty()
+            && self.storage.load_promotion_policy_schemas()?.is_empty())
+    }
+
+    fn execute_optional_match_count_fast_path(
+        &self,
+        request_context: &RequestContext,
+        query: &Query,
+    ) -> Result<Option<EvalResult>, EvalError> {
+        if query.clauses.len() != 3 {
+            return Ok(None);
+        }
+        let (Some(Clause::Match(source_match)), Some(Clause::OptionalMatch(optional_match)), Some(Clause::Return(ret))) = (
+            query.clauses.first(),
+            query.clauses.get(1),
+            query.clauses.get(2),
+        ) else {
+            return Ok(None);
+        };
+        let source_pattern = &source_match.pattern;
+        let optional_pattern = &optional_match.pattern;
+        if source_pattern.path_variable.is_some()
+            || source_pattern.shortest_path
+            || source_pattern.all_shortest_paths
+            || source_pattern.nodes.len() != 1
+            || !source_pattern.edges.is_empty()
+            || !source_pattern.nodes[0].labels.is_empty()
+            || !source_pattern.nodes[0].properties.is_empty()
+            || optional_pattern.path_variable.is_some()
+            || optional_pattern.shortest_path
+            || optional_pattern.all_shortest_paths
+            || optional_pattern.nodes.len() != 2
+            || optional_pattern.edges.len() != 1
+            || !optional_pattern.segment_edge_counts.is_empty()
+                && optional_pattern.segment_edge_counts != [1]
+            || optional_pattern.nodes.iter().any(|node| {
+                !node.labels.is_empty() || !node.properties.is_empty()
+            })
+            || ret.distinct
+            || !ret.order_by.is_empty()
+            || ret.skip.is_some()
+            || ret.limit.is_some()
+            || ret.items.len() != 1
+        {
+            return Ok(None);
+        }
+        let Some(source_variable) = source_pattern.nodes[0].variable.as_ref() else {
+            return Ok(None);
+        };
+        let Some(optional_source_variable) = optional_pattern.nodes[0].variable.as_ref() else {
+            return Ok(None);
+        };
+        let Some(target_variable) = optional_pattern.nodes[1].variable.as_ref() else {
+            return Ok(None);
+        };
+        let edge = &optional_pattern.edges[0];
+        let Some(rel_type) = edge.rel_type.as_deref() else {
+            return Ok(None);
+        };
+        if optional_source_variable != source_variable
+            || edge.variable.is_some()
+            || edge.direction != EdgeDirection::Outgoing
+            || !edge.properties.is_empty()
+            || edge.min_hops.is_some()
+            || edge.max_hops.is_some()
+            || !matches!(
+                &ret.items[0].expression,
+                Expression::FunctionCall { name, args, distinct: false }
+                    if name.eq_ignore_ascii_case("count")
+                        && matches!(args.as_slice(), [Expression::Variable(variable)] if variable == target_variable)
+            )
+            || !self.count_all_relationships_has_no_policies()?
+        {
+            return Ok(None);
+        }
+
+        request_context.check_active()?;
+        let count = self.storage.edge_type_count(rel_type)?;
+        let column = column_name(&ret.items[0]);
+        let mut row = Row::new();
+        row.insert(column.clone(), Value::from(count));
+        Ok(Some(EvalResult {
+            columns: vec![column],
+            rows: vec![row],
+            stats: QueryStats::default(),
+        }))
+    }
+
+    fn execute_two_hop_match_count_fast_path(
+        &self,
+        request_context: &RequestContext,
+        query: &Query,
+    ) -> Result<Option<EvalResult>, EvalError> {
+        if query.clauses.len() != 2 {
+            return Ok(None);
+        }
+        let (Some(Clause::Match(match_clause)), Some(Clause::Return(ret))) =
+            (query.clauses.first(), query.clauses.get(1))
+        else {
+            return Ok(None);
+        };
+        let pattern = &match_clause.pattern;
+        if pattern.path_variable.is_some()
+            || pattern.shortest_path
+            || pattern.all_shortest_paths
+            || pattern.nodes.len() != 3
+            || pattern.edges.len() != 2
+            || !pattern.segment_edge_counts.is_empty() && pattern.segment_edge_counts != [2]
+            || pattern.nodes.iter().any(|node| {
+                !node.labels.is_empty() || !node.properties.is_empty()
+            })
+            || ret.distinct
+            || !ret.order_by.is_empty()
+            || ret.skip.is_some()
+            || ret.limit.is_some()
+            || ret.items.len() != 1
+        {
+            return Ok(None);
+        }
+        let Some(target_variable) = pattern.nodes[2].variable.as_ref() else {
+            return Ok(None);
+        };
+        let Some(first_type) = pattern.edges[0].rel_type.as_deref() else {
+            return Ok(None);
+        };
+        let Some(second_type) = pattern.edges[1].rel_type.as_deref() else {
+            return Ok(None);
+        };
+        if pattern.edges.iter().any(|edge| {
+            edge.variable.is_some()
+                || edge.direction != EdgeDirection::Outgoing
+                || !edge.properties.is_empty()
+                || edge.min_hops.is_some()
+                || edge.max_hops.is_some()
+        }) || !matches!(
+            &ret.items[0].expression,
+            Expression::FunctionCall { name, args, distinct: false }
+                if name.eq_ignore_ascii_case("count")
+                    && matches!(args.as_slice(), [Expression::Variable(variable)] if variable == target_variable)
+        ) || !self.count_all_relationships_has_no_policies()?
+        {
+            return Ok(None);
+        }
+
+        let mut count = 0_u64;
+        for edge in self.storage.get_edges_by_type(first_type)? {
+            request_context.check_active()?;
+            if self.storage.get_node_record(&edge.start_node)?.is_none()
+                || self.storage.get_node_record(&edge.end_node)?.is_none()
+            {
+                continue;
+            }
+            for next_edge in self
+                .storage
+                .get_edges_from_node_by_type(&edge.end_node, second_type)?
+            {
+                if self.storage.get_node_record(&next_edge.end_node)?.is_some() {
+                    count += 1;
+                }
+            }
+        }
+        let column = column_name(&ret.items[0]);
+        let mut row = Row::new();
+        row.insert(column.clone(), Value::from(count));
+        Ok(Some(EvalResult {
+            columns: vec![column],
+            rows: vec![row],
+            stats: QueryStats::default(),
+        }))
+    }
+
+    fn execute_count_all_relationships_storage_fast_path(
+        &self,
+        request_context: &RequestContext,
+        column: &str,
+    ) -> Result<EvalResult, EvalError> {
+        request_context.check_active()?;
+        let mut row = Row::new();
+        row.insert(column.into(), Value::from(self.storage.total_edge_count()?));
+        Ok(EvalResult {
+            columns: vec![column.into()],
+            rows: vec![row],
+            stats: QueryStats::default(),
+        })
     }
 
     fn can_execute_simple_match_limit(&self, query: &Query) -> bool {
@@ -3534,7 +3893,11 @@ impl EvalEngine {
         max_hops: usize,
     ) -> Result<Option<ShortestPathFound>, EvalError> {
         let resolver = self.knowledge_policy_resolver()?;
-        let adjacency = self.bfs_adjacency_map(rel_types, direction, &resolver)?;
+        let storage_direction = match direction {
+            EdgeDirection::Outgoing => EdgeAdjacencyDirection::Outgoing,
+            EdgeDirection::Incoming => EdgeAdjacencyDirection::Incoming,
+            EdgeDirection::Both => EdgeAdjacencyDirection::Both,
+        };
 
         let mut predecessors: HashMap<String, BfsPredecessor> = HashMap::new();
         predecessors.insert(
@@ -3562,10 +3925,27 @@ impl EvalEngine {
                 continue;
             }
 
-            let neighbors = adjacency.get(&current_id);
-            let Some(neighbors) = neighbors else { continue };
+            let mut neighbors = Vec::new();
+            if rel_types.is_empty() {
+                neighbors = self.storage.get_adjacent_edges(
+                    &current_id,
+                    storage_direction,
+                    None,
+                )?;
+            } else {
+                for rel_type in rel_types {
+                    neighbors.extend(self.storage.get_adjacent_edges(
+                        &current_id,
+                        storage_direction,
+                        Some(rel_type),
+                    )?);
+                }
+            }
             for edge in neighbors {
-                let next_id = related_node_id(&current_id, edge, direction).map(str::to_string);
+                if !self.edge_visible_under_policy(&edge, &resolver)? {
+                    continue;
+                }
+                let next_id = related_node_id(&current_id, &edge, direction).map(str::to_string);
                 let Some(next_id) = next_id else {
                     continue;
                 };
@@ -3577,7 +3957,7 @@ impl EvalEngine {
                     next_id.clone(),
                     BfsPredecessor {
                         parent: Some(current_id.clone()),
-                        edge: Some(edge.clone()),
+                        edge: Some(edge),
                         depth: depth + 1,
                     },
                 );
@@ -3739,6 +4119,47 @@ impl EvalEngine {
         let limit_val = resolve_limit(&ret.limit, params);
 
         let columns: Vec<String> = ret.items.iter().map(column_name).collect();
+        let path_variable = query.clauses.iter().find_map(|clause| {
+            if let Clause::Match(match_clause) = clause {
+                match_clause.pattern.path_variable.as_deref()
+            } else {
+                None
+            }
+        });
+        if !ret.distinct
+            && ret.order_by.is_empty()
+            && ret.skip.is_none()
+            && ret.items.len() == 1
+            && matches!(
+                (&ret.items[0].expression, path_variable),
+                (
+                    Expression::FunctionCall {
+                        name,
+                        args,
+                        distinct: false,
+                    },
+                    Some(path_variable),
+                ) if name.eq_ignore_ascii_case("length")
+                    && matches!(args.as_slice(), [Expression::Variable(variable)] if variable == path_variable)
+            )
+        {
+            let limit = limit_val.unwrap_or(i64::MAX).max(0) as usize;
+            let column = columns[0].clone();
+            let rows = paths
+                .iter()
+                .take(limit)
+                .map(|path| {
+                    let mut row = Row::new();
+                    row.insert(column.clone(), Value::from(path.hops as i64));
+                    row
+                })
+                .collect();
+            return Ok(Some(EvalResult {
+                columns,
+                rows,
+                stats: QueryStats::default(),
+            }));
+        }
         let mut rows = Vec::new();
 
         for path in &paths {
@@ -3782,14 +4203,8 @@ impl EvalEngine {
             });
 
             let mut row = Row::new();
-            if let Some(ref pv) = query.clauses.iter().find_map(|c| {
-                if let Clause::Match(m) = c {
-                    m.pattern.path_variable.clone()
-                } else {
-                    None
-                }
-            }) {
-                row.insert(pv.to_string(), path_val);
+            if let Some(path_variable) = path_variable {
+                row.insert(path_variable.to_string(), path_val);
             }
 
             // Evaluate RETURN expressions

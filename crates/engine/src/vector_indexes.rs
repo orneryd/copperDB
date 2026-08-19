@@ -9,6 +9,8 @@ const VECTOR_FILE_STORE_DIRECTORY: &str = "vectors";
 const HNSW_CANDIDATE_MULTIPLIER: usize = 20;
 const HNSW_MIN_CANDIDATES: usize = 200;
 const HNSW_MAX_CANDIDATES: usize = 5_000;
+const HNSW_LEXICAL_SEED_MAX_TERMS: usize = 256;
+const HNSW_LEXICAL_SEED_PER_TERM: usize = 8;
 
 #[derive(Debug, Clone)]
 struct VectorIndexBinding {
@@ -102,18 +104,29 @@ impl VectorIndexManager {
             for binding in &bindings {
                 match binding.entity_type {
                     IndexEntityType::Node => {
+                        let seed_ids = lexical_seed_node_ids(storage, &binding.label)?;
+                        let mut seeded_vectors = Vec::new();
+                        let mut other_vectors = Vec::new();
                         for node in storage.all_node_records()? {
                             let matches_label = binding.label.is_empty()
                                 || node.labels.iter().any(|label| label == &binding.label);
-                            if !matches_label {
-                                continue;
+                            if matches_label {
+                                if let Some(vector) =
+                                    node_vector_for_property(&node, &binding.property)
+                                {
+                                    let entry = (node.id, vector);
+                                    if seed_ids.contains(&entry.0) {
+                                        seeded_vectors.push(entry);
+                                    } else {
+                                        other_vectors.push(entry);
+                                    }
+                                }
                             }
-                            if let Some(vector) = node_vector_for_property(&node, &binding.property)
-                            {
-                                registry
-                                    .upsert(&binding.name, &node.id, vector)
-                                    .map_err(vector_error)?;
-                            }
+                        }
+                        for (id, vector) in seeded_vectors.into_iter().chain(other_vectors) {
+                            registry
+                                .upsert(&binding.name, id, vector)
+                                .map_err(vector_error)?;
                         }
                     }
                     IndexEntityType::Relationship => {
@@ -554,6 +567,28 @@ fn file_store_bindings(
             }))
         })
         .collect()
+}
+
+fn lexical_seed_node_ids(
+    storage: &StorageEngine,
+    label: &str,
+) -> Result<std::collections::HashSet<String>, CopperDbError> {
+    let mut seed_ids = std::collections::HashSet::new();
+    for definition in storage.load_index_definitions()? {
+        if definition.kind != IndexKind::FullText
+            || definition.entity_type != IndexEntityType::Node
+            || definition.label != label
+        {
+            continue;
+        }
+        seed_ids.extend(storage.lexical_seed_doc_ids(
+            &definition.label,
+            &definition.properties,
+            HNSW_LEXICAL_SEED_MAX_TERMS,
+            HNSW_LEXICAL_SEED_PER_TERM,
+        )?);
+    }
+    Ok(seed_ids)
 }
 
 fn vector_file_store_path(directory: &std::path::Path, index_name: &str) -> PathBuf {
