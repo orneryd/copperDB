@@ -1426,6 +1426,54 @@ mod tests {
     }
 
     #[test]
+    fn rrf_merge_matches_nornicdb_fifty_result_fixture_threshold() {
+        let shard = PlacementKey::new("default", "copper", "primary");
+        let fixture_id = |position: usize, offset: usize| {
+            let prefix = char::from_u32('a' as u32 + ((position + offset) % 26) as u32)
+                .unwrap();
+            let suffix = char::from_u32(position as u32).unwrap();
+            format!("{prefix}{suffix}")
+        };
+        let semantic = (0..50)
+            .map(|position| RrfSearchHit {
+                global_id: FabricGlobalId::new(shard.clone(), "node", fixture_id(position, 0)),
+                rank: position + 1,
+                score: (50 - position) as f32 / 50.0,
+                source: "semantic".into(),
+                shard: shard.clone(),
+                label: "Node".into(),
+                snippet: None,
+            })
+            .collect::<Vec<_>>();
+        let lexical = (0..50)
+            .map(|position| RrfSearchHit {
+                global_id: FabricGlobalId::new(shard.clone(), "node", fixture_id(position, 10)),
+                rank: position + 1,
+                score: (50 - position) as f32,
+                source: "lexical".into(),
+                shard: shard.clone(),
+                label: "Node".into(),
+                snippet: None,
+            })
+            .collect::<Vec<_>>();
+
+        let merged = merge_rrf_search_hits(
+            vec![semantic, lexical],
+            RrfConfig::new(60.0, usize::MAX).with_min_score(0.01),
+        );
+
+        assert_eq!(merged.len(), 80);
+        assert!(merged.iter().all(|hit| hit.rrf_score >= 0.01));
+        let semantic_first = merged
+            .iter()
+            .find(|hit| hit.global_id.local_id == fixture_id(0, 0))
+            .expect("semantic rank-one fixture hit must remain present");
+        assert_eq!(semantic_first.rrf_score, 1.0 / 61.0);
+        assert_eq!(semantic_first.vector_rank, 1);
+        assert_eq!(semantic_first.bm25_rank, 0);
+    }
+
+    #[test]
     fn rrf_hydration_filters_and_redacts_ranked_results() {
         let primary = PlacementKey::new("default", "copper", "primary");
         let doc_a = FabricGlobalId::new(primary.clone(), "node", "Person:1");

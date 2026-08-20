@@ -966,6 +966,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_nornicdb_fulltext_query_parsing_benchmark_inputs() {
+        for input in [
+            "simple query",
+            "\"exact phrase\"",
+            "word1 \"phrase one\" word2 \"phrase two\"",
+            "complex AND query OR \"multiple phrases\" NOT excluded",
+        ] {
+            assert!(
+                parse_fulltext_query(input).is_ok(),
+                "NornicDB benchmark input must parse: {input}"
+            );
+        }
+    }
+
+    #[test]
     fn parses_boolean_precedence_and_implicit_or() {
         assert_eq!(
             parse_fulltext_query("alpha AND beta OR gamma")

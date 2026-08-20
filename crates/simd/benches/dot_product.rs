@@ -1,7 +1,7 @@
 use copperdb_simd::dot_f32;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-const DIMENSIONS: [usize; 3] = [128, 384, 1_024];
+const DIMENSIONS: [usize; 8] = [128, 256, 384, 512, 768, 1_024, 1_536, 3_072];
 
 fn bench_dot_product(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("dot_product");

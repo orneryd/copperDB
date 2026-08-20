@@ -699,6 +699,15 @@ impl HnswIndex {
         id: impl Into<String>,
         vector: Vec<f32>,
     ) -> Result<(), VectorSpaceError> {
+        self.insert_slice(id, &vector)
+    }
+
+    /// Insert a vector by copying and normalizing the caller-owned slice.
+    pub fn insert_slice(
+        &mut self,
+        id: impl Into<String>,
+        vector: &[f32],
+    ) -> Result<(), VectorSpaceError> {
         if vector.len() != self.dimensions {
             return Err(VectorSpaceError::DimensionMismatch {
                 expected: self.dimensions,
@@ -709,7 +718,7 @@ impl HnswIndex {
         if self.id_to_internal.contains_key(&id) {
             return Err(VectorSpaceError::DuplicateVector(id));
         }
-        let vector = normalize_vector(&vector);
+        let vector = normalize_vector(vector);
         let level = deterministic_level(&id, self.config.m);
         let internal_id = u32::try_from(self.external_ids.len()).map_err(|_| {
             VectorSpaceError::InvalidHnswConfiguration("index exceeds u32 node capacity")
@@ -2001,6 +2010,18 @@ mod tests {
         index.insert("zero", vec![0.0, 0.0]).unwrap();
         assert!(index.knn(&[1.0], 1).is_err());
         assert_eq!(index.knn(&[1.0, 0.0], 1).unwrap().0[0].1, 0.0);
+    }
+
+    #[test]
+    fn hnsw_insert_slice_copies_the_caller_vector() {
+        let mut index = HnswIndex::new(2, HnswConfig::default()).unwrap();
+        let mut vector = vec![1.0, 0.0];
+        index.insert_slice("source", &vector).unwrap();
+        vector.copy_from_slice(&[0.0, 1.0]);
+
+        let (results, _) = index.knn(&[1.0, 0.0], 1).unwrap();
+        assert_eq!(results[0].0, "source");
+        assert!((results[0].1 - 1.0).abs() < 1e-6);
     }
 
     #[test]

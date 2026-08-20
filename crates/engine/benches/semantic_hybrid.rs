@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
 
 use copperdb_engine::{CopperDb, DatabaseConfig};
-use copperdb_search::{merge_rrf_search_batches, RrfConfig, RrfSearchBatch, SearchQuery};
+use copperdb_search::{
+    merge_rrf_search_batches, merge_rrf_search_hits, RrfConfig, RrfSearchBatch, RrfSearchHit,
+    SearchQuery,
+};
 use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind, NodeRecord, StorageEngine};
-use copperdb_topology::PlacementKey;
+use copperdb_topology::{FabricGlobalId, PlacementKey};
 use criterion::{
     black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
 };
@@ -196,6 +199,60 @@ fn profile_query_vector() -> Vec<f32> {
     vector[7] = 0.25;
     vector[13] = 0.15;
     vector
+}
+
+fn nornicdb_rrf_fixture_id(position: usize, offset: usize) -> String {
+    let prefix = char::from_u32('a' as u32 + ((position + offset) % 26) as u32)
+        .expect("benchmark ID prefix must be a Unicode scalar value");
+    let suffix = char::from_u32(position as u32)
+        .expect("benchmark ID suffix must be a Unicode scalar value");
+    format!("{prefix}{suffix}")
+}
+
+fn nornicdb_rrf_batches() -> Vec<RrfSearchBatch> {
+    let shard = PlacementKey::new("default", "copper", "primary");
+    let semantic_hits = (0..50)
+        .map(|position| RrfSearchHit {
+            global_id: FabricGlobalId::new(
+                shard.clone(),
+                "node",
+                nornicdb_rrf_fixture_id(position, 0),
+            ),
+            rank: position + 1,
+            score: (50 - position) as f32 / 50.0,
+            source: "semantic".into(),
+            shard: shard.clone(),
+            label: "Node".into(),
+            snippet: None,
+        })
+        .collect();
+    let lexical_hits = (0..50)
+        .map(|position| RrfSearchHit {
+            global_id: FabricGlobalId::new(
+                shard.clone(),
+                "node",
+                nornicdb_rrf_fixture_id(position, 10),
+            ),
+            rank: position + 1,
+            score: (50 - position) as f32,
+            source: "lexical".into(),
+            shard: shard.clone(),
+            label: "Node".into(),
+            snippet: None,
+        })
+        .collect();
+    vec![
+        RrfSearchBatch {
+            shard: shard.clone(),
+            source: "semantic".into(),
+            hits: semantic_hits,
+        },
+        RrfSearchBatch {
+            shard,
+            source: "lexical".into(),
+            hits: lexical_hits,
+        },
+    ]
 }
 
 fn bench_semantic_hybrid(criterion: &mut Criterion) {
@@ -408,6 +465,22 @@ fn bench_semantic_hybrid(criterion: &mut Criterion) {
             );
         },
     );
+    let nornicdb_rrf_hits = nornicdb_rrf_batches()
+        .into_iter()
+        .map(|batch| batch.hits)
+        .collect::<Vec<_>>();
+    let nornicdb_rrf_config = RrfConfig::new(60.0, usize::MAX).with_min_score(0.01);
+    let nornicdb_rrf_results = merge_rrf_search_hits(nornicdb_rrf_hits.clone(), nornicdb_rrf_config);
+    assert_eq!(nornicdb_rrf_results.len(), 80);
+    group.bench_function("rrf_fusion_nornicdb_50x2", |bench| {
+        bench.iter_batched(
+            || nornicdb_rrf_hits.clone(),
+            |hits| {
+                black_box(merge_rrf_search_hits(hits, nornicdb_rrf_config));
+            },
+            BatchSize::SmallInput,
+        );
+    });
     group.finish();
 
     let memory_workload = Workload::new(StorageMode::Memory);

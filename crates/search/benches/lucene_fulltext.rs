@@ -2,6 +2,12 @@ use copperdb_search::lucene::{evaluate_fulltext_query, parse_fulltext_query, Ful
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 const VOCABULARY_SIZES: [usize; 2] = [256, 2_048];
+const NORNICDB_FULLTEXT_PARSING_QUERIES: [&str; 4] = [
+    "simple query",
+    "\"exact phrase\"",
+    "word1 \"phrase one\" word2 \"phrase two\"",
+    "complex AND query OR \"multiple phrases\" NOT excluded",
+];
 
 fn vocabulary(size: usize) -> Vec<String> {
     let mut terms = (0..size)
@@ -20,6 +26,15 @@ fn document(terms: &[String]) -> FulltextDocument {
 
 fn bench_lucene_fulltext(criterion: &mut Criterion) {
     let mut group = criterion.benchmark_group("lucene_fulltext");
+    group.bench_function("nornicdb_fulltext_query_parsing", |bench| {
+        bench.iter(|| {
+            for input in NORNICDB_FULLTEXT_PARSING_QUERIES {
+                black_box(
+                    parse_fulltext_query(input).expect("NornicDB benchmark query must parse"),
+                );
+            }
+        });
+    });
     for vocabulary_size in VOCABULARY_SIZES {
         let vocabulary = vocabulary(vocabulary_size);
         let document = document(&vocabulary);
