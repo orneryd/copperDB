@@ -74,6 +74,14 @@ pub struct RrfConfig {
     pub limit: usize,
     #[serde(default)]
     pub min_score: f32,
+    #[serde(default = "default_rrf_weight")]
+    pub vector_weight: f32,
+    #[serde(default = "default_rrf_weight")]
+    pub bm25_weight: f32,
+}
+
+const fn default_rrf_weight() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -170,11 +178,19 @@ impl RrfConfig {
             k: k.max(1.0),
             limit,
             min_score: 0.0,
+            vector_weight: default_rrf_weight(),
+            bm25_weight: default_rrf_weight(),
         }
     }
 
     pub fn with_min_score(mut self, min_score: f32) -> Self {
         self.min_score = min_score.max(0.0);
+        self
+    }
+
+    pub fn with_weights(mut self, vector_weight: f32, bm25_weight: f32) -> Self {
+        self.vector_weight = vector_weight.max(0.0);
+        self.bm25_weight = bm25_weight.max(0.0);
         self
     }
 }
@@ -185,6 +201,8 @@ impl Default for RrfConfig {
             k: 60.0,
             limit: 10,
             min_score: 0.0,
+            vector_weight: default_rrf_weight(),
+            bm25_weight: default_rrf_weight(),
         }
     }
 }
@@ -205,7 +223,12 @@ fn merge_rrf_search_hits_before_limit(
     let input_hit_count = ranked_hits.iter().map(Vec::len).sum();
     let mut merged: HashMap<FabricGlobalId, RrfMergedHit> = HashMap::with_capacity(input_hit_count);
     for hit in ranked_hits.into_iter().flatten() {
-        let contribution = 1.0 / (config.k + hit.rank.max(1) as f32);
+        let weight = match hit.source.as_str() {
+            "lexical" => config.bm25_weight,
+            "semantic" | "vector" => config.vector_weight,
+            _ => 1.0,
+        };
+        let contribution = weight / (config.k + hit.rank.max(1) as f32);
         if let Some(entry) = merged.get_mut(&hit.global_id) {
             entry.rrf_score += contribution;
             if hit.score > entry.best_score {
@@ -1345,6 +1368,42 @@ mod tests {
         assert_eq!(merged[1].sources, vec!["lexical", "vector"]);
         assert_eq!(merged[1].vector_rank, 1);
         assert_eq!(merged[1].bm25_rank, 2);
+    }
+
+    #[test]
+    fn rrf_merge_applies_source_weights() {
+        let placement = PlacementKey::new("default", "copper", "primary");
+        let lexical_id = FabricGlobalId::new(placement.clone(), "node", "document:lexical");
+        let vector_id = FabricGlobalId::new(placement.clone(), "node", "document:vector");
+        let ranked_hits = vec![
+            vec![RrfSearchHit {
+                global_id: lexical_id,
+                rank: 1,
+                score: 1.0,
+                source: "lexical".into(),
+                shard: placement.clone(),
+                label: "Document".into(),
+                snippet: None,
+            }],
+            vec![RrfSearchHit {
+                global_id: vector_id,
+                rank: 1,
+                score: 1.0,
+                source: "vector".into(),
+                shard: placement,
+                label: "Document".into(),
+                snippet: None,
+            }],
+        ];
+
+        let default_order = merge_rrf_search_hits(ranked_hits.clone(), RrfConfig::new(60.0, 2));
+        let vector_weighted = merge_rrf_search_hits(
+            ranked_hits,
+            RrfConfig::new(60.0, 2).with_weights(2.0, 1.0),
+        );
+
+        assert_eq!(default_order[0].global_id.local_id, "document:lexical");
+        assert_eq!(vector_weighted[0].global_id.local_id, "document:vector");
     }
 
     #[test]

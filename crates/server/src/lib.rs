@@ -1271,6 +1271,8 @@ struct SearchRequest {
     #[serde(default)]
     database: String,
     #[serde(default)]
+    mode: Option<SearchMode>,
+    #[serde(default)]
     query: String,
     #[serde(default)]
     vector: Option<Vec<f32>>,
@@ -1281,7 +1283,27 @@ struct SearchRequest {
     #[serde(default)]
     limit: usize,
     #[serde(default)]
+    offset: usize,
+    #[serde(default)]
+    min_score: Option<f32>,
+    #[serde(default)]
+    rrf_k: Option<f32>,
+    #[serde(default)]
+    vector_weight: Option<f32>,
+    #[serde(default)]
+    bm25_weight: Option<f32>,
+    #[serde(default)]
+    include_diagnostics: bool,
+    #[serde(default)]
     filters: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SearchMode {
+    Lexical,
+    Semantic,
+    Hybrid,
 }
 
 /// POST /copperdb/search — CopperDB's branded equivalent of NornicDB search.
@@ -1328,6 +1350,46 @@ async fn search_handler(
         10
     } else {
         request.limit
+    };
+    let candidate_limit = limit.saturating_add(request.offset);
+    let min_score = match request.min_score {
+        Some(min_score) if !min_score.is_finite() => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "min_score must be finite"})),
+            )
+                .into_response();
+        }
+        Some(min_score) => min_score,
+        None => f32::NEG_INFINITY,
+    };
+    let rrf_config = match (request.rrf_k, request.vector_weight, request.bm25_weight) {
+        (None, None, None) => None,
+        (rrf_k, vector_weight, bm25_weight) => {
+            let rrf_k = rrf_k.unwrap_or(60.0);
+            let vector_weight = vector_weight.unwrap_or(1.0);
+            let bm25_weight = bm25_weight.unwrap_or(1.0);
+            if !rrf_k.is_finite()
+                || rrf_k <= 0.0
+                || !vector_weight.is_finite()
+                || vector_weight < 0.0
+                || !bm25_weight.is_finite()
+                || bm25_weight < 0.0
+            {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "rrf_k must be finite and positive; vector_weight and bm25_weight must be finite and non-negative"
+                    })),
+                )
+                    .into_response();
+            }
+            Some(
+                RrfConfig::new(rrf_k, candidate_limit)
+                    .with_min_score(0.01)
+                    .with_weights(vector_weight, bm25_weight),
+            )
+        }
     };
 
     let engine = match open_engine(&state, &database) {
@@ -1444,35 +1506,74 @@ async fn search_handler(
     };
     let embedding_elapsed = embedding_started.elapsed();
     let embedding_time_ms = embedding_elapsed.as_millis() as u64;
-    let (query, search_method) = match (
-        bm25_indexes.is_empty(),
-        request.query.is_empty(),
-        query_vector,
-    ) {
-        (false, false, Some(vector)) => (
-            SearchQuery::Hybrid {
-                text: request.query.clone(),
-                vector,
-                k: limit,
-            },
-            "hybrid",
-        ),
-        (_, true, Some(vector)) => (
-            SearchQuery::Semantic {
-                vector,
-                k: limit,
-                min_score: f32::NEG_INFINITY,
-            },
-            "semantic",
-        ),
-        (false, false, None) => (
+    let missing_query = || {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "search requires non-empty query text or a query vector"
+            })),
+        )
+            .into_response()
+    };
+    let (query, search_method) = match (request.mode, query_vector) {
+        (Some(SearchMode::Lexical), _) if !request.query.is_empty() => (
             SearchQuery::FullText {
                 query: request.query.clone(),
                 fields: bm25_indexes
                     .iter()
                     .flat_map(|index| index.properties.iter().cloned())
                     .collect(),
-                limit,
+                limit: candidate_limit,
+            },
+            "bm25",
+        ),
+        (Some(SearchMode::Semantic), Some(vector)) => (
+            SearchQuery::Semantic {
+                vector,
+                k: candidate_limit,
+                min_score,
+            },
+            "semantic",
+        ),
+        (Some(SearchMode::Hybrid), Some(vector)) if !request.query.is_empty() => (
+            SearchQuery::Hybrid {
+                text: request.query.clone(),
+                vector,
+                k: candidate_limit,
+            },
+            "hybrid",
+        ),
+        (Some(_), _) => {
+            let _ = state.telemetry.record_counter(
+                "nornicdb_search_requests_total",
+                &[("mode", "unknown"), ("result", "error")],
+            );
+            return missing_query();
+        }
+        (None, Some(vector)) if !request.query.is_empty() && !bm25_indexes.is_empty() => (
+            SearchQuery::Hybrid {
+                text: request.query.clone(),
+                vector,
+                k: candidate_limit,
+            },
+            "hybrid",
+        ),
+        (None, Some(vector)) if request.query.is_empty() => (
+            SearchQuery::Semantic {
+                vector,
+                k: candidate_limit,
+                min_score,
+            },
+            "semantic",
+        ),
+        (None, None) if !request.query.is_empty() && !bm25_indexes.is_empty() => (
+            SearchQuery::FullText {
+                query: request.query.clone(),
+                fields: bm25_indexes
+                    .iter()
+                    .flat_map(|index| index.properties.iter().cloned())
+                    .collect(),
+                limit: candidate_limit,
             },
             "bm25",
         ),
@@ -1481,20 +1582,14 @@ async fn search_handler(
                 "nornicdb_search_requests_total",
                 &[("mode", "unknown"), ("result", "error")],
             );
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "error": "search requires non-empty query text or a query vector"
-                })),
-            )
-                .into_response();
+            return missing_query();
         }
     };
 
     let search_started = std::time::Instant::now();
     let placement = PlacementKey::default_for_database(&database);
     let outcome = match engine
-        .search_fabric_ranked_outcome_locally_scoped_with_context_and_roles_and_indexes(
+        .search_fabric_ranked_outcome_locally_scoped_with_context_and_roles_and_indexes_and_rrf_config(
             &request_context,
             &placement,
             &query,
@@ -1502,6 +1597,7 @@ async fn search_handler(
             &request.filters,
             &roles,
             &request.indexes,
+            rrf_config,
         ) {
         Ok(outcome) => outcome,
         Err(error) => {
@@ -1520,9 +1616,14 @@ async fn search_handler(
     let search_time_ms = search_elapsed.as_millis() as u64;
     let hydration_started = std::time::Instant::now();
     let candidate_count = outcome.input_hits;
+    let fused_count = outcome.fused_hits;
+    let output_count = outcome.output_hits;
+    let sources = outcome.sources.clone();
     let results = outcome
         .results
         .into_iter()
+        .skip(request.offset)
+        .take(limit)
         .filter_map(|hit| {
             let node = engine.get_node(&hit.global_id.local_id).ok()??;
             Some(serde_json::json!({
@@ -1575,7 +1676,30 @@ async fn search_handler(
         "search completed"
     );
 
-    Json(results).into_response()
+    if request.include_diagnostics {
+        Json(serde_json::json!({
+            "results": results,
+            "diagnostics": {
+                "status": result,
+                "search_method": search_method,
+                "ready": true,
+                "sources": sources,
+                "input_candidates": candidate_count,
+                "fused_candidates": fused_count,
+                "output_candidates": output_count,
+                "returned": results.len(),
+                "partial": false,
+                "timings": {
+                    "embedding_ms": embedding_time_ms,
+                    "index_ms": search_time_ms,
+                    "hydration_ms": hydration_time_ms,
+                },
+            },
+        }))
+        .into_response()
+    } else {
+        Json(results).into_response()
+    }
 }
 
 async fn database_info_handler(

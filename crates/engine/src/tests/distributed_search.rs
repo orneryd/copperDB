@@ -344,6 +344,29 @@ fn local_hybrid_search_fuses_duplicate_lexical_and_semantic_hits() {
     assert_eq!(outcome.results[1].global_id.local_id, "document:a");
     assert_eq!(outcome.results[1].bm25_rank, 0);
     assert_eq!(outcome.results[1].vector_rank, 1);
+
+    let vector_only_weighted = db
+        .search_fabric_ranked_outcome_locally_scoped_with_context_and_roles_and_indexes_and_rrf_config(
+            &RequestContext::detached(),
+            &PlacementKey::default_for_database("copper"),
+            &SearchQuery::Hybrid {
+                text: "graph".into(),
+                vector: vec![1.0, 0.0],
+                k: 2,
+            },
+            &[],
+            &BTreeMap::new(),
+            &["admin".into()],
+            &[],
+            Some(
+                RrfConfig::new(60.0, 2)
+                    .with_min_score(0.01)
+                    .with_weights(1.0, 0.0),
+            ),
+        )
+        .unwrap();
+
+    assert_eq!(vector_only_weighted.results[0].global_id.local_id, "document:a");
 }
 
 #[test]

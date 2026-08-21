@@ -268,6 +268,30 @@ impl CopperDb {
         roles: &[String],
         index_names: &[String],
     ) -> Result<RrfSearchOutcome, CopperDbError> {
+        self.search_fabric_ranked_outcome_locally_scoped_with_context_and_roles_and_indexes_and_rrf_config(
+            request_context,
+            placement,
+            query,
+            labels,
+            filters,
+            roles,
+            index_names,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn search_fabric_ranked_outcome_locally_scoped_with_context_and_roles_and_indexes_and_rrf_config(
+        &self,
+        request_context: &RequestContext,
+        placement: &PlacementKey,
+        query: &SearchQuery,
+        labels: &[String],
+        filters: &BTreeMap<String, Vec<String>>,
+        roles: &[String],
+        index_names: &[String],
+        rrf_config: Option<RrfConfig>,
+    ) -> Result<RrfSearchOutcome, CopperDbError> {
         if !matches!(query, SearchQuery::Hybrid { .. }) {
             let limit = match query {
                 SearchQuery::FullText { limit, .. } => *limit,
@@ -284,7 +308,12 @@ impl CopperDb {
                     roles,
                     index_names,
                 )
-                .map(|batch| merge_rrf_search_batches(vec![batch], RrfConfig::new(60.0, limit)));
+                .map(|batch| {
+                    merge_rrf_search_batches(
+                        vec![batch],
+                        rrf_config.unwrap_or_else(|| RrfConfig::new(60.0, limit)),
+                    )
+                });
         }
 
         self.ensure_ranked_search_query_enabled(query)?;
@@ -334,7 +363,9 @@ impl CopperDb {
         )?;
         Ok(merge_rrf_search_batches(
             vec![lexical, semantic],
-            RrfConfig::new(60.0, *k).with_min_score(NORNICDB_HYBRID_MIN_RRF_SCORE),
+            rrf_config.unwrap_or_else(|| {
+                RrfConfig::new(60.0, *k).with_min_score(NORNICDB_HYBRID_MIN_RRF_SCORE)
+            }),
         ))
     }
 
