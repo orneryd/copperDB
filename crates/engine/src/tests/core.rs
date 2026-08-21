@@ -1675,6 +1675,7 @@ fn engine_persists_and_plans_fabric_database_shards() {
                 label: "Person".into(),
                 snippet: None,
             }],
+            filtered_hits: 0,
         },
         RrfSearchBatch {
             shard: PlacementKey::new("default", "copper", "person-00"),
@@ -1692,6 +1693,7 @@ fn engine_persists_and_plans_fabric_database_shards() {
                 label: "Person".into(),
                 snippet: Some("fresh".into()),
             }],
+            filtered_hits: 0,
         },
     ];
     let hydration = vec![RrfHydrationRecord {
@@ -1759,6 +1761,7 @@ fn engine_persists_and_plans_fabric_database_shards() {
                         label: "Person".into(),
                         snippet: Some("ignore me".into()),
                     }],
+                    filtered_hits: 0,
                 });
                 batches
             },

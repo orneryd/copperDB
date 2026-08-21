@@ -235,6 +235,7 @@ async fn copperdb_search_accepts_direct_vector_when_embedding_is_disabled() {
     assert_eq!(payload["diagnostics"]["input_candidates"], 1);
     assert_eq!(payload["diagnostics"]["fused_candidates"], 1);
     assert_eq!(payload["diagnostics"]["output_candidates"], 1);
+    assert_eq!(payload["diagnostics"]["filtered_candidates"], 0);
     assert_eq!(payload["diagnostics"]["returned"], 1);
     assert_eq!(payload["diagnostics"]["partial"], false);
     for stage in ["embedding_ms", "index_ms", "hydration_ms"] {
@@ -1083,6 +1084,7 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
                         "query": "graph",
                         "labels": ["Document"],
                         "limit": 1,
+                        "include_diagnostics": true,
                         "filters": {"collection": ["keep"]}
                     })
                     .to_string(),
@@ -1097,12 +1099,13 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
         .await
         .unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(payload.is_array());
-    assert_eq!(payload.as_array().unwrap().len(), 1);
-    assert_eq!(payload[0]["node"]["id"], "document:graph");
-    assert_eq!(payload[0]["node"]["labels"][0], "Document");
-    assert_eq!(payload[0]["vector_rank"], 0);
-    assert_eq!(payload[0]["bm25_rank"], 1);
+    assert_eq!(payload["results"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["results"][0]["node"]["id"], "document:graph");
+    assert_eq!(payload["results"][0]["node"]["labels"][0], "Document");
+    assert_eq!(payload["results"][0]["vector_rank"], 0);
+    assert_eq!(payload["results"][0]["bm25_rank"], 1);
+    assert_eq!(payload["diagnostics"]["input_candidates"], 1);
+    assert_eq!(payload["diagnostics"]["filtered_candidates"], 2);
 
     let selected_index_response = build_router(Arc::new(state.clone()))
         .oneshot(
@@ -2527,6 +2530,7 @@ async fn fabric_admin_api_executes_ranked_search_over_grpc_transports() {
                         label: "Person".into(),
                         snippet: None,
                     }],
+                    filtered_hits: 0,
                 }),
                 "search-b" => Ok(RrfSearchBatch {
                     shard: person.clone(),
@@ -2544,6 +2548,7 @@ async fn fabric_admin_api_executes_ranked_search_over_grpc_transports() {
                         label: "Person".into(),
                         snippet: Some("fresh".into()),
                     }],
+                    filtered_hits: 0,
                 }),
                 other => Err(GrpcError::Transport(format!("no ranked batch for {other}"))),
             }
@@ -3665,6 +3670,7 @@ async fn fabric_ranked_search_respects_per_database_viewer_access() {
                         label: "Person".into(),
                         snippet: None,
                     }],
+                    filtered_hits: 0,
                 }),
                 "search-b" => Ok(RrfSearchBatch {
                     shard: person.clone(),
@@ -3682,6 +3688,7 @@ async fn fabric_ranked_search_respects_per_database_viewer_access() {
                         label: "Person".into(),
                         snippet: Some("fresh".into()),
                     }],
+                    filtered_hits: 0,
                 }),
                 other => Err(GrpcError::Transport(format!("no ranked batch for {other}"))),
             }

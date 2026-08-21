@@ -642,6 +642,7 @@ async fn engine_executes_fabric_ranked_search_with_transport() {
                 label: "Person".into(),
                 snippet: None,
             }],
+            filtered_hits: 0,
         },
     );
     transport.register_ranked_results(
@@ -662,6 +663,7 @@ async fn engine_executes_fabric_ranked_search_with_transport() {
                 label: "Person".into(),
                 snippet: Some("fresh".into()),
             }],
+            filtered_hits: 0,
         },
     );
 

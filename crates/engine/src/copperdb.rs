@@ -441,6 +441,7 @@ impl CopperDb {
                 }
                 let candidate_limit = Self::fulltext_candidate_limit(*limit, filters);
                 let mut hits = Vec::new();
+                let mut filtered_hits = 0;
 
                 for label in search_labels {
                     request_context.check_active()?;
@@ -489,6 +490,7 @@ impl CopperDb {
                                 &policy_resolver,
                             )?
                         {
+                            filtered_hits += 1;
                             continue;
                         }
                         hits.push(RrfSearchHit {
@@ -522,6 +524,7 @@ impl CopperDb {
                     shard: placement.clone(),
                     source: "lexical".into(),
                     hits,
+                    filtered_hits,
                 })
             }
             SearchQuery::Semantic {
@@ -547,8 +550,10 @@ impl CopperDb {
                     index_names,
                 )?;
                 let mut hits = Vec::new();
+                let mut filtered_hits = 0;
                 for (id, score, label) in matches {
                     let Some(node) = self.storage.get_node_record(&id)? else {
+                        filtered_hits += 1;
                         continue;
                     };
                     if !node_matches_search_filters(&node, filters)
@@ -559,6 +564,7 @@ impl CopperDb {
                             &policy_resolver,
                         )?
                     {
+                        filtered_hits += 1;
                         continue;
                     }
                     if hits.len() == *k {
@@ -578,6 +584,7 @@ impl CopperDb {
                     shard: placement.clone(),
                     source: "semantic".into(),
                     hits,
+                    filtered_hits,
                 })
             }
             SearchQuery::Hybrid { text, vector, k } => {
@@ -618,6 +625,7 @@ impl CopperDb {
                     vec![lexical, semantic],
                     RrfConfig::new(60.0, *k).with_min_score(NORNICDB_HYBRID_MIN_RRF_SCORE),
                 );
+                let filtered_hits = outcome.filtered_hits;
                 let hits = outcome
                     .results
                     .into_iter()
@@ -636,6 +644,7 @@ impl CopperDb {
                     shard: placement.clone(),
                     source: "hybrid".into(),
                     hits,
+                    filtered_hits,
                 })
             }
         };

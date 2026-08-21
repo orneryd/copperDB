@@ -212,6 +212,7 @@ struct LlamaApi {
     context_free: unsafe extern "C" fn(ctx: *mut LlamaContext),
     batch_free: unsafe extern "C" fn(batch: *mut LlamaBatch),
     supports_gpu_offload: Option<unsafe extern "C" fn() -> bool>,
+    #[cfg(target_os = "windows")]
     backend_load_all_from_path: Option<unsafe extern "C" fn(path: *const c_char)>,
 }
 
@@ -347,6 +348,7 @@ unsafe fn load_api(lib: libloading::Library, library: &Path) -> Result<LlamaApi,
             .get::<unsafe extern "C" fn() -> bool>(b"llama_supports_gpu_offload\0")
             .ok()
             .map(|f| *f),
+        #[cfg(target_os = "windows")]
         backend_load_all_from_path: lib
             .get::<unsafe extern "C" fn(*const c_char)>(b"ggml_backend_load_all_from_path\0")
             .ok()

@@ -676,6 +676,7 @@ async fn ranked_search_transport_sends_requests_to_target_endpoint() {
                 label: "Person".into(),
                 snippet: None,
             }],
+                filtered_hits: 0,
         },
     );
 
@@ -781,6 +782,7 @@ fn generated_proto_converts_ranked_search_messages() {
         shard: PlacementKey::new("default", "copper", "primary"),
         source: "lexical".into(),
         hits: vec![],
+        filtered_hits: 3,
     };
 
     let proto_request = proto::RemoteRankedSearchRequest::try_from(request.clone()).unwrap();
@@ -844,6 +846,7 @@ async fn generated_replica_service_handles_ranked_search_rpc() {
             shard: placement.clone(),
             source: "lexical".into(),
             hits: vec![],
+            filtered_hits: 0,
         },
     );
     let service = NornicReplicaService::new(Arc::new(RecordingRemoteReplicaClient::default()))
@@ -963,6 +966,7 @@ async fn tonic_ranked_search_client_forwards_caller_auth_token() {
             shard: placement.clone(),
             source: "lexical".into(),
             hits: vec![],
+            filtered_hits: 0,
         },
     );
 
@@ -1078,6 +1082,7 @@ async fn tonic_ranked_search_client_connects_over_tls() {
             shard: placement.clone(),
             source: "lexical".into(),
             hits: vec![],
+            filtered_hits: 0,
         },
     );
 

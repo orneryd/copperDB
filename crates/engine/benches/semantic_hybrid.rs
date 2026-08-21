@@ -246,11 +246,13 @@ fn nornicdb_rrf_batches() -> Vec<RrfSearchBatch> {
             shard: shard.clone(),
             source: "semantic".into(),
             hits: semantic_hits,
+            filtered_hits: 0,
         },
         RrfSearchBatch {
             shard,
             source: "lexical".into(),
             hits: lexical_hits,
+            filtered_hits: 0,
         },
     ]
 }

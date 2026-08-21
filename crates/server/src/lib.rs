@@ -1618,6 +1618,7 @@ async fn search_handler(
     let candidate_count = outcome.input_hits;
     let fused_count = outcome.fused_hits;
     let output_count = outcome.output_hits;
+    let filtered_count = outcome.filtered_hits;
     let sources = outcome.sources.clone();
     let results = outcome
         .results
@@ -1687,6 +1688,7 @@ async fn search_handler(
                 "input_candidates": candidate_count,
                 "fused_candidates": fused_count,
                 "output_candidates": output_count,
+                "filtered_candidates": filtered_count,
                 "returned": results.len(),
                 "partial": false,
                 "timings": {

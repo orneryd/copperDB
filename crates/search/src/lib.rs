@@ -89,6 +89,8 @@ pub struct RrfSearchBatch {
     pub shard: PlacementKey,
     pub source: String,
     pub hits: Vec<RrfSearchHit>,
+    #[serde(default)]
+    pub filtered_hits: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -100,6 +102,8 @@ pub struct RrfSearchOutcome {
     #[serde(default)]
     pub fused_hits: usize,
     pub output_hits: usize,
+    #[serde(default)]
+    pub filtered_hits: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -286,6 +290,7 @@ pub fn merge_rrf_search_batches(
     let mut touched_shards = Vec::new();
     let mut sources = BTreeSet::new();
     let mut input_hits = 0;
+    let mut filtered_hits = 0;
     let mut ranked_hits = Vec::with_capacity(batches.len());
 
     for batch in batches {
@@ -301,6 +306,7 @@ pub fn merge_rrf_search_batches(
             }
         }
         input_hits += batch.hits.len();
+        filtered_hits += batch.filtered_hits;
         ranked_hits.push(batch.hits);
     }
 
@@ -315,6 +321,7 @@ pub fn merge_rrf_search_batches(
         input_hits,
         fused_hits,
         output_hits,
+        filtered_hits,
     }
 }
 
@@ -366,7 +373,7 @@ pub fn hydrate_rrf_search_outcome(
         sources: outcome.sources,
         input_hits: outcome.input_hits,
         output_hits,
-        filtered_hits,
+        filtered_hits: outcome.filtered_hits + filtered_hits,
         missing_hydration_hits,
     }
 }
@@ -1427,6 +1434,7 @@ mod tests {
                         label: "Person".into(),
                         snippet: None,
                     }],
+                    filtered_hits: 1,
                 },
                 RrfSearchBatch {
                     shard: vector.clone(),
@@ -1451,6 +1459,7 @@ mod tests {
                             snippet: None,
                         },
                     ],
+                    filtered_hits: 2,
                 },
             ],
             RrfConfig::new(60.0, 10),
@@ -1460,6 +1469,7 @@ mod tests {
         assert_eq!(outcome.sources, vec!["lexical", "vector"]);
         assert_eq!(outcome.input_hits, 3);
         assert_eq!(outcome.output_hits, 2);
+        assert_eq!(outcome.filtered_hits, 3);
         assert_eq!(outcome.results[0].global_id.local_id, "Person:1");
         assert_eq!(outcome.results[0].best_score, 0.9);
         assert_eq!(outcome.results[0].snippet, Some("fresh".into()));
@@ -1567,6 +1577,7 @@ mod tests {
             input_hits: 3,
             fused_hits: 2,
             output_hits: 2,
+            filtered_hits: 0,
         };
 
         let hydrated = hydrate_rrf_search_outcome(
@@ -1656,6 +1667,7 @@ mod tests {
                         label: "Person".into(),
                         snippet: None,
                     }],
+                    filtered_hits: 0,
                 },
                 RrfSearchBatch {
                     shard: ignored.clone(),
@@ -1669,6 +1681,7 @@ mod tests {
                         label: "Person".into(),
                         snippet: Some("ignored".into()),
                     }],
+                    filtered_hits: 0,
                 },
             ],
             vec![RrfHydrationRecord {
@@ -1757,6 +1770,7 @@ mod tests {
                     label: "Person".into(),
                     snippet: None,
                 }],
+                filtered_hits: 0,
             },
         );
         transport.register_ranked_results(
@@ -1773,6 +1787,7 @@ mod tests {
                     label: "Person".into(),
                     snippet: Some("fresh".into()),
                 }],
+                filtered_hits: 0,
             },
         );
 
