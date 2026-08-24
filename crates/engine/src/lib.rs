@@ -41,7 +41,7 @@
 use crate::embedding_runtime::{EmbeddingRuntime, EmbeddingRuntimeStatus};
 use crate::vector_indexes::VectorIndexManager;
 use copperdb_audit::{AuditConfig, AuditLog, Event, EventType};
-use copperdb_cache::QueryCache;
+use copperdb_cache::{is_cacheable_read_query, QueryCache, QueryResultCache};
 use copperdb_compliance::{ComplianceManager, ComplianceReporter};
 use copperdb_cypher::{
     can_execute_as_pipeline, detect_query_pattern, match_compound_query_shape, Clause,
@@ -275,7 +275,7 @@ impl Default for DatabaseConfig {
 
 // ─── QueryResult / QueryStats ─────────────────────────────────────────────────
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct QueryResult {
     pub columns: Vec<String>,
     pub rows: Vec<HashMap<String, Value>>,
@@ -339,6 +339,7 @@ pub struct CopperDb {
     eval: EvalEngine,
     tx_manager: Arc<TransactionManager>,
     query_cache: Arc<QueryCache<copperdb_cypher::Query>>,
+    cypher_result_cache: Arc<QueryResultCache<QueryResult>>,
     ranked_search_cache: Arc<QueryCache<RrfSearchBatch>>,
     audit_log: Arc<AuditLog>,
     compliance: Arc<ComplianceManager>,

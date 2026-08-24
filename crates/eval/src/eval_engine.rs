@@ -25,9 +25,9 @@ impl EvalEngine {
         vector_index_query: VectorIndexQuery,
     ) -> Self {
         let query_result_cache = Arc::new(QueryResultCache::new(1_000, None));
-        let query_result_policy_generation = Arc::new(AtomicU64::new(
-            storage.knowledge_policy_schema_generation(),
-        ));
+        let query_result_policy_generation =
+            Arc::new(AtomicU64::new(storage.knowledge_policy_schema_generation()));
+        let bfs_adjacency_cache = Arc::new(Mutex::new(HashMap::new()));
         let invalidated_query_result_cache = Arc::clone(&query_result_cache);
         storage.on_commit_completed(Arc::new(move || {
             invalidated_query_result_cache.invalidate();
@@ -55,24 +55,39 @@ impl EvalEngine {
         }));
         let created_storage = Arc::downgrade(&storage);
         let created_indexes = Arc::clone(&vector_indexes);
+        let created_bfs_adjacency_cache = Arc::clone(&bfs_adjacency_cache);
         storage.on_edge_created(Arc::new(move |edge| {
             if let Some(storage) = created_storage.upgrade() {
                 maintain_vector_indexes_for_edge(&storage, &created_indexes, &edge);
             }
+            created_bfs_adjacency_cache
+                .lock()
+                .expect("BFS adjacency cache lock poisoned")
+                .clear();
         }));
         let updated_storage = Arc::downgrade(&storage);
         let updated_indexes = Arc::clone(&vector_indexes);
+        let updated_bfs_adjacency_cache = Arc::clone(&bfs_adjacency_cache);
         storage.on_edge_updated(Arc::new(move |edge| {
             if let Some(storage) = updated_storage.upgrade() {
                 maintain_vector_indexes_for_edge(&storage, &updated_indexes, &edge);
             }
+            updated_bfs_adjacency_cache
+                .lock()
+                .expect("BFS adjacency cache lock poisoned")
+                .clear();
         }));
         let deleted_storage = Arc::downgrade(&storage);
         let deleted_indexes = Arc::clone(&vector_indexes);
+        let deleted_bfs_adjacency_cache = Arc::clone(&bfs_adjacency_cache);
         storage.on_edge_deleted(Arc::new(move |id| {
             if let Some(storage) = deleted_storage.upgrade() {
                 remove_edge_from_vector_indexes(&storage, &deleted_indexes, &id);
             }
+            deleted_bfs_adjacency_cache
+                .lock()
+                .expect("BFS adjacency cache lock poisoned")
+                .clear();
         }));
         Self {
             storage,
@@ -84,6 +99,7 @@ impl EvalEngine {
             query_result_policy_generation,
             fulltext_query_cache: Arc::new(Mutex::new(HashMap::new())),
             knowledge_policy_resolver_cache: Arc::new(Mutex::new(None)),
+            bfs_adjacency_cache,
             access_flusher: Arc::new(AccessFlusher::new()),
             hot_path_trace: HotPathTraceState::new(),
         }
@@ -476,7 +492,7 @@ impl EvalEngine {
             .eq_ignore_ascii_case("MATCH ()-[r]->() RETURN count(r) AS count");
         if params.is_empty()
             && is_canonical_count_all
-            && self.count_all_relationships_has_no_policies()?
+            && self.has_no_knowledge_policies()?
         {
             self.hot_path_trace.reset();
             return self.with_request_context(request_context, || {
@@ -500,7 +516,7 @@ impl EvalEngine {
                     | Clause::WhereExists(_)
                     | Clause::Unwind(_)
             )
-        }) && self.count_all_relationships_has_no_policies()?;
+        }) && self.has_no_knowledge_policies()?;
         let result = self.execute_with_context(request_context, &query, params)?;
         if cacheable_read {
             self.query_result_cache
@@ -3331,7 +3347,7 @@ impl EvalEngine {
             return Ok(None);
         }
 
-        if !self.count_all_relationships_has_no_policies()? {
+        if !self.has_no_knowledge_policies()? {
             return Ok(None);
         }
 
@@ -3343,7 +3359,7 @@ impl EvalEngine {
         ))
     }
 
-    fn count_all_relationships_has_no_policies(&self) -> Result<bool, EvalError> {
+    pub fn has_no_knowledge_policies(&self) -> Result<bool, EvalError> {
         // A configured edge policy may exclude otherwise matching relationships.
         Ok(self
             .storage
@@ -3419,7 +3435,7 @@ impl EvalEngine {
                     if name.eq_ignore_ascii_case("count")
                         && matches!(args.as_slice(), [Expression::Variable(variable)] if variable == target_variable)
             )
-            || !self.count_all_relationships_has_no_policies()?
+            || !self.has_no_knowledge_policies()?
         {
             return Ok(None);
         }
@@ -3487,7 +3503,7 @@ impl EvalEngine {
             Expression::FunctionCall { name, args, distinct: false }
                 if name.eq_ignore_ascii_case("count")
                     && matches!(args.as_slice(), [Expression::Variable(variable)] if variable == target_variable)
-        ) || !self.count_all_relationships_has_no_policies()?
+        ) || !self.has_no_knowledge_policies()?
         {
             return Ok(None);
         }
@@ -3831,31 +3847,30 @@ impl EvalEngine {
         rel_types: &[String],
         direction: &EdgeDirection,
         resolver: &Resolver,
-    ) -> Result<HashMap<String, Vec<EdgeRecord>>, EvalError> {
-        let mut adjacency: HashMap<String, Vec<EdgeRecord>> = HashMap::new();
+    ) -> Result<BfsAdjacencyMap, EvalError> {
+        let mut adjacency = BfsAdjacencyMap::new();
 
-        // Full sequential scan is fastest for LSM trees — avoids per-edge
-        // random lookups that index-based approaches would incur.
-        let edge_count = self.storage.bfs_stream_edges(|edge| {
+        let edges = if rel_types.len() == 1 {
+            self.storage
+                .bfs_cached_edges(rel_types.first().map(String::as_str))?
+        } else {
+            self.storage.bfs_cached_edges(None)?
+        };
+        for edge in edges {
             if !rel_types.is_empty() && !rel_types.contains(&edge.edge_type) {
-                return Ok(());
+                continue;
             }
-            if !self
-                .edge_visible_under_policy(&edge, resolver)
-                .unwrap_or(false)
-            {
-                return Ok(());
+            if !self.edge_visible_under_policy(&edge, resolver)? {
+                continue;
             }
             Self::add_edge_to_adjacency(&mut adjacency, edge, direction);
-            Ok(())
-        })?;
-        let _ = edge_count;
+        }
         Ok(adjacency)
     }
 
     /// Insert an edge into the adjacency map accounting for direction.
     fn add_edge_to_adjacency(
-        adjacency: &mut HashMap<String, Vec<EdgeRecord>>,
+        adjacency: &mut BfsAdjacencyMap,
         edge: EdgeRecord,
         direction: &EdgeDirection,
     ) {
@@ -3893,11 +3908,11 @@ impl EvalEngine {
         max_hops: usize,
     ) -> Result<Option<ShortestPathFound>, EvalError> {
         let resolver = self.knowledge_policy_resolver()?;
-        let storage_direction = match direction {
-            EdgeDirection::Outgoing => EdgeAdjacencyDirection::Outgoing,
-            EdgeDirection::Incoming => EdgeAdjacencyDirection::Incoming,
-            EdgeDirection::Both => EdgeAdjacencyDirection::Both,
-        };
+        let adjacency = self
+            .cached_bfs_adjacency_map(rel_types, direction, &resolver)?
+            .unwrap_or(Arc::new(
+                self.bfs_adjacency_map(rel_types, direction, &resolver)?,
+            ));
 
         let mut predecessors: HashMap<String, BfsPredecessor> = HashMap::new();
         predecessors.insert(
@@ -3925,27 +3940,8 @@ impl EvalEngine {
                 continue;
             }
 
-            let mut neighbors = Vec::new();
-            if rel_types.is_empty() {
-                neighbors = self.storage.get_adjacent_edges(
-                    &current_id,
-                    storage_direction,
-                    None,
-                )?;
-            } else {
-                for rel_type in rel_types {
-                    neighbors.extend(self.storage.get_adjacent_edges(
-                        &current_id,
-                        storage_direction,
-                        Some(rel_type),
-                    )?);
-                }
-            }
-            for edge in neighbors {
-                if !self.edge_visible_under_policy(&edge, &resolver)? {
-                    continue;
-                }
-                let next_id = related_node_id(&current_id, &edge, direction).map(str::to_string);
+            for edge in adjacency.get(&current_id).into_iter().flatten() {
+                let next_id = related_node_id(&current_id, edge, direction).map(str::to_string);
                 let Some(next_id) = next_id else {
                     continue;
                 };
@@ -3957,7 +3953,7 @@ impl EvalEngine {
                     next_id.clone(),
                     BfsPredecessor {
                         parent: Some(current_id.clone()),
-                        edge: Some(edge),
+                        edge: Some(edge.clone()),
                         depth: depth + 1,
                     },
                 );
@@ -3971,6 +3967,45 @@ impl EvalEngine {
         }
 
         Ok(None)
+    }
+
+    fn cached_bfs_adjacency_map(
+        &self,
+        rel_types: &[String],
+        direction: &EdgeDirection,
+        resolver: &Resolver,
+    ) -> Result<Option<Arc<BfsAdjacencyMap>>, EvalError> {
+        let Some(rel_type) = rel_types.first().filter(|_| rel_types.len() == 1) else {
+            return Ok(None);
+        };
+        if resolver.resolve_edge(rel_type).is_some() {
+            return Ok(None);
+        }
+        let direction_key = match direction {
+            EdgeDirection::Outgoing => "outgoing",
+            EdgeDirection::Incoming => "incoming",
+            EdgeDirection::Both => "both",
+        };
+        let cache_key = format!("{direction_key}:{rel_type}");
+        if let Some(adjacency) = self
+            .bfs_adjacency_cache
+            .lock()
+            .expect("BFS adjacency cache lock poisoned")
+            .get(&cache_key)
+        {
+            return Ok(Some(Arc::clone(adjacency)));
+        }
+
+        let mut adjacency = BfsAdjacencyMap::new();
+        for edge in self.storage.bfs_cached_edges(Some(rel_type))? {
+            Self::add_edge_to_adjacency(&mut adjacency, edge, direction);
+        }
+        let adjacency = Arc::new(adjacency);
+        self.bfs_adjacency_cache
+            .lock()
+            .expect("BFS adjacency cache lock poisoned")
+            .insert(cache_key, Arc::clone(&adjacency));
+        Ok(Some(adjacency))
     }
 
     fn reconstruct_shortest_path(

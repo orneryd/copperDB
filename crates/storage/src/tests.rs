@@ -539,9 +539,11 @@ fn prefix_scan_counts_and_namespace_listing_are_deterministic() {
 
     assert_eq!(engine.node_count_by_prefix("alpha:").unwrap(), 2);
     assert_eq!(engine.node_count_by_prefix("beta:").unwrap(), 1);
+    assert_eq!(engine.total_node_count().unwrap(), 3);
     assert_eq!(engine.edge_count_by_prefix("alpha:").unwrap(), 1);
     assert_eq!(engine.edge_count_by_prefix("beta:").unwrap(), 1);
     assert_eq!(engine.total_edge_count().unwrap(), 2);
+    assert_eq!(engine.total_node_count().unwrap(), 3);
     assert_eq!(
         engine
             .node_count_by_label_in_namespace("alpha", "Person")
@@ -587,6 +589,7 @@ fn prefix_scan_counts_and_namespace_listing_are_deterministic() {
 
     engine.delete_node_record("beta:n1").unwrap();
     engine.delete_edge_record("beta:e1").unwrap();
+    assert_eq!(engine.total_node_count().unwrap(), 2);
     assert_eq!(engine.total_edge_count().unwrap(), 1);
     assert_eq!(engine.node_count_by_prefix("beta:").unwrap(), 0);
     assert_eq!(engine.edge_count_by_prefix("beta:").unwrap(), 0);
@@ -597,6 +600,43 @@ fn prefix_scan_counts_and_namespace_listing_are_deterministic() {
         0
     );
     assert_eq!(engine.list_namespaces().unwrap(), vec!["alpha".to_string()]);
+}
+
+#[test]
+fn node_counter_initializes_from_legacy_nodes_on_first_mutation() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    engine
+        .put_node_record(&sample_node("legacy:n1", &["Person"]))
+        .unwrap();
+    engine
+        .put_node_record(&sample_node("legacy:n2", &["Person"]))
+        .unwrap();
+
+    engine.meta.remove(META_GLOBAL_NODE_COUNT_KEY).unwrap();
+    assert_eq!(engine.total_node_count().unwrap(), 2);
+
+    engine
+        .put_node_record(&sample_node("legacy:n3", &["Person"]))
+        .unwrap();
+    assert_eq!(engine.total_node_count().unwrap(), 3);
+    assert_eq!(
+        rmp_serde::from_slice::<u64>(
+            &engine
+                .meta
+                .fjall_get(META_GLOBAL_NODE_COUNT_KEY)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap(),
+        3
+    );
+
+    engine
+        .put_node_record(&sample_node("legacy:n3", &["Robot"]))
+        .unwrap();
+    assert_eq!(engine.total_node_count().unwrap(), 3);
+    engine.delete_node_record("legacy:n1").unwrap();
+    assert_eq!(engine.total_node_count().unwrap(), 2);
 }
 
 #[test]

@@ -230,7 +230,8 @@ impl AuditLog {
         event.previous_hash = chain.previous_hash.clone();
         event.hash = Some(hash_event(&event)?);
 
-        self.storage.put_node_record(&event_to_node(&event)?)?;
+        self.storage
+            .put_system_audit_record(&event_to_node(&event)?)?;
         chain.next_sequence += 1;
         chain.previous_hash = event.hash.clone();
         drop(chain);

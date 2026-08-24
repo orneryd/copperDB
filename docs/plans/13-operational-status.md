@@ -1,6 +1,6 @@
 # 13: Truthful Operational Status
 
-Status: planned. Priority: P1. Owners: `server`, `engine`, `storage`, `bolt`, `otel`, embedding/search runtimes.
+Status: in progress. Priority: P1. Owners: `server`, `engine`, `storage`, `bolt`, `otel`, embedding/search runtimes.
 
 ## Objective
 
@@ -25,6 +25,15 @@ Replace literal zero/false status fields with cheap immutable snapshots from the
 ## Tests
 
 Values change after requests and graph mutations; active counts return to zero; failed components report degraded; embedding/search states match items 11/12; status remains available during partial failure and responsive under load; sensitive paths/errors are sanitized.
+
+## Progress
+
+- Complete: storage maintains global node and edge cardinalities through atomic mutation deltas. Legacy databases seed missing counters from a one-time keyspace count on their first mutation; status reads never scan records.
+- Complete: `/status` returns a versioned, timestamped snapshot with monotonic process uptime, maintained graph cardinalities from the open default engine, database state, and explicit `unknown`/`null` HTTP counters instead of synthetic zeros.
+- Complete: `/db/{database}` preserves its established fields while reporting maintained node/edge counts, real storage bytes, search readiness, and embedding runtime state plus pending work. Unowned managed-embedding bytes are explicitly unknown.
+- Complete: the UI status contract accepts unknown counters, cardinalities, and embedding bytes and renders unavailable database values as `Unknown` rather than zero or a runtime error.
+- Validated: storage regressions cover namespace/global count mutation and pre-counter migration initialization; the focused server regression creates one node and one edge and verifies database and server snapshots report `1/1`, disabled-but-pending embedding work, timestamps, schema versions, and unknown counters.
+- Remaining: add owned HTTP and Bolt counters, broader engine/storage lifecycle snapshots, readiness/liveness separation, bounded collection latency coverage, stale-snapshot observability, and partial-failure/concurrent-load tests.
 
 ## Definition Of Done
 

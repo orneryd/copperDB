@@ -68,11 +68,9 @@ export function Databases() {
     return `${m}m ${s}s`;
   };
 
-  const formatBytes = (bytes?: number): string => {
-    const n =
-      typeof bytes === "number" && Number.isFinite(bytes)
-        ? Math.max(0, bytes)
-        : 0;
+  const formatBytes = (bytes?: number | null): string => {
+    if (typeof bytes !== "number" || !Number.isFinite(bytes)) return "Unknown";
+    const n = Math.max(0, bytes);
     if (n < 1024) return `${n} B`;
     const units = ["KB", "MB", "GB", "TB"];
     let value = n;
@@ -639,13 +637,13 @@ export function Databases() {
                       <div className="flex justify-between">
                         <span className="text-silver-steel">Nodes:</span>
                         <span className="text-white font-medium">
-                          {db.nodeCount.toLocaleString()}
+                          {db.nodeCount?.toLocaleString() ?? "Unknown"}
                         </span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-silver-steel">Edges:</span>
                         <span className="text-white font-medium">
-                          {db.edgeCount.toLocaleString()}
+                          {db.edgeCount?.toLocaleString() ?? "Unknown"}
                         </span>
                       </div>
                       <div className="flex justify-between">
@@ -927,13 +925,13 @@ export function Databases() {
                 <div className="flex justify-between">
                   <span className="text-silver-steel">Nodes:</span>
                   <span className="text-white font-medium">
-                    {selectedDatabase.nodeCount.toLocaleString()}
+                    {selectedDatabase.nodeCount?.toLocaleString() ?? "Unknown"}
                   </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-silver-steel">Edges:</span>
                   <span className="text-white font-medium">
-                    {selectedDatabase.edgeCount.toLocaleString()}
+                    {selectedDatabase.edgeCount?.toLocaleString() ?? "Unknown"}
                   </span>
                 </div>
                 <div className="flex justify-between">

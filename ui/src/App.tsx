@@ -53,15 +53,17 @@ function App() {
         <Route
           path="/demo"
           element={
-            <Suspense
-              fallback={
-                <div className="min-h-screen flex items-center justify-center bg-midnight text-silver-steel">
-                  Loading galaxy...
-                </div>
-              }
-            >
-              <Demo />
-            </Suspense>
+            <ProtectedRoute>
+              <Suspense
+                fallback={
+                  <div className="min-h-screen flex items-center justify-center bg-midnight text-silver-steel">
+                    Loading galaxy...
+                  </div>
+                }
+              >
+                <Demo />
+              </Suspense>
+            </ProtectedRoute>
           }
         />
         <Route

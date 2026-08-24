@@ -1767,11 +1767,31 @@ async fn auth_token_uses_durable_authenticator_for_cookie_access() {
         .to_string();
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/status")
-                .header(header::COOKIE, cookie)
+                .header(header::COOKIE, &cookie)
                 .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/db/copperdb/tx/commit")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::COOKIE, &cookie)
+                .body(Body::from(
+                    serde_json::json!({
+                        "statements": [{"statement": "MATCH (n) RETURN n LIMIT 1"}]
+                    })
+                    .to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -4593,7 +4613,7 @@ async fn test_discovery_served_to_api_clients_by_default() {
 async fn database_info_allows_unauthenticated_access_when_security_disabled() {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind};
+    use copperdb_storage::{EdgeRecord, IndexDefinition, IndexEntityType, IndexKind, NodeRecord};
     use tower::ServiceExt;
 
     let temp_dir = tempfile::tempdir().unwrap();
@@ -4610,8 +4630,8 @@ async fn database_info_allows_unauthenticated_access_when_security_disabled() {
         ..Default::default()
     };
     state.auth.security_enabled = false;
-    open_engine(&state, "copperdb")
-        .unwrap()
+    let engine = open_engine(&state, "copperdb").unwrap();
+    engine
         .storage()
         .persist_index_definition(&IndexDefinition {
             name: "document_title".into(),
@@ -4621,9 +4641,39 @@ async fn database_info_allows_unauthenticated_access_when_security_disabled() {
             kind: IndexKind::FullText,
         })
         .unwrap();
-    let app = build_router(Arc::new(state));
+    engine
+        .storage()
+        .put_node_record(&NodeRecord {
+            id: "document:1".into(),
+            labels: vec!["Document".into()],
+            properties: BTreeMap::from([(
+                "title".into(),
+                serde_json::Value::String("Operational status".into()),
+            )]),
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        })
+        .unwrap();
+    engine
+        .storage()
+        .put_edge_record(&EdgeRecord {
+            id: "edge:1".into(),
+            start_node: "document:1".into(),
+            end_node: "document:1".into(),
+            edge_type: "REFERENCES".into(),
+            properties: BTreeMap::new(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        })
+        .unwrap();
+    let state = Arc::new(state);
+    let app = build_router(Arc::clone(&state));
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/db/copperdb")
@@ -4640,6 +4690,53 @@ async fn database_info_allows_unauthenticated_access_when_security_disabled() {
     assert_eq!(payload["searchReady"], true);
     assert_eq!(payload["searchBuilding"], false);
     assert_eq!(payload["searchInitialized"], true);
+    assert_eq!(payload["schemaVersion"], STATUS_SCHEMA_VERSION);
+    assert!(payload["collectedAtUnixMs"].as_u64().unwrap() > 0);
+    assert_eq!(payload["nodeCount"], 1);
+    assert_eq!(payload["edgeCount"], 1);
+    assert_eq!(payload["embeddingState"], "disabled");
+    assert_eq!(payload["embeddingPending"], 1);
+    assert!(payload["managedEmbeddingBytes"].is_null());
+    assert_eq!(state.http_counters.active.load(Ordering::Relaxed), 0);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/db/missing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(state.http_counters.active.load(Ordering::Relaxed), 0);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["schema_version"], STATUS_SCHEMA_VERSION);
+    assert!(payload["collected_at_unix_ms"].as_u64().unwrap() > 0);
+    assert_eq!(payload["server"]["counters_state"], "ready");
+    assert_eq!(payload["server"]["requests"], 3);
+    assert_eq!(payload["server"]["errors"], 1);
+    assert_eq!(payload["server"]["active"], 1);
+    assert!(payload["server"]["uptime_seconds"].is_u64());
+    assert_eq!(payload["database"]["state"], "ready");
+    assert_eq!(payload["database"]["nodes"], 1);
+    assert_eq!(payload["database"]["edges"], 1);
+    assert_eq!(state.http_counters.active.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
@@ -5352,6 +5449,155 @@ async fn demo_e2e_seed_query_and_persistence() {
         row[1], 1,
         "after reopen: star sector should persist: {commit_resp:?}"
     );
+}
+
+#[tokio::test]
+async fn demo_shortest_path_e2e_warms_result_cache() {
+    use axum::body::Body;
+    use axum::http::{header, Method, Request, StatusCode};
+    use copperdb_storage::{EdgeRecord, IndexDefinition, IndexEntityType, IndexKind, NodeRecord};
+    use tower::ServiceExt;
+
+    const SECTORS: usize = 20;
+    const STARS_PER_SECTOR: usize = 100;
+    const EXTRA_LINKS_PER_STAR: usize = 7;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    state
+        .db_manager
+        .create(
+            "d3_demo",
+            temp_dir
+                .path()
+                .join("d3_demo")
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .unwrap();
+    let engine = open_engine(&state, "d3_demo").unwrap();
+    engine
+        .storage()
+        .persist_index_definition(&IndexDefinition {
+            name: "star_id_idx".into(),
+            entity_type: IndexEntityType::Node,
+            kind: IndexKind::Range,
+            label: "Star".into(),
+            properties: vec!["starId".into()],
+        })
+        .unwrap();
+
+    let mut nodes = Vec::with_capacity(SECTORS * STARS_PER_SECTOR);
+    for sector in 0..SECTORS {
+        for star in 0..STARS_PER_SECTOR {
+            let star_id = format!("s{sector}-{star}");
+            nodes.push(NodeRecord {
+                id: format!("star:{star_id}"),
+                labels: vec!["Star".into()],
+                properties: BTreeMap::from([("starId".into(), serde_json::json!(star_id))]),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            });
+        }
+    }
+    engine.storage().put_node_records_batch(&nodes).unwrap();
+
+    let mut random_state = 0x00fe_edd3_u32;
+    let mut next_random = || {
+        random_state = random_state
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
+        (random_state as usize) % STARS_PER_SECTOR
+    };
+    let mut seen_links = std::collections::BTreeSet::new();
+    let mut edges = Vec::new();
+    let mut add_link = |from: String, to: String| {
+        if from == to {
+            return;
+        }
+        let key = if from < to {
+            format!("{from}|{to}")
+        } else {
+            format!("{to}|{from}")
+        };
+        if !seen_links.insert(key) {
+            return;
+        }
+        for (start, end) in [(&from, &to), (&to, &from)] {
+            let edge_id = format!("lane:{}", edges.len());
+            edges.push(EdgeRecord {
+                id: edge_id,
+                start_node: format!("star:{start}"),
+                end_node: format!("star:{end}"),
+                edge_type: "HYPERLANE".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            });
+        }
+    };
+    for sector in 0..SECTORS {
+        for star in 1..STARS_PER_SECTOR {
+            add_link(
+                format!("s{sector}-{}", star - 1),
+                format!("s{sector}-{star}"),
+            );
+        }
+        for star in 0..STARS_PER_SECTOR {
+            for _ in 0..EXTRA_LINKS_PER_STAR {
+                add_link(
+                    format!("s{sector}-{star}"),
+                    format!("s{sector}-{}", next_random()),
+                );
+            }
+        }
+    }
+    for sector in 0..(SECTORS - 1) {
+        for _ in 0..2 {
+            add_link(
+                format!("s{sector}-{}", next_random()),
+                format!("s{}-{}", sector + 1, next_random()),
+            );
+        }
+    }
+    engine.storage().put_edge_records_batch(&edges).unwrap();
+
+    let app = build_router(state);
+    let query = "MATCH (start:Star {starId: $startId}), (end:Star {starId: $endId}) MATCH p = shortestPath((start)-[:HYPERLANE*]-(end)) RETURN [n IN nodes(p) | n.starId] AS pathIds, length(p) AS hops LIMIT 1";
+    let request = || {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/db/d3_demo/tx/commit")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                demo_cypher_request(vec![(
+                    query,
+                    serde_json::json!({"startId": "s0-16", "endId": "s19-79"}),
+                )])
+                .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let warmup = app.clone().oneshot(request()).await.unwrap();
+    assert_eq!(warmup.status(), StatusCode::OK);
+    let started = Instant::now();
+    let response = app.oneshot(request()).await.unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        payload["errors"].as_array().unwrap().is_empty(),
+        "{payload:?}"
+    );
+    assert_eq!(payload["results"][0]["data"].as_array().unwrap().len(), 1);
+    assert_eq!(engine.cypher_result_cache_stats().hits, 1);
+    eprintln!("warmed d3_demo HTTP shortestPath completed in {elapsed:?}");
 }
 
 // ─── Database lifecycle e2e ─────────────────────────────────────────────

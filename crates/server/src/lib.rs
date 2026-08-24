@@ -62,8 +62,9 @@ use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -181,6 +182,8 @@ fn default_auth_storage_path() -> String {
 /// Application state shared across request handlers.
 #[derive(Clone)]
 pub struct AppState {
+    /// Monotonic process-local origin for operational uptime reporting.
+    pub started_at: Instant,
     pub db_name: String,
     pub runtime_config: Arc<RuntimeConfig>,
     /// Shared retention manager for policy/hold/erasure CRUD.
@@ -197,6 +200,8 @@ pub struct AppState {
     pub auth: AuthState,
     /// Shared metrics surface (ported from NornicDB observability catalog).
     pub telemetry: Arc<Telemetry>,
+    /// Owner-maintained HTTP lifecycle counters.
+    pub http_counters: Arc<HttpCounters>,
     /// Protocol-neutral ingress validation for headers, tokens, and URL query parameters.
     pub security: SecurityMiddleware,
     /// Route supported Cypher requests through the distributed coordinator when enabled.
@@ -207,6 +212,23 @@ pub struct AppState {
     /// from disk triggers LSM-tree recovery (WAL replay, manifest rebuild)
     /// which can take 400–600 ms.  Caching avoids this cost per query.
     pub engine_cache: Arc<RwLock<HashMap<String, Arc<GraphEngine>>>>,
+}
+
+#[derive(Default)]
+pub struct HttpCounters {
+    requests: AtomicU64,
+    errors: AtomicU64,
+    active: AtomicU64,
+}
+
+struct ActiveHttpRequest {
+    counters: Arc<HttpCounters>,
+}
+
+impl Drop for ActiveHttpRequest {
+    fn drop(&mut self) {
+        self.counters.active.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone)]
@@ -568,6 +590,7 @@ impl Default for AppState {
         );
         let _ = db_manager.create("copperdb", "./data/copperdb");
         Self {
+            started_at: Instant::now(),
             db_name: "copperdb".into(),
             runtime_config: Arc::new(RuntimeConfig::default()),
             retention: Arc::new(RwLock::new(RetentionManager::default())),
@@ -577,6 +600,7 @@ impl Default for AppState {
             db_manager,
             auth: AuthState::default(),
             telemetry: Arc::new(Telemetry::new()),
+            http_counters: Arc::new(HttpCounters::default()),
             security: SecurityMiddleware::with_config(SecurityConfig {
                 environment: env_get("COPPERDB_ENV", "development"),
                 allow_http: get_bool_loose("COPPERDB_ALLOW_HTTP", true),
@@ -593,6 +617,72 @@ impl Default for AppState {
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+}
+
+const STATUS_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Serialize)]
+struct ServerStatusSnapshot {
+    schema_version: u32,
+    collected_at_unix_ms: u64,
+    status: &'static str,
+    server: ServerRuntimeStatus,
+    database: DatabaseRuntimeStatus,
+}
+
+#[derive(Serialize)]
+struct ServerRuntimeStatus {
+    uptime_seconds: u64,
+    counters_state: &'static str,
+    requests: Option<u64>,
+    errors: Option<u64>,
+    active: Option<u64>,
+    version: String,
+    announcement: String,
+}
+
+#[derive(Serialize)]
+struct DatabaseRuntimeStatus {
+    state: &'static str,
+    nodes: Option<u64>,
+    edges: Option<u64>,
+    databases: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DatabaseInfoSnapshot {
+    schema_version: u32,
+    collected_at_unix_ms: u64,
+    name: String,
+    status: &'static str,
+    #[serde(rename = "default")]
+    is_default: bool,
+    #[serde(rename = "type")]
+    database_type: &'static str,
+    node_count: Option<u64>,
+    edge_count: Option<u64>,
+    node_storage_bytes: u64,
+    managed_embedding_bytes: Option<u64>,
+    embedding_state: String,
+    embedding_pending: Option<u64>,
+    search_ready: bool,
+    search_building: bool,
+    search_initialized: bool,
+}
+
+fn collected_at_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+fn graph_counts(engine: &GraphEngine) -> (Option<u64>, Option<u64>) {
+    (
+        engine.storage().total_node_count().ok(),
+        engine.storage().total_edge_count().ok(),
+    )
 }
 
 /// Build the application router.
@@ -715,12 +805,34 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         Arc::clone(&state),
         security_validation_middleware,
     ));
+    let router = router.layer(middleware::from_fn_with_state(
+        Arc::clone(&state),
+        http_metrics_middleware,
+    ));
 
     if normalized == "/" {
         router.with_state(state)
     } else {
         Router::new().nest(&normalized, router).with_state(state)
     }
+}
+
+async fn http_metrics_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    state.http_counters.requests.fetch_add(1, Ordering::Relaxed);
+    state.http_counters.active.fetch_add(1, Ordering::Relaxed);
+    let _active_request = ActiveHttpRequest {
+        counters: Arc::clone(&state.http_counters),
+    };
+
+    let response = next.run(request).await;
+    if response.status().is_client_error() || response.status().is_server_error() {
+        state.http_counters.errors.fetch_add(1, Ordering::Relaxed);
+    }
+    response
 }
 
 async fn security_validation_middleware(
@@ -978,22 +1090,28 @@ async fn status_handler(
     }
 
     let databases = state.db_manager.list();
-    Json(serde_json::json!({
-        "status": "running",
-        "server": {
-            "uptime_seconds": 0,
-            "requests": 0,
-            "errors": 0,
-            "active": 0,
-            "version": display_version(),
-            "announcement": server_announcement(),
+    let engine = state.engine_cache.read().get(&state.db_name).cloned();
+    let (nodes, edges) = engine.as_deref().map(graph_counts).unwrap_or((None, None));
+    Json(ServerStatusSnapshot {
+        schema_version: STATUS_SCHEMA_VERSION,
+        collected_at_unix_ms: collected_at_unix_ms(),
+        status: "running",
+        server: ServerRuntimeStatus {
+            uptime_seconds: state.started_at.elapsed().as_secs(),
+            counters_state: "ready",
+            requests: Some(state.http_counters.requests.load(Ordering::Relaxed)),
+            errors: Some(state.http_counters.errors.load(Ordering::Relaxed)),
+            active: Some(state.http_counters.active.load(Ordering::Relaxed)),
+            version: display_version(),
+            announcement: server_announcement(),
         },
-        "database": {
-            "nodes": 0,
-            "edges": 0,
-            "databases": databases.iter().filter(|db| db.name != "system").count(),
-        }
-    }))
+        database: DatabaseRuntimeStatus {
+            state: if engine.is_some() { "ready" } else { "unknown" },
+            nodes,
+            edges,
+            databases: databases.iter().filter(|db| db.name != "system").count(),
+        },
+    })
     .into_response()
 }
 
@@ -1716,6 +1834,8 @@ async fn database_info_handler(
     match state.db_manager.get(&database) {
         Some(db) => {
             let engine = open_engine(&state, &database).ok();
+            let (node_count, edge_count) =
+                engine.as_deref().map(graph_counts).unwrap_or((None, None));
             let storage_bytes = engine
                 .as_ref()
                 .map(|engine| engine.size_on_disk())
@@ -1734,19 +1854,33 @@ async fn database_info_handler(
                     })
                 });
             let search_ready = db.status == DatabaseStatus::Online && search_initialized;
-            Json(serde_json::json!({
-                "name": db.name,
-                "status": database_status_name(db.status),
-                "default": db.name == state.db_name,
-                "type": if db.name == "system" { "system" } else { "standard" },
-                "nodeCount": 0,
-                "edgeCount": 0,
-                "nodeStorageBytes": storage_bytes,
-                "managedEmbeddingBytes": 0,
-                "searchReady": search_ready,
-                "searchBuilding": false,
-                "searchInitialized": search_initialized,
-            }))
+            let embedding_status = engine
+                .as_ref()
+                .and_then(|engine| engine.embedding_runtime_status().ok());
+            Json(DatabaseInfoSnapshot {
+                schema_version: STATUS_SCHEMA_VERSION,
+                collected_at_unix_ms: collected_at_unix_ms(),
+                name: db.name.clone(),
+                status: database_status_name(db.status),
+                is_default: db.name == state.db_name,
+                database_type: if db.name == "system" {
+                    "system"
+                } else {
+                    "standard"
+                },
+                node_count,
+                edge_count,
+                node_storage_bytes: storage_bytes,
+                managed_embedding_bytes: None,
+                embedding_state: embedding_status
+                    .as_ref()
+                    .map(|status| format!("{:?}", status.state).to_ascii_lowercase())
+                    .unwrap_or_else(|| "unknown".into()),
+                embedding_pending: embedding_status.map(|status| status.pending),
+                search_ready,
+                search_building: false,
+                search_initialized,
+            })
             .into_response()
         }
         None => StatusCode::NOT_FOUND.into_response(),

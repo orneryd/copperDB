@@ -87,6 +87,7 @@ const META_LAYOUT_MANIFEST_KEY: &[u8] = b"layout_manifest";
 const META_ENCRYPTION_MANIFEST_KEY: &[u8] = b"encryption_manifest";
 const META_MVCC_STATE_KEY: &[u8] = b"mvcc_state";
 const META_WAL_APPLIED_SEQUENCE_KEY: &[u8] = b"wal_applied_sequence";
+const META_GLOBAL_NODE_COUNT_KEY: &[u8] = b"global_node_count";
 const META_GLOBAL_EDGE_COUNT_KEY: &[u8] = b"global_edge_count";
 const META_EDGE_TYPE_COUNT_PREFIX: &[u8] = b"edge_type_count/";
 const STORAGE_WAL_FILENAME: &str = "copperdb.wal.rmp";
@@ -2599,6 +2600,11 @@ impl StorageEngine {
         self.graph_query_cache.lock().clear();
     }
 
+    fn is_system_audit_node(node: &NodeRecord) -> bool {
+        node.id.starts_with("audit:event:")
+            && node.labels.iter().any(|label| label == "_AuditEvent")
+    }
+
     // --- Raw node operations ---
 
     /// Store a node's serialized properties.
@@ -2686,6 +2692,40 @@ impl StorageEngine {
             batch.put_node_record(node);
             Ok::<_, StorageError>(())
         })
+    }
+
+    /// Persist an append-only system audit record without treating it as a
+    /// graph mutation. The caller owns the reserved audit namespace and labels.
+    pub fn put_system_audit_record(&self, node: &NodeRecord) -> Result<(), StorageError> {
+        let wal_sequence = self.wal.append_transaction(
+            format!("audit-{}", self.wal.stats().next_seq),
+            vec![WALTransactionRecord {
+                op: "put_node".into(),
+                key: node.id.clone(),
+                payload: rmp_serde::to_vec(node)?,
+            }],
+        )?;
+        let mut batch = StorageBackendBatch::new(self.backend.as_ref());
+        batch.insert(
+            &self.nodes,
+            node.id.as_bytes(),
+            self.encode_record_bytes(rmp_serde::to_vec(node)?)?,
+        );
+        for label in &node.labels {
+            batch.insert(&self.indexes, label_index_key(label, &node.id), []);
+        }
+        batch.insert(
+            &self.meta,
+            META_WAL_APPLIED_SEQUENCE_KEY,
+            rmp_serde::to_vec(&wal_sequence.seq)?,
+        );
+        batch.commit()?;
+        if self.wal.sync_mode() == WALSyncMode::Immediate {
+            self.backend.flush()?;
+        } else if self.wal.batch_sync_due() {
+            self.sync_wal_if_due()?;
+        }
+        Ok(())
     }
 
     pub fn put_node_records_batch(&self, nodes: &[NodeRecord]) -> Result<(), StorageError> {
@@ -4274,6 +4314,16 @@ impl StorageEngine {
         Ok(self.nodes.scan_prefix(prefix.as_bytes()).count() as u64)
     }
 
+    /// Count all nodes without deserializing their records.
+    ///
+    /// Databases created before the counter was introduced fall back to a scan.
+    pub fn total_node_count(&self) -> Result<u64, StorageError> {
+        match self.meta.fjall_get(META_GLOBAL_NODE_COUNT_KEY)? {
+            Some(raw) => Ok(rmp_serde::from_slice(raw.as_ref())?),
+            None => Ok(self.nodes.fjall_iter().count() as u64),
+        }
+    }
+
     pub fn put_edge_record(&self, edge: &EdgeRecord) -> Result<(), StorageError> {
         self.batch_write(|batch| {
             batch.put_edge_record(edge);
@@ -4580,6 +4630,38 @@ impl StorageEngine {
             }
         }
         Ok(streamed)
+    }
+
+    /// Return a stable snapshot of all edges, optionally restricted to one
+    /// relationship type. Snapshots are invalidated by every graph mutation.
+    pub fn bfs_cached_edges(
+        &self,
+        edge_type: Option<&str>,
+    ) -> Result<Vec<EdgeRecord>, StorageError> {
+        let cache_key = match edge_type {
+            Some(edge_type) => format!("\0bfs/edge-type/{edge_type}"),
+            None => "\0bfs/all-edges".into(),
+        };
+        if let Some(cached) = self.graph_query_cache.lock().get(&cache_key) {
+            return Ok(cached);
+        }
+
+        let mut edges = Vec::new();
+        match edge_type {
+            Some(edge_type) => self.bfs_stream_edges_by_type(edge_type, |edge| {
+                edges.push(edge);
+                Ok(())
+            })?,
+            None => self.bfs_stream_edges(|edge| {
+                edges.push(edge);
+                Ok(())
+            })?,
+        };
+        edges.sort_by(|left, right| left.id.cmp(&right.id));
+        self.graph_query_cache
+            .lock()
+            .insert(cache_key, edges.clone());
+        Ok(edges)
     }
 
     pub fn get_edges_from_node(&self, node_id: &str) -> Result<Vec<EdgeRecord>, StorageError> {
@@ -7942,7 +8024,9 @@ impl<'a> BatchWriter<'a> {
             }
         }
         for (key, delta) in counter_deltas {
-            let current = if key.as_slice() == META_GLOBAL_EDGE_COUNT_KEY {
+            let current = if key.as_slice() == META_GLOBAL_NODE_COUNT_KEY {
+                self.engine.total_node_count()?
+            } else if key.as_slice() == META_GLOBAL_EDGE_COUNT_KEY {
                 self.engine.total_edge_count()?
             } else if let Some(edge_type) = edge_type_from_count_key(&key)? {
                 self.engine.edge_type_count(&edge_type)?
@@ -7986,10 +8070,18 @@ impl<'a> BatchWriter<'a> {
                 .knowledge_policy_schema_generation
                 .fetch_add(1, Ordering::Release);
         }
-        if !nodes.is_empty() || !edges.is_empty() {
+        let has_graph_node_changes = nodes.values().any(|(old, new)| {
+            old.as_ref()
+                .or(new.as_ref())
+                .is_none_or(|node| !StorageEngine::is_system_audit_node(node))
+        });
+        let has_graph_mutation = has_graph_node_changes || !edges.is_empty();
+        if has_graph_mutation {
             self.engine.invalidate_graph_caches();
+        } else if !nodes.is_empty() {
+            self.engine.graph_node_cache.lock().clear();
         }
-        if !nodes.is_empty() {
+        if has_graph_node_changes {
             self.engine.fulltext_runtime_indexes.lock().clear();
         }
         if !indexes.is_empty() {
@@ -8008,6 +8100,13 @@ impl<'a> BatchWriter<'a> {
         self.engine.mvcc.publish_persisted_state(staged_mvcc_state);
 
         for (id, (old, new)) in node_changes {
+            if old
+                .as_ref()
+                .or(new.as_ref())
+                .is_some_and(StorageEngine::is_system_audit_node)
+            {
+                continue;
+            }
             match (old, new) {
                 (None, Some(node)) => self.engine.notify_node_created(&node),
                 (Some(_), Some(node)) => self.engine.notify_node_updated(&node),
@@ -8023,7 +8122,9 @@ impl<'a> BatchWriter<'a> {
                 (None, None) => {}
             }
         }
-        self.engine.notify_commit_completed();
+        if has_graph_mutation || !indexes.is_empty() || has_knowledge_policy_change {
+            self.engine.notify_commit_completed();
+        }
         Ok(())
     }
 
@@ -8224,6 +8325,9 @@ impl<'a> BatchWriter<'a> {
 }
 
 fn stage_node_counter_deltas(deltas: &mut HashMap<Vec<u8>, i64>, node: &NodeRecord, delta: i64) {
+    *deltas
+        .entry(META_GLOBAL_NODE_COUNT_KEY.to_vec())
+        .or_default() += delta;
     let Some(namespace) = namespace_from_str(&node.id) else {
         return;
     };

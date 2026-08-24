@@ -1234,12 +1234,35 @@ fn engine_records_durable_query_audit_events() {
     db.execute("MATCH (n:Audit) RETURN n", Default::default())
         .unwrap();
 
-    let events = db.audit_log().events().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let events = loop {
+        let events = db.audit_log().events().unwrap();
+        if events.len() == 2 || std::time::Instant::now() >= deadline {
+            break events;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].event_type, EventType::DataCreate);
     assert_eq!(events[1].event_type, EventType::DataRead);
     assert_eq!(events[1].resource.as_deref(), Some("cypher_query"));
     assert!(db.audit_log().verify_chain().unwrap().valid);
+}
+
+#[test]
+fn engine_invalidates_cached_read_results_after_graph_mutation() {
+    let db = CopperDb::open_temporary().unwrap();
+    db.execute("CREATE (:Person {name: 'first'})", Default::default())
+        .unwrap();
+
+    let query = "MATCH (n:Person) RETURN n";
+    assert_eq!(db.execute(query, Default::default()).unwrap().rows.len(), 1);
+    assert_eq!(db.execute(query, Default::default()).unwrap().rows.len(), 1);
+    assert_eq!(db.cypher_result_cache_stats().hits, 1);
+
+    db.execute("CREATE (:Person {name: 'second'})", Default::default())
+        .unwrap();
+    assert_eq!(db.execute(query, Default::default()).unwrap().rows.len(), 2);
 }
 
 #[test]

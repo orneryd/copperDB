@@ -62,6 +62,10 @@ impl CopperDb {
         self.ranked_search_cache.set_enabled(enabled);
     }
 
+    pub fn cypher_result_cache_stats(&self) -> copperdb_cache::CacheStats {
+        self.cypher_result_cache.stats()
+    }
+
     /// Return all currently configured index definitions.
     pub fn list_index_definitions(
         &self,
@@ -805,6 +809,14 @@ impl CopperDb {
             Some(vector_indexes.artifact_refresh_callback(&storage)),
             vector_indexes.query_callback(),
         );
+        let cypher_result_cache = Arc::new(QueryResultCache::new(
+            1024,
+            Some(std::time::Duration::from_secs(300)),
+        ));
+        let invalidated_cypher_result_cache = Arc::clone(&cypher_result_cache);
+        storage.on_commit_completed(Arc::new(move || {
+            invalidated_cypher_result_cache.invalidate();
+        }));
         vector_indexes.enable_persistence(&storage);
         let audit_log = Arc::new(AuditLog::new(Arc::clone(&storage), AuditConfig::default())?);
         let compliance = Arc::new(ComplianceManager::new(Arc::clone(&storage)));
@@ -819,6 +831,7 @@ impl CopperDb {
                 1024,
                 Some(std::time::Duration::from_secs(300)),
             )),
+            cypher_result_cache,
             ranked_search_cache: Arc::new(QueryCache::new(
                 1024,
                 Some(std::time::Duration::from_secs(300)),
@@ -903,6 +916,39 @@ impl CopperDb {
         }
         let t_compliance = t1.elapsed();
 
+        let mut normalized_roles = roles.to_vec();
+        normalized_roles.sort();
+        normalized_roles.dedup();
+        let cache_query = format!(
+            "{cypher}\n/* copperdb roles: {} */",
+            normalized_roles.join(",")
+        );
+        let cacheable_read = !is_mutating_query(&parsed.query_type)
+            && is_cacheable_read_query(cypher)
+            && self
+                .eval
+                .has_no_knowledge_policies()
+                .map_err(CopperDbError::from)?;
+        let cache_params = params
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        if cacheable_read {
+            if let Some(mut cached) = self.cypher_result_cache.get(&cache_query, &cache_params) {
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                cached.stats.execution_time_ms = elapsed_ms;
+                self.record_query_audit(
+                    cypher,
+                    query_action(&parsed.query_type),
+                    true,
+                    None,
+                    Some(hash),
+                    elapsed_ms,
+                )?;
+                return Ok(cached);
+            }
+        }
+
         let t2 = std::time::Instant::now();
         let pattern_info = detect_query_pattern(cypher);
         let (compound_shape, compound_ok) = match_compound_query_shape(cypher);
@@ -963,11 +1009,16 @@ impl CopperDb {
             "query phase breakdown"
         );
 
-        Ok(QueryResult {
+        let result = QueryResult {
             columns: eval_result.columns,
             rows: eval_result.rows,
             stats,
-        })
+        };
+        if cacheable_read {
+            self.cypher_result_cache
+                .put(&cache_query, &cache_params, result.clone());
+        }
+        Ok(result)
     }
 
     pub fn begin_transaction(&self, config: &SessionConfig) -> Result<uuid::Uuid, CopperDbError> {
@@ -1627,6 +1678,20 @@ impl CopperDb {
         event
             .metadata
             .insert("elapsed_ms".into(), elapsed_ms.to_string());
+        if action == "READ" && success {
+            let audit_log = Arc::clone(&self.audit_log);
+            let deferred_event = event.clone();
+            let spawn_result = std::thread::Builder::new()
+                .name("copperdb-audit-read".into())
+                .spawn(move || {
+                    if let Err(error) = audit_log.record(deferred_event) {
+                        tracing::warn!(%error, "failed to persist deferred read audit event");
+                    }
+                });
+            if spawn_result.is_ok() {
+                return Ok(());
+            }
+        }
         self.audit_log.record(event)?;
         Ok(())
     }

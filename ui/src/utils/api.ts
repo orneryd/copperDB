@@ -31,16 +31,16 @@ export interface DatabaseStats {
   status: string;
   server: {
     uptime_seconds: number;
-    requests: number;
-    errors: number;
-    active: number;
+    requests: number | null;
+    errors: number | null;
+    active: number | null;
     version: string;
     commit?: string;
     build_time?: string;
   };
   database: {
-    nodes: number;
-    edges: number;
+    nodes: number | null;
+    edges: number | null;
   };
 }
 
@@ -120,10 +120,10 @@ export interface DatabaseInfo {
   default: boolean;
   type?: string; // "standard", "composite", "system"
   constituents?: ConstituentInfo[]; // only for composite databases
-  nodeCount: number;
-  edgeCount: number;
+  nodeCount: number | null;
+  edgeCount: number | null;
   nodeStorageBytes?: number;
-  managedEmbeddingBytes?: number;
+  managedEmbeddingBytes?: number | null;
   searchReady?: boolean;
   searchBuilding?: boolean;
   searchInitialized?: boolean;
@@ -590,7 +590,9 @@ class CopperDBClient {
   // runCypherOverBolt drives a single Cypher statement through the
   // Bolt-over-WS driver and reshapes the result into the same
   // CypherResponse format the UI's parseCypherRows / display layer
-  // already consumes. This replaces the HTTP /tx/commit path.
+  // already consumes. Browser calls use the HTTP transaction path below
+  // because browser WebSocket authentication cannot forward HttpOnly
+  // login cookies through Bolt's scheme=none handshake.
   //
   // Auth: the WS upgrade carries the same-origin copperdb_token cookie
   // (browsers attach automatically) or an Authorization: Bearer header
@@ -839,7 +841,9 @@ class CopperDBClient {
   }
 
   async getStatus(): Promise<DatabaseStats> {
-    const res = await fetch(joinBasePath(BASE_PATH, "/status"));
+    const res = await fetch(joinBasePath(BASE_PATH, "/status"), {
+      credentials: "include",
+    });
     return await res.json();
   }
 
@@ -911,7 +915,7 @@ class CopperDBClient {
       database != null && database !== ""
         ? database
         : await this.getDefaultDatabase();
-    return this.runCypherOverBolt(dbName, statement, parameters);
+    return this.runCypherOverHttp(dbName, statement, parameters);
   }
 
   async getResolvedDatabaseName(database?: string): Promise<string> {
@@ -962,7 +966,7 @@ class CopperDBClient {
     statement: string,
     parameters?: Record<string, unknown>,
   ): Promise<CypherResponse> {
-    return this.runCypherOverBolt(dbName, statement, parameters);
+    return this.runCypherOverHttp(dbName, statement, parameters);
   }
 
   async executeSystemCypher(
