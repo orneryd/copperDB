@@ -7,6 +7,7 @@ use copperdb_search::{
 };
 use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind, NodeRecord, StorageEngine};
 use copperdb_topology::{FabricGlobalId, PlacementKey};
+use copperdb_util::RequestContext;
 use criterion::{
     black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
 };
@@ -30,6 +31,8 @@ struct Workload {
     placement: PlacementKey,
     hybrid_query: SearchQuery,
     high_limit_hybrid_query: SearchQuery,
+    filtered_hybrid_filters: BTreeMap<String, Vec<String>>,
+    request_context: RequestContext,
     lexical_query: SearchQuery,
     semantic_query: SearchQuery,
     lexical_batch: RrfSearchBatch,
@@ -96,6 +99,12 @@ impl Workload {
                                 "where are my prescriptions and refill history".into(),
                             ),
                         ),
+                        (
+                            "cohort".into(),
+                            serde_json::Value::String(
+                                if position % 2 == 0 { "keep" } else { "discard" }.into(),
+                            ),
+                        ),
                     ]),
                     named_embeddings: BTreeMap::new(),
                     chunk_embeddings: vec![profile_vector(position)],
@@ -130,6 +139,8 @@ impl Workload {
             vector: profile_query_vector(),
             k: HIGH_LIMIT,
         };
+        let filtered_hybrid_filters = BTreeMap::from([("cohort".into(), vec!["keep".into()])]);
+        let request_context = RequestContext::detached();
         let lexical_query = SearchQuery::FullText {
             query: QUERY.into(),
             fields: Vec::new(),
@@ -147,6 +158,26 @@ impl Workload {
         assert_eq!(warmup.source, "hybrid");
         assert!(warmup.hits.iter().any(|hit| hit.source == "hybrid"));
         assert!(!warmup.hits.is_empty());
+        let filtered_warmup = db
+            .search_fabric_ranked_outcome_locally_scoped_with_context_and_roles_and_indexes(
+                &request_context,
+                &placement,
+                &hybrid_query,
+                &[],
+                &filtered_hybrid_filters,
+                &["admin".into()],
+                &[],
+            )
+            .expect("benchmark filtered hybrid warmup search must succeed");
+        assert_eq!(filtered_warmup.output_hits, LIMIT);
+        assert!(filtered_warmup.filtered_hits > 0);
+        assert!(filtered_warmup.results.iter().all(|hit| {
+            hit.global_id
+                .local_id
+                .strip_prefix("n-")
+                .and_then(|position| position.parse::<usize>().ok())
+                .is_some_and(|position| position % 2 == 0)
+        }));
         let lexical_batch = db
             .search_fabric_ranked_batch_locally(&placement, &lexical_query)
             .expect("benchmark lexical warmup search must succeed");
@@ -176,6 +207,8 @@ impl Workload {
             placement,
             hybrid_query,
             high_limit_hybrid_query,
+            filtered_hybrid_filters,
+            request_context,
             lexical_query,
             semantic_query,
             lexical_batch,
@@ -291,6 +324,31 @@ fn bench_semantic_hybrid(criterion: &mut Criterion) {
                             black_box(&workload.high_limit_hybrid_query),
                         )
                         .expect("benchmark high-limit hybrid search must succeed"),
+                );
+            });
+        },
+    );
+    group.bench_with_input(
+        BenchmarkId::new(
+            "rrf_hybrid_filtered_50pct",
+            format!("{NODE_COUNT}-d{DIMENSIONS}-k{LIMIT}"),
+        ),
+        &workload,
+        |bench, workload| {
+            bench.iter(|| {
+                black_box(
+                    workload
+                        .db
+                        .search_fabric_ranked_outcome_locally_scoped_with_context_and_roles_and_indexes(
+                            &workload.request_context,
+                            &workload.placement,
+                            black_box(&workload.hybrid_query),
+                            &[],
+                            black_box(&workload.filtered_hybrid_filters),
+                            &["admin".into()],
+                            &[],
+                        )
+                        .expect("benchmark filtered hybrid search must succeed"),
                 );
             });
         },

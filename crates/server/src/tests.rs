@@ -531,7 +531,8 @@ async fn copperdb_search_combines_text_and_direct_vector_when_embedding_is_disab
                 .body(Body::from(
                     serde_json::json!({
                         "query": "graph",
-                        "vector": [1.0, 0.0, 0.0]
+                        "vector": [1.0, 0.0, 0.0],
+                        "include_diagnostics": true
                     })
                     .to_string(),
                 ))
@@ -545,10 +546,26 @@ async fn copperdb_search_combines_text_and_direct_vector_when_embedding_is_disab
         .await
         .unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(payload.as_array().unwrap().len(), 1);
-    assert_eq!(payload[0]["node"]["id"], "document:hybrid");
-    assert_eq!(payload[0]["bm25_rank"], 1);
-    assert_eq!(payload[0]["vector_rank"], 1);
+    assert_eq!(payload["results"].as_array().unwrap().len(), 1);
+    assert_eq!(payload["results"][0]["node"]["id"], "document:hybrid");
+    assert_eq!(payload["results"][0]["bm25_rank"], 1);
+    assert_eq!(payload["results"][0]["vector_rank"], 1);
+    assert_eq!(payload["diagnostics"]["status"], "success");
+    assert_eq!(payload["diagnostics"]["search_method"], "hybrid");
+    assert_eq!(payload["diagnostics"]["ready"], true);
+    assert_eq!(
+        payload["diagnostics"]["sources"],
+        serde_json::json!(["lexical", "semantic"])
+    );
+    assert_eq!(payload["diagnostics"]["input_candidates"], 2);
+    assert_eq!(payload["diagnostics"]["fused_candidates"], 1);
+    assert_eq!(payload["diagnostics"]["output_candidates"], 1);
+    assert_eq!(payload["diagnostics"]["filtered_candidates"], 0);
+    assert_eq!(payload["diagnostics"]["returned"], 1);
+    assert_eq!(payload["diagnostics"]["partial"], false);
+    for stage in ["embedding_ms", "index_ms", "hydration_ms"] {
+        assert!(payload["diagnostics"]["timings"][stage].is_u64());
+    }
 
     let semantic_response = build_router(Arc::new(state.clone()))
         .oneshot(
@@ -1104,8 +1121,62 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
     assert_eq!(payload["results"][0]["node"]["labels"][0], "Document");
     assert_eq!(payload["results"][0]["vector_rank"], 0);
     assert_eq!(payload["results"][0]["bm25_rank"], 1);
+    assert_eq!(payload["diagnostics"]["status"], "success");
+    assert_eq!(payload["diagnostics"]["search_method"], "bm25");
+    assert_eq!(payload["diagnostics"]["ready"], true);
+    assert_eq!(
+        payload["diagnostics"]["sources"],
+        serde_json::json!(["lexical"])
+    );
     assert_eq!(payload["diagnostics"]["input_candidates"], 1);
+    assert_eq!(payload["diagnostics"]["fused_candidates"], 1);
+    assert_eq!(payload["diagnostics"]["output_candidates"], 1);
     assert_eq!(payload["diagnostics"]["filtered_candidates"], 2);
+    assert_eq!(payload["diagnostics"]["returned"], 1);
+    assert_eq!(payload["diagnostics"]["partial"], false);
+    for stage in ["embedding_ms", "index_ms", "hydration_ms"] {
+        assert!(payload["diagnostics"]["timings"][stage].is_u64());
+    }
+
+    let no_results_response = build_router(Arc::new(state.clone()))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/copperdb/search")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "database": "copper",
+                        "query": "absent",
+                        "labels": ["Document"],
+                        "include_diagnostics": true
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(no_results_response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(no_results_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(payload["results"].as_array().unwrap().is_empty());
+    assert_eq!(payload["diagnostics"]["status"], "no_results");
+    assert_eq!(payload["diagnostics"]["search_method"], "bm25");
+    assert_eq!(payload["diagnostics"]["ready"], true);
+    assert_eq!(
+        payload["diagnostics"]["sources"],
+        serde_json::json!(["lexical"])
+    );
+    assert_eq!(payload["diagnostics"]["input_candidates"], 0);
+    assert_eq!(payload["diagnostics"]["fused_candidates"], 0);
+    assert_eq!(payload["diagnostics"]["output_candidates"], 0);
+    assert_eq!(payload["diagnostics"]["filtered_candidates"], 0);
+    assert_eq!(payload["diagnostics"]["returned"], 0);
+    assert_eq!(payload["diagnostics"]["partial"], false);
 
     let selected_index_response = build_router(Arc::new(state.clone()))
         .oneshot(
@@ -1173,6 +1244,13 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
             copperdb_otel::MetricSample {
                 labels: vec![
                     ("mode".to_string(), "bm25".to_string()),
+                    ("result".to_string(), "no_results".to_string()),
+                ],
+                value: copperdb_otel::MetricValue::Counter(1.0),
+            },
+            copperdb_otel::MetricSample {
+                labels: vec![
+                    ("mode".to_string(), "bm25".to_string()),
                     ("result".to_string(), "success".to_string()),
                 ],
                 value: copperdb_otel::MetricValue::Counter(3.0),
@@ -1208,7 +1286,7 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
                 labels,
                 value: copperdb_otel::MetricValue::Histogram(values),
             } if labels.iter().any(|(key, value)| key == "mode" && value == "bm25")
-                && values.len() == 3
+                && values.len() == 4
         )
     }));
 }

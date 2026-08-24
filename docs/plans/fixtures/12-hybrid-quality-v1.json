@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "dimensions": 8,
+  "limit": 5,
+  "runs": 5,
+  "minimum_ndcg_at_k": 0.95,
+  "documents": [
+    {
+      "id": "atlas-3",
+      "title": "copper atlas copper atlas copper atlas",
+      "content": "copper atlas",
+      "vector": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    },
+    {
+      "id": "atlas-2",
+      "title": "copper atlas copper",
+      "content": "atlas",
+      "vector": [0.9, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    },
+    {
+      "id": "atlas-1",
+      "title": "copper atlas",
+      "content": "reference",
+      "vector": [0.7, 0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    },
+    {
+      "id": "traversal-3",
+      "title": "graph traversal graph traversal graph traversal",
+      "content": "graph traversal",
+      "vector": [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    },
+    {
+      "id": "traversal-2",
+      "title": "graph traversal graph",
+      "content": "traversal",
+      "vector": [0.0, 0.0, 0.9, 0.3, 0.0, 0.0, 0.0, 0.0]
+    },
+    {
+      "id": "traversal-1",
+      "title": "graph traversal",
+      "content": "reference",
+      "vector": [0.0, 0.0, 0.7, 0.7, 0.0, 0.0, 0.0, 0.0]
+    },
+    {
+      "id": "audit-3",
+      "title": "policy audit policy audit policy audit",
+      "content": "policy audit",
+      "vector": [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    },
+    {
+      "id": "audit-2",
+      "title": "policy audit policy",
+      "content": "audit",
+      "vector": [0.0, 0.0, 0.0, 0.0, 0.9, 0.3, 0.0, 0.0]
+    },
+    {
+      "id": "audit-1",
+      "title": "policy audit",
+      "content": "reference",
+      "vector": [0.0, 0.0, 0.0, 0.0, 0.7, 0.7, 0.0, 0.0]
+    },
+    {
+      "id": "distractor-storage",
+      "title": "durable storage compaction",
+      "content": "transaction logs and snapshots",
+      "vector": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    },
+    {
+      "id": "distractor-security",
+      "title": "encryption key rotation",
+      "content": "cipher suites and key material",
+      "vector": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.8, 0.6]
+    },
+    {
+      "id": "distractor-replication",
+      "title": "replica placement topology",
+      "content": "regions peers and quorum",
+      "vector": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.6, 0.8]
+    }
+  ],
+  "queries": [
+    {
+      "name": "atlas",
+      "text": "copper atlas",
+      "vector": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+      "relevance": {"atlas-3": 3, "atlas-2": 2, "atlas-1": 1}
+    },
+    {
+      "name": "traversal",
+      "text": "graph traversal",
+      "vector": [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+      "relevance": {"traversal-3": 3, "traversal-2": 2, "traversal-1": 1}
+    },
+    {
+      "name": "audit",
+      "text": "policy audit",
+      "vector": [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+      "relevance": {"audit-3": 3, "audit-2": 2, "audit-1": 1}
+    }
+  ]
+}

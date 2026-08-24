@@ -6,6 +6,9 @@ mod core;
 #[path = "tests/distributed_search.rs"]
 mod distributed_search;
 
+#[path = "tests/hybrid_quality.rs"]
+mod hybrid_quality;
+
 #[path = "tests/distributed_paths.rs"]
 mod distributed_paths;
 
