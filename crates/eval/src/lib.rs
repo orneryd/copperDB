@@ -226,8 +226,7 @@ impl KnowledgePolicyInspection {
 
 /// The query executor.
 type KnowledgePolicyResolverCache = Arc<Mutex<Option<(u64, Arc<Resolver>)>>>;
-type BfsAdjacencyMap = HashMap<String, Vec<EdgeRecord>>;
-type BfsAdjacencyCache = Arc<Mutex<HashMap<String, Arc<BfsAdjacencyMap>>>>;
+type BfsAdjacencyMap = HashMap<String, Vec<Arc<EdgeRecord>>>;
 
 pub struct EvalEngine {
     storage: Arc<StorageEngine>,
@@ -245,7 +244,6 @@ pub struct EvalEngine {
     fulltext_query_cache:
         Arc<Mutex<HashMap<(u64, String), copperdb_search::lucene::FulltextQuery>>>,
     knowledge_policy_resolver_cache: KnowledgePolicyResolverCache,
-    bfs_adjacency_cache: BfsAdjacencyCache,
     access_flusher: Arc<AccessFlusher>,
     hot_path_trace: Arc<HotPathTraceState>,
 }

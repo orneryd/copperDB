@@ -84,6 +84,7 @@ pub struct AuthState {
     pub cookie_name: String,
     pub jwt_secret: String,
     pub auth_storage_path: String,
+    authenticator: Arc<Authenticator>,
 }
 
 impl Default for AuthState {
@@ -120,7 +121,25 @@ impl AuthState {
         password: String,
         jwt_secret: String,
     ) -> Result<Self, AuthError> {
-        let state = Self {
+        let auth_config = AuthConfig {
+            jwt_secret: jwt_secret.clone().into_bytes(),
+            token_expiry: Some(Duration::from_secs(7 * 24 * 60 * 60)),
+            default_admin_username: username.clone(),
+            security_enabled,
+            ..Default::default()
+        };
+        let storage = Arc::new(StorageEngine::open(&auth_storage_path)?);
+        let authenticator = Arc::new(Authenticator::new(auth_config, storage)?);
+        authenticator.seed_builtin_access_if_empty()?;
+        if security_enabled
+            && matches!(
+                authenticator.get_user(&username),
+                Err(AuthError::UserNotFound(_))
+            )
+        {
+            authenticator.create_user(&username, &password, vec!["admin".into()])?;
+        }
+        Ok(Self {
             security_enabled,
             dev_login_enabled,
             username,
@@ -128,34 +147,13 @@ impl AuthState {
             cookie_name: "nornicdb_token".into(),
             jwt_secret,
             auth_storage_path,
-        };
-        let authenticator = state.open_authenticator()?;
-        authenticator.seed_builtin_access_if_empty()?;
-        if state.security_enabled
-            && matches!(
-                authenticator.get_user(&state.username),
-                Err(AuthError::UserNotFound(_))
-            )
-        {
-            authenticator.create_user(&state.username, &state.password, vec!["admin".into()])?;
-        }
-        Ok(state)
-    }
-
-    fn auth_config(&self) -> AuthConfig {
-        AuthConfig {
-            jwt_secret: self.jwt_secret.clone().into_bytes(),
-            token_expiry: Some(Duration::from_secs(7 * 24 * 60 * 60)),
-            default_admin_username: self.username.clone(),
-            security_enabled: self.security_enabled,
-            ..Default::default()
-        }
+            authenticator,
+        })
     }
 
     #[allow(clippy::arc_with_non_send_sync)]
-    fn open_authenticator(&self) -> Result<Authenticator, AuthError> {
-        let storage = Arc::new(StorageEngine::open(&self.auth_storage_path)?);
-        Authenticator::new(self.auth_config(), storage)
+    fn open_authenticator(&self) -> Result<Arc<Authenticator>, AuthError> {
+        Ok(Arc::clone(&self.authenticator))
     }
 }
 
@@ -584,6 +582,12 @@ pub fn build_local_nornic_replica_service(state: Arc<AppState>) -> NornicReplica
 
 impl Default for AppState {
     fn default() -> Self {
+        Self::with_auth(AuthState::default())
+    }
+}
+
+impl AppState {
+    pub fn with_auth(auth: AuthState) -> Self {
         let db_manager = Arc::new(
             DatabaseManager::open("./data/copperdb-multidb")
                 .unwrap_or_else(|_| DatabaseManager::new()),
@@ -598,7 +602,7 @@ impl Default for AppState {
             base_path: "/".into(),
             headless: false,
             db_manager,
-            auth: AuthState::default(),
+            auth,
             telemetry: Arc::new(Telemetry::new()),
             http_counters: Arc::new(HttpCounters::default()),
             security: SecurityMiddleware::with_config(SecurityConfig {

@@ -296,16 +296,14 @@ async fn main() -> Result<()> {
     telemetry.seed_zero_catalog_metrics();
     let auth = copperdb_server::AuthState::from_runtime_config(startup.runtime_config.as_ref())
         .context("failed to initialize configured authentication")?;
-    let state = Arc::new(AppState {
-        db_name: startup.db_name.clone(),
-        runtime_config: Arc::clone(&startup.runtime_config),
-        static_dir: startup.static_dir.clone(),
-        base_path: startup.base_path.clone(),
-        headless: startup.headless,
-        telemetry: Arc::clone(&telemetry),
-        auth,
-        ..Default::default()
-    });
+    let mut state = AppState::with_auth(auth);
+    state.db_name = startup.db_name.clone();
+    state.runtime_config = Arc::clone(&startup.runtime_config);
+    state.static_dir = startup.static_dir.clone();
+    state.base_path = startup.base_path.clone();
+    state.headless = startup.headless;
+    state.telemetry = Arc::clone(&telemetry);
+    let state = Arc::new(state);
     if state.db_manager.get(&startup.db_name).is_none() {
         let storage_path = state.db_manager.default_storage_path(&startup.db_name);
         state

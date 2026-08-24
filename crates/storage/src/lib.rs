@@ -117,6 +117,7 @@ const META_KP_ACCESS_METADATA_PREFIX: &[u8] = b"kp_access_metadata/";
 const GRAPH_NODE_CACHE_CAPACITY: usize = 16_384;
 const GRAPH_EDGE_CACHE_CAPACITY: usize = 32_768;
 const GRAPH_QUERY_CACHE_CAPACITY: usize = 16_384;
+const BFS_ADJACENCY_CACHE_CAPACITY: usize = 16;
 const IDX_LABEL_PREFIX: &str = "label_nodes";
 const IDX_EDGE_TYPE_PREFIX: &str = "edge_type";
 const IDX_EDGE_START_PREFIX: &str = "edge_start";
@@ -262,6 +263,9 @@ pub enum EdgeAdjacencyDirection {
     Incoming,
     Both,
 }
+
+pub type BfsAdjacencyMap = HashMap<String, Vec<Arc<EdgeRecord>>>;
+type BfsEdgeSnapshot = Arc<Vec<Arc<EdgeRecord>>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WALEntry {
@@ -1743,6 +1747,8 @@ pub struct StorageEngine {
     graph_node_cache: Mutex<BoundedCache<String, Option<NodeRecord>>>,
     graph_edge_cache: Mutex<BoundedCache<String, Option<EdgeRecord>>>,
     graph_query_cache: Mutex<BoundedCache<String, Vec<EdgeRecord>>>,
+    bfs_edge_cache: Mutex<BoundedCache<String, BfsEdgeSnapshot>>,
+    bfs_adjacency_cache: Mutex<BoundedCache<String, Arc<BfsAdjacencyMap>>>,
     schema_manager: RwLock<Arc<SchemaManager>>,
     index_schema_generation: AtomicU64,
     knowledge_policy_schema_generation: AtomicU64,
@@ -2298,6 +2304,8 @@ impl StorageEngine {
             graph_node_cache: Mutex::new(BoundedCache::new(GRAPH_NODE_CACHE_CAPACITY)),
             graph_edge_cache: Mutex::new(BoundedCache::new(GRAPH_EDGE_CACHE_CAPACITY)),
             graph_query_cache: Mutex::new(BoundedCache::new(GRAPH_QUERY_CACHE_CAPACITY)),
+            bfs_edge_cache: Mutex::new(BoundedCache::new(BFS_ADJACENCY_CACHE_CAPACITY)),
+            bfs_adjacency_cache: Mutex::new(BoundedCache::new(BFS_ADJACENCY_CACHE_CAPACITY)),
             schema_manager: RwLock::new(Arc::new(SchemaManager::new())),
             index_schema_generation: AtomicU64::new(0),
             knowledge_policy_schema_generation: AtomicU64::new(0),
@@ -2598,6 +2606,8 @@ impl StorageEngine {
         self.graph_node_cache.lock().clear();
         self.graph_edge_cache.lock().clear();
         self.graph_query_cache.lock().clear();
+        self.bfs_edge_cache.lock().clear();
+        self.bfs_adjacency_cache.lock().clear();
     }
 
     fn is_system_audit_node(node: &NodeRecord) -> bool {
@@ -3436,6 +3446,8 @@ impl StorageEngine {
             self.meta.fjall_insert(tombstone_key(key), [])?;
         }
         self.graph_query_cache.lock().clear();
+        self.bfs_edge_cache.lock().clear();
+        self.bfs_adjacency_cache.lock().clear();
         Ok(())
     }
 
@@ -3446,6 +3458,8 @@ impl StorageEngine {
             self.meta.fjall_remove(tombstone_key(key))?;
         }
         self.graph_query_cache.lock().clear();
+        self.bfs_edge_cache.lock().clear();
+        self.bfs_adjacency_cache.lock().clear();
         Ok(())
     }
 
@@ -3474,6 +3488,8 @@ impl StorageEngine {
         }
         if removed > 0 {
             self.graph_query_cache.lock().clear();
+            self.bfs_edge_cache.lock().clear();
+            self.bfs_adjacency_cache.lock().clear();
         }
         Ok(removed)
     }
@@ -4637,31 +4653,120 @@ impl StorageEngine {
     pub fn bfs_cached_edges(
         &self,
         edge_type: Option<&str>,
-    ) -> Result<Vec<EdgeRecord>, StorageError> {
+    ) -> Result<BfsEdgeSnapshot, StorageError> {
         let cache_key = match edge_type {
             Some(edge_type) => format!("\0bfs/edge-type/{edge_type}"),
             None => "\0bfs/all-edges".into(),
         };
-        if let Some(cached) = self.graph_query_cache.lock().get(&cache_key) {
+        if let Some(cached) = self.bfs_edge_cache.lock().get(&cache_key) {
             return Ok(cached);
         }
 
+        let use_full_scan = edge_type
+            .map(|edge_type| {
+                let matching = self.edge_type_count(edge_type)?;
+                let total = self.total_edge_count()?;
+                Ok::<bool, StorageError>(total > 0 && matching.saturating_mul(2) >= total)
+            })
+            .transpose()?
+            .unwrap_or(true);
+        let scan_started = std::time::Instant::now();
         let mut edges = Vec::new();
-        match edge_type {
-            Some(edge_type) => self.bfs_stream_edges_by_type(edge_type, |edge| {
-                edges.push(edge);
+        if use_full_scan {
+            self.bfs_stream_edges(|edge| {
+                if edge_type.is_none_or(|edge_type| edge.edge_type == edge_type) {
+                    edges.push(Arc::new(edge));
+                }
                 Ok(())
-            })?,
-            None => self.bfs_stream_edges(|edge| {
-                edges.push(edge);
+            })?;
+        } else if let Some(edge_type) = edge_type {
+            self.bfs_stream_edges_by_type(edge_type, |edge| {
+                edges.push(Arc::new(edge));
                 Ok(())
-            })?,
-        };
+            })?;
+        }
+        let scan_elapsed = scan_started.elapsed();
+        let sort_started = std::time::Instant::now();
         edges.sort_by(|left, right| left.id.cmp(&right.id));
-        self.graph_query_cache
+        tracing::info!(
+            edge_type,
+            full_scan = use_full_scan,
+            edge_count = edges.len(),
+            phase_scan_us = scan_elapsed.as_micros(),
+            phase_sort_us = sort_started.elapsed().as_micros(),
+            "BFS edge snapshot phase breakdown"
+        );
+        let edges = Arc::new(edges);
+        self.bfs_edge_cache
             .lock()
-            .insert(cache_key, edges.clone());
+            .insert(cache_key, Arc::clone(&edges));
         Ok(edges)
+    }
+
+    /// Return a deterministic, in-memory adjacency projection for BFS.
+    /// The projection is bounded and invalidated with all other graph caches.
+    pub fn bfs_cached_adjacency(
+        &self,
+        edge_type: &str,
+        direction: EdgeAdjacencyDirection,
+    ) -> Result<Arc<BfsAdjacencyMap>, StorageError> {
+        let direction_key = match direction {
+            EdgeAdjacencyDirection::Outgoing => "outgoing",
+            EdgeAdjacencyDirection::Incoming => "incoming",
+            EdgeAdjacencyDirection::Both => "both",
+        };
+        let cache_key = format!("{direction_key}:{edge_type}");
+        if let Some(adjacency) = self.bfs_adjacency_cache.lock().get(&cache_key) {
+            return Ok(adjacency);
+        }
+
+        let snapshot_started = std::time::Instant::now();
+        let edges = self.bfs_cached_edges(Some(edge_type))?;
+        let snapshot_elapsed = snapshot_started.elapsed();
+        let build_started = std::time::Instant::now();
+        let mut adjacency = HashMap::new();
+        for edge in edges.iter() {
+            match direction {
+                EdgeAdjacencyDirection::Outgoing => {
+                    adjacency
+                        .entry(edge.start_node.clone())
+                        .or_insert_with(Vec::new)
+                        .push(Arc::clone(edge));
+                }
+                EdgeAdjacencyDirection::Incoming => {
+                    adjacency
+                        .entry(edge.end_node.clone())
+                        .or_insert_with(Vec::new)
+                        .push(Arc::clone(edge));
+                }
+                EdgeAdjacencyDirection::Both => {
+                    adjacency
+                        .entry(edge.start_node.clone())
+                        .or_insert_with(Vec::new)
+                        .push(Arc::clone(edge));
+                    adjacency
+                        .entry(edge.end_node.clone())
+                        .or_insert_with(Vec::new)
+                        .push(Arc::clone(edge));
+                }
+            }
+        }
+        for edges in adjacency.values_mut() {
+            edges.sort_by(|left, right| left.id.cmp(&right.id));
+        }
+        tracing::info!(
+            edge_type,
+            direction = direction_key,
+            node_count = adjacency.len(),
+            phase_edge_snapshot_us = snapshot_elapsed.as_micros(),
+            phase_adjacency_build_us = build_started.elapsed().as_micros(),
+            "BFS adjacency-cache construction phase breakdown"
+        );
+        let adjacency = Arc::new(adjacency);
+        self.bfs_adjacency_cache
+            .lock()
+            .insert(cache_key, Arc::clone(&adjacency));
+        Ok(adjacency)
     }
 
     pub fn get_edges_from_node(&self, node_id: &str) -> Result<Vec<EdgeRecord>, StorageError> {

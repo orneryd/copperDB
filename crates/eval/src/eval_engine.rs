@@ -27,7 +27,6 @@ impl EvalEngine {
         let query_result_cache = Arc::new(QueryResultCache::new(1_000, None));
         let query_result_policy_generation =
             Arc::new(AtomicU64::new(storage.knowledge_policy_schema_generation()));
-        let bfs_adjacency_cache = Arc::new(Mutex::new(HashMap::new()));
         let invalidated_query_result_cache = Arc::clone(&query_result_cache);
         storage.on_commit_completed(Arc::new(move || {
             invalidated_query_result_cache.invalidate();
@@ -55,39 +54,24 @@ impl EvalEngine {
         }));
         let created_storage = Arc::downgrade(&storage);
         let created_indexes = Arc::clone(&vector_indexes);
-        let created_bfs_adjacency_cache = Arc::clone(&bfs_adjacency_cache);
         storage.on_edge_created(Arc::new(move |edge| {
             if let Some(storage) = created_storage.upgrade() {
                 maintain_vector_indexes_for_edge(&storage, &created_indexes, &edge);
             }
-            created_bfs_adjacency_cache
-                .lock()
-                .expect("BFS adjacency cache lock poisoned")
-                .clear();
         }));
         let updated_storage = Arc::downgrade(&storage);
         let updated_indexes = Arc::clone(&vector_indexes);
-        let updated_bfs_adjacency_cache = Arc::clone(&bfs_adjacency_cache);
         storage.on_edge_updated(Arc::new(move |edge| {
             if let Some(storage) = updated_storage.upgrade() {
                 maintain_vector_indexes_for_edge(&storage, &updated_indexes, &edge);
             }
-            updated_bfs_adjacency_cache
-                .lock()
-                .expect("BFS adjacency cache lock poisoned")
-                .clear();
         }));
         let deleted_storage = Arc::downgrade(&storage);
         let deleted_indexes = Arc::clone(&vector_indexes);
-        let deleted_bfs_adjacency_cache = Arc::clone(&bfs_adjacency_cache);
         storage.on_edge_deleted(Arc::new(move |id| {
             if let Some(storage) = deleted_storage.upgrade() {
                 remove_edge_from_vector_indexes(&storage, &deleted_indexes, &id);
             }
-            deleted_bfs_adjacency_cache
-                .lock()
-                .expect("BFS adjacency cache lock poisoned")
-                .clear();
         }));
         Self {
             storage,
@@ -99,7 +83,6 @@ impl EvalEngine {
             query_result_policy_generation,
             fulltext_query_cache: Arc::new(Mutex::new(HashMap::new())),
             knowledge_policy_resolver_cache: Arc::new(Mutex::new(None)),
-            bfs_adjacency_cache,
             access_flusher: Arc::new(AccessFlusher::new()),
             hot_path_trace: HotPathTraceState::new(),
         }
@@ -3856,14 +3839,14 @@ impl EvalEngine {
         } else {
             self.storage.bfs_cached_edges(None)?
         };
-        for edge in edges {
+        for edge in edges.iter() {
             if !rel_types.is_empty() && !rel_types.contains(&edge.edge_type) {
                 continue;
             }
-            if !self.edge_visible_under_policy(&edge, resolver)? {
+            if !self.edge_visible_under_policy(edge, resolver)? {
                 continue;
             }
-            Self::add_edge_to_adjacency(&mut adjacency, edge, direction);
+            Self::add_edge_to_adjacency(&mut adjacency, edge.as_ref().clone(), direction);
         }
         Ok(adjacency)
     }
@@ -3874,6 +3857,7 @@ impl EvalEngine {
         edge: EdgeRecord,
         direction: &EdgeDirection,
     ) {
+        let edge = Arc::new(edge);
         match direction {
             EdgeDirection::Outgoing => {
                 adjacency
@@ -3953,7 +3937,7 @@ impl EvalEngine {
                     next_id.clone(),
                     BfsPredecessor {
                         parent: Some(current_id.clone()),
-                        edge: Some(edge.clone()),
+                        edge: Some(edge.as_ref().clone()),
                         depth: depth + 1,
                     },
                 );
@@ -3974,38 +3958,19 @@ impl EvalEngine {
         rel_types: &[String],
         direction: &EdgeDirection,
         resolver: &Resolver,
-    ) -> Result<Option<Arc<BfsAdjacencyMap>>, EvalError> {
+    ) -> Result<Option<Arc<copperdb_storage::BfsAdjacencyMap>>, EvalError> {
         let Some(rel_type) = rel_types.first().filter(|_| rel_types.len() == 1) else {
             return Ok(None);
         };
         if resolver.resolve_edge(rel_type).is_some() {
             return Ok(None);
         }
-        let direction_key = match direction {
-            EdgeDirection::Outgoing => "outgoing",
-            EdgeDirection::Incoming => "incoming",
-            EdgeDirection::Both => "both",
+        let storage_direction = match direction {
+            EdgeDirection::Outgoing => copperdb_storage::EdgeAdjacencyDirection::Outgoing,
+            EdgeDirection::Incoming => copperdb_storage::EdgeAdjacencyDirection::Incoming,
+            EdgeDirection::Both => copperdb_storage::EdgeAdjacencyDirection::Both,
         };
-        let cache_key = format!("{direction_key}:{rel_type}");
-        if let Some(adjacency) = self
-            .bfs_adjacency_cache
-            .lock()
-            .expect("BFS adjacency cache lock poisoned")
-            .get(&cache_key)
-        {
-            return Ok(Some(Arc::clone(adjacency)));
-        }
-
-        let mut adjacency = BfsAdjacencyMap::new();
-        for edge in self.storage.bfs_cached_edges(Some(rel_type))? {
-            Self::add_edge_to_adjacency(&mut adjacency, edge, direction);
-        }
-        let adjacency = Arc::new(adjacency);
-        self.bfs_adjacency_cache
-            .lock()
-            .expect("BFS adjacency cache lock poisoned")
-            .insert(cache_key, Arc::clone(&adjacency));
-        Ok(Some(adjacency))
+        Ok(Some(self.storage.bfs_cached_adjacency(rel_type, storage_direction)?))
     }
 
     fn reconstruct_shortest_path(
@@ -4106,7 +4071,7 @@ impl EvalEngine {
                 let mut next_node_path = node_path.clone();
                 next_node_path.push(next_id.clone());
                 let mut next_edge_path = edge_path.clone();
-                next_edge_path.push(edge.clone());
+                next_edge_path.push(edge.as_ref().clone());
 
                 if next_id == end_id {
                     results.push(ShortestPathFound {

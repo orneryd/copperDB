@@ -80,7 +80,7 @@ test:
 	@cargo test --workspace
 
 run:
-	@RUST_LOG=$(RUST_LOG) COPPERDB_ADDRESS=$(ADDRESS) COPPERDB_HTTP_PORT=$(HTTP_PORT) COPPERDB_BOLT_PORT=$(BOLT_PORT) COPPERDB_BASE_PATH=$(BASE_PATH) cargo run -p copperdb -- --address $(ADDRESS) --http-port $(HTTP_PORT) --bolt-port $(BOLT_PORT) --db-name $(DB_NAME) --base-path $(BASE_PATH)
+	@RUST_LOG=$(RUST_LOG) COPPERDB_ADDRESS=$(ADDRESS) COPPERDB_HTTP_PORT=$(HTTP_PORT) COPPERDB_BOLT_PORT=$(BOLT_PORT) COPPERDB_BASE_PATH=$(BASE_PATH) cargo run --release -p copperdb -- --address $(ADDRESS) --http-port $(HTTP_PORT) --bolt-port $(BOLT_PORT) --db-name $(DB_NAME) --base-path $(BASE_PATH)
 
 fmt:
 	@cargo fmt --all

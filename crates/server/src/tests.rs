@@ -5581,8 +5581,22 @@ async fn demo_shortest_path_e2e_warms_result_cache() {
             .unwrap()
     };
 
-    let warmup = app.clone().oneshot(request()).await.unwrap();
-    assert_eq!(warmup.status(), StatusCode::OK);
+    let cold_started = Instant::now();
+    let cold = app.clone().oneshot(request()).await.unwrap();
+    let cold_elapsed = cold_started.elapsed();
+    assert_eq!(cold.status(), StatusCode::OK);
+    let cold_body = axum::body::to_bytes(cold.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let cold_payload: serde_json::Value = serde_json::from_slice(&cold_body).unwrap();
+    assert!(
+        cold_payload["errors"].as_array().unwrap().is_empty(),
+        "{cold_payload:?}"
+    );
+    assert_eq!(
+        cold_payload["results"][0]["data"].as_array().unwrap().len(),
+        1
+    );
     let started = Instant::now();
     let response = app.oneshot(request()).await.unwrap();
     let elapsed = started.elapsed();
@@ -5597,7 +5611,9 @@ async fn demo_shortest_path_e2e_warms_result_cache() {
     );
     assert_eq!(payload["results"][0]["data"].as_array().unwrap().len(), 1);
     assert_eq!(engine.cypher_result_cache_stats().hits, 1);
-    eprintln!("warmed d3_demo HTTP shortestPath completed in {elapsed:?}");
+    eprintln!(
+        "d3_demo HTTP shortestPath: cold={cold_elapsed:?} warm_result_cache_hit={elapsed:?}"
+    );
 }
 
 // ─── Database lifecycle e2e ─────────────────────────────────────────────

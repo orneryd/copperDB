@@ -937,6 +937,7 @@ impl CopperDb {
             if let Some(mut cached) = self.cypher_result_cache.get(&cache_query, &cache_params) {
                 let elapsed_ms = start.elapsed().as_millis() as u64;
                 cached.stats.execution_time_ms = elapsed_ms;
+                let audit_started = std::time::Instant::now();
                 self.record_query_audit(
                     cypher,
                     query_action(&parsed.query_type),
@@ -945,6 +946,14 @@ impl CopperDb {
                     Some(hash),
                     elapsed_ms,
                 )?;
+                tracing::info!(
+                    query = cypher,
+                    phase_parse_cache_us = t_parse_cache.as_micros(),
+                    phase_compliance_us = t_compliance.as_micros(),
+                    phase_audit_spawn_us = audit_started.elapsed().as_micros(),
+                    phase_total_us = start.elapsed().as_micros(),
+                    "query result-cache hit phase breakdown"
+                );
                 return Ok(cached);
             }
         }

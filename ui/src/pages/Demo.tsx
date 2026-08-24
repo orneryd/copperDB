@@ -262,13 +262,15 @@ export function Demo() {
       }
 
       setPhase("indexing");
-      setStatusLine("Provisioning Star index...");
+      setStatusLine("Checking persisted Star index...");
       assertCypherSuccess(
         await api.executeCypherOnDatabase(DEMO_DB, CYPHER_CREATE_INDEX),
         "Failed to create Star index",
       );
       if (cancelled) return;
 
+      setPhase("checking");
+      setStatusLine("Counting persisted demo graph...");
       const countResp = await api.executeCypherOnDatabase(DEMO_DB, CYPHER_DEMO_COUNTS);
       assertCypherSuccess(countResp, "Failed to validate demo seed contents");
       const counts = firstRowObject(countResp);
