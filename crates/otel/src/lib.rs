@@ -322,16 +322,18 @@ type CheckFunc = Arc<dyn Fn() -> CheckResult + Send + Sync>;
 struct RegisteredCheck {
     check: CheckFunc,
     required: bool,
+    timeout: Duration,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CheckStatus {
     pub ok: bool,
     pub latency_ms: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReadyResult {
     pub ok: bool,
     pub checks: BTreeMap<String, CheckStatus>,
@@ -353,11 +355,22 @@ impl Health {
         required: bool,
         check: impl Fn() -> CheckResult + Send + Sync + 'static,
     ) {
+        self.register_with_timeout(name, required, Duration::from_secs(1), check);
+    }
+
+    pub fn register_with_timeout(
+        &self,
+        name: impl Into<String>,
+        required: bool,
+        timeout: Duration,
+        check: impl Fn() -> CheckResult + Send + Sync + 'static,
+    ) {
         self.checks.write().expect("health lock poisoned").insert(
             name.into(),
             RegisteredCheck {
                 check: Arc::new(check),
                 required,
+                timeout: timeout.max(Duration::from_millis(1)),
             },
         );
     }
@@ -369,21 +382,38 @@ impl Health {
             .remove(name);
     }
 
-    pub fn ready(&self) -> ReadyResult {
+    pub async fn ready(&self) -> ReadyResult {
         let snapshot = self.checks.read().expect("health lock poisoned").clone();
+        let mut checks = tokio::task::JoinSet::new();
+        for (name, registered) in snapshot {
+            checks.spawn(async move {
+                let started_at = Instant::now();
+                let result = tokio::time::timeout(
+                    registered.timeout,
+                    tokio::task::spawn_blocking(move || (registered.check)()),
+                )
+                .await
+                .map_err(|_| "deadline exceeded".to_string())
+                .and_then(|result| result.map_err(|error| error.to_string()))
+                .and_then(|result| result);
+                (
+                    name,
+                    CheckStatus {
+                        ok: result.is_ok(),
+                        latency_ms: started_at.elapsed().as_millis(),
+                        error: result.err(),
+                    },
+                    registered.required,
+                )
+            });
+        }
         let mut out = ReadyResult {
             ok: true,
             checks: BTreeMap::new(),
         };
-        for (name, registered) in snapshot {
-            let start = Instant::now();
-            let result = (registered.check)();
-            let status = CheckStatus {
-                ok: result.is_ok(),
-                latency_ms: start.elapsed().as_millis(),
-                error: result.err(),
-            };
-            if registered.required && !status.ok {
+        while let Some(result) = checks.join_next().await {
+            let (name, status, required) = result.expect("health check task must not panic");
+            if required && !status.ok {
                 out.ok = false;
             }
             out.checks.insert(name, status);
@@ -789,23 +819,43 @@ mod tests {
         );
     }
 
-    #[test]
-    fn health_registry_reports_required_failures_only_for_overall_status() {
+    #[tokio::test]
+    async fn health_registry_reports_required_failures_only_for_overall_status() {
         let health = Health::new();
         health.register("storage", true, || Ok(()));
         health.register("downstream", false, || Err("offline".into()));
-        let ready = health.ready();
+        let ready = health.ready().await;
         assert!(ready.ok);
         assert!(ready.checks["storage"].ok);
         assert!(!ready.checks["downstream"].ok);
 
         health.register("replication", true, || Err("no quorum".into()));
-        let ready = health.ready();
+        let ready = health.ready().await;
         assert!(!ready.ok);
         assert_eq!(
             ready.checks["replication"].error.as_deref(),
             Some("no quorum")
         );
+    }
+
+    #[tokio::test]
+    async fn health_registry_runs_checks_concurrently_and_bounds_each_timeout() {
+        let health = Health::new();
+        health.register_with_timeout("slow", true, Duration::from_millis(10), || {
+            std::thread::sleep(Duration::from_millis(50));
+            Ok(())
+        });
+        health.register_with_timeout("peer", false, Duration::from_millis(100), || {
+            std::thread::sleep(Duration::from_millis(50));
+            Ok(())
+        });
+
+        let started_at = Instant::now();
+        let ready = health.ready().await;
+        assert!(started_at.elapsed() < Duration::from_millis(90));
+        assert!(!ready.ok);
+        assert_eq!(ready.checks["slow"].error.as_deref(), Some("deadline exceeded"));
+        assert!(ready.checks["peer"].ok);
     }
 
     #[test]

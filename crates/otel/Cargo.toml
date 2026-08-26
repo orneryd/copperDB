@@ -10,4 +10,5 @@ repository.workspace = true
 [dependencies]
 thiserror.workspace = true
 serde = { workspace = true }
+tokio.workspace = true
 

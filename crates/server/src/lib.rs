@@ -11,15 +11,15 @@ use axum::{
     http::{header, HeaderMap, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{delete, get, post, post_service},
+    routing::{any, delete, get, post, post_service},
     Json, Router,
 };
 use copperdb_auth::{
     AuthConfig, AuthError, Authenticator, Claims, DatabaseAccessMode, TokenManager,
 };
 use copperdb_bolt::server::{
-    BoltAuthProvider, BoltPrincipal, BoltQueryResult, BoltResultStats, BoltTransaction,
-    BoltTransactionError, QueryExecutor,
+    BoltAuthProvider, BoltPrincipal, BoltQueryResult, BoltResultStats, BoltRuntimeCounters,
+    BoltTransaction, BoltTransactionError, QueryExecutor,
 };
 use copperdb_buildinfo::{display_version, server_announcement, version};
 use copperdb_config::Config as RuntimeConfig;
@@ -35,7 +35,7 @@ use copperdb_nornicgrpc::{
     RemoteReplicaClient, TonicRemoteHydrationClient, TonicRemoteRankedSearchClient,
     TonicRemoteReplicaClient,
 };
-use copperdb_otel::Telemetry;
+use copperdb_otel::{Health, Telemetry};
 use copperdb_replication::{Command, ReplicaTransport, ReplicationStorage, StorageEngineAdapter};
 use copperdb_retention::{
     ErasureRequest, LegalHold, Manager as RetentionManager, Policy, RetentionError,
@@ -200,6 +200,10 @@ pub struct AppState {
     pub telemetry: Arc<Telemetry>,
     /// Owner-maintained HTTP lifecycle counters.
     pub http_counters: Arc<HttpCounters>,
+    /// Owner-maintained Bolt protocol counters, populated only when Bolt is enabled.
+    pub bolt_counters: Arc<BoltRuntimeCounters>,
+    /// Whether this process runs the Bolt protocol listener.
+    pub bolt_enabled: bool,
     /// Protocol-neutral ingress validation for headers, tokens, and URL query parameters.
     pub security: SecurityMiddleware,
     /// Route supported Cypher requests through the distributed coordinator when enabled.
@@ -605,6 +609,8 @@ impl AppState {
             auth,
             telemetry: Arc::new(Telemetry::new()),
             http_counters: Arc::new(HttpCounters::default()),
+            bolt_counters: Arc::new(BoltRuntimeCounters::default()),
+            bolt_enabled: false,
             security: SecurityMiddleware::with_config(SecurityConfig {
                 environment: env_get("COPPERDB_ENV", "development"),
                 allow_http: get_bool_loose("COPPERDB_ALLOW_HTTP", true),
@@ -631,6 +637,7 @@ struct ServerStatusSnapshot {
     collected_at_unix_ms: u64,
     status: &'static str,
     server: ServerRuntimeStatus,
+    bolt: BoltRuntimeStatus,
     database: DatabaseRuntimeStatus,
 }
 
@@ -643,6 +650,15 @@ struct ServerRuntimeStatus {
     active: Option<u64>,
     version: String,
     announcement: String,
+}
+
+#[derive(Serialize)]
+struct BoltRuntimeStatus {
+    state: &'static str,
+    active_connections: Option<u64>,
+    active_sessions: Option<u64>,
+    active_transactions: Option<u64>,
+    failures: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -665,6 +681,7 @@ struct DatabaseInfoSnapshot {
     #[serde(rename = "type")]
     database_type: &'static str,
     node_count: Option<u64>,
+    label_node_count: Option<u64>,
     edge_count: Option<u64>,
     node_storage_bytes: u64,
     managed_embedding_bytes: Option<u64>,
@@ -687,6 +704,11 @@ fn graph_counts(engine: &GraphEngine) -> (Option<u64>, Option<u64>) {
         engine.storage().total_node_count().ok(),
         engine.storage().total_edge_count().ok(),
     )
+}
+
+#[derive(Deserialize)]
+struct DatabaseInfoQuery {
+    label: Option<String>,
 }
 
 /// Build the application router.
@@ -819,6 +841,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     } else {
         Router::new().nest(&normalized, router).with_state(state)
     }
+}
+
+/// Build the unauthenticated telemetry probe router.
+///
+/// This is deliberately separate from the application router, matching
+/// NornicDB's network-isolated observability listener.
+pub fn build_telemetry_router(health: Arc<Health>) -> Router {
+    Router::new()
+        .route("/livez", any(livez_handler))
+        .route("/readyz", any(readyz_handler))
+        .with_state(health)
 }
 
 async fn http_metrics_middleware(
@@ -1085,6 +1118,22 @@ async fn health_handler(State(state): State<Arc<AppState>>) -> Json<HealthRespon
     })
 }
 
+/// /livez is an unconditional, bodyless process liveness probe.
+async fn livez_handler() -> StatusCode {
+    StatusCode::OK
+}
+
+/// /readyz reports the telemetry-owned readiness registry.
+async fn readyz_handler(State(health): State<Arc<Health>>) -> Response {
+    let response = health.ready().await;
+    let status = if response.ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(response)).into_response()
+}
+
 async fn status_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1108,6 +1157,24 @@ async fn status_handler(
             active: Some(state.http_counters.active.load(Ordering::Relaxed)),
             version: display_version(),
             announcement: server_announcement(),
+        },
+        bolt: if state.bolt_enabled {
+            let bolt = state.bolt_counters.snapshot();
+            BoltRuntimeStatus {
+                state: "ready",
+                active_connections: Some(bolt.active_connections),
+                active_sessions: Some(bolt.active_sessions),
+                active_transactions: Some(bolt.active_transactions),
+                failures: Some(bolt.failures),
+            }
+        } else {
+            BoltRuntimeStatus {
+                state: "unknown",
+                active_connections: None,
+                active_sessions: None,
+                active_transactions: None,
+                failures: None,
+            }
         },
         database: DatabaseRuntimeStatus {
             state: if engine.is_some() { "ready" } else { "unknown" },
@@ -1829,6 +1896,7 @@ async fn search_handler(
 async fn database_info_handler(
     State(state): State<Arc<AppState>>,
     Path(database): Path<String>,
+    Query(query): Query<DatabaseInfoQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     if let Err(status) = authorize_database_access(&state, &headers, &database, false) {
@@ -1840,6 +1908,11 @@ async fn database_info_handler(
             let engine = open_engine(&state, &database).ok();
             let (node_count, edge_count) =
                 engine.as_deref().map(graph_counts).unwrap_or((None, None));
+            let label_node_count = query.label.as_deref().and_then(|label| {
+                engine
+                    .as_deref()
+                    .and_then(|engine| engine.storage().node_count_by_label(label).ok())
+            });
             let storage_bytes = engine
                 .as_ref()
                 .map(|engine| engine.size_on_disk())
@@ -1873,6 +1946,7 @@ async fn database_info_handler(
                     "standard"
                 },
                 node_count,
+                label_node_count,
                 edge_count,
                 node_storage_bytes: storage_bytes,
                 managed_embedding_bytes: None,

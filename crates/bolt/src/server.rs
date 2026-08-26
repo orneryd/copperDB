@@ -327,12 +327,77 @@ impl std::fmt::Debug for BoltServer {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoltRuntimeStatus {
+    pub active_connections: u64,
+    pub active_sessions: u64,
+    pub active_transactions: u64,
+    pub failures: u64,
+}
+
+#[derive(Default)]
+pub struct BoltRuntimeCounters {
+    active_connections: AtomicU64,
+    active_sessions: AtomicU64,
+    active_transactions: AtomicU64,
+    failures: AtomicU64,
+}
+
+impl BoltRuntimeCounters {
+    pub fn snapshot(&self) -> BoltRuntimeStatus {
+        BoltRuntimeStatus {
+            active_connections: self.active_connections.load(Ordering::Relaxed),
+            active_sessions: self.active_sessions.load(Ordering::Relaxed),
+            active_transactions: self.active_transactions.load(Ordering::Relaxed),
+            failures: self.failures.load(Ordering::Relaxed),
+        }
+    }
+
+    fn connection_opened(&self) -> u64 {
+        self.active_connections.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn connection_closed(&self) -> u64 {
+        self.active_connections.fetch_sub(1, Ordering::SeqCst) - 1
+    }
+
+    fn record_failure(&self) {
+        self.failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn open_session(self: &Arc<Self>) -> ActiveBoltSession {
+        self.active_sessions.fetch_add(1, Ordering::SeqCst);
+        ActiveBoltSession(Arc::clone(self))
+    }
+
+    fn open_transaction(self: &Arc<Self>) -> ActiveBoltTransaction {
+        self.active_transactions.fetch_add(1, Ordering::SeqCst);
+        ActiveBoltTransaction(Arc::clone(self))
+    }
+}
+
+struct ActiveBoltSession(Arc<BoltRuntimeCounters>);
+
+impl Drop for ActiveBoltSession {
+    fn drop(&mut self) {
+        self.0.active_sessions.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+struct ActiveBoltTransaction(Arc<BoltRuntimeCounters>);
+
+impl Drop for ActiveBoltTransaction {
+    fn drop(&mut self) {
+        self.0.active_transactions.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 #[derive(Clone)]
 pub struct BoltServer {
     pub listen_addr: String,
     config: BoltServerConfig,
     telemetry: Arc<Telemetry>,
-    active_connections: Arc<AtomicU64>,
+    runtime_counters: Arc<BoltRuntimeCounters>,
     executor: Arc<dyn QueryExecutor>,
     auth_provider: Option<Arc<dyn BoltAuthProvider>>,
 }
@@ -352,7 +417,7 @@ impl BoltServer {
                 auth_enabled: true,
             },
             telemetry,
-            active_connections: Arc::new(AtomicU64::new(0)),
+            runtime_counters: Arc::new(BoltRuntimeCounters::default()),
             executor,
             auth_provider: None,
         }
@@ -370,6 +435,15 @@ impl BoltServer {
     pub fn with_auth_provider(mut self, auth_provider: Arc<dyn BoltAuthProvider>) -> Self {
         self.auth_provider = Some(auth_provider);
         self
+    }
+
+    pub fn with_runtime_counters(mut self, runtime_counters: Arc<BoltRuntimeCounters>) -> Self {
+        self.runtime_counters = runtime_counters;
+        self
+    }
+
+    pub fn runtime_status(&self) -> BoltRuntimeStatus {
+        self.runtime_counters.snapshot()
     }
 
     pub async fn serve(&self) -> Result<(), BoltError> {
@@ -411,15 +485,16 @@ impl BoltServer {
 
         let started = std::time::Instant::now();
         let telemetry = Arc::clone(&self.telemetry);
-        let active_connections = Arc::clone(&self.active_connections);
+        let runtime_counters = Arc::clone(&self.runtime_counters);
         let executor = Arc::clone(&self.executor);
         let auth_enabled = self.config.auth_enabled;
         let auth_provider = self.auth_provider.clone();
+        let session_counters = Arc::clone(&self.runtime_counters);
         let _ = telemetry.record_counter(
             "nornicdb_bolt_connections_total",
             &[("result", "success"), ("transport", "ws")],
         );
-        let active = active_connections.fetch_add(1, Ordering::SeqCst) + 1;
+        let active = runtime_counters.connection_opened();
         let _ = telemetry.set_gauge(
             "nornicdb_bolt_connections_active",
             &[("transport", "ws")],
@@ -429,15 +504,17 @@ impl BoltServer {
         tokio::spawn(async move {
             match accept_async(stream).await {
                 Ok(mut ws_stream) => {
-                    let result = handle_ws_session(
+                    let result = handle_ws_session_with_counters(
                         &mut ws_stream,
                         &telemetry,
                         executor,
                         auth_enabled,
                         auth_provider,
+                        session_counters,
                     )
                     .await;
                     if let Err(ref e) = result {
+                        runtime_counters.record_failure();
                         warn!(%peer_addr, %e, "bolt ws connection failed");
                         let _ = telemetry.record_counter(
                             "nornicdb_bolt_connections_total",
@@ -446,10 +523,11 @@ impl BoltServer {
                     }
                 }
                 Err(e) => {
+                    runtime_counters.record_failure();
                     warn!(%peer_addr, %e, "ws upgrade failed");
                 }
             }
-            let active = active_connections.fetch_sub(1, Ordering::SeqCst) - 1;
+            let active = runtime_counters.connection_closed();
             let _ = telemetry.set_gauge(
                 "nornicdb_bolt_connections_active",
                 &[("transport", "ws")],
@@ -466,15 +544,16 @@ impl BoltServer {
     fn spawn_tcp(&self, mut stream: TcpStream, peer_addr: std::net::SocketAddr) {
         let started = std::time::Instant::now();
         let telemetry = Arc::clone(&self.telemetry);
-        let active_connections = Arc::clone(&self.active_connections);
+        let runtime_counters = Arc::clone(&self.runtime_counters);
         let executor = Arc::clone(&self.executor);
         let auth_enabled = self.config.auth_enabled;
         let auth_provider = self.auth_provider.clone();
+        let session_counters = Arc::clone(&self.runtime_counters);
         let _ = telemetry.record_counter(
             "nornicdb_bolt_connections_total",
             &[("result", "success"), ("transport", "tcp")],
         );
-        let active = active_connections.fetch_add(1, Ordering::SeqCst) + 1;
+        let active = runtime_counters.connection_opened();
         let _ = telemetry.set_gauge(
             "nornicdb_bolt_connections_active",
             &[("transport", "tcp")],
@@ -483,22 +562,24 @@ impl BoltServer {
         debug!(%peer_addr, "accepted bolt tcp");
 
         tokio::spawn(async move {
-            let result = handle_tcp_session(
+            let result = handle_tcp_session_with_counters(
                 &mut stream,
                 &telemetry,
                 executor,
                 auth_enabled,
                 auth_provider,
+                session_counters,
             )
             .await;
             if let Err(ref e) = result {
+                runtime_counters.record_failure();
                 let _ = telemetry.record_counter(
                     "nornicdb_bolt_connections_total",
                     &[("result", "error"), ("transport", "tcp")],
                 );
                 warn!(%peer_addr, %e, "bolt tcp failed");
             }
-            let active = active_connections.fetch_sub(1, Ordering::SeqCst) - 1;
+            let active = runtime_counters.connection_closed();
             let _ = telemetry.set_gauge(
                 "nornicdb_bolt_connections_active",
                 &[("transport", "tcp")],
@@ -514,6 +595,7 @@ impl BoltServer {
 } // end impl BoltServer
 
 /// Handle a Bolt session over raw TCP.
+#[cfg(test)]
 async fn handle_tcp_session(
     stream: &mut TcpStream,
     telemetry: &Telemetry,
@@ -532,6 +614,27 @@ async fn handle_tcp_session(
     .await
 }
 
+    async fn handle_tcp_session_with_counters(
+        stream: &mut TcpStream,
+        telemetry: &Telemetry,
+        executor: Arc<dyn QueryExecutor>,
+        auth_enabled: bool,
+        auth_provider: Option<Arc<dyn BoltAuthProvider>>,
+        runtime_counters: Arc<BoltRuntimeCounters>,
+    ) -> Result<(), BoltError> {
+        handle_tcp_session_with_timeout_and_counters(
+            stream,
+            telemetry,
+            executor,
+            auth_enabled,
+            auth_provider,
+            BOLT_RECEIVE_TIMEOUT,
+            Some(runtime_counters),
+        )
+        .await
+    }
+
+#[cfg(test)]
 async fn handle_tcp_session_with_timeout(
     stream: &mut TcpStream,
     telemetry: &Telemetry,
@@ -539,6 +642,27 @@ async fn handle_tcp_session_with_timeout(
     auth_enabled: bool,
     auth_provider: Option<Arc<dyn BoltAuthProvider>>,
     receive_timeout: Duration,
+) -> Result<(), BoltError> {
+    handle_tcp_session_with_timeout_and_counters(
+        stream,
+        telemetry,
+        executor,
+        auth_enabled,
+        auth_provider,
+        receive_timeout,
+        None,
+    )
+    .await
+}
+
+async fn handle_tcp_session_with_timeout_and_counters(
+    stream: &mut TcpStream,
+    telemetry: &Telemetry,
+    executor: Arc<dyn QueryExecutor>,
+    auth_enabled: bool,
+    auth_provider: Option<Arc<dyn BoltAuthProvider>>,
+    receive_timeout: Duration,
+    runtime_counters: Option<Arc<BoltRuntimeCounters>>,
 ) -> Result<(), BoltError> {
     let peer = stream
         .peer_addr()
@@ -555,7 +679,7 @@ async fn handle_tcp_session_with_timeout(
     stream.write_all(&[0x00, 0x00, 0x04, 0x04]).await?;
     info!(%peer, "bolt tcp version 4.4 sent, entering message loop");
 
-    let mut session = BoltSession::new(auth_enabled);
+    let mut session = BoltSession::new_with_counters(auth_enabled, runtime_counters);
     let mut decoder = wsconn::BoltChunkDecoder::new();
     let mut temp_buf = [0u8; 4096];
 
@@ -588,35 +712,37 @@ async fn handle_tcp_session_with_timeout(
     result
 }
 
-/// Handle a Bolt session over WebSocket.
-async fn handle_ws_session<S>(
+async fn handle_ws_session_with_counters<S>(
     ws: &mut tokio_tungstenite::WebSocketStream<S>,
-    _telemetry: &Telemetry,
+    telemetry: &Telemetry,
     executor: Arc<dyn QueryExecutor>,
     auth_enabled: bool,
     auth_provider: Option<Arc<dyn BoltAuthProvider>>,
+    runtime_counters: Arc<BoltRuntimeCounters>,
 ) -> Result<(), BoltError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    handle_ws_session_with_timeout(
+    handle_ws_session_with_timeout_and_counters(
         ws,
-        _telemetry,
+        telemetry,
         executor,
         auth_enabled,
         auth_provider,
         BOLT_RECEIVE_TIMEOUT,
+        Some(runtime_counters),
     )
     .await
 }
 
-async fn handle_ws_session_with_timeout<S>(
+async fn handle_ws_session_with_timeout_and_counters<S>(
     ws: &mut tokio_tungstenite::WebSocketStream<S>,
     _telemetry: &Telemetry,
     executor: Arc<dyn QueryExecutor>,
     auth_enabled: bool,
     auth_provider: Option<Arc<dyn BoltAuthProvider>>,
     receive_timeout: Duration,
+    runtime_counters: Option<Arc<BoltRuntimeCounters>>,
 ) -> Result<(), BoltError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -654,7 +780,7 @@ where
         .map_err(|e| BoltError::ProtocolViolation(format!("WS version response error: {e}")))?;
     info!("bolt WS version response sent, entering message loop");
 
-    let mut session = BoltSession::new(auth_enabled);
+    let mut session = BoltSession::new_with_counters(auth_enabled, runtime_counters);
     let mut decoder = wsconn::BoltChunkDecoder::new();
 
     let result = 'session_loop: loop {
@@ -806,6 +932,9 @@ struct BoltSession {
     next_qid: i64,
     last_bookmark: Option<String>,
     transaction: Option<BoltTransaction>,
+    _session_counter: Option<ActiveBoltSession>,
+    transaction_counter: Option<ActiveBoltTransaction>,
+    runtime_counters: Option<Arc<BoltRuntimeCounters>>,
 }
 
 struct BoltCursor {
@@ -815,7 +944,16 @@ struct BoltCursor {
 }
 
 impl BoltSession {
+    #[cfg(test)]
     fn new(auth_enabled: bool) -> Self {
+        Self::new_with_counters(auth_enabled, None)
+    }
+
+    fn new_with_counters(
+        auth_enabled: bool,
+        runtime_counters: Option<Arc<BoltRuntimeCounters>>,
+    ) -> Self {
+        let session_counter = runtime_counters.as_ref().map(BoltRuntimeCounters::open_session);
         Self {
             auth_enabled,
             authenticated: !auth_enabled,
@@ -828,7 +966,23 @@ impl BoltSession {
             next_qid: 0,
             last_bookmark: None,
             transaction: None,
+            _session_counter: session_counter,
+            transaction_counter: None,
+            runtime_counters,
         }
+    }
+
+    fn set_transaction(&mut self, transaction: BoltTransaction) {
+        self.transaction_counter = self
+            .runtime_counters
+            .as_ref()
+            .map(BoltRuntimeCounters::open_transaction);
+        self.transaction = Some(transaction);
+    }
+
+    fn take_transaction(&mut self) -> Option<BoltTransaction> {
+        self.transaction_counter.take();
+        self.transaction.take()
     }
 }
 
@@ -914,7 +1068,7 @@ fn authentication_required(session: &BoltSession) -> bool {
 }
 
 fn rollback_active_transaction(session: &mut BoltSession, executor: &dyn QueryExecutor) {
-    if let Some(transaction) = session.transaction.take() {
+    if let Some(transaction) = session.take_transaction() {
         if let Err(error) = executor.rollback_transaction(&transaction) {
             warn!(%error, transaction_id = %transaction.id, "Bolt session cleanup rollback failed");
         }
@@ -1071,7 +1225,7 @@ async fn process_message(
             }
         }
         BoltMessage::Logoff => {
-            if let Some(transaction) = session.transaction.take() {
+            if let Some(transaction) = session.take_transaction() {
                 let _ = executor.rollback_transaction(&transaction);
             }
             session.authenticated = !session.auth_enabled;
@@ -1252,7 +1406,7 @@ async fn process_message(
             match executor.begin_transaction(&database, &extra, session.principal.as_ref()) {
                 Ok(transaction) => {
                     session.database = Some(transaction.database.clone());
-                    session.transaction = Some(transaction);
+                    session.set_transaction(transaction);
                     Ok(vec![dispatch::encode_message(&BoltMessage::Success {
                         metadata: HashMap::new(),
                     })])
@@ -1267,7 +1421,7 @@ async fn process_message(
             if authentication_required(session) {
                 return Ok(authentication_failure_response("authentication required"));
             }
-            let Some(transaction) = session.transaction.take() else {
+            let Some(transaction) = session.take_transaction() else {
                 return Ok(transaction_failure_response(
                     "Neo.ClientError.Transaction.TransactionNotFound",
                     "no transaction to commit",
@@ -1290,7 +1444,7 @@ async fn process_message(
             if authentication_required(session) {
                 return Ok(authentication_failure_response("authentication required"));
             }
-            let Some(transaction) = session.transaction.take() else {
+            let Some(transaction) = session.take_transaction() else {
                 return Ok(vec![dispatch::encode_message(&BoltMessage::Success {
                     metadata: HashMap::new(),
                 })]);
@@ -1306,7 +1460,7 @@ async fn process_message(
             }
         }
         BoltMessage::Reset => {
-            if let Some(transaction) = session.transaction.take() {
+            if let Some(transaction) = session.take_transaction() {
                 let _ = executor.rollback_transaction(&transaction);
             }
             session.current_query = None;
@@ -1954,6 +2108,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_status_tracks_session_and_transaction_guards() {
+        let counters = Arc::new(BoltRuntimeCounters::default());
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let executor: Arc<dyn QueryExecutor> = Arc::new(TransactionRecordingExecutor {
+            operations: Arc::clone(&operations),
+        });
+        let begin = Value::Struct {
+            signature: 0x11,
+            fields: vec![Value::Map(vec![])],
+        };
+        let commit = Value::Struct {
+            signature: 0x12,
+            fields: vec![],
+        };
+        let mut session = BoltSession::new_with_counters(false, Some(Arc::clone(&counters)));
+        assert_eq!(counters.snapshot().active_sessions, 1);
+        assert_eq!(counters.snapshot().active_transactions, 0);
+
+        response_signature_with_executor(&begin, &mut session, Arc::clone(&executor), None)
+            .await;
+        assert_eq!(counters.snapshot().active_transactions, 1);
+
+        response_signature_with_executor(&commit, &mut session, executor, None).await;
+        assert_eq!(counters.snapshot().active_transactions, 0);
+        drop(session);
+        assert_eq!(counters.snapshot().active_sessions, 0);
+    }
+
+    #[tokio::test]
     async fn retryable_commit_conflicts_use_the_neo4j_outdated_status() {
         let provider: Arc<dyn BoltAuthProvider> = Arc::new(TestAuthProvider);
         let executor: Arc<dyn QueryExecutor> = Arc::new(ConflictingTransactionExecutor);
@@ -2515,6 +2698,34 @@ mod tests {
         // Close immediately — server should handle gracefully
         drop(client);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_status_tracks_connection_lifecycle() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let telemetry = Arc::new(Telemetry::new());
+        let server = BoltServer::new(address.to_string(), telemetry, Arc::new(NoopExecutor))
+            .with_auth_enabled(false);
+        let handler = server.clone();
+        let accept_task = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handler.spawn_tcp(stream, peer);
+        });
+
+        let client = TcpStream::connect(address).await.unwrap();
+        accept_task.await.unwrap();
+        assert_eq!(server.runtime_status().active_connections, 1);
+        assert_eq!(server.runtime_status().failures, 0);
+
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while server.runtime_status().active_connections != 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("Bolt connection counter should return to zero after disconnect");
     }
 
     #[tokio::test]

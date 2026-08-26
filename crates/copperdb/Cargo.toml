@@ -26,5 +26,6 @@ copperdb-bolt = { workspace = true }
 copperdb-buildinfo = { workspace = true }
 copperdb-config = { workspace = true }
 copperdb-lifecycle = { workspace = true }
+copperdb-multidb = { workspace = true }
 copperdb-server = { workspace = true }
 copperdb-otel = { workspace = true }

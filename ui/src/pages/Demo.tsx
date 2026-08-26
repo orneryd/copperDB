@@ -87,11 +87,6 @@ MATCH (b:Star {starId: row.toId})
 MERGE (a)-[r:HYPERLANE]->(b)
 SET r.distance = row.distance`;
 
-const CYPHER_DEMO_COUNTS = `MATCH (n:Star)
-WITH count(n) AS stars
-MATCH ()-[r:HYPERLANE]->()
-RETURN stars, count(r) AS hyperlanes`;
-
 // Unbounded shortest-path traversal — dedicated executor in
 // pkg/cypher/shortest_path.go. Undirected to traverse across the seeded
 // forward+reverse hyperlanes regardless of stored direction.
@@ -108,34 +103,6 @@ function assertCypherSuccess(resp: CypherResponse, fallback: string): void {
   if (resp.errors && resp.errors.length > 0) {
     throw new Error(resp.errors.map((err) => err.message).join("; ") || fallback);
   }
-}
-
-function firstRowObject(resp: CypherResponse): ParsedRow | null {
-  const result = resp.results?.[0];
-  const columns = result?.columns || [];
-  const row = result?.data?.[0]?.row || [];
-  if (columns.length === 0 || row.length === 0) {
-    return null;
-  }
-  return columns.reduce<ParsedRow>((out, column, index) => {
-    out[column] = row[index];
-    return out;
-  }, {});
-}
-
-function asCount(value: unknown): number {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value === "string") {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : 0;
-  }
-  if (typeof value === "object" && value !== null && "low" in value) {
-    const low = Number((value as { low?: unknown }).low);
-    return Number.isFinite(low) ? low : 0;
-  }
-  return 0;
 }
 
 function rowsFromCypher(resp: CypherResponse): ParsedRow[] {
@@ -270,12 +237,10 @@ export function Demo() {
       if (cancelled) return;
 
       setPhase("checking");
-      setStatusLine("Counting persisted demo graph...");
-      const countResp = await api.executeCypherOnDatabase(DEMO_DB, CYPHER_DEMO_COUNTS);
-      assertCypherSuccess(countResp, "Failed to validate demo seed contents");
-      const counts = firstRowObject(countResp);
-      const starCount = asCount(counts?.stars);
-      const edgeCount = asCount(counts?.hyperlanes);
+      setStatusLine("Reading persisted demo graph counters...");
+      const info = await api.getDatabaseInfo(DEMO_DB, "Star");
+      const starCount = info.labelNodeCount ?? 0;
+      const edgeCount = info.edgeCount ?? 0;
 
       if (starCount === starRows.length && edgeCount >= edgeRows.length) {
         setStatusLine(`Database '${DEMO_DB}' detected; reusing.`);

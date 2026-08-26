@@ -32,8 +32,10 @@ Values change after requests and graph mutations; active counts return to zero; 
 - Complete: `/status` returns a versioned, timestamped snapshot with monotonic process uptime, maintained graph cardinalities from the open default engine, database state, and explicit `unknown`/`null` HTTP counters instead of synthetic zeros.
 - Complete: `/db/{database}` preserves its established fields while reporting maintained node/edge counts, real storage bytes, search readiness, and embedding runtime state plus pending work. Unowned managed-embedding bytes are explicitly unknown.
 - Complete: the UI status contract accepts unknown counters, cardinalities, and embedding bytes and renders unavailable database values as `Unknown` rather than zero or a runtime error.
+- Complete: a dedicated unauthenticated telemetry listener serves NornicDB-compatible probes: bodyless `/livez` and map-backed `/readyz`; readiness reports informational storage availability without blocking the probe response.
+- Complete: `/status` receives the Bolt listener's RAII-backed active connection, session, explicit transaction, and failure snapshot when Bolt is enabled, and reports explicit unknown values when it is not running.
 - Validated: storage regressions cover namespace/global count mutation and pre-counter migration initialization; the focused server regression creates one node and one edge and verifies database and server snapshots report `1/1`, disabled-but-pending embedding work, timestamps, schema versions, and unknown counters.
-- Remaining: add owned HTTP and Bolt counters, broader engine/storage lifecycle snapshots, readiness/liveness separation, bounded collection latency coverage, stale-snapshot observability, and partial-failure/concurrent-load tests.
+- Remaining: add broader engine/storage lifecycle snapshots, bounded collection latency coverage, stale-snapshot observability, and partial-failure/concurrent-load tests.
 
 ## Definition Of Done
 

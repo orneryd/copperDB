@@ -4330,6 +4330,13 @@ impl StorageEngine {
         Ok(self.nodes.scan_prefix(prefix.as_bytes()).count() as u64)
     }
 
+    /// Count nodes carrying `label` from the durable label index without
+    /// deserializing node records.
+    pub fn node_count_by_label(&self, label: &str) -> Result<u64, StorageError> {
+        let prefix = label_index_prefix(label);
+        Ok(self.indexes.scan_prefix(prefix.as_bytes()).count() as u64)
+    }
+
     /// Count all nodes without deserializing their records.
     ///
     /// Databases created before the counter was introduced fall back to a scan.

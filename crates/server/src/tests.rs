@@ -1666,6 +1666,70 @@ async fn health_uses_buildinfo_version() {
 }
 
 #[tokio::test]
+async fn liveness_and_readiness_probes_are_public_and_report_database_availability() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use copperdb_otel::Health;
+    use tower::ServiceExt;
+
+    let health = Arc::new(Health::new());
+    let ready_app = build_telemetry_router(Arc::clone(&health));
+
+    let response = ready_app
+        .clone()
+        .oneshot(Request::builder().uri("/livez").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(body.is_empty());
+
+    let response = ready_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/livez")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = ready_app
+        .clone()
+        .oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let readiness: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(readiness["ok"], true);
+    assert_eq!(readiness["checks"], serde_json::json!({}));
+
+    health.register("info", false, || Err("informational failure".into()));
+    health.register("required", true, || Err("required failure".into()));
+    let response = ready_app
+        .oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let readiness: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(readiness["ok"], false);
+    assert_eq!(readiness["checks"]["info"]["ok"], false);
+    assert_eq!(readiness["checks"]["info"]["error"], "informational failure");
+    assert_eq!(readiness["checks"]["required"]["error"], "required failure");
+}
+
+#[tokio::test]
 async fn root_advertises_buildinfo_server_announcement() {
     use axum::body::Body;
     use axum::http::Request;
@@ -4733,6 +4797,11 @@ async fn database_info_allows_unauthenticated_access_when_security_disabled() {
     assert_eq!(payload["server"]["errors"], 1);
     assert_eq!(payload["server"]["active"], 1);
     assert!(payload["server"]["uptime_seconds"].is_u64());
+    assert_eq!(payload["bolt"]["state"], "unknown");
+    assert!(payload["bolt"]["active_connections"].is_null());
+    assert!(payload["bolt"]["active_sessions"].is_null());
+    assert!(payload["bolt"]["active_transactions"].is_null());
+    assert!(payload["bolt"]["failures"].is_null());
     assert_eq!(payload["database"]["state"], "ready");
     assert_eq!(payload["database"]["nodes"], 1);
     assert_eq!(payload["database"]["edges"], 1);

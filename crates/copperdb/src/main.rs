@@ -10,9 +10,11 @@ use copperdb_bolt::server::BoltServer;
 use copperdb_buildinfo::display_version;
 use copperdb_config::{load_with_precedence, ConfigOverrides};
 use copperdb_lifecycle::{BoxError, Component, Supervisor};
-use copperdb_otel::Telemetry;
+use copperdb_multidb::DatabaseStatus;
+use copperdb_otel::{Health, ObservabilityConfig, Telemetry};
 use copperdb_server::{
-    build_local_nornic_replica_service, build_router, AppState, AppStateBoltExecutor,
+    build_local_nornic_replica_service, build_router, build_telemetry_router, AppState,
+    AppStateBoltExecutor,
 };
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -118,6 +120,36 @@ struct StartupConfig {
 struct HttpComponent {
     listen_addr: String,
     app: Router,
+}
+
+#[derive(Debug)]
+struct TelemetryComponent {
+    listen_addr: String,
+    app: Router,
+}
+
+#[async_trait]
+impl Component for TelemetryComponent {
+    fn name(&self) -> &str {
+        "telemetry"
+    }
+
+    async fn start(&self, token: CancellationToken) -> Result<(), BoxError> {
+        let listener = TcpListener::bind(&self.listen_addr)
+            .await
+            .with_context(|| format!("failed to bind telemetry listener {}", self.listen_addr))?;
+        info!(listen_addr = %self.listen_addr, "copperdb telemetry listener listening");
+        let server = axum::serve(listener, self.app.clone());
+        tokio::select! {
+            result = server => result.context("telemetry listener exited unexpectedly")?,
+            _ = token.cancelled() => {}
+        }
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), BoxError> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -302,6 +334,7 @@ async fn main() -> Result<()> {
     state.static_dir = startup.static_dir.clone();
     state.base_path = startup.base_path.clone();
     state.headless = startup.headless;
+    state.bolt_enabled = startup.bolt_enabled;
     state.telemetry = Arc::clone(&telemetry);
     let state = Arc::new(state);
     if state.db_manager.get(&startup.db_name).is_none() {
@@ -314,6 +347,23 @@ async fn main() -> Result<()> {
 
     let app = build_router(Arc::clone(&state));
     let mut supervisor = Supervisor::new();
+
+    let mut observability_config = ObservabilityConfig::default();
+    observability_config.apply_env_map(&std::env::vars().collect());
+    let readiness = Arc::new(Health::new());
+    let storage_state = Arc::clone(&state);
+    readiness.register("storage", false, move || {
+        storage_state
+            .db_manager
+            .get(&storage_state.db_name)
+            .is_some_and(|database| database.status == DatabaseStatus::Online)
+            .then_some(())
+            .ok_or_else(|| "default database is unavailable".into())
+    });
+    supervisor.register(TelemetryComponent {
+        listen_addr: observability_config.metrics.listen,
+        app: build_telemetry_router(readiness),
+    });
 
     if startup.http_enabled {
         supervisor.register(HttpComponent {
@@ -328,7 +378,8 @@ async fn main() -> Result<()> {
         supervisor.register(BoltComponent {
             server: BoltServer::new(startup.bolt_address.clone(), telemetry, executor)
                 .with_auth_enabled(state.auth.security_enabled)
-                .with_auth_provider(auth_provider),
+                .with_auth_provider(auth_provider)
+                .with_runtime_counters(Arc::clone(&state.bolt_counters)),
         });
     }
 

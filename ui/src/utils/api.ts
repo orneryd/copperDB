@@ -121,6 +121,7 @@ export interface DatabaseInfo {
   type?: string; // "standard", "composite", "system"
   constituents?: ConstituentInfo[]; // only for composite databases
   nodeCount: number | null;
+  labelNodeCount?: number | null;
   edgeCount: number | null;
   nodeStorageBytes?: number;
   managedEmbeddingBytes?: number | null;
@@ -976,9 +977,10 @@ class CopperDBClient {
     return this.executeCypherOnDatabase("system", statement, parameters);
   }
 
-  async getDatabaseInfo(name: string): Promise<DatabaseInfo> {
+  async getDatabaseInfo(name: string, label?: string): Promise<DatabaseInfo> {
+    const query = label ? `?label=${encodeURIComponent(label)}` : "";
     const res = await fetch(
-      joinBasePath(BASE_PATH, `/db/${encodeURIComponent(name)}`),
+      joinBasePath(BASE_PATH, `/db/${encodeURIComponent(name)}${query}`),
       {
         method: "GET",
         headers: { "Content-Type": "application/json" },
