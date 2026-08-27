@@ -3642,6 +3642,7 @@ fn storage_engine_embedding_dead_letter_is_durable_and_explicitly_requeueable() 
         EmbeddingFailureDisposition::Retry
     );
     assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
+    assert_eq!(engine.embedding_dead_letter_count().unwrap(), 0);
     assert!(engine.embedding_dead_letter("n1").unwrap().is_none());
 
     assert_eq!(
@@ -3655,10 +3656,57 @@ fn storage_engine_embedding_dead_letter_is_durable_and_explicitly_requeueable() 
     assert_eq!(dead_letter.attempts, 2);
     assert_eq!(dead_letter.last_error, "terminal");
     assert_eq!(engine.embedding_dead_letter_count().unwrap(), 1);
+    assert_eq!(
+        engine
+            .record_embedding_failure("n1", "still terminal", 2, 102)
+            .unwrap(),
+        EmbeddingFailureDisposition::DeadLettered
+    );
+    assert_eq!(engine.embedding_dead_letter_count().unwrap(), 1);
 
     engine.add_to_pending_embeddings("n1").unwrap();
     assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
+    assert_eq!(engine.embedding_dead_letter_count().unwrap(), 0);
     assert!(engine.embedding_dead_letter("n1").unwrap().is_none());
+}
+
+#[test]
+fn storage_engine_dead_letter_count_seeds_legacy_database_and_persists_zero() {
+    let test_dir = tempfile::tempdir().unwrap();
+    {
+        let engine = StorageEngine::open(test_dir.path()).unwrap();
+        let mut node = sample_node("n1", &["File"]);
+        node.properties
+            .insert("content".to_string(), json!("pending"));
+        engine.put_node_record(&node).unwrap();
+        assert_eq!(
+            engine
+                .record_embedding_failure("n1", "terminal", 1, 100)
+                .unwrap(),
+            EmbeddingFailureDisposition::DeadLettered
+        );
+        engine
+            .meta
+            .fjall_remove(META_EMBEDDING_DEAD_LETTER_COUNT_KEY)
+            .unwrap();
+        engine.flush().unwrap();
+    }
+
+    {
+        let engine = StorageEngine::open(test_dir.path()).unwrap();
+        assert_eq!(engine.embedding_dead_letter_count().unwrap(), 1);
+        engine.add_to_pending_embeddings("n1").unwrap();
+        assert_eq!(engine.embedding_dead_letter_count().unwrap(), 0);
+        assert!(engine
+            .meta
+            .fjall_get(META_EMBEDDING_DEAD_LETTER_COUNT_KEY)
+            .unwrap()
+            .is_some());
+        engine.flush().unwrap();
+    }
+
+    let reopened = StorageEngine::open(test_dir.path()).unwrap();
+    assert_eq!(reopened.embedding_dead_letter_count().unwrap(), 0);
 }
 
 #[test]

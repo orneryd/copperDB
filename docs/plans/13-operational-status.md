@@ -40,8 +40,9 @@ Values change after requests and graph mutations; active counts return to zero; 
 - Complete: `/db/{database}` caches Fjall disk-space measurements for five seconds and reports the sample timestamp and age. Successful flushes invalidate the storage-owned sample for refresh on the next poll without adding work to the durability boundary, while the exact synchronous storage size API remains available for non-polling callers.
 - Complete: the cached default engine owns a bounded embedding lifecycle snapshot with state, workers, completed/failed totals, backend, and sanitized last error. `/status` maps it to NornicDB's conditional `enabled/status/processed/failed` contract without queue scans; unopened engines report explicit unknowns.
 - Complete: storage owns a durable pending-embedding counter, seeds legacy databases once on open, updates direct and transactional queue mutations atomically, and mirrors the committed value into the bounded embedding operational snapshot. Detailed queue-age diagnostics remain scan-based.
+- Complete: storage maintains dead-letter cardinality across retry, terminal failure, duplicate failure, and explicit requeue transitions. Legacy databases seed once on open, and embedding operational status reads the atomic owner snapshot without decoding failure records.
 - Validated: storage regressions cover namespace/global count mutation and pre-counter migration initialization; the focused server regression creates one node and one edge and verifies database and server snapshots report `1/1`, disabled-but-pending embedding work, timestamps, schema versions, and unknown counters.
-- Remaining: add owner-maintained search/index readiness and a maintained embedding dead-letter counter before exposing additional values in the frequent snapshot.
+- Remaining: add owner-maintained search/index readiness before exposing additional values in the frequent snapshot.
 
 ## Definition Of Done
 

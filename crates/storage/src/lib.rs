@@ -106,6 +106,7 @@ const META_NAMESPACE_LABEL_COUNT_PREFIX: &[u8] = b"namespace_label_count/";
 const META_PENDING_EMBEDDING_PREFIX: &[u8] = b"pending_embedding/";
 const META_PENDING_EMBEDDING_COUNT_KEY: &[u8] = b"pending_embedding_count";
 const META_EMBEDDING_DEAD_LETTER_PREFIX: &[u8] = b"embedding_dead_letter/";
+const META_EMBEDDING_DEAD_LETTER_COUNT_KEY: &[u8] = b"embedding_dead_letter_count";
 const META_FORCED_REEMBEDDING_PREFIX: &[u8] = b"forced_reembedding/";
 const META_PENDING_DEINDEX_PREFIX: &[u8] = b"pending_deindex/";
 const META_INDEX_TOMBSTONE_PREFIX: &[u8] = b"index_tombstone/";
@@ -1757,6 +1758,7 @@ pub struct StorageEngine {
     batch_commit_lock: Mutex<()>,
     embedding_claims: Mutex<BTreeSet<String>>,
     pending_embedding_count: AtomicU64,
+    embedding_dead_letter_count: AtomicU64,
     fulltext_runtime_indexes: Mutex<HashMap<String, Arc<FulltextRuntimeIndex>>>,
     graph_node_cache: Mutex<BoundedCache<String, Option<NodeRecord>>>,
     graph_edge_cache: Mutex<BoundedCache<String, Option<EdgeRecord>>>,
@@ -2330,6 +2332,7 @@ impl StorageEngine {
             batch_commit_lock: Mutex::new(()),
             embedding_claims: Mutex::new(BTreeSet::new()),
             pending_embedding_count: AtomicU64::new(0),
+            embedding_dead_letter_count: AtomicU64::new(0),
             fulltext_runtime_indexes: Mutex::new(HashMap::new()),
             graph_node_cache: Mutex::new(BoundedCache::new(GRAPH_NODE_CACHE_CAPACITY)),
             graph_edge_cache: Mutex::new(BoundedCache::new(GRAPH_EDGE_CACHE_CAPACITY)),
@@ -2354,6 +2357,7 @@ impl StorageEngine {
         engine.ensure_layout_manifest()?;
         engine.ensure_encryption_manifest()?;
         engine.ensure_pending_embedding_count()?;
+        engine.ensure_embedding_dead_letter_count()?;
         if bootstrap_mvcc {
             engine.restore_or_bootstrap_mvcc()?;
             engine.recover_wal_transactions()?;
@@ -3176,9 +3180,10 @@ impl StorageEngine {
         let Some(node) = self.get_node_record(id)? else {
             return Ok(());
         };
-        self.meta.fjall_remove(embedding_dead_letter_key(id))?;
         if node.needs_embedding() || self.has_forced_reembedding(id)? {
-            self.set_pending_embedding(id, Some(pending_embedding_value()?))?;
+            self.requeue_embedding(id, pending_embedding_value()?)?;
+        } else {
+            self.clear_embedding_failure(id)?;
         }
         Ok(())
     }
@@ -3192,11 +3197,10 @@ impl StorageEngine {
         if !node_record_is_embedding_eligible(&node) {
             return Ok(false);
         }
-        self.meta.fjall_remove(embedding_dead_letter_key(id))?;
         self.meta.fjall_insert(forced_reembedding_key(id), [])?;
         node.clear_managed_chunk_embeddings();
         self.put_node_record(&node)?;
-        self.set_pending_embedding(id, Some(pending_embedding_value()?))?;
+        self.requeue_embedding(id, pending_embedding_value()?)?;
         Ok(true)
     }
 
@@ -3244,11 +3248,13 @@ impl StorageEngine {
     ) -> Result<EmbeddingFailureDisposition, StorageError> {
         let _commit_guard = self.batch_commit_lock.lock();
         let key = embedding_dead_letter_key(id);
-        let attempts = self
+        let previous = self
             .meta
             .fjall_get(&key)?
             .map(|raw| rmp_serde::from_slice::<EmbeddingDeadLetter>(raw.as_ref()))
-            .transpose()?
+            .transpose()?;
+        let attempts = previous
+            .as_ref()
             .map(|record| record.attempts)
             .unwrap_or(0)
             .saturating_add(1);
@@ -3259,13 +3265,54 @@ impl StorageEngine {
             failed_at_unix_secs,
             dead_lettered: attempts >= max_attempts.max(1),
         };
+        let was_dead_lettered = previous.is_some_and(|failure| failure.dead_lettered);
+        let pending_key = pending_embedding_key(id);
+        let was_pending = self.meta.fjall_get(&pending_key)?.is_some();
+        let mut batch = StorageBackendBatch::new(self.backend.as_ref());
+        batch.insert(&self.meta, &key, rmp_serde::to_vec(&record)?);
+        let dead_letter_count = self.embedding_dead_letter_count.load(Ordering::Acquire);
+        let updated_dead_letter_count = match (was_dead_lettered, record.dead_lettered) {
+            (false, true) => dead_letter_count.saturating_add(1),
+            (true, false) => dead_letter_count.saturating_sub(1),
+            _ => dead_letter_count,
+        };
+        if was_dead_lettered != record.dead_lettered {
+            batch.insert(
+                &self.meta,
+                META_EMBEDDING_DEAD_LETTER_COUNT_KEY,
+                rmp_serde::to_vec(&updated_dead_letter_count)?,
+            );
+        }
+        let updated_pending_count = if record.dead_lettered && was_pending {
+            Some(
+                self.pending_embedding_count
+                    .load(Ordering::Acquire)
+                    .saturating_sub(1),
+            )
+        } else {
+            None
+        };
         if record.dead_lettered {
-            self.meta.fjall_insert(&key, rmp_serde::to_vec(&record)?)?;
-            self.set_pending_embedding_locked(id, None)?;
+            batch.remove(&self.meta, pending_key);
+            if let Some(pending_count) = updated_pending_count {
+                batch.insert(
+                    &self.meta,
+                    META_PENDING_EMBEDDING_COUNT_KEY,
+                    rmp_serde::to_vec(&pending_count)?,
+                );
+            }
+        }
+        batch.commit()?;
+        if let Some(pending_count) = updated_pending_count {
+            self.pending_embedding_count
+                .store(pending_count, Ordering::Release);
+        }
+        self.embedding_dead_letter_count
+            .store(updated_dead_letter_count, Ordering::Release);
+        if record.dead_lettered {
             self.embedding_claims.lock().remove(id);
             return Ok(EmbeddingFailureDisposition::DeadLettered);
         }
-        self.meta.fjall_insert(&key, rmp_serde::to_vec(&record)?)?;
         Ok(EmbeddingFailureDisposition::Retry)
     }
 
@@ -3286,15 +3333,11 @@ impl StorageEngine {
     }
 
     pub fn embedding_dead_letter_count(&self) -> Result<usize, StorageError> {
-        let mut count = 0;
-        for entry in self.meta.scan_prefix(META_EMBEDDING_DEAD_LETTER_PREFIX) {
-            let (_, value) = entry?;
-            let failure: EmbeddingDeadLetter = rmp_serde::from_slice(value.as_ref())?;
-            if failure.dead_lettered {
-                count += 1;
-            }
-        }
-        Ok(count)
+        Ok(self.embedding_dead_letter_count_snapshot() as usize)
+    }
+
+    pub fn embedding_dead_letter_count_snapshot(&self) -> u64 {
+        self.embedding_dead_letter_count.load(Ordering::Acquire)
     }
 
     pub fn pending_embeddings_count(&self) -> Result<usize, StorageError> {
@@ -6020,6 +6063,109 @@ impl StorageEngine {
             }
         };
         self.pending_embedding_count.store(count, Ordering::Release);
+        Ok(())
+    }
+
+    fn ensure_embedding_dead_letter_count(&self) -> Result<(), StorageError> {
+        let count = match self.meta.fjall_get(META_EMBEDDING_DEAD_LETTER_COUNT_KEY)? {
+            Some(raw) => rmp_serde::from_slice(raw.as_ref())?,
+            None => {
+                let mut count = 0_u64;
+                for entry in self.meta.scan_prefix(META_EMBEDDING_DEAD_LETTER_PREFIX) {
+                    let (_, value) = entry?;
+                    let failure: EmbeddingDeadLetter = rmp_serde::from_slice(value.as_ref())?;
+                    count += u64::from(failure.dead_lettered);
+                }
+                self.meta.fjall_insert(
+                    META_EMBEDDING_DEAD_LETTER_COUNT_KEY,
+                    rmp_serde::to_vec(&count)?,
+                )?;
+                count
+            }
+        };
+        self.embedding_dead_letter_count
+            .store(count, Ordering::Release);
+        Ok(())
+    }
+
+    fn clear_embedding_failure(&self, id: &str) -> Result<bool, StorageError> {
+        let _commit_guard = self.batch_commit_lock.lock();
+        let key = embedding_dead_letter_key(id);
+        let Some(previous) = self
+            .meta
+            .fjall_get(&key)?
+            .map(|raw| rmp_serde::from_slice::<EmbeddingDeadLetter>(raw.as_ref()))
+            .transpose()?
+        else {
+            return Ok(false);
+        };
+        let mut batch = StorageBackendBatch::new(self.backend.as_ref());
+        batch.remove(&self.meta, key);
+        let updated_count = previous.dead_lettered.then(|| {
+            self.embedding_dead_letter_count
+                .load(Ordering::Acquire)
+                .saturating_sub(1)
+        });
+        if let Some(count) = updated_count {
+            batch.insert(
+                &self.meta,
+                META_EMBEDDING_DEAD_LETTER_COUNT_KEY,
+                rmp_serde::to_vec(&count)?,
+            );
+        }
+        batch.commit()?;
+        if let Some(count) = updated_count {
+            self.embedding_dead_letter_count
+                .store(count, Ordering::Release);
+        }
+        Ok(true)
+    }
+
+    fn requeue_embedding(&self, id: &str, value: Vec<u8>) -> Result<(), StorageError> {
+        let _commit_guard = self.batch_commit_lock.lock();
+        let failure_key = embedding_dead_letter_key(id);
+        let was_dead_lettered = self
+            .meta
+            .fjall_get(&failure_key)?
+            .map(|raw| rmp_serde::from_slice::<EmbeddingDeadLetter>(raw.as_ref()))
+            .transpose()?
+            .is_some_and(|failure| failure.dead_lettered);
+        let pending_key = pending_embedding_key(id);
+        let was_pending = self.meta.fjall_get(&pending_key)?.is_some();
+        let pending_count = self.pending_embedding_count.load(Ordering::Acquire);
+        let updated_pending_count = if was_pending {
+            pending_count
+        } else {
+            pending_count.saturating_add(1)
+        };
+        let dead_letter_count = self.embedding_dead_letter_count.load(Ordering::Acquire);
+        let updated_dead_letter_count = if was_dead_lettered {
+            dead_letter_count.saturating_sub(1)
+        } else {
+            dead_letter_count
+        };
+        let mut batch = StorageBackendBatch::new(self.backend.as_ref());
+        batch.remove(&self.meta, failure_key);
+        batch.insert(&self.meta, pending_key, value);
+        if !was_pending {
+            batch.insert(
+                &self.meta,
+                META_PENDING_EMBEDDING_COUNT_KEY,
+                rmp_serde::to_vec(&updated_pending_count)?,
+            );
+        }
+        if was_dead_lettered {
+            batch.insert(
+                &self.meta,
+                META_EMBEDDING_DEAD_LETTER_COUNT_KEY,
+                rmp_serde::to_vec(&updated_dead_letter_count)?,
+            );
+        }
+        batch.commit()?;
+        self.pending_embedding_count
+            .store(updated_pending_count, Ordering::Release);
+        self.embedding_dead_letter_count
+            .store(updated_dead_letter_count, Ordering::Release);
         Ok(())
     }
 

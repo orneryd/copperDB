@@ -40,6 +40,7 @@ pub struct EmbeddingOperationalStatus {
     pub backend: Option<String>,
     pub worker_count: usize,
     pub pending: u64,
+    pub dead_lettered: u64,
     pub completed: u64,
     pub failed: u64,
     pub last_error: Option<String>,
@@ -241,6 +242,7 @@ impl EmbeddingRuntime {
             backend: self.backend.lock().expect("embedding backend lock").clone(),
             worker_count: self.active_workers.load(Ordering::Relaxed),
             pending: self.storage.pending_embeddings_count_snapshot(),
+            dead_lettered: self.storage.embedding_dead_letter_count_snapshot(),
             completed: self.completed.load(Ordering::Relaxed),
             failed: self.failed.load(Ordering::Relaxed),
             last_error: self
@@ -832,6 +834,7 @@ mod tests {
                 backend: None,
                 worker_count: 0,
                 pending: 0,
+                dead_lettered: 0,
                 completed: 0,
                 failed: 0,
                 last_error: None,
@@ -958,6 +961,7 @@ mod tests {
         let status = runtime.status().unwrap();
         assert_eq!(status.pending, 0);
         assert_eq!(status.dead_lettered, 1);
+        assert_eq!(runtime.operational_status().dead_lettered, 1);
         assert_eq!(
             storage
                 .embedding_dead_letter("node-1")
