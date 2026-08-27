@@ -4833,6 +4833,8 @@ async fn database_info_allows_unauthenticated_access_when_security_disabled() {
     assert!(payload["database"]["mvcc"]["retained_versions"].is_null());
     assert!(payload["database"]["mvcc"]["prune_debt"].is_null());
     assert!(payload["database"]["mvcc"]["suggested_prune_floor"].is_null());
+    assert_eq!(payload["embeddings"]["enabled"], false);
+    assert_eq!(payload["embeddings"].as_object().unwrap().len(), 1);
     assert_eq!(state.http_counters.active.load(Ordering::Relaxed), 0);
 }
 
@@ -4863,6 +4865,9 @@ async fn status_reports_unknown_storage_snapshot_when_engine_is_unopened() {
     assert!(payload["database"]["nodes"].is_null());
     assert!(payload["database"]["edges"].is_null());
     assert!(payload["database"]["mvcc"].is_null());
+    assert!(payload["embeddings"]["enabled"].is_null());
+    assert_eq!(payload["embeddings"]["status"], "unknown");
+    assert_eq!(payload["embeddings"].as_object().unwrap().len(), 2);
 }
 
 #[tokio::test]

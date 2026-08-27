@@ -20,6 +20,30 @@ pub enum EmbeddingRuntimeState {
     Stopping,
 }
 
+impl EmbeddingRuntimeState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Cold => "cold",
+            Self::Warming => "warming",
+            Self::Ready => "ready",
+            Self::Degraded => "degraded",
+            Self::Failed => "failed",
+            Self::Stopping => "stopping",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingOperationalStatus {
+    pub state: EmbeddingRuntimeState,
+    pub backend: Option<String>,
+    pub worker_count: usize,
+    pub completed: u64,
+    pub failed: u64,
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmbeddingRuntimeStatus {
     pub state: EmbeddingRuntimeState,
@@ -207,6 +231,21 @@ impl EmbeddingRuntime {
             stop: Arc::new(AtomicBool::new(false)),
             active_workers: Arc::new(AtomicUsize::new(0)),
             workers: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn operational_status(&self) -> EmbeddingOperationalStatus {
+        EmbeddingOperationalStatus {
+            state: *self.state.lock().expect("embedding runtime state lock"),
+            backend: self.backend.lock().expect("embedding backend lock").clone(),
+            worker_count: self.active_workers.load(Ordering::Relaxed),
+            completed: self.completed.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
+            last_error: self
+                .last_error
+                .lock()
+                .expect("embedding runtime error lock")
+                .clone(),
         }
     }
 
@@ -784,6 +823,17 @@ mod tests {
         );
         assert_eq!(runtime.status().unwrap().worker_count, 0);
         assert!(runtime.status().unwrap().model_load_duration_ms.is_none());
+        assert_eq!(
+            runtime.operational_status(),
+            EmbeddingOperationalStatus {
+                state: EmbeddingRuntimeState::Disabled,
+                backend: None,
+                worker_count: 0,
+                completed: 0,
+                failed: 0,
+                last_error: None,
+            }
+        );
         assert!(!runtime.drain_one().unwrap());
         assert_eq!(runtime.embed_query("graph database").unwrap(), None);
     }

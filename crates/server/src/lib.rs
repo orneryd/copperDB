@@ -640,6 +640,7 @@ struct ServerStatusSnapshot {
     server: ServerRuntimeStatus,
     bolt: BoltRuntimeStatus,
     database: DatabaseRuntimeStatus,
+    embeddings: EmbeddingRuntimeSummary,
 }
 
 #[derive(Serialize)]
@@ -669,6 +670,17 @@ struct DatabaseRuntimeStatus {
     edges: Option<u64>,
     databases: usize,
     mvcc: Option<MvccRuntimeStatus>,
+}
+
+#[derive(Serialize)]
+struct EmbeddingRuntimeSummary {
+    enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    processed: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failed: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -735,6 +747,36 @@ fn mvcc_runtime_status(engine: &GraphEngine) -> MvccRuntimeStatus {
         retained_versions: None,
         prune_debt: None,
         suggested_prune_floor: None,
+    }
+}
+
+fn embedding_runtime_summary(engine: Option<&GraphEngine>) -> EmbeddingRuntimeSummary {
+    let Some(engine) = engine else {
+        return EmbeddingRuntimeSummary {
+            enabled: None,
+            status: Some("unknown"),
+            processed: None,
+            failed: None,
+        };
+    };
+    let status = engine.embedding_operational_status();
+    if status.state == copperdb_engine::EmbeddingRuntimeState::Disabled {
+        return EmbeddingRuntimeSummary {
+            enabled: Some(false),
+            status: None,
+            processed: None,
+            failed: None,
+        };
+    }
+    EmbeddingRuntimeSummary {
+        enabled: Some(true),
+        status: Some(if status.worker_count > 0 {
+            "processing"
+        } else {
+            "idle"
+        }),
+        processed: Some(status.completed),
+        failed: Some(status.failed),
     }
 }
 
@@ -1178,6 +1220,7 @@ async fn status_handler(
     let engine = state.engine_cache.read().get(&state.db_name).cloned();
     let (nodes, edges) = engine.as_deref().map(graph_counts).unwrap_or((None, None));
     let mvcc = engine.as_deref().map(mvcc_runtime_status);
+    let embeddings = embedding_runtime_summary(engine.as_deref());
     Json(ServerStatusSnapshot {
         schema_version: STATUS_SCHEMA_VERSION,
         collected_at_unix_ms: collected_at_unix_ms(),
@@ -1216,6 +1259,7 @@ async fn status_handler(
             databases: databases.iter().filter(|db| db.name != "system").count(),
             mvcc,
         },
+        embeddings,
     })
     .into_response()
 }

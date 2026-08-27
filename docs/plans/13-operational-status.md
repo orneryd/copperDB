@@ -38,8 +38,9 @@ Values change after requests and graph mutations; active counts return to zero; 
 - Complete: `/status` remains available with an unopened engine and under concurrent request load; unavailable storage snapshots are explicit `unknown`/`null` values rather than handler failures.
 - Complete: `/status` reads a bounded storage MVCC snapshot that uses atomics and active-reader bookkeeping only. Scan-derived retention and prune-debt diagnostics remain on the detailed lifecycle endpoint and are explicit `null` in the frequent status snapshot.
 - Complete: `/db/{database}` caches Fjall disk-space measurements for five seconds and reports the sample timestamp and age. Successful flushes invalidate the storage-owned sample for refresh on the next poll without adding work to the durability boundary, while the exact synchronous storage size API remains available for non-polling callers.
+- Complete: the cached default engine owns a bounded embedding lifecycle snapshot with state, workers, completed/failed totals, backend, and sanitized last error. `/status` maps it to NornicDB's conditional `enabled/status/processed/failed` contract without queue scans; unopened engines report explicit unknowns.
 - Validated: storage regressions cover namespace/global count mutation and pre-counter migration initialization; the focused server regression creates one node and one edge and verifies database and server snapshots report `1/1`, disabled-but-pending embedding work, timestamps, schema versions, and unknown counters.
-- Remaining: add broader engine lifecycle snapshots.
+- Remaining: add owner-maintained search/index readiness and maintained embedding queue counters before exposing those values in the frequent snapshot.
 
 ## Definition Of Done
 

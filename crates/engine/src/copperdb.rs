@@ -121,6 +121,11 @@ impl CopperDb {
         self.embedding_runtime.status()
     }
 
+    /// Return embedding lifecycle counters without scanning durable queue state.
+    pub fn embedding_operational_status(&self) -> EmbeddingOperationalStatus {
+        self.embedding_runtime.operational_status()
+    }
+
     /// Embed search text with this database's configured embedding provider.
     /// Returns `None` when embedding is disabled or the query is empty.
     pub fn embed_search_query(&self, text: &str) -> Result<Option<Vec<f32>>, CopperDbError> {

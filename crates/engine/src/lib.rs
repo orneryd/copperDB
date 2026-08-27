@@ -38,7 +38,10 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-use crate::embedding_runtime::{EmbeddingRuntime, EmbeddingRuntimeStatus};
+use crate::embedding_runtime::EmbeddingRuntime;
+pub use crate::embedding_runtime::{
+    EmbeddingOperationalStatus, EmbeddingRuntimeState, EmbeddingRuntimeStatus,
+};
 use crate::vector_indexes::VectorIndexManager;
 use copperdb_audit::{AuditConfig, AuditLog, Event, EventType};
 use copperdb_cache::{is_cacheable_read_query, QueryCache, QueryResultCache};
