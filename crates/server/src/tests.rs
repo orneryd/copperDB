@@ -22,6 +22,74 @@ fn encode_bolt_chunks(message: &[u8]) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn request_context_middleware_owns_http_request_cancellation() {
+    use axum::{body::Body, http::Request, routing::get, Extension, Router};
+    use tower::ServiceExt;
+
+    let captured = Arc::new(Mutex::new(None));
+    let handler_capture = Arc::clone(&captured);
+    let app = Router::new()
+        .route(
+            "/",
+            get(move |Extension(context): Extension<RequestContext>| {
+                let handler_capture = Arc::clone(&handler_capture);
+                async move {
+                    assert!(!context.request_id().is_empty());
+                    assert!(!context.is_cancelled());
+                    *handler_capture.lock() = Some(context);
+                    StatusCode::NO_CONTENT
+                }
+            }),
+        )
+        .layer(middleware::from_fn(request_context_middleware));
+
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let context = captured.lock().clone().expect("handler captured context");
+    assert!(context.is_cancelled());
+}
+
+#[tokio::test]
+async fn request_context_middleware_cancels_dropped_http_request() {
+    use axum::{body::Body, http::Request, routing::get, Extension, Router};
+    use tower::ServiceExt;
+
+    let (context_tx, context_rx) = tokio::sync::oneshot::channel();
+    let context_tx = Arc::new(Mutex::new(Some(context_tx)));
+    let handler_tx = Arc::clone(&context_tx);
+    let app = Router::new()
+        .route(
+            "/",
+            get(move |Extension(context): Extension<RequestContext>| {
+                let handler_tx = Arc::clone(&handler_tx);
+                async move {
+                    handler_tx
+                        .lock()
+                        .take()
+                        .expect("handler sends context once")
+                        .send(context)
+                        .expect("test receives context");
+                    std::future::pending::<StatusCode>().await
+                }
+            }),
+        )
+        .layer(middleware::from_fn(request_context_middleware));
+
+    let request_task =
+        tokio::spawn(app.oneshot(Request::builder().uri("/").body(Body::empty()).unwrap()));
+    let context = context_rx.await.expect("handler started");
+    assert!(!context.is_cancelled());
+
+    request_task.abort();
+    assert!(request_task.await.unwrap_err().is_cancelled());
+    assert!(context.is_cancelled());
+}
+
+#[tokio::test]
 async fn copperdb_search_returns_not_found_for_an_authorized_missing_database() {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;

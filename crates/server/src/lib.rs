@@ -12,7 +12,7 @@ use axum::{
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{any, delete, get, post, post_service},
-    Json, Router,
+    Extension, Json, Router,
 };
 use copperdb_auth::{
     AuthConfig, AuthError, Authenticator, Claims, DatabaseAccessMode, TokenManager,
@@ -917,6 +917,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         Arc::clone(&state),
         http_metrics_middleware,
     ));
+    let router = router.layer(middleware::from_fn(request_context_middleware));
 
     if normalized == "/" {
         router.with_state(state)
@@ -934,6 +935,12 @@ pub fn build_telemetry_router(health: Arc<Health>) -> Router {
         .route("/livez", any(livez_handler))
         .route("/readyz", any(readyz_handler))
         .with_state(health)
+}
+
+async fn request_context_middleware(mut request: Request<Body>, next: Next) -> Response {
+    let (request_context, _request_guard) = RequestContext::root(None);
+    request.extensions_mut().insert(request_context);
+    next.run(request).await
 }
 
 async fn http_metrics_middleware(
@@ -1610,24 +1617,27 @@ enum SearchMode {
 /// POST /copperdb/search — CopperDB's branded equivalent of NornicDB search.
 async fn copperdb_search_handler(
     State(state): State<Arc<AppState>>,
+    Extension(request_context): Extension<RequestContext>,
     headers: HeaderMap,
     Json(request): Json<SearchRequest>,
 ) -> impl IntoResponse {
-    search_handler(state, headers, request, None).await
+    search_handler(state, request_context, headers, request, None).await
 }
 
 /// POST /db/{database}/search — database-scoped CopperDB search.
 async fn database_search_handler(
     State(state): State<Arc<AppState>>,
     Path(database): Path<String>,
+    Extension(request_context): Extension<RequestContext>,
     headers: HeaderMap,
     Json(request): Json<SearchRequest>,
 ) -> impl IntoResponse {
-    search_handler(state, headers, request, Some(database)).await
+    search_handler(state, request_context, headers, request, Some(database)).await
 }
 
 async fn search_handler(
     state: Arc<AppState>,
+    request_context: RequestContext,
     headers: HeaderMap,
     request: SearchRequest,
     path_database: Option<String>,
@@ -1783,7 +1793,6 @@ async fn search_handler(
             .into_response();
     }
 
-    let (request_context, _request_guard) = RequestContext::root(None);
     let embedding_started = std::time::Instant::now();
     let query_vector = if request.vector.is_some() {
         request.vector.clone()
@@ -2161,6 +2170,7 @@ async fn get_effective_database_config_handler(
 async fn neo4j_tx_commit_handler(
     State(state): State<Arc<AppState>>,
     Path(database): Path<String>,
+    Extension(request_context): Extension<RequestContext>,
     headers: HeaderMap,
     Json(request): Json<Neo4jCommitRequest>,
 ) -> impl IntoResponse {
@@ -2206,7 +2216,7 @@ async fn neo4j_tx_commit_handler(
         let roles = roles.clone();
         let caller_auth_token = caller_auth_token.clone();
         let request_region = request_region.clone();
-        let (request_context, _request_guard) = RequestContext::root(None);
+        let request_context = request_context.clone();
         let result = tokio::task::spawn_blocking(move || {
             execute_statement(
                 Arc::clone(&state),
@@ -3562,6 +3572,9 @@ async fn execute_fabric_ranked_search_admin_service(
     state: Arc<AppState>,
     request: Request<Body>,
 ) -> Response {
+    let Some(request_context) = request.extensions().get::<RequestContext>().cloned() else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
     let (tenant, database) = match parse_fabric_ranked_search_path(request.uri().path()) {
         Ok(path) => path,
         Err(response) => return response,
@@ -3590,18 +3603,25 @@ async fn execute_fabric_ranked_search_admin_service(
                 .into_response();
         }
     };
-    execute_fabric_ranked_search_admin_impl(state, tenant, database, request, caller_auth_token)
-        .await
+    execute_fabric_ranked_search_admin_impl(
+        state,
+        tenant,
+        database,
+        request_context,
+        request,
+        caller_auth_token,
+    )
+    .await
 }
 
 async fn execute_fabric_ranked_search_admin_impl(
     state: Arc<AppState>,
     tenant: String,
     database: String,
+    request_context: RequestContext,
     request: FabricRankedSearchRequest,
     caller_auth_token: Option<String>,
 ) -> Response {
-    let (request_context, _request_guard) = RequestContext::root(None);
     let read_fence = match derive_distributed_read_fence(&state, &database, &request.bookmarks) {
         Ok(read_fence) => read_fence,
         Err(error) => {

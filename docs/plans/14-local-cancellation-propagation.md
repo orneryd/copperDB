@@ -1,6 +1,6 @@
 # 14: Local Request Cancellation Propagation
 
-Status: planned. Priority: P1. Owners: `util`, `server`, `bolt`, `engine`, `eval`, `storage`, `indexing`, `search`, `embed`, `nornicgrpc`.
+Status: in progress. Priority: P1. Owners: `util`, `server`, `bolt`, `engine`, `eval`, `storage`, `indexing`, `search`, `embed`, `nornicgrpc`.
 
 ## Objective
 
@@ -25,6 +25,12 @@ Reads/searches drop partial assembly. Uncommitted transactions request rollback.
 ## Tests
 
 Cancel before work, mid-loop, during rebuild/hydration, on disconnect/deadline, and before/during/after commit. Assert bounded latency, cleanup, no partial result, stable IDs, and correct error class.
+
+## Progress
+
+- Complete: Axum middleware creates one root request context for every application HTTP request, retains its cancellation guard through handler execution, and exposes the context through request extensions. Search, transactional Cypher, and Fabric ranked-search paths consume that ingress context instead of creating independent roots. Deterministic middleware tests verify the context is active in the handler and cancelled when the request future completes or is dropped.
+- Pending: port NornicDB's route-specific HTTP timeout policy so ingress contexts carry narrowed deadlines and timed-out routes return the compatible response contract.
+- Pending: complete context-aware internal APIs, bounded cooperative checkpoints, typed protocol error mapping, and cancellation telemetry.
 
 ## Definition Of Done
 
