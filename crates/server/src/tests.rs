@@ -89,6 +89,95 @@ async fn request_context_middleware_cancels_dropped_http_request() {
     assert!(context.is_cancelled());
 }
 
+#[test]
+fn request_context_middleware_selects_upstream_route_timeouts() {
+    let status = http_request_timeout("/status").expect("status timeout");
+    assert_eq!(status.duration, Duration::from_secs(5));
+    assert_eq!(status.message, "request timeout: status busy");
+
+    for path in ["/copperdb/search", "/db/copperdb/search"] {
+        let search = http_request_timeout(path).expect("search timeout");
+        assert_eq!(search.duration, Duration::from_secs(20));
+        assert_eq!(search.message, "request timeout: search busy");
+    }
+
+    assert!(http_request_timeout("/health").is_none());
+    assert!(http_request_timeout("/admin/retention/status").is_none());
+    assert!(http_request_timeout("/admin/fabric/databases/t/d/ranked-search").is_none());
+}
+
+#[test]
+fn transaction_request_timeout_accepts_only_positive_duration_overrides() {
+    assert_eq!(
+        transaction_request_timeout_from("5ms", "10ms"),
+        Duration::from_millis(5)
+    );
+    assert_eq!(
+        transaction_request_timeout_from("", "10ms"),
+        Duration::from_millis(10)
+    );
+    assert_eq!(
+        transaction_request_timeout_from("0ms", "0ms"),
+        DEFAULT_TRANSACTION_REQUEST_TIMEOUT
+    );
+    assert_eq!(
+        transaction_request_timeout_from("invalid", "invalid"),
+        DEFAULT_TRANSACTION_REQUEST_TIMEOUT
+    );
+}
+
+#[tokio::test]
+async fn request_context_middleware_returns_timeout_and_cancels_context() {
+    use axum::{body::Body, http::Request, routing::get, Extension, Router};
+    use tower::ServiceExt;
+
+    let (context_tx, context_rx) = tokio::sync::oneshot::channel();
+    let context_tx = Arc::new(Mutex::new(Some(context_tx)));
+    let handler_tx = Arc::clone(&context_tx);
+    let timeout = HttpRequestTimeout {
+        duration: Duration::from_millis(10),
+        message: "request timeout: transaction busy",
+    };
+    let app = Router::new()
+        .route(
+            "/",
+            get(move |Extension(context): Extension<RequestContext>| {
+                let handler_tx = Arc::clone(&handler_tx);
+                async move {
+                    assert!(context.deadline().is_some());
+                    assert!(context.check_active().is_ok());
+                    handler_tx
+                        .lock()
+                        .take()
+                        .expect("handler sends context once")
+                        .send(context)
+                        .expect("test receives context");
+                    std::future::pending::<StatusCode>().await
+                }
+            }),
+        )
+        .layer(middleware::from_fn(move |request, next| {
+            run_with_request_context(request, next, Some(timeout))
+        }));
+
+    let request_task =
+        tokio::spawn(app.oneshot(Request::builder().uri("/").body(Body::empty()).unwrap()));
+    let context = context_rx.await.expect("handler started");
+    let response = tokio::time::timeout(Duration::from_secs(1), request_task)
+        .await
+        .expect("middleware completed within bound")
+        .expect("request task completed")
+        .expect("router returned response");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    assert_eq!(&body[..], b"request timeout: transaction busy");
+    assert!(context.is_cancelled());
+    assert!(context.check_active().is_err());
+}
+
 #[tokio::test]
 async fn copperdb_search_returns_not_found_for_an_authorized_missing_database() {
     use axum::{body::Body, http::Request};

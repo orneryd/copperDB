@@ -24,7 +24,7 @@ use copperdb_bolt::server::{
 use copperdb_buildinfo::{display_version, server_announcement, version};
 use copperdb_config::Config as RuntimeConfig;
 use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig, ResultStats};
-use copperdb_envutil::{get as env_get, get_bool_loose};
+use copperdb_envutil::{get as env_get, get_bool_loose, parse_duration};
 use copperdb_fabric::{FabricReadRequest, FabricReadScope};
 use copperdb_graphql::GraphQlSchema;
 use copperdb_multidb::{DatabaseManager, DatabaseStatus, MultiDbError};
@@ -631,6 +631,17 @@ pub struct HealthResponse {
 
 const STATUS_SCHEMA_VERSION: u32 = 1;
 const STORAGE_SIZE_SNAPSHOT_MAX_AGE: Duration = Duration::from_secs(5);
+const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const SEARCH_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const DEFAULT_TRANSACTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const TRANSACTION_REQUEST_TIMEOUT_ENV: &str = "COPPERDB_HTTP_TX_TIMEOUT";
+const UPSTREAM_TRANSACTION_REQUEST_TIMEOUT_ENV: &str = "NORNICDB_HTTP_TX_TIMEOUT";
+
+#[derive(Clone, Copy)]
+struct HttpRequestTimeout {
+    duration: Duration,
+    message: &'static str,
+}
 
 #[derive(Serialize)]
 struct ServerStatusSnapshot {
@@ -913,11 +924,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         Arc::clone(&state),
         security_validation_middleware,
     ));
+    let router = router.layer(middleware::from_fn(request_context_middleware));
     let router = router.layer(middleware::from_fn_with_state(
         Arc::clone(&state),
         http_metrics_middleware,
     ));
-    let router = router.layer(middleware::from_fn(request_context_middleware));
 
     if normalized == "/" {
         router.with_state(state)
@@ -937,10 +948,61 @@ pub fn build_telemetry_router(health: Arc<Health>) -> Router {
         .with_state(health)
 }
 
-async fn request_context_middleware(mut request: Request<Body>, next: Next) -> Response {
-    let (request_context, _request_guard) = RequestContext::root(None);
+async fn request_context_middleware(request: Request<Body>, next: Next) -> Response {
+    let timeout = http_request_timeout(request.uri().path());
+    run_with_request_context(request, next, timeout).await
+}
+
+async fn run_with_request_context(
+    mut request: Request<Body>,
+    next: Next,
+    timeout: Option<HttpRequestTimeout>,
+) -> Response {
+    let deadline = timeout.and_then(|policy| SystemTime::now().checked_add(policy.duration));
+    let (request_context, _request_guard) = RequestContext::root(deadline);
     request.extensions_mut().insert(request_context);
-    next.run(request).await
+    match timeout {
+        Some(policy) => match tokio::time::timeout(policy.duration, next.run(request)).await {
+            Ok(response) => response,
+            Err(_) => (StatusCode::SERVICE_UNAVAILABLE, policy.message).into_response(),
+        },
+        None => next.run(request).await,
+    }
+}
+
+fn http_request_timeout(path: &str) -> Option<HttpRequestTimeout> {
+    match path {
+        "/status" => Some(HttpRequestTimeout {
+            duration: STATUS_REQUEST_TIMEOUT,
+            message: "request timeout: status busy",
+        }),
+        "/copperdb/search" => Some(HttpRequestTimeout {
+            duration: SEARCH_REQUEST_TIMEOUT,
+            message: "request timeout: search busy",
+        }),
+        path if path.starts_with("/db/") && path.ends_with("/search") => Some(HttpRequestTimeout {
+            duration: SEARCH_REQUEST_TIMEOUT,
+            message: "request timeout: search busy",
+        }),
+        path if path.starts_with("/db/") && path.contains("/tx") => Some(HttpRequestTimeout {
+            duration: transaction_request_timeout(),
+            message: "request timeout: transaction busy",
+        }),
+        _ => None,
+    }
+}
+
+fn transaction_request_timeout() -> Duration {
+    let configured = env_get(TRANSACTION_REQUEST_TIMEOUT_ENV, "");
+    let upstream = env_get(UPSTREAM_TRANSACTION_REQUEST_TIMEOUT_ENV, "");
+    transaction_request_timeout_from(configured.trim(), upstream.trim())
+}
+
+fn transaction_request_timeout_from(configured: &str, upstream: &str) -> Duration {
+    parse_duration(configured)
+        .filter(|duration| !duration.is_zero())
+        .or_else(|| parse_duration(upstream).filter(|duration| !duration.is_zero()))
+        .unwrap_or(DEFAULT_TRANSACTION_REQUEST_TIMEOUT)
 }
 
 async fn http_metrics_middleware(

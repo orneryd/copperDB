@@ -29,7 +29,7 @@ Cancel before work, mid-loop, during rebuild/hydration, on disconnect/deadline, 
 ## Progress
 
 - Complete: Axum middleware creates one root request context for every application HTTP request, retains its cancellation guard through handler execution, and exposes the context through request extensions. Search, transactional Cypher, and Fabric ranked-search paths consume that ingress context instead of creating independent roots. Deterministic middleware tests verify the context is active in the handler and cancelled when the request future completes or is dropped.
-- Pending: port NornicDB's route-specific HTTP timeout policy so ingress contexts carry narrowed deadlines and timed-out routes return the compatible response contract.
+- Complete: HTTP ingress contexts carry NornicDB-compatible route deadlines for status, search, and transaction requests. Timeout expiration returns the upstream `503` message, cancels the shared context, and honors positive `COPPERDB_HTTP_TX_TIMEOUT` or upstream-compatible `NORNICDB_HTTP_TX_TIMEOUT` duration overrides with a five-minute transaction default.
 - Pending: complete context-aware internal APIs, bounded cooperative checkpoints, typed protocol error mapping, and cancellation telemetry.
 
 ## Definition Of Done
