@@ -637,10 +637,18 @@ struct ServerStatusSnapshot {
     schema_version: u32,
     collected_at_unix_ms: u64,
     status: &'static str,
+    startup: StartupRuntimeStatus,
     server: ServerRuntimeStatus,
     bolt: BoltRuntimeStatus,
     database: DatabaseRuntimeStatus,
     embeddings: EmbeddingRuntimeSummary,
+}
+
+#[derive(Serialize)]
+struct StartupRuntimeStatus {
+    phase: &'static str,
+    search_ready_databases: usize,
+    search_building_databases: usize,
 }
 
 #[derive(Serialize)]
@@ -1217,7 +1225,24 @@ async fn status_handler(
     }
 
     let databases = state.db_manager.list();
-    let engine = state.engine_cache.read().get(&state.db_name).cloned();
+    let (engine, search_ready_databases, search_building_databases) = {
+        let engine_cache = state.engine_cache.read();
+        let engine = engine_cache.get(&state.db_name).cloned();
+        let mut search_ready_databases = 0;
+        let mut search_building_databases = 0;
+        for database in databases
+            .iter()
+            .filter(|database| database.name != "system")
+        {
+            let Some(database_engine) = engine_cache.get(&database.name) else {
+                continue;
+            };
+            let search = database_engine.search_operational_status();
+            search_ready_databases += usize::from(search.ready);
+            search_building_databases += usize::from(search.building);
+        }
+        (engine, search_ready_databases, search_building_databases)
+    };
     let (nodes, edges) = engine.as_deref().map(graph_counts).unwrap_or((None, None));
     let mvcc = engine.as_deref().map(mvcc_runtime_status);
     let embeddings = embedding_runtime_summary(engine.as_deref());
@@ -1225,6 +1250,15 @@ async fn status_handler(
         schema_version: STATUS_SCHEMA_VERSION,
         collected_at_unix_ms: collected_at_unix_ms(),
         status: "running",
+        startup: StartupRuntimeStatus {
+            phase: if search_building_databases > 0 {
+                "search_warming"
+            } else {
+                "ready"
+            },
+            search_ready_databases,
+            search_building_databases,
+        },
         server: ServerRuntimeStatus {
             uptime_seconds: state.started_at.elapsed().as_secs(),
             counters_state: "ready",
@@ -1996,20 +2030,9 @@ async fn database_info_handler(
                     .storage()
                     .size_on_disk_snapshot(STORAGE_SIZE_SNAPSHOT_MAX_AGE)
             });
-            let search_initialized = engine
+            let search_status = engine
                 .as_ref()
-                .and_then(|engine| engine.list_index_definitions().ok())
-                .is_some_and(|definitions| {
-                    definitions.iter().any(|definition| {
-                        definition.entity_type == copperdb_storage::IndexEntityType::Node
-                            && matches!(
-                                definition.kind,
-                                copperdb_storage::IndexKind::FullText
-                                    | copperdb_storage::IndexKind::Vector
-                            )
-                    })
-                });
-            let search_ready = db.status == DatabaseStatus::Online && search_initialized;
+                .map(|engine| engine.search_operational_status());
             let embedding_status = engine
                 .as_ref()
                 .and_then(|engine| engine.embedding_runtime_status().ok());
@@ -2037,9 +2060,10 @@ async fn database_info_handler(
                     .map(|status| format!("{:?}", status.state).to_ascii_lowercase())
                     .unwrap_or_else(|| "unknown".into()),
                 embedding_pending: embedding_status.map(|status| status.pending),
-                search_ready,
-                search_building: false,
-                search_initialized,
+                search_ready: db.status == DatabaseStatus::Online
+                    && search_status.as_ref().is_some_and(|status| status.ready),
+                search_building: search_status.as_ref().is_some_and(|status| status.building),
+                search_initialized: search_status.is_some_and(|status| status.initialized),
             })
             .into_response()
         }

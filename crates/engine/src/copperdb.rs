@@ -126,6 +126,43 @@ impl CopperDb {
         self.embedding_runtime.operational_status()
     }
 
+    /// Return search readiness from owner-maintained schema counters.
+    pub fn search_operational_status(&self) -> SearchOperationalStatus {
+        let indexes = self.storage.search_index_operational_status();
+        let initialized = indexes.fulltext_indexes > 0 || indexes.vector_indexes > 0;
+        let ready = initialized
+            && self.vector_indexes.initialized_index_count()
+                == Some(indexes.vector_indexes as usize);
+        let bm25_enabled = self.config.runtime_config.bm25_enabled;
+        let vector_enabled = self.config.runtime_config.vector_enabled;
+        SearchOperationalStatus {
+            ready,
+            building: false,
+            initialized,
+            strategy: if ready && indexes.vector_indexes > 0 {
+                "hnsw"
+            } else {
+                "unknown"
+            },
+            phase: if ready {
+                "ready"
+            } else if initialized {
+                "degraded"
+            } else {
+                "not_initialized"
+            },
+            processed_nodes: 0,
+            total_nodes: 0,
+            rate_nodes_per_sec: 0.0,
+            eta_seconds: -1,
+            bm25_enabled,
+            vector_enabled,
+            lazy_trigger_needed: !initialized
+                && ((bm25_enabled && self.config.runtime_config.bm25_warming == "lazy")
+                    || (vector_enabled && self.config.runtime_config.vector_warming == "lazy")),
+        }
+    }
+
     /// Embed search text with this database's configured embedding provider.
     /// Returns `None` when embedding is disabled or the query is empty.
     pub fn embed_search_query(&self, text: &str) -> Result<Option<Vec<f32>>, CopperDbError> {

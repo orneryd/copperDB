@@ -1359,6 +1359,56 @@ fn test_default_config() {
 }
 
 #[test]
+fn search_operational_status_tracks_configuration_and_runtime_readiness() {
+    let storage = Arc::new(StorageEngine::open_temporary().unwrap());
+    let mut config = DatabaseConfig::default();
+    config.runtime_config.bm25_enabled = true;
+    config.runtime_config.bm25_warming = "lazy".to_string();
+    let db = CopperDb::from_storage(Arc::clone(&storage), config).unwrap();
+
+    let cold = db.search_operational_status();
+    assert!(!cold.ready);
+    assert!(!cold.building);
+    assert!(!cold.initialized);
+    assert_eq!(cold.strategy, "unknown");
+    assert_eq!(cold.phase, "not_initialized");
+    assert!(cold.bm25_enabled);
+    assert!(!cold.vector_enabled);
+    assert!(cold.lazy_trigger_needed);
+    assert_eq!(cold.eta_seconds, -1);
+
+    storage
+        .persist_index_definition(&copperdb_storage::IndexDefinition {
+            name: "person_bio_idx".to_string(),
+            entity_type: IndexEntityType::Node,
+            label: "Person".to_string(),
+            properties: vec!["bio".to_string()],
+            kind: IndexKind::FullText,
+        })
+        .unwrap();
+    let ready = db.search_operational_status();
+    assert!(ready.ready);
+    assert!(ready.initialized);
+    assert_eq!(ready.phase, "ready");
+    assert!(!ready.lazy_trigger_needed);
+
+    storage
+        .persist_index_definition(&copperdb_storage::IndexDefinition {
+            name: "person_embedding_idx".to_string(),
+            entity_type: IndexEntityType::Node,
+            label: "Person".to_string(),
+            properties: vec!["embedding".to_string()],
+            kind: IndexKind::Vector,
+        })
+        .unwrap();
+    let degraded = db.search_operational_status();
+    assert!(!degraded.ready);
+    assert!(degraded.initialized);
+    assert_eq!(degraded.strategy, "unknown");
+    assert_eq!(degraded.phase, "degraded");
+}
+
+#[test]
 fn persistent_engine_maps_sync_writes_to_immediate_wal_durability() {
     let dir = tempfile::tempdir().unwrap();
     let db = CopperDb::open(DatabaseConfig {

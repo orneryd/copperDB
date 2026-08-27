@@ -1767,6 +1767,8 @@ pub struct StorageEngine {
     bfs_adjacency_cache: Mutex<BoundedCache<String, Arc<BfsAdjacencyMap>>>,
     schema_manager: RwLock<Arc<SchemaManager>>,
     index_schema_generation: AtomicU64,
+    fulltext_index_count: AtomicU64,
+    vector_index_count: AtomicU64,
     knowledge_policy_schema_generation: AtomicU64,
     size_on_disk_snapshot: Mutex<Option<CachedStorageSizeSnapshot>>,
     encryption: Option<StorageEncryption>,
@@ -1787,6 +1789,12 @@ pub struct StorageSizeSnapshot {
     pub bytes: u64,
     pub sampled_at_unix_ms: u64,
     pub age_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchIndexOperationalStatus {
+    pub fulltext_indexes: u64,
+    pub vector_indexes: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2341,6 +2349,8 @@ impl StorageEngine {
             bfs_adjacency_cache: Mutex::new(BoundedCache::new(BFS_ADJACENCY_CACHE_CAPACITY)),
             schema_manager: RwLock::new(Arc::new(SchemaManager::new())),
             index_schema_generation: AtomicU64::new(0),
+            fulltext_index_count: AtomicU64::new(0),
+            vector_index_count: AtomicU64::new(0),
             knowledge_policy_schema_generation: AtomicU64::new(0),
             size_on_disk_snapshot: Mutex::new(None),
             encryption,
@@ -2362,6 +2372,7 @@ impl StorageEngine {
             engine.restore_or_bootstrap_mvcc()?;
             engine.recover_wal_transactions()?;
         }
+        engine.refresh_search_index_operational_status()?;
         engine.rebuild_schema_manager()?;
         Ok(engine)
     }
@@ -5190,6 +5201,7 @@ impl StorageEngine {
         if is_node_fulltext_index(index) {
             self.fulltext_runtime_indexes.lock().clear();
         }
+        self.refresh_search_index_operational_status()?;
         self.index_schema_generation.fetch_add(1, Ordering::Release);
         Ok(())
     }
@@ -5197,6 +5209,13 @@ impl StorageEngine {
     /// Monotonic generation for invalidating query plans derived from the index schema.
     pub fn index_schema_generation(&self) -> u64 {
         self.index_schema_generation.load(Ordering::Acquire)
+    }
+
+    pub fn search_index_operational_status(&self) -> SearchIndexOperationalStatus {
+        SearchIndexOperationalStatus {
+            fulltext_indexes: self.fulltext_index_count.load(Ordering::Acquire),
+            vector_indexes: self.vector_index_count.load(Ordering::Acquire),
+        }
     }
 
     /// Persist vector index options (separate from the main index definition to avoid
@@ -5326,6 +5345,7 @@ impl StorageEngine {
                 }
             }
             self.index_schema_generation.fetch_add(1, Ordering::Release);
+            self.refresh_search_index_operational_status()?;
         }
         Ok(deleted)
     }
@@ -6046,6 +6066,23 @@ impl StorageEngine {
             Some(raw) => Ok(rmp_serde::from_slice(raw.as_ref())?),
             None => Ok(0),
         }
+    }
+
+    fn refresh_search_index_operational_status(&self) -> Result<(), StorageError> {
+        let mut fulltext_indexes = 0_u64;
+        let mut vector_indexes = 0_u64;
+        for index in self.load_index_definitions()? {
+            match index.kind {
+                IndexKind::FullText => fulltext_indexes += 1,
+                IndexKind::Vector => vector_indexes += 1,
+                IndexKind::Range | IndexKind::Temporal => {}
+            }
+        }
+        self.fulltext_index_count
+            .store(fulltext_indexes, Ordering::Release);
+        self.vector_index_count
+            .store(vector_indexes, Ordering::Release);
+        Ok(())
     }
 
     fn ensure_pending_embedding_count(&self) -> Result<(), StorageError> {
@@ -8516,6 +8553,7 @@ impl<'a> BatchWriter<'a> {
             self.engine.fulltext_runtime_indexes.lock().clear();
         }
         if !indexes.is_empty() {
+            self.engine.refresh_search_index_operational_status()?;
             self.engine
                 .index_schema_generation
                 .fetch_add(1, Ordering::Release);

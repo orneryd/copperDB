@@ -165,6 +165,14 @@ impl VectorIndexManager {
         self.registry.status(name).map_err(vector_error)
     }
 
+    pub(crate) fn initialized_index_count(&self) -> Option<usize> {
+        self.file_store_bindings
+            .lock()
+            .ok()
+            .as_deref()
+            .map(Vec::len)
+    }
+
     pub(crate) fn query_node_indexes(
         &self,
         cancellation: &copperdb_util::RequestCancellation,

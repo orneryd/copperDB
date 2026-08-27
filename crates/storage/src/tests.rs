@@ -2965,6 +2965,61 @@ fn index_schema_generation_tracks_direct_and_atomic_index_ddl() {
 }
 
 #[test]
+fn search_index_operational_status_tracks_direct_and_atomic_index_ddl() {
+    let test_dir = tempfile::tempdir().unwrap();
+    let engine = StorageEngine::open(test_dir.path()).unwrap();
+    let range = IndexDefinition {
+        name: "person_email_idx".to_string(),
+        entity_type: IndexEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["email".to_string()],
+        kind: IndexKind::Range,
+    };
+    let fulltext = IndexDefinition {
+        name: "person_bio_idx".to_string(),
+        entity_type: IndexEntityType::Node,
+        label: "Person".to_string(),
+        properties: vec!["bio".to_string()],
+        kind: IndexKind::FullText,
+    };
+    let vector = IndexDefinition {
+        name: fulltext.name.clone(),
+        kind: IndexKind::Vector,
+        ..fulltext.clone()
+    };
+
+    assert_eq!(
+        engine.search_index_operational_status(),
+        SearchIndexOperationalStatus {
+            fulltext_indexes: 0,
+            vector_indexes: 0,
+        }
+    );
+    engine.persist_index_definition(&range).unwrap();
+    engine.persist_index_definition(&fulltext).unwrap();
+    assert_eq!(engine.search_index_operational_status().fulltext_indexes, 1);
+
+    engine
+        .batch_write(|writer| {
+            writer.put_index_definition(&vector);
+            Ok::<_, StorageError>(())
+        })
+        .unwrap();
+    assert_eq!(
+        engine.search_index_operational_status(),
+        SearchIndexOperationalStatus {
+            fulltext_indexes: 0,
+            vector_indexes: 1,
+        }
+    );
+    engine.flush().unwrap();
+    drop(engine);
+
+    let reopened = StorageEngine::open(test_dir.path()).unwrap();
+    assert_eq!(reopened.search_index_operational_status().vector_indexes, 1);
+}
+
+#[test]
 fn topology_metadata_round_trip_builds_valid_registry() {
     use copperdb_topology::{
         DistributedWriteMode, HyperscalerProfile as TopologyHyperscalerProfile, MeshPeer,

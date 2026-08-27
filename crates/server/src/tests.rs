@@ -4812,6 +4812,9 @@ async fn database_info_allows_unauthenticated_access_when_security_disabled() {
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["schema_version"], STATUS_SCHEMA_VERSION);
     assert!(payload["collected_at_unix_ms"].as_u64().unwrap() > 0);
+    assert_eq!(payload["startup"]["phase"], "ready");
+    assert_eq!(payload["startup"]["search_ready_databases"], 1);
+    assert_eq!(payload["startup"]["search_building_databases"], 0);
     assert_eq!(payload["server"]["counters_state"], "ready");
     assert_eq!(payload["server"]["requests"], 3);
     assert_eq!(payload["server"]["errors"], 1);
@@ -4862,6 +4865,9 @@ async fn status_reports_unknown_storage_snapshot_when_engine_is_unopened() {
         .unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload["database"]["state"], "unknown");
+    assert_eq!(payload["startup"]["phase"], "ready");
+    assert_eq!(payload["startup"]["search_ready_databases"], 0);
+    assert_eq!(payload["startup"]["search_building_databases"], 0);
     assert!(payload["database"]["nodes"].is_null());
     assert!(payload["database"]["edges"].is_null());
     assert!(payload["database"]["mvcc"].is_null());

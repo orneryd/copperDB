@@ -285,6 +285,22 @@ pub struct QueryResult {
     pub stats: ResultStats,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchOperationalStatus {
+    pub ready: bool,
+    pub building: bool,
+    pub initialized: bool,
+    pub strategy: &'static str,
+    pub phase: &'static str,
+    pub processed_nodes: u64,
+    pub total_nodes: u64,
+    pub rate_nodes_per_sec: f64,
+    pub eta_seconds: i64,
+    pub bm25_enabled: bool,
+    pub vector_enabled: bool,
+    pub lazy_trigger_needed: bool,
+}
+
 #[derive(Debug)]
 pub struct DistributedQueryResult {
     pub result: QueryResult,
