@@ -4,6 +4,7 @@ use copperdb_util::RequestCancellation;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Cursor;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -100,6 +101,71 @@ fn memory_backend_keeps_graph_state_in_process() {
     engine.flush().unwrap();
 }
 
+struct CountingSizeBackend {
+    inner: MemoryStorageBackend,
+    size_calls: AtomicU64,
+    size_bytes: AtomicU64,
+}
+
+impl CountingSizeBackend {
+    fn new(size_bytes: u64) -> Self {
+        Self {
+            inner: MemoryStorageBackend::new(),
+            size_calls: AtomicU64::new(0),
+            size_bytes: AtomicU64::new(size_bytes),
+        }
+    }
+}
+
+impl StorageBackend for CountingSizeBackend {
+    fn keyspace(&self, id: StorageKeyspaceId) -> StorageKeyspace {
+        self.inner.keyspace(id)
+    }
+
+    fn apply_batch(&self, operations: &[StorageBackendOperation]) -> Result<(), StorageError> {
+        self.inner.apply_batch(operations)
+    }
+
+    fn flush(&self) -> Result<(), StorageError> {
+        self.inner.flush()
+    }
+
+    fn size_on_disk(&self) -> u64 {
+        self.size_calls.fetch_add(1, Ordering::Relaxed);
+        self.size_bytes.load(Ordering::Relaxed)
+    }
+
+    fn name(&self) -> &'static str {
+        "counting-memory"
+    }
+}
+
+#[test]
+fn size_on_disk_snapshot_reuses_fresh_sample_and_reports_refresh() {
+    let backend = Arc::new(CountingSizeBackend::new(42));
+    let engine = StorageEngine::from_backend(backend.clone()).unwrap();
+
+    let first = engine.size_on_disk_snapshot(Duration::from_secs(5));
+    let cached = engine.size_on_disk_snapshot(Duration::from_secs(5));
+    assert_eq!(first.bytes, 42);
+    assert_eq!(cached.sampled_at_unix_ms, first.sampled_at_unix_ms);
+    assert_eq!(backend.size_calls.load(Ordering::Relaxed), 1);
+
+    backend.size_bytes.store(84, Ordering::Relaxed);
+    let refreshed = engine.size_on_disk_snapshot(Duration::ZERO);
+    assert_eq!(refreshed.bytes, 84);
+    assert_eq!(refreshed.age_ms, 0);
+    assert_eq!(backend.size_calls.load(Ordering::Relaxed), 2);
+
+    engine.flush().unwrap();
+    assert_eq!(backend.size_calls.load(Ordering::Relaxed), 2);
+    assert_eq!(
+        engine.size_on_disk_snapshot(Duration::from_secs(5)).bytes,
+        84
+    );
+    assert_eq!(backend.size_calls.load(Ordering::Relaxed), 3);
+}
+
 #[test]
 fn offline_staging_promotes_a_durable_batch_and_cleans_up_abandoned_state() {
     let directory = tempfile::tempdir().unwrap();
@@ -194,7 +260,7 @@ fn storage_batch_wal_sync_coalesces_durability_barriers() {
         .unwrap();
     let syncs_before_interval = engine.wal_stats().syncs;
 
-    std::thread::sleep(Duration::from_millis(30));
+    engine.wal.mark_batch_sync_due();
     engine
         .put_node_record(&sample_node("second", &["Node"]))
         .unwrap();
@@ -223,7 +289,7 @@ fn storage_batch_wal_sync_can_complete_without_a_follow_up_write() {
         .unwrap();
     let syncs_before_interval = engine.wal_stats().syncs;
 
-    std::thread::sleep(Duration::from_millis(30));
+    engine.wal.mark_batch_sync_due();
     assert!(engine.sync_wal_if_due().unwrap());
     assert_eq!(engine.wal_stats().syncs, syncs_before_interval + 1);
     assert!(!engine.sync_wal_if_due().unwrap());
@@ -5265,6 +5331,29 @@ fn mvcc_lifecycle_status_reports_debt_and_reader_pressure() {
     assert_eq!(status.active_reader_count, 0);
     assert_eq!(status.suggested_prune_floor, 3);
     assert_eq!(status.prune_debt, 2);
+}
+
+#[test]
+fn mvcc_operational_status_reports_only_bounded_snapshot_fields() {
+    let mvcc = MvccStore::new();
+    mvcc.commit_batch(vec![("node:1".to_string(), Some(b"v1".to_vec()))]);
+    let reader = mvcc.begin_registered_snapshot();
+    mvcc.commit_batch(vec![("node:1".to_string(), Some(b"v2".to_vec()))]);
+
+    assert_eq!(
+        mvcc.operational_status(),
+        MvccOperationalStatus {
+            enabled: true,
+            paused: false,
+            schedule_interval_ms: 60_000,
+            floor: 0,
+            head: 2,
+            oldest_active_reader: Some(1),
+            active_reader_count: 1,
+        }
+    );
+    drop(reader);
+    assert_eq!(mvcc.operational_status().active_reader_count, 0);
 }
 
 #[test]

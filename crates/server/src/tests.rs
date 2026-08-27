@@ -1677,7 +1677,12 @@ async fn liveness_and_readiness_probes_are_public_and_report_database_availabili
 
     let response = ready_app
         .clone()
-        .oneshot(Request::builder().uri("/livez").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/livez")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -1701,7 +1706,12 @@ async fn liveness_and_readiness_probes_are_public_and_report_database_availabili
 
     let response = ready_app
         .clone()
-        .oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -1715,7 +1725,12 @@ async fn liveness_and_readiness_probes_are_public_and_report_database_availabili
     health.register("info", false, || Err("informational failure".into()));
     health.register("required", true, || Err("required failure".into()));
     let response = ready_app
-        .oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -1725,7 +1740,10 @@ async fn liveness_and_readiness_probes_are_public_and_report_database_availabili
     let readiness: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(readiness["ok"], false);
     assert_eq!(readiness["checks"]["info"]["ok"], false);
-    assert_eq!(readiness["checks"]["info"]["error"], "informational failure");
+    assert_eq!(
+        readiness["checks"]["info"]["error"],
+        "informational failure"
+    );
     assert_eq!(readiness["checks"]["required"]["error"], "required failure");
 }
 
@@ -4758,6 +4776,8 @@ async fn database_info_allows_unauthenticated_access_when_security_disabled() {
     assert!(payload["collectedAtUnixMs"].as_u64().unwrap() > 0);
     assert_eq!(payload["nodeCount"], 1);
     assert_eq!(payload["edgeCount"], 1);
+    assert!(payload["nodeStorageSampledAtUnixMs"].as_u64().unwrap() > 0);
+    assert!(payload["nodeStorageSampleAgeMs"].as_u64().is_some());
     assert_eq!(payload["embeddingState"], "disabled");
     assert_eq!(payload["embeddingPending"], 1);
     assert!(payload["managedEmbeddingBytes"].is_null());
@@ -4805,7 +4825,78 @@ async fn database_info_allows_unauthenticated_access_when_security_disabled() {
     assert_eq!(payload["database"]["state"], "ready");
     assert_eq!(payload["database"]["nodes"], 1);
     assert_eq!(payload["database"]["edges"], 1);
+    assert_eq!(payload["database"]["mvcc"]["enabled"], true);
+    assert_eq!(payload["database"]["mvcc"]["paused"], false);
+    assert_eq!(payload["database"]["mvcc"]["head"], 2);
+    assert_eq!(payload["database"]["mvcc"]["floor"], 0);
+    assert_eq!(payload["database"]["mvcc"]["active_readers"], 0);
+    assert!(payload["database"]["mvcc"]["retained_versions"].is_null());
+    assert!(payload["database"]["mvcc"]["prune_debt"].is_null());
+    assert!(payload["database"]["mvcc"]["suggested_prune_floor"].is_null());
     assert_eq!(state.http_counters.active.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn status_reports_unknown_storage_snapshot_when_engine_is_unopened() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let mut state = AppState::default();
+    state.auth.security_enabled = false;
+    let response = build_router(Arc::new(state))
+        .oneshot(
+            Request::builder()
+                .uri("/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["database"]["state"], "unknown");
+    assert!(payload["database"]["nodes"].is_null());
+    assert!(payload["database"]["edges"].is_null());
+    assert!(payload["database"]["mvcc"].is_null());
+}
+
+#[tokio::test]
+async fn status_remains_responsive_under_concurrent_load() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let mut state = AppState::default();
+    state.auth.security_enabled = false;
+    open_engine(&state, &state.db_name).unwrap();
+    let app = build_router(Arc::new(state));
+    let mut requests = tokio::task::JoinSet::new();
+
+    for _ in 0..16 {
+        let app = app.clone();
+        requests.spawn(async move {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                app.oneshot(
+                    Request::builder()
+                        .uri("/status")
+                        .body(Body::empty())
+                        .unwrap(),
+                ),
+            )
+            .await
+        });
+    }
+
+    while let Some(result) = requests.join_next().await {
+        let response = result.unwrap().unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 }
 
 #[tokio::test]
@@ -5680,9 +5771,7 @@ async fn demo_shortest_path_e2e_warms_result_cache() {
     );
     assert_eq!(payload["results"][0]["data"].as_array().unwrap().len(), 1);
     assert_eq!(engine.cypher_result_cache_stats().hits, 1);
-    eprintln!(
-        "d3_demo HTTP shortestPath: cold={cold_elapsed:?} warm_result_cache_hit={elapsed:?}"
-    );
+    eprintln!("d3_demo HTTP shortestPath: cold={cold_elapsed:?} warm_result_cache_hit={elapsed:?}");
 }
 
 // ─── Database lifecycle e2e ─────────────────────────────────────────────

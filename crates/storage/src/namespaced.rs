@@ -1,7 +1,7 @@
 use crate::{
     BatchWriter, EdgeAdjacencyDirection, EdgeRecord, MvccLifecycleDebtKey, MvccLifecycleStatus,
-    MvccPruneOptions, MvccSnapshot, MvccSnapshotLease, NamespaceSchema, NodeRecord, StorageEngine,
-    StorageError,
+    MvccOperationalStatus, MvccPruneOptions, MvccSnapshot, MvccSnapshotLease, NamespaceSchema,
+    NodeRecord, StorageEngine, StorageError,
 };
 use copperdb_util::RequestCancellation;
 
@@ -336,6 +336,10 @@ impl<'a> NamespacedStorageEngine<'a> {
 
     pub fn lifecycle_status(&self) -> MvccLifecycleStatus {
         self.inner.lifecycle_status()
+    }
+
+    pub fn operational_status(&self) -> MvccOperationalStatus {
+        self.inner.operational_mvcc_status()
     }
 
     pub fn trigger_prune_now(&self, retain_last_n_versions: u64) -> usize {

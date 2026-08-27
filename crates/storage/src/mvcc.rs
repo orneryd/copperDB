@@ -71,6 +71,18 @@ pub struct MvccLifecycleStatus {
     pub suggested_prune_floor: u64,
 }
 
+/// Cheap MVCC state intended for frequently-polled operational status endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MvccOperationalStatus {
+    pub enabled: bool,
+    pub paused: bool,
+    pub schedule_interval_ms: u64,
+    pub floor: u64,
+    pub head: u64,
+    pub oldest_active_reader: Option<u64>,
+    pub active_reader_count: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MvccLifecycleDebtKey {
     pub logical_key: String,
@@ -894,6 +906,21 @@ impl MvccStore {
         }
     }
 
+    /// Returns lifecycle state without traversing retained MVCC records.
+    pub fn operational_status(&self) -> MvccOperationalStatus {
+        let head = self.head();
+        let readers = self.active_readers.lock();
+        MvccOperationalStatus {
+            enabled: true,
+            paused: self.lifecycle_paused.load(Ordering::SeqCst) != 0,
+            schedule_interval_ms: self.lifecycle_schedule_ms.load(Ordering::SeqCst),
+            floor: head.floor,
+            head: head.head,
+            oldest_active_reader: readers.keys().next().copied(),
+            active_reader_count: readers.values().copied().sum(),
+        }
+    }
+
     pub fn active_reader_count(&self) -> u64 {
         self.active_readers.lock().values().copied().sum()
     }
@@ -1124,6 +1151,10 @@ impl<'a> NamespacedMvccStore<'a> {
 
     pub fn lifecycle_status(&self) -> MvccLifecycleStatus {
         self.inner.lifecycle_status()
+    }
+
+    pub fn operational_status(&self) -> MvccOperationalStatus {
+        self.inner.operational_status()
     }
 
     pub fn trigger_prune_now(&self, retain_last_n_versions: u64) -> usize {

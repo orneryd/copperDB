@@ -124,6 +124,8 @@ export interface DatabaseInfo {
   labelNodeCount?: number | null;
   edgeCount: number | null;
   nodeStorageBytes?: number;
+  nodeStorageSampledAtUnixMs?: number;
+  nodeStorageSampleAgeMs?: number;
   managedEmbeddingBytes?: number | null;
   searchReady?: boolean;
   searchBuilding?: boolean;

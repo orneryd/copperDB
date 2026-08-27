@@ -19,7 +19,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -48,8 +48,8 @@ pub use crate::async_engine::{
     AsyncFlushGuard, AsyncFlushResult, AsyncStorageConfig, AsyncStorageEngine,
 };
 pub use crate::mvcc::{
-    MvccHead, MvccLifecycleDebtKey, MvccLifecycleStatus, MvccLogicalHead, MvccPruneOptions,
-    MvccSnapshot, MvccSnapshotLease, MvccStore, MvccVersion, NamespacedMvccStore,
+    MvccHead, MvccLifecycleDebtKey, MvccLifecycleStatus, MvccLogicalHead, MvccOperationalStatus,
+    MvccPruneOptions, MvccSnapshot, MvccSnapshotLease, MvccStore, MvccVersion, NamespacedMvccStore,
 };
 use crate::mvcc::{MvccRecordMutation, PersistedMvccStore};
 pub use crate::namespaced::NamespacedStorageEngine;
@@ -586,6 +586,18 @@ impl WAL {
             }
             WALSyncMode::NoSync | WALSyncMode::Immediate => false,
         }
+    }
+
+    #[cfg(test)]
+    fn mark_batch_sync_due(&self) {
+        let WALSyncMode::Batch { interval_ms } = self.config.sync_mode else {
+            return;
+        };
+        *self.last_sync_at.lock() = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(
+                interval_ms.saturating_add(1),
+            ))
+            .expect("batch sync interval should fit before current instant");
     }
 
     fn sync_persistent_file(&self) -> Result<(), StorageError> {
@@ -1752,6 +1764,7 @@ pub struct StorageEngine {
     schema_manager: RwLock<Arc<SchemaManager>>,
     index_schema_generation: AtomicU64,
     knowledge_policy_schema_generation: AtomicU64,
+    size_on_disk_snapshot: Mutex<Option<CachedStorageSizeSnapshot>>,
     encryption: Option<StorageEncryption>,
     data_dir: Option<PathBuf>,
     temp_dir: Option<tempfile::TempDir>,
@@ -1763,6 +1776,20 @@ pub struct StorageEngine {
     on_edge_updated_cb: RwLock<Vec<EdgeEventCallback>>,
     on_edge_deleted_cb: RwLock<Vec<EdgeDeleteCallback>>,
     on_commit_completed_cb: RwLock<Vec<CommitEventCallback>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageSizeSnapshot {
+    pub bytes: u64,
+    pub sampled_at_unix_ms: u64,
+    pub age_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CachedStorageSizeSnapshot {
+    bytes: u64,
+    sampled_at_unix_ms: u64,
+    sampled_at: Instant,
 }
 
 #[derive(Debug)]
@@ -2309,6 +2336,7 @@ impl StorageEngine {
             schema_manager: RwLock::new(Arc::new(SchemaManager::new())),
             index_schema_generation: AtomicU64::new(0),
             knowledge_policy_schema_generation: AtomicU64::new(0),
+            size_on_disk_snapshot: Mutex::new(None),
             encryption,
             data_dir,
             temp_dir: None,
@@ -4445,6 +4473,11 @@ impl StorageEngine {
         self.mvcc.lifecycle_status()
     }
 
+    /// Return the cheap MVCC snapshot used by frequently-polled status endpoints.
+    pub fn operational_mvcc_status(&self) -> MvccOperationalStatus {
+        self.mvcc.operational_status()
+    }
+
     pub fn trigger_prune_now(&self, retain_last_n_versions: u64) -> usize {
         self.mvcc.trigger_prune_now(retain_last_n_versions)
     }
@@ -4502,9 +4535,7 @@ impl StorageEngine {
         }
 
         out.sort_by(|a, b| a.id.cmp(&b.id));
-        self.graph_query_cache
-            .lock()
-            .insert(prefix, out.clone());
+        self.graph_query_cache.lock().insert(prefix, out.clone());
         Ok(out)
     }
 
@@ -5602,7 +5633,9 @@ impl StorageEngine {
 
     /// Flush all pending writes to disk.
     pub fn flush(&self) -> Result<(), StorageError> {
-        self.backend.flush()
+        self.backend.flush()?;
+        *self.size_on_disk_snapshot.lock() = None;
+        Ok(())
     }
 
     /// Acquire a flush guard. When dropped, flushes all pending writes to disk.
@@ -5615,6 +5648,40 @@ impl StorageEngine {
     /// Return the on-disk size in bytes.
     pub fn size_on_disk(&self) -> u64 {
         self.backend.size_on_disk()
+    }
+
+    /// Return a timestamped disk-size sample, refreshing it after `max_age`.
+    pub fn size_on_disk_snapshot(&self, max_age: Duration) -> StorageSizeSnapshot {
+        let mut cached = self.size_on_disk_snapshot.lock();
+        if let Some(snapshot) = *cached {
+            let age = snapshot.sampled_at.elapsed();
+            if !max_age.is_zero() && age <= max_age {
+                return StorageSizeSnapshot {
+                    bytes: snapshot.bytes,
+                    sampled_at_unix_ms: snapshot.sampled_at_unix_ms,
+                    age_ms: age.as_millis() as u64,
+                };
+            }
+        }
+
+        let snapshot = self.capture_size_on_disk_snapshot();
+        *cached = Some(snapshot);
+        StorageSizeSnapshot {
+            bytes: snapshot.bytes,
+            sampled_at_unix_ms: snapshot.sampled_at_unix_ms,
+            age_ms: 0,
+        }
+    }
+
+    fn capture_size_on_disk_snapshot(&self) -> CachedStorageSizeSnapshot {
+        CachedStorageSizeSnapshot {
+            bytes: self.backend.size_on_disk(),
+            sampled_at_unix_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or_default(),
+            sampled_at: Instant::now(),
+        }
     }
 
     fn has_node_property_index(&self, label: &str, property: &str) -> Result<bool, StorageError> {
@@ -5887,9 +5954,7 @@ impl StorageEngine {
             }
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
-        self.graph_query_cache
-            .lock()
-            .insert(cache_key, out.clone());
+        self.graph_query_cache.lock().insert(cache_key, out.clone());
         Ok(out)
     }
 
@@ -6064,7 +6129,11 @@ fn namespace_edge_count_key(namespace: &str) -> Vec<u8> {
 }
 
 fn edge_type_count_key(edge_type: &str) -> Vec<u8> {
-    [META_EDGE_TYPE_COUNT_PREFIX, escape_index_component(edge_type).as_bytes()].concat()
+    [
+        META_EDGE_TYPE_COUNT_PREFIX,
+        escape_index_component(edge_type).as_bytes(),
+    ]
+    .concat()
 }
 
 fn edge_type_from_count_key(key: &[u8]) -> Result<Option<String>, StorageError> {

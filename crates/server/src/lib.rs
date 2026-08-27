@@ -630,6 +630,7 @@ pub struct HealthResponse {
 }
 
 const STATUS_SCHEMA_VERSION: u32 = 1;
+const STORAGE_SIZE_SNAPSHOT_MAX_AGE: Duration = Duration::from_secs(5);
 
 #[derive(Serialize)]
 struct ServerStatusSnapshot {
@@ -667,6 +668,20 @@ struct DatabaseRuntimeStatus {
     nodes: Option<u64>,
     edges: Option<u64>,
     databases: usize,
+    mvcc: Option<MvccRuntimeStatus>,
+}
+
+#[derive(Serialize)]
+struct MvccRuntimeStatus {
+    enabled: bool,
+    paused: bool,
+    schedule_interval_ms: u64,
+    floor: u64,
+    head: u64,
+    active_readers: u64,
+    retained_versions: Option<usize>,
+    prune_debt: Option<usize>,
+    suggested_prune_floor: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -684,6 +699,8 @@ struct DatabaseInfoSnapshot {
     label_node_count: Option<u64>,
     edge_count: Option<u64>,
     node_storage_bytes: u64,
+    node_storage_sampled_at_unix_ms: Option<u64>,
+    node_storage_sample_age_ms: Option<u64>,
     managed_embedding_bytes: Option<u64>,
     embedding_state: String,
     embedding_pending: Option<u64>,
@@ -704,6 +721,21 @@ fn graph_counts(engine: &GraphEngine) -> (Option<u64>, Option<u64>) {
         engine.storage().total_node_count().ok(),
         engine.storage().total_edge_count().ok(),
     )
+}
+
+fn mvcc_runtime_status(engine: &GraphEngine) -> MvccRuntimeStatus {
+    let status = engine.storage().operational_mvcc_status();
+    MvccRuntimeStatus {
+        enabled: status.enabled,
+        paused: status.paused,
+        schedule_interval_ms: status.schedule_interval_ms,
+        floor: status.floor,
+        head: status.head,
+        active_readers: status.active_reader_count,
+        retained_versions: None,
+        prune_debt: None,
+        suggested_prune_floor: None,
+    }
 }
 
 #[derive(Deserialize)]
@@ -1145,6 +1177,7 @@ async fn status_handler(
     let databases = state.db_manager.list();
     let engine = state.engine_cache.read().get(&state.db_name).cloned();
     let (nodes, edges) = engine.as_deref().map(graph_counts).unwrap_or((None, None));
+    let mvcc = engine.as_deref().map(mvcc_runtime_status);
     Json(ServerStatusSnapshot {
         schema_version: STATUS_SCHEMA_VERSION,
         collected_at_unix_ms: collected_at_unix_ms(),
@@ -1181,6 +1214,7 @@ async fn status_handler(
             nodes,
             edges,
             databases: databases.iter().filter(|db| db.name != "system").count(),
+            mvcc,
         },
     })
     .into_response()
@@ -1913,10 +1947,11 @@ async fn database_info_handler(
                     .as_deref()
                     .and_then(|engine| engine.storage().node_count_by_label(label).ok())
             });
-            let storage_bytes = engine
-                .as_ref()
-                .map(|engine| engine.size_on_disk())
-                .unwrap_or(0);
+            let storage_size = engine.as_ref().map(|engine| {
+                engine
+                    .storage()
+                    .size_on_disk_snapshot(STORAGE_SIZE_SNAPSHOT_MAX_AGE)
+            });
             let search_initialized = engine
                 .as_ref()
                 .and_then(|engine| engine.list_index_definitions().ok())
@@ -1948,7 +1983,10 @@ async fn database_info_handler(
                 node_count,
                 label_node_count,
                 edge_count,
-                node_storage_bytes: storage_bytes,
+                node_storage_bytes: storage_size.map(|sample| sample.bytes).unwrap_or(0),
+                node_storage_sampled_at_unix_ms: storage_size
+                    .map(|sample| sample.sampled_at_unix_ms),
+                node_storage_sample_age_ms: storage_size.map(|sample| sample.age_ms),
                 managed_embedding_bytes: None,
                 embedding_state: embedding_status
                     .as_ref()
