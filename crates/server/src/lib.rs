@@ -4148,6 +4148,7 @@ async fn graphql_playground_handler() -> impl IntoResponse {
 
 async fn mcp_handler(
     State(state): State<Arc<AppState>>,
+    Extension(request_context): Extension<RequestContext>,
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
@@ -4177,7 +4178,7 @@ async fn mcp_handler(
         }
     };
     let registry = copperdb_mcp::ToolRegistry::with_engine(engine);
-    let response = registry.dispatch(&request);
+    let response = registry.dispatch_with_context(&request_context, &request);
     Json(response).into_response()
 }
 

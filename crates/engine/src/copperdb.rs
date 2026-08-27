@@ -191,6 +191,19 @@ impl CopperDb {
         query: &str,
         limit: usize,
     ) -> Result<Vec<SearchResult>, CopperDbError> {
+        let request_context = RequestContext::detached();
+        self.search_fulltext_nodes_with_context(&request_context, label, fields, query, limit)
+    }
+
+    pub fn search_fulltext_nodes_with_context(
+        &self,
+        request_context: &RequestContext,
+        label: &str,
+        fields: &[String],
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, CopperDbError> {
+        request_context.check_active()?;
         self.ensure_ranked_search_query_enabled(&SearchQuery::FullText {
             query: query.to_string(),
             fields: fields.to_vec(),
@@ -207,7 +220,13 @@ impl CopperDb {
 
         Ok(self
             .storage
-            .search_fulltext_nodes_by_properties(label, &matched_properties, query, limit)?
+            .search_fulltext_nodes_by_properties_with_cancellation(
+                label,
+                &matched_properties,
+                query,
+                limit,
+                request_context.cancellation(),
+            )?
             .into_iter()
             .map(|(node, score)| SearchResult {
                 snippet: build_fulltext_snippet(&node, &matched_properties),
@@ -911,6 +930,7 @@ impl CopperDb {
         params: HashMap<String, Value>,
         roles: &[String],
     ) -> Result<QueryResult, CopperDbError> {
+        request_context.check_active()?;
         let start = Instant::now();
 
         if self.config.log_queries {

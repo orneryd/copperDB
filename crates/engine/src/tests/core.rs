@@ -296,6 +296,43 @@ fn test_local_fulltext_search_respects_bm25_toggle() {
 }
 
 #[test]
+fn context_aware_execute_preserves_pre_cancelled_error() {
+    let db = CopperDb::open_temporary().unwrap();
+    let request_context = copperdb_util::RequestContext::detached();
+    request_context.cancel();
+
+    let error = db
+        .execute_as_with_context(
+            &request_context,
+            "RETURN 1 AS n",
+            HashMap::new(),
+            &["admin".into()],
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, CopperDbError::RequestCancelled(_)));
+}
+
+#[test]
+fn context_aware_fulltext_search_preserves_pre_cancelled_error() {
+    let db = CopperDb::open_temporary().unwrap();
+    let request_context = copperdb_util::RequestContext::detached();
+    request_context.cancel();
+
+    let error = db
+        .search_fulltext_nodes_with_context(
+            &request_context,
+            "Person",
+            &["bio".into()],
+            "alice",
+            10,
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, CopperDbError::RequestCancelled(_)));
+}
+
+#[test]
 fn test_execute_routes_simple_edge_property_aggregation_through_fast_path() {
     let db = CopperDb::open_temporary().unwrap();
     for (id, labels, props) in [

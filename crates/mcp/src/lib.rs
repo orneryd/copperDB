@@ -9,6 +9,7 @@
 //! https://modelcontextprotocol.io/
 
 use copperdb_engine::CopperDb as GraphEngine;
+use copperdb_util::RequestContext;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -153,6 +154,15 @@ impl ToolRegistry {
 
     /// Dispatch an MCP request. Returns an MCP response.
     pub fn dispatch(&self, request: &McpRequest) -> McpResponse {
+        let request_context = RequestContext::detached();
+        self.dispatch_with_context(&request_context, request)
+    }
+
+    pub fn dispatch_with_context(
+        &self,
+        request_context: &RequestContext,
+        request: &McpRequest,
+    ) -> McpResponse {
         match request.method.as_str() {
             "tools/list" => {
                 let tools: Vec<&Tool> = self.list();
@@ -176,7 +186,7 @@ impl ToolRegistry {
                         format!("tool not found: {}", call.name),
                     );
                 }
-                match self.execute_tool(&call.name, &call.arguments) {
+                match self.execute_tool(request_context, &call.name, &call.arguments) {
                     Ok(result) => McpResponse::ok(request.id.clone(), result),
                     Err(e) => McpResponse::error(request.id.clone(), -32000, e),
                 }
@@ -196,6 +206,7 @@ impl ToolRegistry {
     /// Execute a named tool with the given arguments.
     fn execute_tool(
         &self,
+        request_context: &RequestContext,
         name: &str,
         arguments: &Option<serde_json::Value>,
     ) -> Result<serde_json::Value, String> {
@@ -207,7 +218,12 @@ impl ToolRegistry {
                     .and_then(|v| v.as_str())
                     .ok_or("missing 'query' parameter")?;
                 let engine = self.engine.as_ref().ok_or("no graph engine configured")?;
-                match engine.execute(query, HashMap::new()) {
+                match engine.execute_as_with_context(
+                    request_context,
+                    query,
+                    HashMap::new(),
+                    &["admin".to_string()],
+                ) {
                     Ok(result) => {
                         let text = format!(
                             "Query executed successfully.\nRows: {}\nStats: {:?}",
@@ -236,7 +252,7 @@ impl ToolRegistry {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(10) as usize;
                 let engine = self.engine.as_ref().ok_or("no graph engine configured")?;
-                match engine.search_fulltext_nodes("", &[], text, k) {
+                match engine.search_fulltext_nodes_with_context(request_context, "", &[], text, k) {
                     Ok(results) => {
                         let json = serde_json::to_string_pretty(&results)
                             .unwrap_or_else(|_| "[]".to_string());
@@ -344,6 +360,53 @@ mod tests {
             resp.error.is_none(),
             "expected success, got: {:?}",
             resp.error
+        );
+    }
+
+    #[test]
+    fn dispatch_with_context_cancels_cypher_before_execution() {
+        let engine = Arc::new(copperdb_engine::CopperDb::open_temporary().unwrap());
+        let registry = ToolRegistry::with_engine(engine);
+        let request_context = RequestContext::detached();
+        request_context.cancel();
+        let request = McpRequest::new(
+            serde_json::json!(6),
+            "tools/call",
+            Some(
+                serde_json::json!({ "name": "run_cypher", "arguments": { "query": "RETURN 1 AS n" } }),
+            ),
+        );
+
+        let response = registry.dispatch_with_context(&request_context, &request);
+
+        assert!(response.error.is_none());
+        let result = response.result.expect("tool result");
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["content"][0]["text"], "Error: request cancelled");
+    }
+
+    #[test]
+    fn dispatch_with_context_cancels_fulltext_before_search() {
+        let engine = Arc::new(copperdb_engine::CopperDb::open_temporary().unwrap());
+        let registry = ToolRegistry::with_engine(engine);
+        let request_context = RequestContext::detached();
+        request_context.cancel();
+        let request = McpRequest::new(
+            serde_json::json!(7),
+            "tools/call",
+            Some(
+                serde_json::json!({ "name": "find_similar", "arguments": { "text": "graph", "k": 3 } }),
+            ),
+        );
+
+        let response = registry.dispatch_with_context(&request_context, &request);
+
+        assert!(response.error.is_none());
+        let result = response.result.expect("tool result");
+        assert_eq!(result["isError"], true);
+        assert_eq!(
+            result["content"][0]["text"],
+            "Search error: request cancelled"
         );
     }
 

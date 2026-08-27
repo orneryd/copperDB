@@ -30,6 +30,7 @@ Cancel before work, mid-loop, during rebuild/hydration, on disconnect/deadline, 
 
 - Complete: Axum middleware creates one root request context for every application HTTP request, retains its cancellation guard through handler execution, and exposes the context through request extensions. Search, transactional Cypher, and Fabric ranked-search paths consume that ingress context instead of creating independent roots. Deterministic middleware tests verify the context is active in the handler and cancelled when the request future completes or is dropped.
 - Complete: HTTP ingress contexts carry NornicDB-compatible route deadlines for status, search, and transaction requests. Timeout expiration returns the upstream `503` message, cancels the shared context, and honors positive `COPPERDB_HTTP_TX_TIMEOUT` or upstream-compatible `NORNICDB_HTTP_TX_TIMEOUT` duration overrides with a five-minute transaction default.
+- Complete: MCP HTTP dispatch passes the ingress request context through both built-in tools. Cypher uses the canonical context-aware engine execution path, full-text search delegates to the storage cancellation-aware primitive, and pre-cancelled requests preserve `CopperDbError::RequestCancelled` before local work begins. Detached MCP dispatch remains available only as an explicit embedded/test wrapper.
 - Pending: complete context-aware internal APIs, bounded cooperative checkpoints, typed protocol error mapping, and cancellation telemetry.
 
 ## Definition Of Done
