@@ -39,6 +39,7 @@ pub struct EmbeddingOperationalStatus {
     pub state: EmbeddingRuntimeState,
     pub backend: Option<String>,
     pub worker_count: usize,
+    pub pending: u64,
     pub completed: u64,
     pub failed: u64,
     pub last_error: Option<String>,
@@ -239,6 +240,7 @@ impl EmbeddingRuntime {
             state: *self.state.lock().expect("embedding runtime state lock"),
             backend: self.backend.lock().expect("embedding backend lock").clone(),
             worker_count: self.active_workers.load(Ordering::Relaxed),
+            pending: self.storage.pending_embeddings_count_snapshot(),
             completed: self.completed.load(Ordering::Relaxed),
             failed: self.failed.load(Ordering::Relaxed),
             last_error: self
@@ -829,6 +831,7 @@ mod tests {
                 state: EmbeddingRuntimeState::Disabled,
                 backend: None,
                 worker_count: 0,
+                pending: 0,
                 completed: 0,
                 failed: 0,
                 last_error: None,
@@ -907,8 +910,10 @@ mod tests {
             2,
             Arc::new(TestEmbedder(Ok(vec![0.25, 0.75]))),
         );
+        assert_eq!(runtime.operational_status().pending, 1);
         assert!(runtime.drain_one().unwrap());
         assert_eq!(storage.pending_embeddings_count().unwrap(), 0);
+        assert_eq!(runtime.operational_status().pending, 0);
         let status = runtime.status().unwrap();
         assert_eq!(status.completed, 1);
         assert_eq!(status.batch_count, 1);
@@ -927,6 +932,7 @@ mod tests {
         );
         assert!(failing.drain_one().is_err());
         assert_eq!(storage.pending_embeddings_count().unwrap(), 1);
+        assert_eq!(failing.operational_status().pending, 1);
         assert_eq!(
             failing.status().unwrap().state,
             EmbeddingRuntimeState::Degraded

@@ -3527,6 +3527,46 @@ fn storage_engine_pending_embeddings_index_tracks_create_mark_refresh_and_delete
 }
 
 #[test]
+fn storage_engine_pending_embedding_count_seeds_and_persists_transaction_updates() {
+    let test_dir = tempfile::tempdir().unwrap();
+    {
+        let engine = StorageEngine::open(test_dir.path()).unwrap();
+        let mut node = sample_node("n1", &["File"]);
+        node.properties
+            .insert("content".to_string(), json!("pending"));
+        engine.put_node_record(&node).unwrap();
+        engine.add_to_pending_embeddings("n1").unwrap();
+        engine.add_to_pending_embeddings("n1").unwrap();
+        assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
+
+        engine
+            .meta
+            .fjall_remove(META_PENDING_EMBEDDING_COUNT_KEY)
+            .unwrap();
+        engine.flush().unwrap();
+    }
+
+    {
+        let engine = StorageEngine::open(test_dir.path()).unwrap();
+        assert_eq!(engine.pending_embeddings_count().unwrap(), 1);
+
+        let mut transaction = engine.begin_transaction().unwrap();
+        transaction.delete_node_record("n1");
+        transaction.commit().unwrap();
+        assert_eq!(engine.pending_embeddings_count().unwrap(), 0);
+        assert!(engine
+            .meta
+            .fjall_get(META_PENDING_EMBEDDING_COUNT_KEY)
+            .unwrap()
+            .is_some());
+        engine.flush().unwrap();
+    }
+
+    let reopened = StorageEngine::open(test_dir.path()).unwrap();
+    assert_eq!(reopened.pending_embeddings_count().unwrap(), 0);
+}
+
+#[test]
 fn storage_engine_reports_oldest_pending_embedding_age() {
     let engine = StorageEngine::open_temporary().unwrap();
     assert_eq!(engine.pending_embedding_oldest_age_ms().unwrap(), None);

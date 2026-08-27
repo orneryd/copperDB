@@ -104,6 +104,7 @@ const META_NAMESPACE_NODE_COUNT_PREFIX: &[u8] = b"namespace_node_count/";
 const META_NAMESPACE_EDGE_COUNT_PREFIX: &[u8] = b"namespace_edge_count/";
 const META_NAMESPACE_LABEL_COUNT_PREFIX: &[u8] = b"namespace_label_count/";
 const META_PENDING_EMBEDDING_PREFIX: &[u8] = b"pending_embedding/";
+const META_PENDING_EMBEDDING_COUNT_KEY: &[u8] = b"pending_embedding_count";
 const META_EMBEDDING_DEAD_LETTER_PREFIX: &[u8] = b"embedding_dead_letter/";
 const META_FORCED_REEMBEDDING_PREFIX: &[u8] = b"forced_reembedding/";
 const META_PENDING_DEINDEX_PREFIX: &[u8] = b"pending_deindex/";
@@ -1755,6 +1756,7 @@ pub struct StorageEngine {
     wal: WAL,
     batch_commit_lock: Mutex<()>,
     embedding_claims: Mutex<BTreeSet<String>>,
+    pending_embedding_count: AtomicU64,
     fulltext_runtime_indexes: Mutex<HashMap<String, Arc<FulltextRuntimeIndex>>>,
     graph_node_cache: Mutex<BoundedCache<String, Option<NodeRecord>>>,
     graph_edge_cache: Mutex<BoundedCache<String, Option<EdgeRecord>>>,
@@ -2327,6 +2329,7 @@ impl StorageEngine {
             wal,
             batch_commit_lock: Mutex::new(()),
             embedding_claims: Mutex::new(BTreeSet::new()),
+            pending_embedding_count: AtomicU64::new(0),
             fulltext_runtime_indexes: Mutex::new(HashMap::new()),
             graph_node_cache: Mutex::new(BoundedCache::new(GRAPH_NODE_CACHE_CAPACITY)),
             graph_edge_cache: Mutex::new(BoundedCache::new(GRAPH_EDGE_CACHE_CAPACITY)),
@@ -2350,6 +2353,7 @@ impl StorageEngine {
         };
         engine.ensure_layout_manifest()?;
         engine.ensure_encryption_manifest()?;
+        engine.ensure_pending_embedding_count()?;
         if bootstrap_mvcc {
             engine.restore_or_bootstrap_mvcc()?;
             engine.recover_wal_transactions()?;
@@ -3152,17 +3156,18 @@ impl StorageEngine {
     /// Cancel the current pending embedding request if no worker has claimed it.
     /// A later explicit re-embedding request or source update can enqueue new work.
     pub fn cancel_pending_embedding(&self, id: &str) -> Result<bool, StorageError> {
-        let claims = self.embedding_claims.lock();
-        if claims.contains(id) || self.meta.fjall_get(pending_embedding_key(id))?.is_none() {
+        if self.embedding_claims.lock().contains(id) {
             return Ok(false);
         }
-        self.meta.fjall_remove(pending_embedding_key(id))?;
+        if !self.set_pending_embedding(id, None)? {
+            return Ok(false);
+        }
         self.meta.fjall_remove(forced_reembedding_key(id))?;
         Ok(true)
     }
 
     pub fn mark_node_embedded(&self, id: &str) -> Result<(), StorageError> {
-        self.meta.fjall_remove(pending_embedding_key(id))?;
+        self.set_pending_embedding(id, None)?;
         self.meta.fjall_remove(forced_reembedding_key(id))?;
         Ok(())
     }
@@ -3173,8 +3178,7 @@ impl StorageEngine {
         };
         self.meta.fjall_remove(embedding_dead_letter_key(id))?;
         if node.needs_embedding() || self.has_forced_reembedding(id)? {
-            self.meta
-                .fjall_insert(pending_embedding_key(id), pending_embedding_value()?)?;
+            self.set_pending_embedding(id, Some(pending_embedding_value()?))?;
         }
         Ok(())
     }
@@ -3192,8 +3196,7 @@ impl StorageEngine {
         self.meta.fjall_insert(forced_reembedding_key(id), [])?;
         node.clear_managed_chunk_embeddings();
         self.put_node_record(&node)?;
-        self.meta
-            .fjall_insert(pending_embedding_key(id), pending_embedding_value()?)?;
+        self.set_pending_embedding(id, Some(pending_embedding_value()?))?;
         Ok(true)
     }
 
@@ -3258,7 +3261,7 @@ impl StorageEngine {
         };
         if record.dead_lettered {
             self.meta.fjall_insert(&key, rmp_serde::to_vec(&record)?)?;
-            self.meta.fjall_remove(pending_embedding_key(id))?;
+            self.set_pending_embedding_locked(id, None)?;
             self.embedding_claims.lock().remove(id);
             return Ok(EmbeddingFailureDisposition::DeadLettered);
         }
@@ -3295,12 +3298,11 @@ impl StorageEngine {
     }
 
     pub fn pending_embeddings_count(&self) -> Result<usize, StorageError> {
-        let mut count = 0;
-        for entry in self.meta.scan_prefix(META_PENDING_EMBEDDING_PREFIX) {
-            entry?;
-            count += 1;
-        }
-        Ok(count)
+        Ok(self.pending_embeddings_count_snapshot() as usize)
+    }
+
+    pub fn pending_embeddings_count_snapshot(&self) -> u64 {
+        self.pending_embedding_count.load(Ordering::Acquire)
     }
 
     /// Age of the oldest pending embedding request in milliseconds.
@@ -3317,6 +3319,7 @@ impl StorageEngine {
     }
 
     pub fn refresh_pending_embeddings_index(&self) -> Result<usize, StorageError> {
+        let _commit_guard = self.batch_commit_lock.lock();
         let valid_ids = self
             .all_node_records()?
             .into_iter()
@@ -3324,18 +3327,15 @@ impl StorageEngine {
             .map(|node| node.id)
             .collect::<BTreeSet<_>>();
 
-        let keys = self
+        let existing_keys = self
             .meta
             .scan_prefix(META_PENDING_EMBEDDING_PREFIX)
             .map(|entry| entry.map(|(key, _)| key.to_vec()))
             .collect::<Result<Vec<_>, _>>()?;
-        for key in keys {
-            self.meta.fjall_remove(key)?;
-        }
+        let mut pending_ids = BTreeSet::new();
         for id in &valid_ids {
             if self.embedding_dead_letter(id)?.is_none() {
-                self.meta
-                    .fjall_insert(pending_embedding_key(id), pending_embedding_value()?)?;
+                pending_ids.insert(id.clone());
             }
         }
         for entry in self.meta.scan_prefix(META_FORCED_REEMBEDDING_PREFIX) {
@@ -3347,12 +3347,30 @@ impl StorageEngine {
                 .get_node_record(&id)?
                 .is_some_and(|node| node_record_is_embedding_eligible(&node));
             if valid && self.embedding_dead_letter(&id)?.is_none() {
-                self.meta
-                    .fjall_insert(pending_embedding_key(&id), pending_embedding_value()?)?;
+                pending_ids.insert(id);
             } else if !valid {
                 self.meta.fjall_remove(forced_reembedding_key(&id))?;
             }
         }
+        let mut batch = StorageBackendBatch::new(self.backend.as_ref());
+        for key in existing_keys {
+            batch.remove(&self.meta, key);
+        }
+        for id in &pending_ids {
+            batch.insert(
+                &self.meta,
+                pending_embedding_key(id),
+                pending_embedding_value()?,
+            );
+        }
+        batch.insert(
+            &self.meta,
+            META_PENDING_EMBEDDING_COUNT_KEY,
+            rmp_serde::to_vec(&(pending_ids.len() as u64))?,
+        );
+        batch.commit()?;
+        self.pending_embedding_count
+            .store(pending_ids.len() as u64, Ordering::Release);
         Ok(valid_ids.len())
     }
 
@@ -5987,6 +6005,76 @@ impl StorageEngine {
         }
     }
 
+    fn ensure_pending_embedding_count(&self) -> Result<(), StorageError> {
+        let count = match self.meta.fjall_get(META_PENDING_EMBEDDING_COUNT_KEY)? {
+            Some(raw) => rmp_serde::from_slice(raw.as_ref())?,
+            None => {
+                let count = self
+                    .meta
+                    .scan_prefix(META_PENDING_EMBEDDING_PREFIX)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .len() as u64;
+                self.meta
+                    .fjall_insert(META_PENDING_EMBEDDING_COUNT_KEY, rmp_serde::to_vec(&count)?)?;
+                count
+            }
+        };
+        self.pending_embedding_count.store(count, Ordering::Release);
+        Ok(())
+    }
+
+    fn set_pending_embedding(
+        &self,
+        id: &str,
+        value: Option<Vec<u8>>,
+    ) -> Result<bool, StorageError> {
+        let _commit_guard = self.batch_commit_lock.lock();
+        self.set_pending_embedding_locked(id, value)
+    }
+
+    fn set_pending_embedding_locked(
+        &self,
+        id: &str,
+        value: Option<Vec<u8>>,
+    ) -> Result<bool, StorageError> {
+        let key = pending_embedding_key(id);
+        let existed = self.meta.fjall_get(&key)?.is_some();
+        let exists = value.is_some();
+        let mut batch = StorageBackendBatch::new(self.backend.as_ref());
+        match value {
+            Some(value) => batch.insert(&self.meta, key, value),
+            None => batch.remove(&self.meta, key),
+        }
+        if existed != exists {
+            let current = self.pending_embedding_count.load(Ordering::Acquire);
+            let updated = if exists {
+                current.saturating_add(1)
+            } else {
+                current.saturating_sub(1)
+            };
+            batch.insert(
+                &self.meta,
+                META_PENDING_EMBEDDING_COUNT_KEY,
+                rmp_serde::to_vec(&updated)?,
+            );
+        }
+        batch.commit()?;
+        if existed != exists {
+            let updated = if exists {
+                self.pending_embedding_count
+                    .load(Ordering::Acquire)
+                    .saturating_add(1)
+            } else {
+                self.pending_embedding_count
+                    .load(Ordering::Acquire)
+                    .saturating_sub(1)
+            };
+            self.pending_embedding_count
+                .store(updated, Ordering::Release);
+        }
+        Ok(existed != exists)
+    }
+
     fn ids_with_prefix(
         &self,
         tree: &StorageKeyspace,
@@ -8049,6 +8137,7 @@ impl<'a> BatchWriter<'a> {
 
         let mut batch = StorageBackendBatch::new(self.engine.backend.as_ref());
         let mut counter_deltas = HashMap::<Vec<u8>, i64>::new();
+        let mut pending_embedding_delta = 0_i64;
         for (name, constraint) in constraints {
             let key = [META_SCHEMA_CONSTRAINT_PREFIX, name.as_bytes()].concat();
             match constraint {
@@ -8114,6 +8203,8 @@ impl<'a> BatchWriter<'a> {
             }
         }
         for (id, (old, new)) in &nodes {
+            let pending_key = pending_embedding_key(id);
+            let was_pending = self.engine.meta.fjall_get(&pending_key)?.is_some();
             if let Some(old) = old {
                 stage_node_indexes!(
                     batch,
@@ -8153,22 +8244,21 @@ impl<'a> BatchWriter<'a> {
                     if source_changed {
                         batch.insert(&self.engine.meta, forced_reembedding_key(id), []);
                     }
-                    if source_changed
+                    let should_be_pending = source_changed
                         || (stored.needs_embedding()
-                            && old.as_ref().is_none_or(|old| !old.needs_embedding()))
-                    {
-                        batch.insert(
-                            &self.engine.meta,
-                            pending_embedding_key(id),
-                            pending_embedding_value()?,
-                        );
+                            && old.as_ref().is_none_or(|old| !old.needs_embedding()));
+                    if should_be_pending {
+                        batch.insert(&self.engine.meta, &pending_key, pending_embedding_value()?);
                     } else {
-                        batch.remove(&self.engine.meta, pending_embedding_key(id));
+                        batch.remove(&self.engine.meta, &pending_key);
                     }
+                    pending_embedding_delta +=
+                        i64::from(should_be_pending) - i64::from(was_pending);
                 }
                 None => {
                     batch.remove(&self.engine.nodes, id.as_bytes());
-                    batch.remove(&self.engine.meta, pending_embedding_key(id));
+                    batch.remove(&self.engine.meta, pending_key);
+                    pending_embedding_delta -= i64::from(was_pending);
                 }
             }
         }
@@ -8204,6 +8294,17 @@ impl<'a> BatchWriter<'a> {
                 None => batch.remove(&self.engine.edges, id.as_bytes()),
             }
         }
+        let pending_embedding_count = self.engine.pending_embedding_count.load(Ordering::Acquire);
+        let pending_embedding_count = if pending_embedding_delta >= 0 {
+            pending_embedding_count.saturating_add(pending_embedding_delta as u64)
+        } else {
+            pending_embedding_count.saturating_sub(pending_embedding_delta.unsigned_abs())
+        };
+        batch.insert(
+            &self.engine.meta,
+            META_PENDING_EMBEDDING_COUNT_KEY,
+            rmp_serde::to_vec(&pending_embedding_count)?,
+        );
         for (key, delta) in counter_deltas {
             let current = if key.as_slice() == META_GLOBAL_NODE_COUNT_KEY {
                 self.engine.total_node_count()?
@@ -8243,6 +8344,9 @@ impl<'a> BatchWriter<'a> {
             }
             return Err(error);
         }
+        self.engine
+            .pending_embedding_count
+            .store(pending_embedding_count, Ordering::Release);
         if let Some(manager) = replacement_schema_manager {
             *self.engine.schema_manager.write() = manager;
         }
