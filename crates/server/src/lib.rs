@@ -4125,13 +4125,17 @@ async fn retention_status(State(state): State<Arc<AppState>>, headers: HeaderMap
 
 async fn graphql_handler(
     State(state): State<Arc<AppState>>,
+    Extension(request_context): Extension<RequestContext>,
     headers: HeaderMap,
     request: GraphQLRequest,
 ) -> Response {
     if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, false) {
         return status.into_response();
     }
-    let gql_response = state.graphql_schema.execute(request.into_inner()).await;
+    let gql_response = state
+        .graphql_schema
+        .execute_with_context(request_context, request.into_inner())
+        .await;
     let body = axum::body::Body::from(serde_json::to_vec(&gql_response).unwrap_or_default());
     Response::builder()
         .status(StatusCode::OK)

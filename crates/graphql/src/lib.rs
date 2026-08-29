@@ -8,7 +8,8 @@
 //! which is directly equivalent to gqlgen in feature set.
 
 use async_graphql::{Context, Object, SimpleObject};
-use copperdb_storage::{NodeRecord, StorageEngine};
+use copperdb_storage::{NodeRecord, StorageEngine, StorageError};
+use copperdb_util::{RequestCancelled, RequestContext};
 use parking_lot::Mutex;
 use std::sync::Arc;
 use thiserror::Error;
@@ -18,9 +19,20 @@ pub enum GraphQlError {
     #[error("schema error: {0}")]
     Schema(String),
     #[error("storage error: {0}")]
-    Storage(#[from] copperdb_storage::StorageError),
+    Storage(StorageError),
+    #[error(transparent)]
+    RequestCancelled(#[from] RequestCancelled),
     #[error("context error: {0}")]
     Context(String),
+}
+
+impl From<StorageError> for GraphQlError {
+    fn from(error: StorageError) -> Self {
+        match error {
+            StorageError::RequestCancelled(cancelled) => Self::RequestCancelled(cancelled),
+            error => Self::Storage(error),
+        }
+    }
 }
 
 impl From<async_graphql::Error> for GraphQlError {
@@ -59,19 +71,27 @@ pub struct QueryRoot;
 #[Object]
 impl QueryRoot {
     /// Fetch a node by ID.
-    async fn node(&self, ctx: &Context<'_>, id: String) -> Option<GraphNode> {
-        let gql_ctx = ctx.data::<GraphQlContext>().ok()?;
+    async fn node(&self, ctx: &Context<'_>, id: String) -> Result<Option<GraphNode>, GraphQlError> {
+        let request_context = ctx.data::<RequestContext>()?;
+        request_context.check_active()?;
+        let gql_ctx = ctx.data::<GraphQlContext>()?;
         let engine = gql_ctx.engine.lock();
-        let node = engine.get_node_record(&id).ok()??;
-        Some(GraphNode::from(node))
+        let node = engine.get_node_record(&id)?;
+        Ok(node.map(GraphNode::from))
     }
 
     /// List all nodes.
     async fn nodes(&self, ctx: &Context<'_>) -> Result<Vec<GraphNode>, GraphQlError> {
+        let request_context = ctx.data::<RequestContext>()?;
+        request_context.check_active()?;
         let gql_ctx = ctx.data::<GraphQlContext>()?;
         let engine = gql_ctx.engine.lock();
-        let nodes = engine.all_node_records()?;
-        Ok(nodes.into_iter().map(GraphNode::from).collect())
+        let mut nodes = Vec::new();
+        engine.stream_node_records_with_cancellation(request_context.cancellation(), |node| {
+            nodes.push(GraphNode::from(node));
+            Ok(())
+        })?;
+        Ok(nodes)
     }
 }
 
@@ -88,6 +108,8 @@ impl MutationRoot {
         labels: Vec<String>,
         properties: serde_json::Value,
     ) -> Result<GraphNode, GraphQlError> {
+        let request_context = ctx.data::<RequestContext>()?;
+        request_context.check_active()?;
         let gql_ctx = ctx.data::<GraphQlContext>()?;
         let engine = gql_ctx.engine.lock();
         let node_id = id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -109,6 +131,7 @@ impl MutationRoot {
             created_at_unix_ms: created_at,
             updated_at_unix_ms: created_at,
         };
+        request_context.check_active()?;
         engine.put_node_record(&node)?;
         Ok(GraphNode::from(node))
     }
@@ -123,7 +146,16 @@ pub struct GraphQlSchema(
 impl GraphQlSchema {
     /// Execute a GraphQL request against the schema.
     pub async fn execute(&self, request: async_graphql::Request) -> async_graphql::Response {
-        self.0.execute(request).await
+        self.execute_with_context(RequestContext::detached(), request)
+            .await
+    }
+
+    pub async fn execute_with_context(
+        &self,
+        request_context: RequestContext,
+        request: async_graphql::Request,
+    ) -> async_graphql::Response {
+        self.0.execute(request.data(request_context)).await
     }
 }
 
@@ -140,4 +172,46 @@ pub fn build_schema(engine: Arc<Mutex<StorageEngine>>) -> GraphQlSchema {
 pub fn build_default_schema() -> GraphQlSchema {
     let engine = Arc::new(Mutex::new(StorageEngine::open_temporary().unwrap()));
     build_schema(engine)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_graphql::{Request, Variables};
+
+    #[tokio::test]
+    async fn cancelled_context_stops_node_listing() {
+        let schema = build_default_schema();
+        let request_context = RequestContext::detached();
+        request_context.cancel();
+
+        let response = schema
+            .execute_with_context(request_context, Request::new("{ nodes { id } }"))
+            .await;
+
+        assert_eq!(response.errors.len(), 1);
+        assert_eq!(response.errors[0].message, "request cancelled");
+    }
+
+    #[tokio::test]
+    async fn cancelled_context_stops_node_creation_without_writing() {
+        let engine = Arc::new(Mutex::new(StorageEngine::open_temporary().unwrap()));
+        let schema = build_schema(Arc::clone(&engine));
+        let request_context = RequestContext::detached();
+        request_context.cancel();
+        let request = Request::new(
+            "mutation($properties: JSON!) { createNode(id: \"cancelled\", labels: [\"Test\"], properties: $properties) { id } }",
+        )
+        .variables(Variables::from_json(serde_json::json!({ "properties": {} })));
+
+        let response = schema.execute_with_context(request_context, request).await;
+
+        assert_eq!(response.errors.len(), 1);
+        assert_eq!(response.errors[0].message, "request cancelled");
+        assert!(engine
+            .lock()
+            .get_node_record("cancelled")
+            .unwrap()
+            .is_none());
+    }
 }

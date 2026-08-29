@@ -179,6 +179,34 @@ async fn request_context_middleware_returns_timeout_and_cancels_context() {
 }
 
 #[tokio::test]
+async fn graphql_handler_executes_with_ingress_request_context() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let mut state = AppState::default();
+    state.auth.security_enabled = false;
+    let response = build_router(Arc::new(state))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/graphql")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":"{ nodes { id } }"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(payload.get("errors").is_none(), "{payload}");
+    assert!(payload["data"]["nodes"].is_array());
+}
+
+#[tokio::test]
 async fn copperdb_search_returns_not_found_for_an_authorized_missing_database() {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;

@@ -19,6 +19,8 @@ use copperdb_topology::{
     TopologyError, TopologyRegistry,
 };
 
+const CANCELLATION_CHECK_INTERVAL: usize = 256;
+
 #[derive(Debug, Error)]
 pub enum SearchError {
     #[error("tantivy error: {0}")]
@@ -834,7 +836,7 @@ pub async fn collect_planned_fabric_ranked_batches_with_context(
         request_context.check_active()?;
         for peer in &plan.fanout {
             request_context.check_active()?;
-            match transport
+            let result = transport
                 .search_ranked_node(
                     &peer.node_id,
                     &plan.placement,
@@ -842,8 +844,9 @@ pub async fn collect_planned_fabric_ranked_batches_with_context(
                     read_fence,
                     Some(request_context),
                 )
-                .await
-            {
+                .await;
+            request_context.check_active()?;
+            match result {
                 Ok(batch) => {
                     responded_nodes.push(peer.node_id.clone());
                     batches.push(batch);
@@ -886,8 +889,13 @@ pub async fn collect_fabric_hydration_records_with_context(
 
     for request in requests {
         request_context.check_active()?;
-        requested_ids.extend(request.global_ids.iter().cloned());
-        match transport
+        for (index, global_id) in request.global_ids.iter().enumerate() {
+            if index % CANCELLATION_CHECK_INTERVAL == 0 {
+                request_context.check_active()?;
+            }
+            requested_ids.push(global_id.clone());
+        }
+        let result = transport
             .hydrate_node(
                 &request.node_id,
                 &request.placement,
@@ -895,8 +903,9 @@ pub async fn collect_fabric_hydration_records_with_context(
                 request.read_fence,
                 Some(request_context),
             )
-            .await
-        {
+            .await;
+        request_context.check_active()?;
+        match result {
             Ok(mut node_records) => {
                 responded_nodes.push(request.node_id);
                 records.append(&mut node_records);
@@ -905,12 +914,18 @@ pub async fn collect_fabric_hydration_records_with_context(
         }
     }
 
-    let returned = records
-        .iter()
-        .map(|record| record.global_id.stable_id())
-        .collect::<HashSet<_>>();
+    let mut returned = HashSet::with_capacity(records.len());
+    for (index, record) in records.iter().enumerate() {
+        if index % CANCELLATION_CHECK_INTERVAL == 0 {
+            request_context.check_active()?;
+        }
+        returned.insert(record.global_id.stable_id());
+    }
     let mut missing_global_ids = Vec::new();
-    for global_id in requested_ids {
+    for (index, global_id) in requested_ids.into_iter().enumerate() {
+        if index % CANCELLATION_CHECK_INTERVAL == 0 {
+            request_context.check_active()?;
+        }
         if !returned.contains(&global_id.stable_id())
             && !missing_global_ids
                 .iter()
@@ -1097,6 +1112,53 @@ impl SearchIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct CancellingRankedTransport;
+
+    #[async_trait]
+    impl RankedSearchTransport for CancellingRankedTransport {
+        async fn search_ranked_node(
+            &self,
+            _node_id: &str,
+            placement: &PlacementKey,
+            _query: &SearchQuery,
+            _read_fence: Option<LogicalTransactionId>,
+            request_context: Option<&RequestContext>,
+        ) -> Result<RrfSearchBatch, SearchError> {
+            request_context.expect("request context").cancel();
+            Ok(RrfSearchBatch {
+                shard: placement.clone(),
+                source: "lexical".into(),
+                hits: Vec::new(),
+                filtered_hits: 0,
+            })
+        }
+    }
+
+    struct CancellingHydrationTransport;
+
+    #[async_trait]
+    impl HydrationTransport for CancellingHydrationTransport {
+        async fn hydrate_node(
+            &self,
+            _node_id: &str,
+            _placement: &PlacementKey,
+            global_ids: &[FabricGlobalId],
+            _read_fence: Option<LogicalTransactionId>,
+            request_context: Option<&RequestContext>,
+        ) -> Result<Vec<RrfHydrationRecord>, SearchError> {
+            request_context.expect("request context").cancel();
+            Ok(global_ids
+                .iter()
+                .cloned()
+                .map(|global_id| RrfHydrationRecord {
+                    global_id,
+                    labels: vec!["Document".into()],
+                    entity: serde_json::json!({"id": "doc-1"}),
+                })
+                .collect())
+        }
+    }
 
     fn make_doc(text: &str) -> HashMap<String, String> {
         let mut m = HashMap::new();
@@ -1817,6 +1879,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ranked_search_discards_response_when_cancelled_during_transport() {
+        use copperdb_topology::{MeshPeer, SearchRoutingPolicy};
+
+        let placement = PlacementKey::default_for_database("copper");
+        let request_context = RequestContext::detached();
+        let result = collect_planned_fabric_ranked_batches_with_context(
+            &request_context,
+            vec![DistributedSearchPlan {
+                placement,
+                fanout: vec![MeshPeer::new("search-a", "search-a.mesh.local:9000")],
+                policy: SearchRoutingPolicy::default(),
+                parallelism: 1,
+                hedge_after_micros: 0,
+            }],
+            SearchQuery::FullText {
+                query: "alice".into(),
+                fields: vec!["body".into()],
+                limit: 10,
+            },
+            None,
+            Arc::new(CancellingRankedTransport),
+        )
+        .await;
+
+        assert!(matches!(result, Err(SearchError::RequestCancelled(_))));
+    }
+
+    #[tokio::test]
     async fn hydration_transport_collects_records_and_tracks_missing_ids() {
         let primary = PlacementKey::new("default", "copper", "primary");
         let person = PlacementKey::new("default", "copper", "person-00");
@@ -1857,6 +1947,26 @@ mod tests {
         assert_eq!(collected.records.len(), 1);
         assert_eq!(collected.records[0].global_id, doc_a);
         assert_eq!(collected.missing_global_ids, vec![doc_b]);
+    }
+
+    #[tokio::test]
+    async fn hydration_discards_response_when_cancelled_during_transport() {
+        let placement = PlacementKey::default_for_database("copper");
+        let global_id = FabricGlobalId::new(placement.clone(), "node", "Document:1");
+        let request_context = RequestContext::detached();
+        let result = collect_fabric_hydration_records_with_context(
+            &request_context,
+            vec![FabricHydrationRequest {
+                node_id: "search-a".into(),
+                placement,
+                global_ids: vec![global_id],
+                read_fence: None,
+            }],
+            Arc::new(CancellingHydrationTransport),
+        )
+        .await;
+
+        assert!(matches!(result, Err(SearchError::RequestCancelled(_))));
     }
 
     #[tokio::test]
