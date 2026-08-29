@@ -5,7 +5,21 @@
     };
     use copperdb_storage::{
         EdgeRecord, IndexDefinition, IndexEntityType, IndexKind, NodeRecord, StorageEngine,
+        StorageError,
     };
+
+    #[test]
+    fn storage_error_conversion_preserves_request_cancellation() {
+        let error = EvalError::from(StorageError::RequestCancelled(RequestCancelled));
+
+        assert!(matches!(error, EvalError::RequestCancelled(_)));
+
+        let error = EvalError::from(StorageError::NotFound("missing".into()));
+        assert!(matches!(
+            error,
+            EvalError::StorageError(message) if message == "key not found: missing"
+        ));
+    }
 
     fn node_props(name: &str) -> HashMap<String, Value> {
         [("name".to_string(), Value::String(name.to_string()))]

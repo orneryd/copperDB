@@ -1,5 +1,5 @@
 use super::*;
-use copperdb_storage::{EdgeRecord, MvccPruneOptions, NodeRecord};
+use copperdb_storage::{EdgeRecord, MvccPruneOptions, NodeRecord, StorageError};
 use copperdb_txsession::{BookmarkMode, SessionConfig};
 use std::collections::BTreeMap;
 
@@ -27,6 +27,32 @@ fn test_open_memory() {
     assert_eq!(db.config.default_database, "copperdb");
     assert_eq!(db.storage_engine().backend_name(), "memory");
     assert!(db.storage_engine().data_dir().is_none());
+}
+
+#[test]
+fn lower_layer_error_conversion_preserves_request_cancellation() {
+    let storage_error = CopperDbError::from(StorageError::RequestCancelled(RequestCancelled));
+    assert!(matches!(
+        storage_error,
+        CopperDbError::RequestCancelled(_)
+    ));
+
+    let eval_error = CopperDbError::from(copperdb_eval::EvalError::RequestCancelled(
+        RequestCancelled,
+    ));
+    assert!(matches!(eval_error, CopperDbError::RequestCancelled(_)));
+
+    let storage_error = CopperDbError::from(StorageError::NotFound("missing".into()));
+    assert!(matches!(
+        storage_error,
+        CopperDbError::Storage(message) if message == "key not found: missing"
+    ));
+
+    let eval_error = CopperDbError::from(copperdb_eval::EvalError::TypeError("invalid".into()));
+    assert!(matches!(
+        eval_error,
+        CopperDbError::Eval(message) if message == "type error: invalid"
+    ));
 }
 
 #[test]

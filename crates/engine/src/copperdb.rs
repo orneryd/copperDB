@@ -1792,10 +1792,10 @@ fn open_storage(config: &DatabaseConfig) -> Result<StorageEngine, CopperDbError>
                 config.storage_encryption_key_uri.clone(),
                 wal_config,
             )
-            .map_err(|e| CopperDbError::Storage(e.to_string()))
+            .map_err(CopperDbError::from)
         }
         None => StorageEngine::open_with_wal_config(&config.data_dir, wal_config)
-            .map_err(|e| CopperDbError::Storage(e.to_string())),
+            .map_err(CopperDbError::from),
     }
 }
 

@@ -116,7 +116,12 @@ pub enum CopperDbError {
 
 impl From<copperdb_storage::StorageError> for CopperDbError {
     fn from(e: copperdb_storage::StorageError) -> Self {
-        CopperDbError::Storage(e.to_string())
+        match e {
+            copperdb_storage::StorageError::RequestCancelled(cancelled) => {
+                CopperDbError::RequestCancelled(cancelled)
+            }
+            error => CopperDbError::Storage(error.to_string()),
+        }
     }
 }
 
@@ -128,7 +133,12 @@ impl From<copperdb_cypher::CypherError> for CopperDbError {
 
 impl From<copperdb_eval::EvalError> for CopperDbError {
     fn from(e: copperdb_eval::EvalError) -> Self {
-        CopperDbError::Eval(e.to_string())
+        match e {
+            copperdb_eval::EvalError::RequestCancelled(cancelled) => {
+                CopperDbError::RequestCancelled(cancelled)
+            }
+            error => CopperDbError::Eval(error.to_string()),
+        }
     }
 }
 

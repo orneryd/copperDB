@@ -684,7 +684,7 @@ fn record_failure(
             CopperDbError::Init("embedding generation failed and was dead-lettered".to_string())
         }
         Ok(false) => CopperDbError::Init("embedding generation failed".to_string()),
-        Err(storage_error) => CopperDbError::Storage(storage_error.to_string()),
+        Err(storage_error) => CopperDbError::from(storage_error),
     }
 }
 

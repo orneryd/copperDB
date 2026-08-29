@@ -70,7 +70,12 @@ pub enum EvalError {
 
 impl From<copperdb_storage::StorageError> for EvalError {
     fn from(e: copperdb_storage::StorageError) -> Self {
-        EvalError::StorageError(e.to_string())
+        match e {
+            copperdb_storage::StorageError::RequestCancelled(cancelled) => {
+                EvalError::RequestCancelled(cancelled)
+            }
+            error => EvalError::StorageError(error.to_string()),
+        }
     }
 }
 
