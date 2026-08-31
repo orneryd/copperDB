@@ -5187,8 +5187,7 @@ impl StorageEngine {
         index: &IndexDefinition,
         cancel: &RequestCancellation,
     ) -> Result<(), StorageError> {
-        let key = [META_SCHEMA_INDEX_PREFIX, index.name.as_bytes()].concat();
-        self.meta.fjall_insert(key, rmp_serde::to_vec(index)?)?;
+        cancel.check_cancelled()?;
         if is_node_property_index(index) {
             self.rebuild_node_property_index_with_cancellation(index, cancel)?;
         } else if is_node_fulltext_index(index) {
@@ -5198,6 +5197,9 @@ impl StorageEngine {
         } else if is_relationship_property_index(index) {
             self.rebuild_relationship_property_index_with_cancellation(index, cancel)?;
         }
+        cancel.check_cancelled()?;
+        let key = [META_SCHEMA_INDEX_PREFIX, index.name.as_bytes()].concat();
+        self.meta.fjall_insert(key, rmp_serde::to_vec(index)?)?;
         if is_node_fulltext_index(index) {
             self.fulltext_runtime_indexes.lock().clear();
         }
@@ -5887,8 +5889,10 @@ impl StorageEngine {
         self.delete_relationship_fulltext_index_entries_with_cancellation(index, cancel)?;
         let mut batch = Batch::new();
         let mut pending = 0usize;
-        for edge in self.get_edges_by_type(&index.label)? {
-            cancel.check_cancelled()?;
+        self.stream_edge_records_with_cancellation(cancel, |edge| {
+            if edge.edge_type != index.label {
+                return Ok(());
+            }
             for property in &index.properties {
                 let Some(value) = edge.properties.get(property) else {
                     continue;
@@ -5907,8 +5911,10 @@ impl StorageEngine {
                     }
                 }
             }
-        }
+            Ok(())
+        })?;
         if pending > 0 {
+            cancel.check_cancelled()?;
             self.indexes.fjall_apply_batch(&batch)?;
         }
         Ok(())

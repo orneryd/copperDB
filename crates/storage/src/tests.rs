@@ -6779,6 +6779,60 @@ fn fulltext_index_rebuilds_and_tracks_mutations() {
 }
 
 #[test]
+fn cancelled_index_creation_does_not_persist_schema_or_operational_state() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let cancelled = RequestCancellation::new();
+    cancelled.cancel();
+    let definitions = [
+        IndexDefinition {
+            name: "node_property".into(),
+            entity_type: IndexEntityType::Node,
+            kind: IndexKind::Range,
+            label: "Person".into(),
+            properties: vec!["name".into()],
+        },
+        IndexDefinition {
+            name: "node_fulltext".into(),
+            entity_type: IndexEntityType::Node,
+            kind: IndexKind::FullText,
+            label: "Document".into(),
+            properties: vec!["body".into()],
+        },
+        IndexDefinition {
+            name: "relationship_property".into(),
+            entity_type: IndexEntityType::Relationship,
+            kind: IndexKind::Range,
+            label: "KNOWS".into(),
+            properties: vec!["since".into()],
+        },
+        IndexDefinition {
+            name: "relationship_fulltext".into(),
+            entity_type: IndexEntityType::Relationship,
+            kind: IndexKind::FullText,
+            label: "MENTIONS".into(),
+            properties: vec!["context".into()],
+        },
+    ];
+
+    for definition in &definitions {
+        let error = engine
+            .persist_index_definition_with_cancellation(definition, &cancelled)
+            .unwrap_err();
+        assert!(matches!(error, StorageError::RequestCancelled(_)));
+    }
+
+    assert!(engine.load_index_definitions().unwrap().is_empty());
+    assert_eq!(
+        engine.search_index_operational_status(),
+        SearchIndexOperationalStatus {
+            fulltext_indexes: 0,
+            vector_indexes: 0,
+        }
+    );
+    assert_eq!(engine.index_schema_generation(), 0);
+}
+
+#[test]
 fn fulltext_runtime_index_preserves_multi_property_term_frequency() {
     let engine = StorageEngine::open_temporary().unwrap();
     let mut repeated = sample_node("db:n1", &["Document"]);

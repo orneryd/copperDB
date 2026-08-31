@@ -167,10 +167,13 @@ impl StorageEngine {
         index: &IndexDefinition,
         cancel: &crate::RequestCancellation,
     ) -> Result<(), StorageError> {
-        self.delete_relationship_property_index_entries(index)?;
+        self.delete_relationship_property_index_entries_with_cancellation(index, cancel)?;
         let mut batch = crate::Batch::new();
         let mut pending: usize = 0;
-        for edge in self.get_edges_by_type(&index.label)? {
+        self.stream_edge_records_with_cancellation(cancel, |edge| {
+            if edge.edge_type != index.label {
+                return Ok(());
+            }
             if let Some(key) = relationship_property_index_key_for_edge(index, &edge) {
                 batch.push((key.into_bytes(), Some(Vec::<u8>::new())));
                 pending += 1;
@@ -178,11 +181,12 @@ impl StorageEngine {
                     self.indexes
                         .fjall_apply_batch(&std::mem::take(&mut batch))?;
                     pending = 0;
-                    cancel.check_cancelled()?;
                 }
             }
-        }
+            Ok(())
+        })?;
         if pending > 0 {
+            cancel.check_cancelled()?;
             self.indexes.fjall_apply_batch(&batch)?;
         }
         Ok(())
@@ -192,15 +196,34 @@ impl StorageEngine {
         &self,
         index: &IndexDefinition,
     ) -> Result<(), StorageError> {
-        let keys = self
-            .indexes
-            .scan_prefix(
-                edge_property_index_definition_prefix(&index.label, &index.properties).as_bytes(),
-            )
-            .map(|entry| entry.map(|(key, _)| key.to_vec()))
-            .collect::<Result<Vec<_>, _>>()?;
-        for key in keys {
-            self.indexes.fjall_remove(key)?;
+        self.delete_relationship_property_index_entries_with_cancellation(
+            index,
+            &crate::RequestCancellation::new(),
+        )
+    }
+
+    fn delete_relationship_property_index_entries_with_cancellation(
+        &self,
+        index: &IndexDefinition,
+        cancel: &crate::RequestCancellation,
+    ) -> Result<(), StorageError> {
+        let prefix = edge_property_index_definition_prefix(&index.label, &index.properties);
+        let mut batch = crate::Batch::new();
+        let mut pending = 0usize;
+        for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
+            cancel.check_cancelled()?;
+            let (key, _) = entry?;
+            batch.push((key.to_vec(), None));
+            pending += 1;
+            if pending >= 4096 {
+                self.indexes
+                    .fjall_apply_batch(&std::mem::take(&mut batch))?;
+                pending = 0;
+            }
+        }
+        if pending > 0 {
+            cancel.check_cancelled()?;
+            self.indexes.fjall_apply_batch(&batch)?;
         }
         Ok(())
     }
