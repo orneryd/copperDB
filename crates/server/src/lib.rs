@@ -18,8 +18,8 @@ use copperdb_auth::{
     AuthConfig, AuthError, Authenticator, Claims, DatabaseAccessMode, TokenManager,
 };
 use copperdb_bolt::server::{
-    BoltAuthProvider, BoltPrincipal, BoltQueryResult, BoltResultStats, BoltRuntimeCounters,
-    BoltTransaction, BoltTransactionError, QueryExecutor,
+    BoltAuthProvider, BoltExecutionError, BoltPrincipal, BoltQueryResult, BoltResultStats,
+    BoltRuntimeCounters, BoltTransaction, BoltTransactionError, QueryExecutor,
 };
 use copperdb_buildinfo::{display_version, server_announcement, version};
 use copperdb_config::Config as RuntimeConfig;
@@ -2340,6 +2340,15 @@ impl From<copperdb_engine::CopperDbError> for StatementExecutionError {
     }
 }
 
+fn bolt_execution_error(error: StatementExecutionError) -> BoltExecutionError {
+    match error {
+        StatementExecutionError::RequestCancelled(cancelled) => {
+            BoltExecutionError::RequestCancelled(cancelled)
+        }
+        StatementExecutionError::Message(message) => BoltExecutionError::Message(message),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_statement(
     state: Arc<AppState>,
@@ -2515,6 +2524,7 @@ impl QueryExecutor for AppStateBoltExecutor {
         let database = database.unwrap_or(&self.state.db_name).to_owned();
         let (request_context, _request_guard) = RequestContext::root(None);
         self.execute_on_database_with_context(&database, query, params, request_context)
+            .map_err(|error| error.to_string())
     }
 
     fn execute_on_database_with_context(
@@ -2523,7 +2533,7 @@ impl QueryExecutor for AppStateBoltExecutor {
         query: &str,
         params: &HashMap<String, serde_json::Value>,
         request_context: RequestContext,
-    ) -> Result<BoltQueryResult, String> {
+    ) -> Result<BoltQueryResult, BoltExecutionError> {
         let result = execute_statement(
             Arc::clone(&self.state),
             database.to_owned(),
@@ -2536,7 +2546,7 @@ impl QueryExecutor for AppStateBoltExecutor {
             None,
             None,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(bolt_execution_error)?;
         Ok(BoltQueryResult {
             columns: result.columns,
             rows: result.data.into_iter().map(|row| row.row).collect(),
@@ -2552,7 +2562,7 @@ impl QueryExecutor for AppStateBoltExecutor {
         params: &HashMap<String, serde_json::Value>,
         request_context: RequestContext,
         principal: Option<&BoltPrincipal>,
-    ) -> Result<BoltQueryResult, String> {
+    ) -> Result<BoltQueryResult, BoltExecutionError> {
         let roles = match principal {
             Some(principal) => principal.roles.clone(),
             None if !self.state.auth.security_enabled => vec!["admin".into()],
@@ -2570,7 +2580,7 @@ impl QueryExecutor for AppStateBoltExecutor {
             None,
             None,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(bolt_execution_error)?;
         Ok(BoltQueryResult {
             columns: result.columns,
             rows: result.data.into_iter().map(|row| row.row).collect(),
@@ -2587,9 +2597,10 @@ impl QueryExecutor for AppStateBoltExecutor {
         request_context: RequestContext,
         principal: Option<&BoltPrincipal>,
         bookmarks: &[String],
-    ) -> Result<BoltQueryResult, String> {
+    ) -> Result<BoltQueryResult, BoltExecutionError> {
         if !bookmarks.is_empty() {
-            derive_distributed_read_fence(&self.state, database, bookmarks)?;
+            derive_distributed_read_fence(&self.state, database, bookmarks)
+                .map_err(BoltExecutionError::from)?;
         }
         self.execute_as_on_database_with_context(
             database,
@@ -2704,14 +2715,15 @@ impl QueryExecutor for AppStateBoltExecutor {
         params: &HashMap<String, serde_json::Value>,
         request_context: RequestContext,
         principal: Option<&BoltPrincipal>,
-    ) -> Result<BoltQueryResult, String> {
+    ) -> Result<BoltQueryResult, BoltExecutionError> {
         let transaction_id = uuid::Uuid::parse_str(&transaction.id)
-            .map_err(|_| "invalid Bolt transaction identifier".to_owned())?;
-        let engine = open_engine(&self.state, &transaction.database)?;
+            .map_err(|_| BoltExecutionError::from("invalid Bolt transaction identifier"))?;
+        let engine =
+            open_engine(&self.state, &transaction.database).map_err(BoltExecutionError::from)?;
         let active = engine
             .tx_manager()
             .get(&transaction_id)
-            .ok_or_else(|| "Bolt transaction is no longer active".to_owned())?;
+            .ok_or_else(|| BoltExecutionError::from("Bolt transaction is no longer active"))?;
         if active.database.as_deref() != Some(transaction.database.as_str()) || !active.is_active()
         {
             return Err("Bolt transaction is no longer active".into());
@@ -2734,7 +2746,8 @@ impl QueryExecutor for AppStateBoltExecutor {
                 params.clone(),
                 &roles,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(StatementExecutionError::from)
+            .map_err(bolt_execution_error)?;
         let result = convert_engine_result(result);
         Ok(BoltQueryResult {
             columns: result.columns,

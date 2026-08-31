@@ -107,6 +107,48 @@ impl From<&str> for BoltTransactionError {
     }
 }
 
+#[derive(Debug)]
+pub enum BoltExecutionError {
+    Message(String),
+    RequestCancelled(copperdb_util::RequestCancelled),
+}
+
+impl BoltExecutionError {
+    fn neo4j_code(&self) -> &'static str {
+        match self {
+            Self::RequestCancelled(_) => "Neo.ClientError.Statement.SyntaxError",
+            Self::Message(_) => "Neo.ClientError.Statement.ExecutionFailed",
+        }
+    }
+}
+
+impl std::fmt::Display for BoltExecutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Message(message) => message.fmt(formatter),
+            Self::RequestCancelled(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl From<String> for BoltExecutionError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<&str> for BoltExecutionError {
+    fn from(message: &str) -> Self {
+        Self::Message(message.to_owned())
+    }
+}
+
+impl From<copperdb_util::RequestCancelled> for BoltExecutionError {
+    fn from(error: copperdb_util::RequestCancelled) -> Self {
+        Self::RequestCancelled(error)
+    }
+}
+
 pub trait BoltAuthProvider: Send + Sync {
     fn authenticate(&self, username: &str, password: &str) -> Result<BoltPrincipal, String>;
 }
@@ -141,9 +183,10 @@ pub trait QueryExecutor: Send + Sync {
         query: &str,
         params: &HashMap<String, serde_json::Value>,
         request_context: copperdb_util::RequestContext,
-    ) -> Result<BoltQueryResult, String> {
+    ) -> Result<BoltQueryResult, BoltExecutionError> {
         let _ = request_context;
         self.execute_on_database(Some(database), query, params)
+            .map_err(BoltExecutionError::from)
     }
 
     fn execute_as_on_database_with_context(
@@ -153,7 +196,7 @@ pub trait QueryExecutor: Send + Sync {
         params: &HashMap<String, serde_json::Value>,
         request_context: copperdb_util::RequestContext,
         _principal: Option<&BoltPrincipal>,
-    ) -> Result<BoltQueryResult, String> {
+    ) -> Result<BoltQueryResult, BoltExecutionError> {
         self.execute_on_database_with_context(database, query, params, request_context)
     }
 
@@ -165,7 +208,7 @@ pub trait QueryExecutor: Send + Sync {
         request_context: copperdb_util::RequestContext,
         principal: Option<&BoltPrincipal>,
         _bookmarks: &[String],
-    ) -> Result<BoltQueryResult, String> {
+    ) -> Result<BoltQueryResult, BoltExecutionError> {
         self.execute_as_on_database_with_context(
             database,
             query,
@@ -202,7 +245,7 @@ pub trait QueryExecutor: Send + Sync {
         params: &HashMap<String, serde_json::Value>,
         request_context: copperdb_util::RequestContext,
         principal: Option<&BoltPrincipal>,
-    ) -> Result<BoltQueryResult, String> {
+    ) -> Result<BoltQueryResult, BoltExecutionError> {
         self.execute_as_on_database_with_context(
             &transaction.database,
             query,
@@ -614,25 +657,25 @@ async fn handle_tcp_session(
     .await
 }
 
-    async fn handle_tcp_session_with_counters(
-        stream: &mut TcpStream,
-        telemetry: &Telemetry,
-        executor: Arc<dyn QueryExecutor>,
-        auth_enabled: bool,
-        auth_provider: Option<Arc<dyn BoltAuthProvider>>,
-        runtime_counters: Arc<BoltRuntimeCounters>,
-    ) -> Result<(), BoltError> {
-        handle_tcp_session_with_timeout_and_counters(
-            stream,
-            telemetry,
-            executor,
-            auth_enabled,
-            auth_provider,
-            BOLT_RECEIVE_TIMEOUT,
-            Some(runtime_counters),
-        )
-        .await
-    }
+async fn handle_tcp_session_with_counters(
+    stream: &mut TcpStream,
+    telemetry: &Telemetry,
+    executor: Arc<dyn QueryExecutor>,
+    auth_enabled: bool,
+    auth_provider: Option<Arc<dyn BoltAuthProvider>>,
+    runtime_counters: Arc<BoltRuntimeCounters>,
+) -> Result<(), BoltError> {
+    handle_tcp_session_with_timeout_and_counters(
+        stream,
+        telemetry,
+        executor,
+        auth_enabled,
+        auth_provider,
+        BOLT_RECEIVE_TIMEOUT,
+        Some(runtime_counters),
+    )
+    .await
+}
 
 #[cfg(test)]
 async fn handle_tcp_session_with_timeout(
@@ -953,7 +996,9 @@ impl BoltSession {
         auth_enabled: bool,
         runtime_counters: Option<Arc<BoltRuntimeCounters>>,
     ) -> Self {
-        let session_counter = runtime_counters.as_ref().map(BoltRuntimeCounters::open_session);
+        let session_counter = runtime_counters
+            .as_ref()
+            .map(BoltRuntimeCounters::open_session);
         Self {
             auth_enabled,
             authenticated: !auth_enabled,
@@ -1336,11 +1381,8 @@ async fn process_message(
                     rollback_active_transaction(session, executor.as_ref());
                     Ok(vec![dispatch::encode_message(&BoltMessage::Failure {
                         metadata: HashMap::from([
-                            (
-                                "code".into(),
-                                serde_json::json!("Neo.ClientError.Statement.ExecutionFailed"),
-                            ),
-                            ("message".into(), serde_json::json!(e)),
+                            ("code".into(), serde_json::json!(e.neo4j_code())),
+                            ("message".into(), serde_json::json!(e.to_string())),
                         ]),
                     })])
                 }
@@ -1592,9 +1634,10 @@ mod tests {
             _request_context: copperdb_util::RequestContext,
             _principal: Option<&BoltPrincipal>,
             bookmarks: &[String],
-        ) -> Result<BoltQueryResult, String> {
+        ) -> Result<BoltQueryResult, BoltExecutionError> {
             *self.bookmarks.lock().unwrap() = bookmarks.to_vec();
             self.execute("", &HashMap::new())
+                .map_err(BoltExecutionError::from)
         }
     }
 
@@ -1684,8 +1727,9 @@ mod tests {
             params: &HashMap<String, serde_json::Value>,
             _request_context: copperdb_util::RequestContext,
             _principal: Option<&BoltPrincipal>,
-        ) -> Result<BoltQueryResult, String> {
+        ) -> Result<BoltQueryResult, BoltExecutionError> {
             self.execute(query, params)
+                .map_err(BoltExecutionError::from)
         }
     }
 
@@ -1710,9 +1754,10 @@ mod tests {
             _params: &HashMap<String, serde_json::Value>,
             _request_context: copperdb_util::RequestContext,
             principal: Option<&BoltPrincipal>,
-        ) -> Result<BoltQueryResult, String> {
+        ) -> Result<BoltQueryResult, BoltExecutionError> {
             *self.principal.lock().unwrap() = principal.cloned();
             self.execute("", &HashMap::new())
+                .map_err(BoltExecutionError::from)
         }
     }
 
@@ -1767,14 +1812,48 @@ mod tests {
             _params: &HashMap<String, serde_json::Value>,
             _request_context: copperdb_util::RequestContext,
             _principal: Option<&BoltPrincipal>,
-        ) -> Result<BoltQueryResult, String> {
+        ) -> Result<BoltQueryResult, BoltExecutionError> {
             self.operations.lock().unwrap().push("run");
             self.execute("", &HashMap::new())
+                .map_err(BoltExecutionError::from)
         }
     }
 
     struct FailingTransactionExecutor {
         operations: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    struct CancellingExecutor {
+        operations: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl QueryExecutor for CancellingExecutor {
+        fn execute(
+            &self,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+        ) -> Result<BoltQueryResult, String> {
+            unreachable!("context-aware execution is required")
+        }
+
+        fn execute_as_on_database_with_context(
+            &self,
+            _database: &str,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+            _request_context: copperdb_util::RequestContext,
+            _principal: Option<&BoltPrincipal>,
+        ) -> Result<BoltQueryResult, BoltExecutionError> {
+            self.operations.lock().unwrap().push("run");
+            Err(BoltExecutionError::RequestCancelled(
+                copperdb_util::RequestCancelled,
+            ))
+        }
+
+        fn rollback_transaction(&self, _transaction: &BoltTransaction) -> Result<(), String> {
+            self.operations.lock().unwrap().push("rollback");
+            Ok(())
+        }
     }
 
     struct ConflictingTransactionExecutor;
@@ -1854,7 +1933,7 @@ mod tests {
             _params: &HashMap<String, serde_json::Value>,
             _request_context: copperdb_util::RequestContext,
             _principal: Option<&BoltPrincipal>,
-        ) -> Result<BoltQueryResult, String> {
+        ) -> Result<BoltQueryResult, BoltExecutionError> {
             self.operations.lock().unwrap().push("run");
             Err("query failed".into())
         }
@@ -1942,6 +2021,51 @@ mod tests {
             panic!("expected Bolt failure code string");
         };
         code.clone()
+    }
+
+    #[tokio::test]
+    async fn cancelled_run_uses_nornicdb_failure_code_and_rolls_back_transaction() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let executor: Arc<dyn QueryExecutor> = Arc::new(CancellingExecutor {
+            operations: Arc::clone(&operations),
+        });
+        let mut session = BoltSession::new(false);
+        session.transaction = Some(BoltTransaction {
+            id: "cancelled-transaction".into(),
+            database: "copperdb".into(),
+        });
+
+        let responses = process_message(&run_message(), &mut session, executor, None)
+            .await
+            .unwrap();
+        let (value, _) = crate::packstream::decode(&responses[0]).unwrap();
+        let Value::Struct {
+            signature: 0x7F,
+            fields,
+        } = value
+        else {
+            panic!("expected Bolt FAILURE response");
+        };
+        let [Value::Map(metadata)] = fields.as_slice() else {
+            panic!("expected Bolt FAILURE metadata");
+        };
+
+        assert_eq!(
+            metadata
+                .iter()
+                .find_map(|(key, value)| (key == "code").then_some(value)),
+            Some(&Value::String(
+                "Neo.ClientError.Statement.SyntaxError".into()
+            ))
+        );
+        assert_eq!(
+            metadata
+                .iter()
+                .find_map(|(key, value)| (key == "message").then_some(value)),
+            Some(&Value::String("request cancelled".into()))
+        );
+        assert!(session.transaction.is_none());
+        assert_eq!(*operations.lock().unwrap(), vec!["run", "rollback"]);
     }
 
     #[tokio::test]
@@ -2126,8 +2250,7 @@ mod tests {
         assert_eq!(counters.snapshot().active_sessions, 1);
         assert_eq!(counters.snapshot().active_transactions, 0);
 
-        response_signature_with_executor(&begin, &mut session, Arc::clone(&executor), None)
-            .await;
+        response_signature_with_executor(&begin, &mut session, Arc::clone(&executor), None).await;
         assert_eq!(counters.snapshot().active_transactions, 1);
 
         response_signature_with_executor(&commit, &mut session, executor, None).await;

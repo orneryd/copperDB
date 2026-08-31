@@ -6622,7 +6622,34 @@ fn appstate_bolt_executor_validates_implicit_run_bookmarks() {
             &["not-a-bookmark".into()],
         )
         .expect_err("an invalid implicit RUN bookmark must fail before execution");
-    assert!(invalid.contains("invalid bookmark"));
+    assert!(invalid.to_string().contains("invalid bookmark"));
+}
+
+#[test]
+fn appstate_bolt_executor_preserves_explicit_transaction_cancellation() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state = demo_temp_appstate_with_catalog(&temp_dir);
+    let executor = AppStateBoltExecutor::new(state);
+    let empty = HashMap::new();
+    let transaction = executor
+        .begin_transaction("copperdb", &empty, None)
+        .unwrap();
+    let request_context = RequestContext::detached();
+    request_context.cancel();
+
+    let error = executor
+        .execute_in_transaction_with_context(
+            &transaction,
+            "RETURN 1 AS value",
+            &empty,
+            request_context,
+            None,
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, BoltExecutionError::RequestCancelled(_)));
+    assert_eq!(error.to_string(), "request cancelled");
+    executor.rollback_transaction(&transaction).unwrap();
 }
 
 #[test]
@@ -7652,7 +7679,7 @@ fn appstate_bolt_executor_rejects_connected_node_delete_in_transaction() {
             None,
         )
         .unwrap_err();
-    assert!(error.contains("still has relationships"));
+    assert!(error.to_string().contains("still has relationships"));
     executor.rollback_transaction(&transaction).unwrap();
 
     let remaining = executor
