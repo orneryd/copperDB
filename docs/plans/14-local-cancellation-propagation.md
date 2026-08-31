@@ -1,6 +1,6 @@
 # 14: Local Request Cancellation Propagation
 
-Status: in progress. Priority: P1. Owners: `util`, `server`, `bolt`, `engine`, `eval`, `storage`, `indexing`, `search`, `embed`, `nornicgrpc`.
+Status: complete. Priority: P1. Owners: `util`, `server`, `bolt`, `engine`, `eval`, `storage`, `indexing`, `search`, `embed`, `nornicgrpc`.
 
 ## Objective
 
@@ -41,7 +41,11 @@ Cancel before work, mid-loop, during rebuild/hydration, on disconnect/deadline, 
 - Complete: query embedding uses the ingress request context and checks immediately before and after the blocking provider call. Pre-cancelled requests never invoke the provider, results produced after cancellation are discarded as typed `RequestCancelled`, and hybrid HTTP search does not swallow cancellation as a BM25 fallback.
 - Complete: index definition persistence checks cancellation before schema mutation and publishes metadata only after rebuild completion and a final check. Relationship property and full-text rebuilds stream edges with a one-record cancellation bound instead of materializing the full relationship set, and relationship-property cleanup is cancellable and batched.
 - Complete: indexing catalog cancellation remains typed through eval instead of being flattened into a generic execution error. Context-aware `CREATE INDEX` now returns `RequestCancelled` across the storage-indexing-eval boundary without publishing a definition or advancing schema generation, while ordinary index errors retain their existing classification.
-- Pending: complete context-aware internal APIs, bounded cooperative checkpoints, typed protocol error mapping, and cancellation telemetry.
+- Complete: eval row projection checks the installed request context before every return item and wildcard field copy, bounding final result materialization while preserving context-free direct projection for explicit embedded callers.
+- Complete: vector index finalization streams existing nodes and relationships with one-record cancellation bounds. Failure or cancellation removes the registry entry, options, and catalog definition so partially built indexes cannot become visible.
+- Complete: eval pattern-comprehension assembly, UNWIND expansion and optimized UNWIND mutation batches, and buffered access-metadata flushing check the installed request context per item. A direct optimized-batch regression verifies typed cancellation before any graph mutation.
+- Complete: Bolt races active RUN execution against TCP and WebSocket input. Disconnect, close, and upstream RESET signature `0x0F` cancel the shared context; RESET then recovers the session in protocol order. Positive client `tx_timeout` takes precedence over the optional CopperDB/NornicDB server fallback, whose default remains disabled.
+- Complete: inbound tonic handlers own request guards through blocking execution and preserve typed engine cancellation as tonic `Cancelled`. HTTP, Bolt, gRPC, GraphQL, and MCP cancellation are counted by bounded protocol, ingress/execution stage, and explicit/deadline reason labels; the first observed cancellation cause wins.
 
 ## Definition Of Done
 

@@ -101,8 +101,10 @@ impl EvalEngine {
     ) -> Result<Row, EvalError> {
         let mut result = HashMap::new();
         for item in items {
+            Self::check_current_request_context()?;
             if matches!(&item.expression, Expression::Variable(v) if v == "*") {
                 for (key, val) in row.iter() {
+                    Self::check_current_request_context()?;
                     result.insert(key.clone(), val.clone());
                 }
                 continue;
@@ -149,6 +151,7 @@ impl EvalEngine {
 
         let mut results = Vec::new();
         for matched_row in &matched_rows {
+            Self::check_current_request_context()?;
             // Evaluate predicate if present
             if let Some(ref pred) = comp.predicate {
                 if !eval_predicate(pred, matched_row, params)? {
@@ -173,6 +176,7 @@ impl EvalEngine {
 
     fn flush_access_mutation_buffer(&self, buffer: AccessMutationBuffer) -> Result<(), EvalError> {
         for (entity_id, pending) in buffer {
+            Self::check_current_request_context()?;
             if pending.access_count_delta == 0 && pending.last_accessed_at_unix_ms.is_none() {
                 continue;
             }
@@ -473,10 +477,7 @@ impl EvalEngine {
             .collect::<Vec<_>>()
             .join(" ")
             .eq_ignore_ascii_case("MATCH ()-[r]->() RETURN count(r) AS count");
-        if params.is_empty()
-            && is_canonical_count_all
-            && self.has_no_knowledge_policies()?
-        {
+        if params.is_empty() && is_canonical_count_all && self.has_no_knowledge_policies()? {
             self.hot_path_trace.reset();
             return self.with_request_context(request_context, || {
                 self.with_access_buffer(|| {
@@ -641,10 +642,12 @@ impl EvalEngine {
                 Clause::Unwind(unwind) => {
                     let mut expanded = Vec::new();
                     for row in &current_rows {
+                        Self::check_current_request_context()?;
                         if let Value::Array(values) =
                             self.evaluate_expression(&unwind.expression, row, params)?
                         {
                             for value in values {
+                                Self::check_current_request_context()?;
                                 let mut expanded_row = row.clone();
                                 expanded_row.insert(unwind.variable.clone(), value);
                                 expanded.push(expanded_row);
@@ -2210,7 +2213,7 @@ impl EvalEngine {
         Ok(())
     }
 
-    fn with_request_context<T>(
+    pub(crate) fn with_request_context<T>(
         &self,
         request_context: &RequestContext,
         run: impl FnOnce() -> Result<T, EvalError>,
@@ -2453,16 +2456,8 @@ impl EvalEngine {
                         true
                     };
 
-                    // Persist vector index options separately
-                    if matches!(create.kind, copperdb_cypher::IndexKind::Vector)
-                        && created
-                        && !create.options.is_empty()
-                    {
-                        self.storage
-                            .persist_index_options(&create.name, &create.options)?;
-                    }
                     if matches!(create.kind, copperdb_cypher::IndexKind::Vector) && created {
-                        self.register_vector_index(&create.name)?;
+                        self.finalize_vector_index(request_context, &create.name, &create.options)?;
                     }
                 }
 
@@ -3019,9 +3014,11 @@ impl EvalEngine {
                 Clause::Unwind(unwind) => {
                     let mut new_rows = pooled_binding_rows();
                     for row in &current_rows {
+                        Self::check_current_request_context()?;
                         let list_val = self.evaluate_expression(&unwind.expression, row, params)?;
                         if let Value::Array(items) = list_val {
                             for item in items {
+                                Self::check_current_request_context()?;
                                 let mut new_row = row.clone();
                                 new_row.insert(unwind.variable.clone(), item);
                                 new_rows.push(new_row);
@@ -3078,7 +3075,35 @@ impl EvalEngine {
         })
     }
 
-    fn register_vector_index(&self, index_name: &str) -> Result<(), EvalError> {
+    pub(crate) fn finalize_vector_index(
+        &self,
+        request_context: &RequestContext,
+        index_name: &str,
+        options: &HashMap<String, Value>,
+    ) -> Result<(), EvalError> {
+        let result = (|| {
+            request_context.check_active()?;
+            if !options.is_empty() {
+                self.storage.persist_index_options(index_name, options)?;
+            }
+            self.register_vector_index(request_context, index_name)?;
+            request_context.check_active()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = self.unregister_vector_index(index_name);
+            let _ = self.storage.delete_index_options(index_name);
+            let _ = IndexCatalog::new(self.storage.as_ref()).drop_if_present(index_name);
+        }
+        result
+    }
+
+    fn register_vector_index(
+        &self,
+        request_context: &RequestContext,
+        index_name: &str,
+    ) -> Result<(), EvalError> {
+        request_context.check_active()?;
         let vector_indexes = &self.vector_indexes;
         let catalog = IndexCatalog::new(self.storage.as_ref());
         let definition = catalog
@@ -3124,34 +3149,59 @@ impl EvalEngine {
         }
         match definition.entity_type {
             copperdb_indexing::CatalogIndexEntityType::Node => {
-                let nodes = if definition.label.is_empty() {
-                    self.storage.all_node_records()?
-                } else {
-                    self.storage.get_nodes_by_label(&definition.label)?
-                };
-                for node in nodes {
-                    if let Some(vector) = vector_from_node(&node, property) {
-                        vector_indexes
-                            .upsert(index_name, node.id, vector)
-                            .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
-                    }
+                let mut callback_error = None;
+                self.storage.stream_node_records_with_cancellation(
+                    request_context.cancellation(),
+                    |node| {
+                        if !definition.label.is_empty()
+                            && !node.labels.iter().any(|label| label == &definition.label)
+                        {
+                            return Ok(());
+                        }
+                        if let Err(error) = request_context.check_active() {
+                            callback_error = Some(EvalError::from(error));
+                            return Err(copperdb_storage::StorageError::IterationStopped);
+                        }
+                        if let Some(vector) = vector_from_node(&node, property) {
+                            if let Err(error) = vector_indexes.upsert(index_name, node.id, vector) {
+                                callback_error = Some(EvalError::ExecutionError(error.to_string()));
+                                return Err(copperdb_storage::StorageError::IterationStopped);
+                            }
+                        }
+                        Ok(())
+                    },
+                )?;
+                if let Some(error) = callback_error {
+                    return Err(error);
                 }
             }
             copperdb_indexing::CatalogIndexEntityType::Relationship => {
-                let edges = if definition.label.is_empty() {
-                    self.storage.all_edges()?
-                } else {
-                    self.storage.get_edges_by_type(&definition.label)?
-                };
-                for edge in edges {
-                    if let Some(vector) = edge_vector_for_property(&edge, property) {
-                        vector_indexes
-                            .upsert(index_name, edge.id, vector)
-                            .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
-                    }
+                let mut callback_error = None;
+                self.storage.stream_edge_records_with_cancellation(
+                    request_context.cancellation(),
+                    |edge| {
+                        if !definition.label.is_empty() && edge.edge_type != definition.label {
+                            return Ok(());
+                        }
+                        if let Err(error) = request_context.check_active() {
+                            callback_error = Some(EvalError::from(error));
+                            return Err(copperdb_storage::StorageError::IterationStopped);
+                        }
+                        if let Some(vector) = edge_vector_for_property(&edge, property) {
+                            if let Err(error) = vector_indexes.upsert(index_name, edge.id, vector) {
+                                callback_error = Some(EvalError::ExecutionError(error.to_string()));
+                                return Err(copperdb_storage::StorageError::IterationStopped);
+                            }
+                        }
+                        Ok(())
+                    },
+                )?;
+                if let Some(error) = callback_error {
+                    return Err(error);
                 }
             }
         }
+        request_context.check_active()?;
         self.refresh_vector_index_artifact();
         Ok(())
     }
@@ -3359,11 +3409,16 @@ impl EvalEngine {
         if query.clauses.len() != 3 {
             return Ok(None);
         }
-        let (Some(Clause::Match(source_match)), Some(Clause::OptionalMatch(optional_match)), Some(Clause::Return(ret))) = (
+        let (
+            Some(Clause::Match(source_match)),
+            Some(Clause::OptionalMatch(optional_match)),
+            Some(Clause::Return(ret)),
+        ) = (
             query.clauses.first(),
             query.clauses.get(1),
             query.clauses.get(2),
-        ) else {
+        )
+        else {
             return Ok(None);
         };
         let source_pattern = &source_match.pattern;
@@ -3382,9 +3437,10 @@ impl EvalEngine {
             || optional_pattern.edges.len() != 1
             || !optional_pattern.segment_edge_counts.is_empty()
                 && optional_pattern.segment_edge_counts != [1]
-            || optional_pattern.nodes.iter().any(|node| {
-                !node.labels.is_empty() || !node.properties.is_empty()
-            })
+            || optional_pattern
+                .nodes
+                .iter()
+                .any(|node| !node.labels.is_empty() || !node.properties.is_empty())
             || ret.distinct
             || !ret.order_by.is_empty()
             || ret.skip.is_some()
@@ -3455,9 +3511,10 @@ impl EvalEngine {
             || pattern.nodes.len() != 3
             || pattern.edges.len() != 2
             || !pattern.segment_edge_counts.is_empty() && pattern.segment_edge_counts != [2]
-            || pattern.nodes.iter().any(|node| {
-                !node.labels.is_empty() || !node.properties.is_empty()
-            })
+            || pattern
+                .nodes
+                .iter()
+                .any(|node| !node.labels.is_empty() || !node.properties.is_empty())
             || ret.distinct
             || !ret.order_by.is_empty()
             || ret.skip.is_some()
@@ -3730,12 +3787,7 @@ impl EvalEngine {
         if seeded.is_empty() {
             // No matching rows from first MATCH — return empty
             let resolver = self.knowledge_policy_resolver()?;
-            return self.build_shortest_path_result(
-                query,
-                params,
-                Vec::new(),
-                resolver.as_ref(),
-            );
+            return self.build_shortest_path_result(query, params, Vec::new(), resolver.as_ref());
         }
 
         let rel_types: Vec<String> = edge_pat
@@ -3802,12 +3854,7 @@ impl EvalEngine {
         let path_count = all_paths.len();
         let seed_count = seeded.len();
         let resolver = self.knowledge_policy_resolver()?;
-        let result = self.build_shortest_path_result(
-            query,
-            params,
-            all_paths,
-            resolver.as_ref(),
-        );
+        let result = self.build_shortest_path_result(query, params, all_paths, resolver.as_ref());
         let t_build_elapsed = t_build.elapsed();
 
         tracing::info!(
@@ -3970,7 +4017,10 @@ impl EvalEngine {
             EdgeDirection::Incoming => copperdb_storage::EdgeAdjacencyDirection::Incoming,
             EdgeDirection::Both => copperdb_storage::EdgeAdjacencyDirection::Both,
         };
-        Ok(Some(self.storage.bfs_cached_adjacency(rel_type, storage_direction)?))
+        Ok(Some(
+            self.storage
+                .bfs_cached_adjacency(rel_type, storage_direction)?,
+        ))
     }
 
     fn reconstruct_shortest_path(
@@ -4915,9 +4965,11 @@ impl EvalEngine {
                 Clause::Unwind(unwind) => {
                     let mut new_rows = pooled_binding_rows();
                     for row in &current_rows {
+                        Self::check_current_request_context()?;
                         let list_val = self.evaluate_expression(&unwind.expression, row, params)?;
                         if let Value::Array(items) = list_val {
                             for item in items {
+                                Self::check_current_request_context()?;
                                 let mut new_row = row.clone();
                                 new_row.insert(unwind.variable.clone(), item);
                                 new_rows.push(new_row);
@@ -5001,7 +5053,7 @@ impl EvalEngine {
         })
     }
 
-    fn execute_unwind_simple_merge_set_batch(
+    pub(crate) fn execute_unwind_simple_merge_set_batch(
         &self,
         query: &Query,
         params: &HashMap<String, Value>,
@@ -5028,6 +5080,7 @@ impl EvalEngine {
         let mut processed_rows = 0usize;
 
         for item in items {
+            Self::check_current_request_context()?;
             let Value::Object(row_map) = item else {
                 continue;
             };
@@ -5169,6 +5222,7 @@ impl EvalEngine {
         let mut touched_edges: HashMap<String, EdgeRecord> = HashMap::new();
 
         for item in items {
+            Self::check_current_request_context()?;
             let Value::Object(row_map) = item else {
                 continue;
             };

@@ -35,7 +35,7 @@ use copperdb_nornicgrpc::{
     RemoteReplicaClient, TonicRemoteHydrationClient, TonicRemoteRankedSearchClient,
     TonicRemoteReplicaClient,
 };
-use copperdb_otel::{Health, Telemetry};
+use copperdb_otel::{CancellationProtocol, CancellationStage, Health, Telemetry};
 use copperdb_replication::{Command, ReplicaTransport, ReplicationStorage, StorageEngineAdapter};
 use copperdb_retention::{
     ErasureRequest, LegalHold, Manager as RetentionManager, Policy, RetentionError,
@@ -57,7 +57,7 @@ use copperdb_topology::{
     ConsistencyLevel, FabricDatabase, FabricGlobalId, LogicalTransactionId, PlacementKey,
 };
 use copperdb_txsession::{BookmarkMode, SessionConfig, TransactionMode};
-use copperdb_util::RequestContext;
+use copperdb_util::{RequestContext, RequestContextGuard};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -497,15 +497,20 @@ impl RemoteRankedSearchClient for LocalEngineRankedSearchHandler {
         )?;
         observe_remote_read_fence(&self.state, &request.placement.database, request.read_fence)
             .map_err(GrpcError::Transport)?;
-        let (request_context, _request_guard) = request
+        let (request_context, request_guard) = request
             .request_context
             .map(RequestContext::from_metadata)
             .unwrap_or_else(|| RequestContext::root(None));
+        let mut cancellation_guard = GrpcCancellationGuard::new(
+            request_context.clone(),
+            request_guard,
+            Arc::clone(&self.state.telemetry),
+        );
         let state = Arc::clone(&self.state);
         let database = request.placement.database.clone();
         let placement = request.placement.clone();
         let query = request.query.clone();
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let engine = open_engine(&state, &database).map_err(GrpcError::Transport)?;
             engine
                 .search_fabric_ranked_batch_locally_scoped_with_context_and_roles(
@@ -516,10 +521,18 @@ impl RemoteRankedSearchClient for LocalEngineRankedSearchHandler {
                     &BTreeMap::new(),
                     &roles,
                 )
-                .map_err(|error| GrpcError::Transport(error.to_string()))
+                .map_err(grpc_error_from_engine)
         })
-        .await
-        .map_err(|error| GrpcError::Transport(error.to_string()))?
+        .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                cancellation_guard.finish();
+                return Err(GrpcError::Transport(error.to_string()));
+            }
+        };
+        cancellation_guard.finish_with_result(&result);
+        result
     }
 }
 
@@ -543,21 +556,99 @@ impl RemoteHydrationClient for LocalEngineHydrationHandler {
         )?;
         observe_remote_read_fence(&self.state, &request.placement.database, request.read_fence)
             .map_err(GrpcError::Transport)?;
-        let (request_context, _request_guard) = request
+        let (request_context, request_guard) = request
             .request_context
             .map(RequestContext::from_metadata)
             .unwrap_or_else(|| RequestContext::root(None));
+        let mut cancellation_guard = GrpcCancellationGuard::new(
+            request_context.clone(),
+            request_guard,
+            Arc::clone(&self.state.telemetry),
+        );
         let state = Arc::clone(&self.state);
         let database = request.placement.database.clone();
         let global_ids = request.global_ids.clone();
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             let engine = open_engine(&state, &database).map_err(GrpcError::Transport)?;
             engine
                 .hydrate_fabric_entities_locally_with_context(&request_context, &global_ids)
-                .map_err(|error| GrpcError::Transport(error.to_string()))
+                .map_err(grpc_error_from_engine)
         })
-        .await
-        .map_err(|error| GrpcError::Transport(error.to_string()))?
+        .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                cancellation_guard.finish();
+                return Err(GrpcError::Transport(error.to_string()));
+            }
+        };
+        cancellation_guard.finish_with_result(&result);
+        result
+    }
+}
+
+fn grpc_error_from_engine(error: copperdb_engine::CopperDbError) -> GrpcError {
+    match error {
+        copperdb_engine::CopperDbError::RequestCancelled(cancelled) => {
+            GrpcError::RequestCancelled(cancelled)
+        }
+        other => GrpcError::Transport(other.to_string()),
+    }
+}
+
+struct GrpcCancellationGuard {
+    request_guard: Option<RequestContextGuard>,
+    request_context: RequestContext,
+    telemetry: Arc<Telemetry>,
+    finished: bool,
+}
+
+impl GrpcCancellationGuard {
+    fn new(
+        request_context: RequestContext,
+        request_guard: RequestContextGuard,
+        telemetry: Arc<Telemetry>,
+    ) -> Self {
+        Self {
+            request_guard: Some(request_guard),
+            request_context,
+            telemetry,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self) {
+        self.finished = true;
+    }
+
+    fn finish_with_result<T>(&mut self, result: &Result<T, GrpcError>) {
+        if matches!(result, Err(GrpcError::RequestCancelled(_))) {
+            if self.request_context.cancellation_reason().is_none() {
+                self.request_context.cancel();
+            }
+            record_request_context_cancellation(
+                self.telemetry.as_ref(),
+                CancellationProtocol::Grpc,
+                CancellationStage::Execution,
+                &self.request_context,
+            );
+        }
+        self.finish();
+    }
+}
+
+impl Drop for GrpcCancellationGuard {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        drop(self.request_guard.take());
+        record_request_context_cancellation(
+            self.telemetry.as_ref(),
+            CancellationProtocol::Grpc,
+            CancellationStage::Ingress,
+            &self.request_context,
+        );
     }
 }
 
@@ -924,7 +1015,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         Arc::clone(&state),
         security_validation_middleware,
     ));
-    let router = router.layer(middleware::from_fn(request_context_middleware));
+    let router = router.layer(middleware::from_fn_with_state(
+        Arc::clone(&state),
+        request_context_middleware,
+    ));
     let router = router.layer(middleware::from_fn_with_state(
         Arc::clone(&state),
         http_metrics_middleware,
@@ -948,25 +1042,104 @@ pub fn build_telemetry_router(health: Arc<Health>) -> Router {
         .with_state(health)
 }
 
-async fn request_context_middleware(request: Request<Body>, next: Next) -> Response {
+async fn request_context_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
     let timeout = http_request_timeout(request.uri().path());
-    run_with_request_context(request, next, timeout).await
+    run_with_request_context(request, next, timeout, state.telemetry.as_ref()).await
 }
 
 async fn run_with_request_context(
     mut request: Request<Body>,
     next: Next,
     timeout: Option<HttpRequestTimeout>,
+    telemetry: &Telemetry,
 ) -> Response {
+    let protocol = match request.uri().path() {
+        "/graphql" => CancellationProtocol::Graphql,
+        "/mcp" => CancellationProtocol::Mcp,
+        _ => CancellationProtocol::Http,
+    };
     let deadline = timeout.and_then(|policy| SystemTime::now().checked_add(policy.duration));
-    let (request_context, _request_guard) = RequestContext::root(deadline);
-    request.extensions_mut().insert(request_context);
-    match timeout {
+    let (request_context, request_guard) = RequestContext::root(deadline);
+    let mut cancellation_guard = HttpCancellationGuard {
+        request_guard: Some(request_guard),
+        request_context: request_context.clone(),
+        telemetry,
+        protocol,
+        finished: false,
+    };
+    request.extensions_mut().insert(request_context.clone());
+    let response = match timeout {
         Some(policy) => match tokio::time::timeout(policy.duration, next.run(request)).await {
-            Ok(response) => response,
-            Err(_) => (StatusCode::SERVICE_UNAVAILABLE, policy.message).into_response(),
+            Ok(response) => {
+                record_request_context_cancellation(
+                    telemetry,
+                    protocol,
+                    CancellationStage::Execution,
+                    &request_context,
+                );
+                response
+            }
+            Err(_) => {
+                request_context.cancel_due_to_deadline();
+                record_request_context_cancellation(
+                    telemetry,
+                    protocol,
+                    CancellationStage::Ingress,
+                    &request_context,
+                );
+                (StatusCode::SERVICE_UNAVAILABLE, policy.message).into_response()
+            }
         },
-        None => next.run(request).await,
+        None => {
+            let response = next.run(request).await;
+            record_request_context_cancellation(
+                telemetry,
+                protocol,
+                CancellationStage::Execution,
+                &request_context,
+            );
+            response
+        }
+    };
+    cancellation_guard.finished = true;
+    response
+}
+
+struct HttpCancellationGuard<'a> {
+    request_guard: Option<RequestContextGuard>,
+    request_context: RequestContext,
+    telemetry: &'a Telemetry,
+    protocol: CancellationProtocol,
+    finished: bool,
+}
+
+impl Drop for HttpCancellationGuard<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        drop(self.request_guard.take());
+        record_request_context_cancellation(
+            self.telemetry,
+            self.protocol,
+            CancellationStage::Ingress,
+            &self.request_context,
+        );
+    }
+}
+
+fn record_request_context_cancellation(
+    telemetry: &Telemetry,
+    protocol: CancellationProtocol,
+    stage: CancellationStage,
+    request_context: &RequestContext,
+) {
+    if let Some(reason) = request_context.cancellation_reason() {
+        let _ = telemetry.record_request_cancellation(protocol, stage, reason);
     }
 }
 

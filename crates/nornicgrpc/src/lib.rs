@@ -602,7 +602,7 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
         self.handler
             .apply_replica(request)
             .await
-            .map_err(|error| Status::internal(error.to_string()))?;
+            .map_err(status_from_grpc_error)?;
         Ok(Response::new(proto::RemoteReplicaApplyResponse {}))
     }
 
@@ -615,7 +615,7 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
             .handler
             .read_replica(RemoteReplicaReadRequest::from(request.into_inner()))
             .await
-            .map_err(|error| Status::internal(error.to_string()))?;
+            .map_err(status_from_grpc_error)?;
         Ok(Response::new(proto::RemoteReplicaReadResponse::from(
             response,
         )))

@@ -9,8 +9,8 @@ use crate::packstream::Value;
 use crate::wsconn;
 use crate::BoltError;
 use copperdb_errors::{map_transient_transaction_error, TransientTransactionCode};
-use copperdb_otel::Telemetry;
-use std::collections::HashMap;
+use copperdb_otel::{CancellationProtocol, CancellationStage, Telemetry};
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -21,6 +21,8 @@ use tokio_tungstenite::accept_async;
 use tracing::{debug, info, warn};
 
 const BOLT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(120);
+const BOLT_STATEMENT_TIMEOUT_ENV: &str = "COPPERDB_BOLT_STATEMENT_TIMEOUT";
+const UPSTREAM_BOLT_STATEMENT_TIMEOUT_ENV: &str = "NORNICDB_BOLT_STATEMENT_TIMEOUT";
 const MAX_BOLT_CURSORS: usize = 64;
 
 /// Result of executing a Cypher query through Bolt.
@@ -725,29 +727,65 @@ async fn handle_tcp_session_with_timeout_and_counters(
     let mut session = BoltSession::new_with_counters(auth_enabled, runtime_counters);
     let mut decoder = wsconn::BoltChunkDecoder::new();
     let mut temp_buf = [0u8; 4096];
+    let mut pending_frames = VecDeque::new();
 
     let result = 'session_loop: loop {
-        let bytes_read =
-            match tokio::time::timeout(receive_timeout, stream.read(&mut temp_buf)).await {
+        if pending_frames.is_empty() {
+            let bytes_read = match tokio::time::timeout(receive_timeout, stream.read(&mut temp_buf))
+                .await
+            {
                 Ok(Ok(bytes_read)) => bytes_read,
                 Ok(Err(error)) => break Err(error.into()),
                 Err(_) => break Err(BoltError::ProtocolViolation("Bolt receive timeout".into())),
             };
-        if bytes_read == 0 {
-            break Ok(());
+            if bytes_read == 0 {
+                break Ok(());
+            }
+            pending_frames.extend(decoder.push(&temp_buf[..bytes_read]));
         }
-        for frame in decoder.push(&temp_buf[..bytes_read]) {
-            if let Err(error) = process_buffer(
+
+        while let Some(frame) = pending_frames.pop_front() {
+            let processing = process_frame(
                 &frame,
-                stream,
                 &mut session,
                 telemetry,
                 Arc::clone(&executor),
                 auth_provider.clone(),
-            )
-            .await
-            {
-                break 'session_loop Err(error);
+            );
+            tokio::pin!(processing);
+            let mut interrupted = false;
+            let responses = loop {
+                tokio::select! {
+                    result = &mut processing => break result,
+                    read = stream.read(&mut temp_buf) => {
+                        let bytes_read = match read {
+                            Ok(bytes_read) => bytes_read,
+                            Err(error) => break 'session_loop Err(error.into()),
+                        };
+                        if bytes_read == 0 {
+                            break 'session_loop Ok(());
+                        }
+                        let frames = decoder.push(&temp_buf[..bytes_read]);
+                        if let Some(reset_index) = frames.iter().position(|frame| {
+                            decoded_message_signature(frame) == Some(0x0F)
+                        }) {
+                            pending_frames.clear();
+                            pending_frames.extend(frames.into_iter().skip(reset_index));
+                            interrupted = true;
+                            break Ok(Vec::new());
+                        }
+                        pending_frames.extend(frames);
+                    }
+                }
+            }?;
+            if interrupted {
+                continue;
+            }
+            for response_bytes in responses {
+                info!(len = response_bytes.len(), "bolt sending response");
+                stream
+                    .write_all(&wsconn::encode_bolt_chunks(&response_bytes))
+                    .await?;
             }
         }
     };
@@ -780,7 +818,7 @@ where
 
 async fn handle_ws_session_with_timeout_and_counters<S>(
     ws: &mut tokio_tungstenite::WebSocketStream<S>,
-    _telemetry: &Telemetry,
+    telemetry: &Telemetry,
     executor: Arc<dyn QueryExecutor>,
     auth_enabled: bool,
     auth_provider: Option<Arc<dyn BoltAuthProvider>>,
@@ -825,80 +863,67 @@ where
 
     let mut session = BoltSession::new_with_counters(auth_enabled, runtime_counters);
     let mut decoder = wsconn::BoltChunkDecoder::new();
+    let mut pending_frames = VecDeque::new();
 
     let result = 'session_loop: loop {
-        let frames =
+        if pending_frames.is_empty() {
             match tokio::time::timeout(receive_timeout, wsconn::read_ws_message(ws, &mut decoder))
                 .await
             {
-                Ok(Some(Ok(messages))) => {
-                    info!(count = messages.len(), "bolt WS messages received");
-                    messages
-                }
-                Ok(Some(Err(e))) => {
-                    break 'session_loop Err(BoltError::ProtocolViolation(format!(
-                        "WS read error: {e}"
+                Ok(Some(Ok(frames))) => pending_frames.extend(frames),
+                Ok(Some(Err(error))) => {
+                    break Err(BoltError::ProtocolViolation(format!(
+                        "WS read error: {error}"
                     )))
                 }
-                Ok(None) => {
-                    info!("bolt WS connection closed");
-                    break 'session_loop Ok(());
-                }
-                Err(_) => {
-                    break 'session_loop Err(BoltError::ProtocolViolation(
-                        "Bolt receive timeout".into(),
-                    ))
-                }
-            };
-
-        for frame in frames {
-            let (value, consumed) = match crate::packstream::decode(&frame) {
-                Ok(decoded) => decoded,
-                Err(error) => break 'session_loop Err(error),
-            };
-            if consumed != frame.len() {
-                break 'session_loop Err(BoltError::ProtocolViolation(format!(
-                    "trailing bytes after Bolt message: {}",
-                    frame.len() - consumed
-                )));
+                Ok(None) => break Ok(()),
+                Err(_) => break Err(BoltError::ProtocolViolation("Bolt receive timeout".into())),
             }
+        }
 
-            match process_message(
-                &value,
+        while let Some(frame) = pending_frames.pop_front() {
+            let processing = process_frame(
+                &frame,
                 &mut session,
+                telemetry,
                 Arc::clone(&executor),
                 auth_provider.clone(),
-            )
-            .await
-            {
-                Ok(responses) => {
-                    let has_responses = !responses.is_empty();
-                    for response_bytes in &responses {
-                        info!(len = response_bytes.len(), "bolt WS sending response");
-                        if let Err(error) = wsconn::write_ws_message(ws, response_bytes).await {
-                            break 'session_loop Err(BoltError::ProtocolViolation(
-                                error.to_string(),
-                            ));
+            );
+            tokio::pin!(processing);
+            let mut interrupted = false;
+            let responses = loop {
+                tokio::select! {
+                    result = &mut processing => break result,
+                    read = wsconn::read_ws_message(ws, &mut decoder) => {
+                        match read {
+                            Some(Ok(frames)) => {
+                                if let Some(reset_index) = frames.iter().position(|frame| {
+                                    decoded_message_signature(frame) == Some(0x0F)
+                                }) {
+                                    pending_frames.clear();
+                                    pending_frames.extend(frames.into_iter().skip(reset_index));
+                                    interrupted = true;
+                                    break Ok(Vec::new());
+                                }
+                                pending_frames.extend(frames);
+                            }
+                            Some(Err(error)) => {
+                                break 'session_loop Err(BoltError::ProtocolViolation(format!(
+                                    "WS read error: {error}"
+                                )))
+                            }
+                            None => break 'session_loop Ok(()),
                         }
                     }
-                    if has_responses {
-                        info!("bolt WS responses sent");
-                    }
                 }
-                Err(e) => {
-                    let failure = BoltMessage::Failure {
-                        metadata: HashMap::from([
-                            (
-                                "code".into(),
-                                serde_json::json!("Neo.TransientError.General.UnknownError"),
-                            ),
-                            ("message".into(), serde_json::json!(e.to_string())),
-                        ]),
-                    };
-                    let bytes = dispatch::encode_message(&failure);
-                    if let Err(error) = wsconn::write_ws_message(ws, &bytes).await {
-                        break 'session_loop Err(BoltError::ProtocolViolation(error.to_string()));
-                    }
+            }?;
+            if interrupted {
+                continue;
+            }
+            for response_bytes in responses {
+                info!(len = response_bytes.len(), "bolt WS sending response");
+                if let Err(error) = wsconn::write_ws_message(ws, &response_bytes).await {
+                    break 'session_loop Err(BoltError::ProtocolViolation(error.to_string()));
                 }
             }
         }
@@ -907,15 +932,51 @@ where
     result
 }
 
-/// Process one decoded Bolt chunk frame and write chunk-framed responses.
-async fn process_buffer(
+fn decoded_message_signature(frame: &[u8]) -> Option<u8> {
+    match crate::packstream::decode(frame).ok()?.0 {
+        Value::Struct { signature, .. } => Some(signature),
+        _ => None,
+    }
+}
+
+struct BoltCancellationGuard<'a> {
+    request_guard: Option<copperdb_util::RequestContextGuard>,
+    request_context: copperdb_util::RequestContext,
+    telemetry: Option<&'a Telemetry>,
+    finished: bool,
+}
+
+impl BoltCancellationGuard<'_> {
+    fn finish(&mut self) {
+        self.finished = true;
+    }
+}
+
+impl Drop for BoltCancellationGuard<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        drop(self.request_guard.take());
+        if let (Some(telemetry), Some(reason)) =
+            (self.telemetry, self.request_context.cancellation_reason())
+        {
+            let _ = telemetry.record_request_cancellation(
+                CancellationProtocol::Bolt,
+                CancellationStage::Ingress,
+                reason,
+            );
+        }
+    }
+}
+
+async fn process_frame(
     frame: &[u8],
-    stream: &mut TcpStream,
     session: &mut BoltSession,
     telemetry: &Telemetry,
     executor: Arc<dyn QueryExecutor>,
     auth_provider: Option<Arc<dyn BoltAuthProvider>>,
-) -> Result<(), BoltError> {
+) -> Result<Vec<Vec<u8>>, BoltError> {
     let (value, consumed) = crate::packstream::decode(frame)?;
     if consumed != frame.len() {
         return Err(BoltError::ProtocolViolation(format!(
@@ -923,43 +984,40 @@ async fn process_buffer(
             frame.len() - consumed
         )));
     }
-    let (op, result) =
-        match process_message(&value, session, Arc::clone(&executor), auth_provider).await {
-            Ok(responses) => {
-                let len = responses.len();
-                for response_bytes in responses {
-                    info!(len = response_bytes.len(), "bolt sending response");
-                    stream
-                        .write_all(&wsconn::encode_bolt_chunks(&response_bytes))
-                        .await?;
-                }
-                if len > 0 {
-                    info!("bolt TCP responses sent");
-                }
-                ("run", "success")
-            }
-            Err(e) => {
-                let failure = BoltMessage::Failure {
-                    metadata: HashMap::from([
-                        (
-                            "code".into(),
-                            serde_json::json!("Neo.TransientError.General.UnknownError"),
-                        ),
-                        ("message".into(), serde_json::json!(e.to_string())),
-                    ]),
-                };
-                let response = dispatch::encode_message(&failure);
-                stream
-                    .write_all(&wsconn::encode_bolt_chunks(&response))
-                    .await?;
-                ("run", "error")
-            }
-        };
-    let _ = telemetry.record_counter(
-        "nornicdb_bolt_messages_total",
-        &[("op", op), ("result", result)],
-    );
-    Ok(())
+    match process_message_with_telemetry(
+        &value,
+        session,
+        Arc::clone(&executor),
+        auth_provider,
+        Some(telemetry),
+    )
+    .await
+    {
+        Ok(responses) => {
+            let _ = telemetry.record_counter(
+                "nornicdb_bolt_messages_total",
+                &[("op", "run"), ("result", "success")],
+            );
+            Ok(responses)
+        }
+        Err(e) => {
+            let failure = BoltMessage::Failure {
+                metadata: HashMap::from([
+                    (
+                        "code".into(),
+                        serde_json::json!("Neo.TransientError.General.UnknownError"),
+                    ),
+                    ("message".into(), serde_json::json!(e.to_string())),
+                ]),
+            };
+            let response = dispatch::encode_message(&failure);
+            let _ = telemetry.record_counter(
+                "nornicdb_bolt_messages_total",
+                &[("op", "run"), ("result", "error")],
+            );
+            Ok(vec![response])
+        }
+    }
 }
 
 /// Per-connection Bolt session state. Mirrors NornicDB's Session struct.
@@ -1038,6 +1096,27 @@ fn database_from_metadata(metadata: &HashMap<String, serde_json::Value>) -> Opti
         .and_then(|value| value.as_str())
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+fn bolt_statement_timeout(extra: &HashMap<String, serde_json::Value>) -> Option<Duration> {
+    extra
+        .get("tx_timeout")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|millis| *millis > 0)
+        .map(Duration::from_millis)
+        .or_else(|| {
+            [
+                BOLT_STATEMENT_TIMEOUT_ENV,
+                UPSTREAM_BOLT_STATEMENT_TIMEOUT_ENV,
+            ]
+            .into_iter()
+            .find_map(|name| {
+                std::env::var(name)
+                    .ok()
+                    .and_then(|value| copperdb_envutil::parse_duration(value.trim()))
+                    .filter(|duration| !duration.is_zero())
+            })
+        })
 }
 
 fn bookmarks_from_metadata(metadata: &HashMap<String, serde_json::Value>) -> Vec<String> {
@@ -1192,11 +1271,22 @@ fn transaction_failure_response(code: &str, message: &str) -> Vec<Vec<u8>> {
     client_failure_response(code, message)
 }
 
+#[cfg(test)]
 async fn process_message(
     value: &Value,
     session: &mut BoltSession,
     executor: Arc<dyn QueryExecutor>,
     auth_provider: Option<Arc<dyn BoltAuthProvider>>,
+) -> Result<Vec<Vec<u8>>, BoltError> {
+    process_message_with_telemetry(value, session, executor, auth_provider, None).await
+}
+
+async fn process_message_with_telemetry(
+    value: &Value,
+    session: &mut BoltSession,
+    executor: Arc<dyn QueryExecutor>,
+    auth_provider: Option<Arc<dyn BoltAuthProvider>>,
+    telemetry: Option<&Telemetry>,
 ) -> Result<Vec<Vec<u8>>, BoltError> {
     let (sig, fields) = match value {
         Value::Struct { signature, fields } => (*signature, fields.as_slice()),
@@ -1312,38 +1402,68 @@ async fn process_message(
             let transaction = session.transaction.clone();
             let bookmarks = bookmarks_from_metadata(&extra);
             let execution_executor = Arc::clone(&executor);
+            let statement_timeout = bolt_statement_timeout(&extra);
 
             // Create request context OUTSIDE spawn_blocking so the guard
             // lives in the async scope.  When the client disconnects, the
             // guard is dropped → cancel fires → the BFS (or any long-running
             // query) observes RequestCancelled and aborts.
-            let (request_context, _request_guard) = copperdb_util::RequestContext::root(None);
+            let (request_context, request_guard) = copperdb_util::RequestContext::root(None);
+            let mut cancellation_guard = BoltCancellationGuard {
+                request_guard: Some(request_guard),
+                request_context: request_context.clone(),
+                telemetry,
+                finished: false,
+            };
+            let execution_context = request_context.clone();
 
-            let execution_result =
-                tokio::task::spawn_blocking(move || match transaction.as_ref() {
-                    Some(transaction) => execution_executor.execute_in_transaction_with_context(
-                        transaction,
-                        &execution_query,
-                        &execution_parameters,
-                        request_context,
-                        principal.as_ref(),
-                    ),
-                    None => execution_executor.execute_as_on_database_with_context_and_bookmarks(
-                        execution_database.as_deref().unwrap_or("copperdb"),
-                        &execution_query,
-                        &execution_parameters,
-                        request_context,
-                        principal.as_ref(),
-                        &bookmarks,
-                    ),
-                })
-                .await
-                .map_err(|error| {
-                    BoltError::ProtocolViolation(format!("bolt executor task failed: {error}"))
-                })?;
+            let execution_task = tokio::task::spawn_blocking(move || match transaction.as_ref() {
+                Some(transaction) => execution_executor.execute_in_transaction_with_context(
+                    transaction,
+                    &execution_query,
+                    &execution_parameters,
+                    execution_context,
+                    principal.as_ref(),
+                ),
+                None => execution_executor.execute_as_on_database_with_context_and_bookmarks(
+                    execution_database.as_deref().unwrap_or("copperdb"),
+                    &execution_query,
+                    &execution_parameters,
+                    execution_context,
+                    principal.as_ref(),
+                    &bookmarks,
+                ),
+            });
+            let execution_result = match statement_timeout {
+                Some(timeout) => match tokio::time::timeout(timeout, execution_task).await {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(error)) => {
+                        cancellation_guard.finish();
+                        return Err(BoltError::ProtocolViolation(format!(
+                            "bolt executor task failed: {error}"
+                        )));
+                    }
+                    Err(_) => {
+                        request_context.cancel_due_to_deadline();
+                        Err(BoltExecutionError::RequestCancelled(
+                            copperdb_util::RequestCancelled,
+                        ))
+                    }
+                },
+                None => match execution_task.await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        cancellation_guard.finish();
+                        return Err(BoltError::ProtocolViolation(format!(
+                            "bolt executor task failed: {error}"
+                        )));
+                    }
+                },
+            };
 
             match execution_result {
                 Ok(result) => {
+                    cancellation_guard.finish();
                     let columns = result.columns.clone();
                     if session.cursors.len() == MAX_BOLT_CURSORS {
                         if let Some(oldest_qid) = session.cursors.keys().min().copied() {
@@ -1377,6 +1497,21 @@ async fn process_message(
                     })])
                 }
                 Err(e) => {
+                    if matches!(e, BoltExecutionError::RequestCancelled(_)) {
+                        if request_context.cancellation_reason().is_none() {
+                            request_context.cancel();
+                        }
+                        if let (Some(telemetry), Some(reason)) =
+                            (telemetry, request_context.cancellation_reason())
+                        {
+                            let _ = telemetry.record_request_cancellation(
+                                CancellationProtocol::Bolt,
+                                CancellationStage::Execution,
+                                reason,
+                            );
+                        }
+                    }
+                    cancellation_guard.finish();
                     warn!(%query, %e, "bolt RUN failed");
                     rollback_active_transaction(session, executor.as_ref());
                     Ok(vec![dispatch::encode_message(&BoltMessage::Failure {
@@ -1827,6 +1962,67 @@ mod tests {
         operations: Arc<Mutex<Vec<&'static str>>>,
     }
 
+    struct DeadlineAwareExecutor;
+
+    struct DisconnectAwareExecutor {
+        started: Arc<std::sync::atomic::AtomicBool>,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl QueryExecutor for DisconnectAwareExecutor {
+        fn execute(
+            &self,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+        ) -> Result<BoltQueryResult, String> {
+            unreachable!("context-aware execution is required")
+        }
+
+        fn execute_as_on_database_with_context(
+            &self,
+            _database: &str,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+            request_context: copperdb_util::RequestContext,
+            _principal: Option<&BoltPrincipal>,
+        ) -> Result<BoltQueryResult, BoltExecutionError> {
+            self.started.store(true, Ordering::Release);
+            loop {
+                if let Err(error) = request_context.check_active() {
+                    self.cancelled.store(true, Ordering::Release);
+                    return Err(error.into());
+                }
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    impl QueryExecutor for DeadlineAwareExecutor {
+        fn execute(
+            &self,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+        ) -> Result<BoltQueryResult, String> {
+            unreachable!("context-aware execution is required")
+        }
+
+        fn execute_as_on_database_with_context(
+            &self,
+            _database: &str,
+            _query: &str,
+            _params: &HashMap<String, serde_json::Value>,
+            request_context: copperdb_util::RequestContext,
+            _principal: Option<&BoltPrincipal>,
+        ) -> Result<BoltQueryResult, BoltExecutionError> {
+            loop {
+                if let Err(error) = request_context.check_active() {
+                    return Err(error.into());
+                }
+                std::thread::yield_now();
+            }
+        }
+    }
+
     impl QueryExecutor for CancellingExecutor {
         fn execute(
             &self,
@@ -2002,7 +2198,11 @@ mod tests {
         let responses = process_message(message, session, executor, provider)
             .await
             .unwrap();
-        let (value, _) = crate::packstream::decode(&responses[0]).unwrap();
+        failure_code_from_response(&responses[0])
+    }
+
+    fn failure_code_from_response(response: &[u8]) -> String {
+        let (value, _) = crate::packstream::decode(response).unwrap();
         let Value::Struct {
             signature: 0x7F,
             fields,
@@ -2034,10 +2234,17 @@ mod tests {
             id: "cancelled-transaction".into(),
             database: "copperdb".into(),
         });
+        let telemetry = Telemetry::new();
 
-        let responses = process_message(&run_message(), &mut session, executor, None)
-            .await
-            .unwrap();
+        let responses = process_message_with_telemetry(
+            &run_message(),
+            &mut session,
+            executor,
+            None,
+            Some(&telemetry),
+        )
+        .await
+        .unwrap();
         let (value, _) = crate::packstream::decode(&responses[0]).unwrap();
         let Value::Struct {
             signature: 0x7F,
@@ -2066,6 +2273,61 @@ mod tests {
         );
         assert!(session.transaction.is_none());
         assert_eq!(*operations.lock().unwrap(), vec!["run", "rollback"]);
+        assert_eq!(
+            telemetry
+                .snapshot_metric("copperdb_request_cancellations_total")
+                .unwrap(),
+            vec![copperdb_otel::MetricSample {
+                labels: vec![
+                    ("protocol".into(), "bolt".into()),
+                    ("reason".into(), "explicit".into()),
+                    ("stage".into(), "execution".into()),
+                ],
+                value: copperdb_otel::MetricValue::Counter(1.0),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn client_statement_timeout_cancels_run_and_records_deadline() {
+        let mut session = BoltSession::new(false);
+        let telemetry = Telemetry::new();
+        let message = Value::Struct {
+            signature: 0x10,
+            fields: vec![
+                Value::String("RETURN 1".into()),
+                Value::Map(vec![]),
+                Value::Map(vec![("tx_timeout".into(), Value::Integer(10))]),
+            ],
+        };
+
+        let responses = process_message_with_telemetry(
+            &message,
+            &mut session,
+            Arc::new(DeadlineAwareExecutor),
+            None,
+            Some(&telemetry),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            failure_code_from_response(&responses[0]),
+            "Neo.ClientError.Statement.SyntaxError"
+        );
+        assert_eq!(
+            telemetry
+                .snapshot_metric("copperdb_request_cancellations_total")
+                .unwrap(),
+            vec![copperdb_otel::MetricSample {
+                labels: vec![
+                    ("protocol".into(), "bolt".into()),
+                    ("reason".into(), "deadline".into()),
+                    ("stage".into(), "execution".into()),
+                ],
+                value: copperdb_otel::MetricValue::Counter(1.0),
+            }]
+        );
     }
 
     #[tokio::test]
@@ -2890,6 +3152,148 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tcp_disconnect_cancels_active_run_and_records_ingress() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let telemetry = Arc::new(Telemetry::new());
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let executor: Arc<dyn QueryExecutor> = Arc::new(DisconnectAwareExecutor {
+            started: Arc::clone(&started),
+            cancelled: Arc::clone(&cancelled),
+        });
+        let server_telemetry = Arc::clone(&telemetry);
+        let handler = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            handle_tcp_session(&mut stream, &server_telemetry, executor, false, None).await
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(&[
+                0x60, 0x60, 0xB0, 0x17, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x04, 0x03, 0x00, 0x00,
+                0x04, 0x02, 0x00, 0x00, 0x04, 0x01,
+            ])
+            .await
+            .unwrap();
+        let mut version = [0u8; 4];
+        client.read_exact(&mut version).await.unwrap();
+        let run = encode_bolt_struct(
+            0x10,
+            &[
+                Value::String("RETURN 1".into()),
+                Value::Map(vec![]),
+                Value::Map(vec![]),
+            ],
+        );
+        client.write_all(&chunk_encode(&run)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !started.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("RUN started");
+        drop(client);
+
+        assert!(handler.await.unwrap().is_ok());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !cancelled.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("executor observed disconnect cancellation");
+        assert_eq!(
+            telemetry
+                .snapshot_metric("copperdb_request_cancellations_total")
+                .unwrap(),
+            vec![copperdb_otel::MetricSample {
+                labels: vec![
+                    ("protocol".into(), "bolt".into()),
+                    ("reason".into(), "explicit".into()),
+                    ("stage".into(), "ingress".into()),
+                ],
+                value: copperdb_otel::MetricValue::Counter(1.0),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn tcp_reset_cancels_active_run_and_recovers_session() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let telemetry = Arc::new(Telemetry::new());
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let executor: Arc<dyn QueryExecutor> = Arc::new(DisconnectAwareExecutor {
+            started: Arc::clone(&started),
+            cancelled: Arc::clone(&cancelled),
+        });
+        let server_telemetry = Arc::clone(&telemetry);
+        let handler = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            handle_tcp_session(&mut stream, &server_telemetry, executor, false, None).await
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(&[
+                0x60, 0x60, 0xB0, 0x17, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x04, 0x03, 0x00, 0x00,
+                0x04, 0x02, 0x00, 0x00, 0x04, 0x01,
+            ])
+            .await
+            .unwrap();
+        let mut version = [0u8; 4];
+        client.read_exact(&mut version).await.unwrap();
+        let run = encode_bolt_struct(
+            0x10,
+            &[
+                Value::String("RETURN 1".into()),
+                Value::Map(vec![]),
+                Value::Map(vec![]),
+            ],
+        );
+        client.write_all(&chunk_encode(&run)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !started.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("RUN started");
+        let reset = encode_bolt_struct(0x0F, &[]);
+        client.write_all(&chunk_encode(&reset)).await.unwrap();
+
+        let mut response = [0u8; 128];
+        let bytes_read = tokio::time::timeout(Duration::from_secs(1), client.read(&mut response))
+            .await
+            .expect("RESET response arrived")
+            .unwrap();
+        let decoded = chunk_decode(&response[..bytes_read]);
+        let decoded_response = crate::packstream::decode(&decoded).unwrap().0;
+        assert_eq!(
+            decoded_message_signature(&decoded),
+            Some(0x70),
+            "unexpected RESET response: {decoded_response:?}"
+        );
+        assert!(cancelled.load(Ordering::Acquire));
+        drop(client);
+        assert!(handler.await.unwrap().is_ok());
+        assert_eq!(
+            telemetry
+                .snapshot_metric("copperdb_request_cancellations_total")
+                .unwrap()[0]
+                .labels,
+            vec![
+                ("protocol".into(), "bolt".into()),
+                ("reason".into(), "explicit".into()),
+                ("stage".into(), "ingress".into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn tcp_receive_timeout_rolls_back_active_transaction() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3091,6 +3495,90 @@ mod tests {
             } => {}
             other => panic!("expected SUCCESS for PULL, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn ws_close_cancels_active_run_and_records_ingress() {
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::{http::Request, Message};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let telemetry = Arc::new(Telemetry::new());
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server = BoltServer::new(
+            addr.to_string(),
+            Arc::clone(&telemetry),
+            Arc::new(DisconnectAwareExecutor {
+                started: Arc::clone(&started),
+                cancelled: Arc::clone(&cancelled),
+            }),
+        )
+        .with_auth_enabled(false);
+        tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            server.spawn_ws(stream, peer);
+        });
+        let request = Request::builder()
+            .uri(format!("ws://{addr}/"))
+            .header("Host", addr.to_string())
+            .header("Upgrade", "websocket")
+            .header("Connection", "Upgrade")
+            .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .header("Sec-WebSocket-Version", "13")
+            .body(())
+            .unwrap();
+        let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        ws.send(Message::Binary(
+            vec![
+                0x60, 0x60, 0xB0, 0x17, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x04, 0x03, 0x00, 0x00,
+                0x04, 0x02, 0x00, 0x00, 0x04, 0x01,
+            ]
+            .into(),
+        ))
+        .await
+        .unwrap();
+        assert!(matches!(ws.next().await, Some(Ok(Message::Binary(_)))));
+        let run = encode_bolt_struct(
+            0x10,
+            &[
+                Value::String("RETURN 1".into()),
+                Value::Map(vec![]),
+                Value::Map(vec![]),
+            ],
+        );
+        ws.send(Message::Binary(chunk_encode(&run).into()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !started.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("WebSocket RUN started");
+        ws.close(None).await.unwrap();
+        drop(ws);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !cancelled.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("executor observed WebSocket close cancellation");
+        assert_eq!(
+            telemetry
+                .snapshot_metric("copperdb_request_cancellations_total")
+                .unwrap()[0]
+                .labels,
+            vec![
+                ("protocol".into(), "bolt".into()),
+                ("reason".into(), "explicit".into()),
+                ("stage".into(), "ingress".into()),
+            ]
+        );
     }
 
     #[tokio::test]

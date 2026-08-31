@@ -41,7 +41,10 @@ async fn request_context_middleware_owns_http_request_cancellation() {
                 }
             }),
         )
-        .layer(middleware::from_fn(request_context_middleware));
+        .layer(middleware::from_fn_with_state(
+            Arc::new(AppState::default()),
+            request_context_middleware,
+        ));
 
     let response = app
         .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
@@ -61,6 +64,8 @@ async fn request_context_middleware_cancels_dropped_http_request() {
     let (context_tx, context_rx) = tokio::sync::oneshot::channel();
     let context_tx = Arc::new(Mutex::new(Some(context_tx)));
     let handler_tx = Arc::clone(&context_tx);
+    let state = Arc::new(AppState::default());
+    let telemetry = Arc::clone(&state.telemetry);
     let app = Router::new()
         .route(
             "/",
@@ -77,7 +82,10 @@ async fn request_context_middleware_cancels_dropped_http_request() {
                 }
             }),
         )
-        .layer(middleware::from_fn(request_context_middleware));
+        .layer(middleware::from_fn_with_state(
+            state,
+            request_context_middleware,
+        ));
 
     let request_task =
         tokio::spawn(app.oneshot(Request::builder().uri("/").body(Body::empty()).unwrap()));
@@ -87,6 +95,19 @@ async fn request_context_middleware_cancels_dropped_http_request() {
     request_task.abort();
     assert!(request_task.await.unwrap_err().is_cancelled());
     assert!(context.is_cancelled());
+    assert_eq!(
+        telemetry
+            .snapshot_metric("copperdb_request_cancellations_total")
+            .unwrap(),
+        vec![copperdb_otel::MetricSample {
+            labels: vec![
+                ("protocol".into(), "http".into()),
+                ("reason".into(), "explicit".into()),
+                ("stage".into(), "ingress".into()),
+            ],
+            value: copperdb_otel::MetricValue::Counter(1.0),
+        }]
+    );
 }
 
 #[test]
@@ -168,6 +189,8 @@ async fn request_context_middleware_returns_timeout_and_cancels_context() {
         duration: Duration::from_millis(10),
         message: "request timeout: transaction busy",
     };
+    let telemetry = Arc::new(Telemetry::new());
+    let middleware_telemetry = Arc::clone(&telemetry);
     let app = Router::new()
         .route(
             "/",
@@ -187,7 +210,10 @@ async fn request_context_middleware_returns_timeout_and_cancels_context() {
             }),
         )
         .layer(middleware::from_fn(move |request, next| {
-            run_with_request_context(request, next, Some(timeout))
+            let telemetry = Arc::clone(&middleware_telemetry);
+            async move {
+                run_with_request_context(request, next, Some(timeout), telemetry.as_ref()).await
+            }
         }));
 
     let request_task =
@@ -206,6 +232,23 @@ async fn request_context_middleware_returns_timeout_and_cancels_context() {
     assert_eq!(&body[..], b"request timeout: transaction busy");
     assert!(context.is_cancelled());
     assert!(context.check_active().is_err());
+    assert_eq!(
+        context.cancellation_reason(),
+        Some(copperdb_util::RequestCancellationReason::Deadline)
+    );
+    assert_eq!(
+        telemetry
+            .snapshot_metric("copperdb_request_cancellations_total")
+            .unwrap(),
+        vec![copperdb_otel::MetricSample {
+            labels: vec![
+                ("protocol".into(), "http".into()),
+                ("reason".into(), "deadline".into()),
+                ("stage".into(), "ingress".into()),
+            ],
+            value: copperdb_otel::MetricValue::Counter(1.0),
+        }]
+    );
 }
 
 #[tokio::test]
@@ -3248,6 +3291,7 @@ async fn engine_backed_ranked_search_rpc_handler_executes_local_fulltext_runtime
     }
 
     let placement = PlacementKey::new("default", "copper", "primary");
+    let telemetry = Arc::clone(&state.telemetry);
     let service =
         build_engine_backed_nornic_replica_service(Arc::new(state), Arc::new(NoopReplicaClient));
 
@@ -3291,7 +3335,7 @@ async fn engine_backed_ranked_search_rpc_handler_executes_local_fulltext_runtime
                 proto::RemoteHydrationRequest::try_from(RemoteHydrationRequest {
                     target_node: "search-a".into(),
                     target_addr: "127.0.0.1:50051".into(),
-                    placement,
+                    placement: placement.clone(),
                     global_ids: vec![batch.hits[0].global_id.clone()],
                     read_fence: None,
                     caller_auth_token: None,
@@ -3311,6 +3355,46 @@ async fn engine_backed_ranked_search_rpc_handler_executes_local_fulltext_runtime
     assert_eq!(
         records[0].entity["bio"],
         "Alice builds reliable graph systems"
+    );
+
+    let mut cancelled_request = Request::new(
+        proto::RemoteRankedSearchRequest::try_from(RemoteRankedSearchRequest {
+            target_node: "search-a".into(),
+            target_addr: "127.0.0.1:50051".into(),
+            placement,
+            query: SearchQuery::FullText {
+                query: "graph".into(),
+                fields: vec!["bio".into()],
+                limit: 10,
+            },
+            read_fence: None,
+            caller_auth_token: None,
+            request_context: None,
+        })
+        .unwrap(),
+    );
+    cancelled_request.metadata_mut().insert(
+        "x-copperdb-request-id",
+        "expired-ranked-search".parse().unwrap(),
+    );
+    cancelled_request
+        .metadata_mut()
+        .insert("x-copperdb-request-deadline-ms", "0".parse().unwrap());
+    let cancelled = service.search_ranked(cancelled_request).await.unwrap_err();
+    assert_eq!(cancelled.code(), tonic::Code::Cancelled);
+    assert_eq!(cancelled.message(), "request cancelled");
+    assert_eq!(
+        telemetry
+            .snapshot_metric("copperdb_request_cancellations_total")
+            .unwrap(),
+        vec![copperdb_otel::MetricSample {
+            labels: vec![
+                ("protocol".into(), "grpc".into()),
+                ("reason".into(), "deadline".into()),
+                ("stage".into(), "execution".into()),
+            ],
+            value: copperdb_otel::MetricValue::Counter(1.0),
+        }]
     );
 }
 

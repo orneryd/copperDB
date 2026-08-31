@@ -16,6 +16,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use copperdb_util::RequestCancellationReason;
+
 pub const REDACTED_PLACEHOLDER: &str = "<REDACTED>";
 pub const DEFAULT_REDACT_KEYS: &[&str] = &[
     "password",
@@ -206,6 +208,42 @@ pub struct Telemetry {
     values: RwLock<HashMap<SampleKey, MetricValue>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancellationProtocol {
+    Http,
+    Bolt,
+    Grpc,
+    Graphql,
+    Mcp,
+}
+
+impl CancellationProtocol {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Bolt => "bolt",
+            Self::Grpc => "grpc",
+            Self::Graphql => "graphql",
+            Self::Mcp => "mcp",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancellationStage {
+    Ingress,
+    Execution,
+}
+
+impl CancellationStage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ingress => "ingress",
+            Self::Execution => "execution",
+        }
+    }
+}
+
 impl Telemetry {
     pub fn new() -> Self {
         Self::default()
@@ -230,6 +268,22 @@ impl Telemetry {
                 requested: "counter",
             }),
         })
+    }
+
+    pub fn record_request_cancellation(
+        &self,
+        protocol: CancellationProtocol,
+        stage: CancellationStage,
+        reason: RequestCancellationReason,
+    ) -> Result<(), TelemetryError> {
+        self.record_counter(
+            "copperdb_request_cancellations_total",
+            &[
+                ("protocol", protocol.as_str()),
+                ("stage", stage.as_str()),
+                ("reason", reason.as_str()),
+            ],
+        )
     }
 
     pub fn set_gauge(
@@ -761,6 +815,49 @@ mod tests {
     }
 
     #[test]
+    fn records_request_cancellation_with_bounded_labels() {
+        let telemetry = Telemetry::new();
+        telemetry
+            .record_request_cancellation(
+                CancellationProtocol::Http,
+                CancellationStage::Ingress,
+                RequestCancellationReason::Deadline,
+            )
+            .unwrap();
+        telemetry
+            .record_request_cancellation(
+                CancellationProtocol::Bolt,
+                CancellationStage::Execution,
+                RequestCancellationReason::Explicit,
+            )
+            .unwrap();
+
+        assert_eq!(
+            telemetry
+                .snapshot_metric("copperdb_request_cancellations_total")
+                .unwrap(),
+            vec![
+                MetricSample {
+                    labels: vec![
+                        ("protocol".into(), "bolt".into()),
+                        ("reason".into(), "explicit".into()),
+                        ("stage".into(), "execution".into()),
+                    ],
+                    value: MetricValue::Counter(1.0),
+                },
+                MetricSample {
+                    labels: vec![
+                        ("protocol".into(), "http".into()),
+                        ("reason".into(), "deadline".into()),
+                        ("stage".into(), "ingress".into()),
+                    ],
+                    value: MetricValue::Counter(1.0),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn classify_cypher_op_type_matches_expected_mapping() {
         assert_eq!(classify_cypher_op_type("MATCH (n) RETURN n"), "read");
         assert_eq!(classify_cypher_op_type("CREATE (n)"), "write");
@@ -854,7 +951,10 @@ mod tests {
         let ready = health.ready().await;
         assert!(started_at.elapsed() < Duration::from_millis(90));
         assert!(!ready.ok);
-        assert_eq!(ready.checks["slow"].error.as_deref(), Some("deadline exceeded"));
+        assert_eq!(
+            ready.checks["slow"].error.as_deref(),
+            Some("deadline exceeded")
+        );
         assert!(ready.checks["peer"].ok);
     }
 

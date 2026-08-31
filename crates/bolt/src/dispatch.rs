@@ -14,7 +14,7 @@ pub fn decode_message(signature: u8, fields: &[Value]) -> Result<BoltMessage, Bo
     match signature {
         0x01 => decode_hello(fields),
         0x02 => Err(BoltError::ProtocolViolation("unexpected GOODBYE".into())),
-        0x0F => Err(BoltError::ProtocolViolation("unexpected GOODBYE".into())),
+        0x0F => decode_reset(),
         0x10 => decode_run(fields),
         0x2F => decode_discard(fields),
         0x3F => decode_pull(fields),
@@ -452,6 +452,10 @@ mod tests {
         assert!(matches!(
             decode_message(0x13, &[]).unwrap(),
             BoltMessage::Rollback
+        ));
+        assert!(matches!(
+            decode_message(0x0F, &[]).unwrap(),
+            BoltMessage::Reset
         ));
         assert!(matches!(
             decode_message(0x15, &[]).unwrap(),

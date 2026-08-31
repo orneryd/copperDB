@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+copperdb-util = { path = "../util" }
 thiserror.workspace = true
 serde = { workspace = true }
 tokio.workspace = true

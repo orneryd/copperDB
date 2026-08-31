@@ -5,7 +5,7 @@
 
 use serde::de::DeserializeOwned;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -35,9 +35,28 @@ pub enum UtilError {
 #[error("request cancelled")]
 pub struct RequestCancelled;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestCancellationReason {
+    Explicit,
+    Deadline,
+}
+
+impl RequestCancellationReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Deadline => "deadline",
+        }
+    }
+}
+
+const REQUEST_ACTIVE: u8 = 0;
+const REQUEST_CANCELLED_EXPLICITLY: u8 = 1;
+const REQUEST_DEADLINE_EXCEEDED: u8 = 2;
+
 #[derive(Debug, Clone, Default)]
 pub struct RequestCancellation {
-    inner: Arc<AtomicBool>,
+    inner: Arc<AtomicU8>,
 }
 
 impl RequestCancellation {
@@ -46,11 +65,19 @@ impl RequestCancellation {
     }
 
     pub fn cancel(&self) {
-        self.inner.store(true, Ordering::SeqCst);
+        self.cancel_with_reason(RequestCancellationReason::Explicit);
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.inner.load(Ordering::SeqCst)
+        self.inner.load(Ordering::Acquire) != REQUEST_ACTIVE
+    }
+
+    pub fn cancellation_reason(&self) -> Option<RequestCancellationReason> {
+        match self.inner.load(Ordering::Acquire) {
+            REQUEST_CANCELLED_EXPLICITLY => Some(RequestCancellationReason::Explicit),
+            REQUEST_DEADLINE_EXCEEDED => Some(RequestCancellationReason::Deadline),
+            _ => None,
+        }
     }
 
     pub fn check_cancelled(&self) -> Result<(), RequestCancelled> {
@@ -59,6 +86,16 @@ impl RequestCancellation {
         } else {
             Ok(())
         }
+    }
+
+    fn cancel_with_reason(&self, reason: RequestCancellationReason) {
+        let state = match reason {
+            RequestCancellationReason::Explicit => REQUEST_CANCELLED_EXPLICITLY,
+            RequestCancellationReason::Deadline => REQUEST_DEADLINE_EXCEEDED,
+        };
+        let _ =
+            self.inner
+                .compare_exchange(REQUEST_ACTIVE, state, Ordering::AcqRel, Ordering::Acquire);
     }
 }
 
@@ -144,8 +181,17 @@ impl RequestContext {
         self.cancellation.cancel();
     }
 
+    pub fn cancel_due_to_deadline(&self) {
+        self.cancellation
+            .cancel_with_reason(RequestCancellationReason::Deadline);
+    }
+
     pub fn is_cancelled(&self) -> bool {
         self.cancellation.is_cancelled()
+    }
+
+    pub fn cancellation_reason(&self) -> Option<RequestCancellationReason> {
+        self.cancellation.cancellation_reason()
     }
 
     pub fn check_active(&self) -> Result<(), RequestCancelled> {
@@ -154,6 +200,7 @@ impl RequestContext {
             .deadline
             .is_some_and(|deadline| SystemTime::now() >= deadline)
         {
+            self.cancel_due_to_deadline();
             return Err(RequestCancelled);
         }
         Ok(())
@@ -344,6 +391,33 @@ mod tests {
 
         assert!(cancel.is_cancelled());
         assert_eq!(other.check_cancelled(), Err(RequestCancelled));
+        assert_eq!(
+            other.cancellation_reason(),
+            Some(RequestCancellationReason::Explicit)
+        );
+    }
+
+    #[test]
+    fn request_context_preserves_the_first_cancellation_reason() {
+        let explicit = RequestContext::detached();
+        explicit.cancel();
+        explicit.cancel_due_to_deadline();
+        assert_eq!(
+            explicit.cancellation_reason(),
+            Some(RequestCancellationReason::Explicit)
+        );
+
+        let (deadline, guard) = RequestContext::root(Some(SystemTime::now()));
+        assert_eq!(deadline.check_active(), Err(RequestCancelled));
+        assert_eq!(
+            deadline.cancellation_reason(),
+            Some(RequestCancellationReason::Deadline)
+        );
+        drop(guard);
+        assert_eq!(
+            deadline.cancellation_reason(),
+            Some(RequestCancellationReason::Deadline)
+        );
     }
 
     #[test]

@@ -17,6 +17,21 @@ pub const NORNICDB_OBSERVABILITY_PATH: &str = "pkg/observability";
 
 pub const ENUM_CATALOG: &[EnumSpec] = &[
     EnumSpec {
+        name: "AllowedCancellationProtocols",
+        values: &["http", "bolt", "grpc", "graphql", "mcp"],
+        source: "copperdb_plan_14",
+    },
+    EnumSpec {
+        name: "AllowedCancellationStages",
+        values: &["ingress", "execution"],
+        source: "copperdb_plan_14",
+    },
+    EnumSpec {
+        name: "AllowedCancellationReasons",
+        values: &["explicit", "deadline"],
+        source: "copperdb_plan_14",
+    },
+    EnumSpec {
         name: "AllowedAuthResults",
         values: &["success", "failure", "denied"],
         source: "catalog_auth.go",
@@ -227,6 +242,11 @@ const STORAGE_INDEX_BASE: &[&str] = &["index", "result"];
 const STORAGE_INDEX_TENANT: &[&str] = &["database", "index", "result"];
 
 pub const METRIC_CATALOG: &[MetricSpec] = &[
+    MetricSpec {
+        name: "copperdb_request_cancellations_total",
+        label_shapes: &[&["protocol", "stage", "reason"]],
+        source: "copperdb_plan_14",
+    },
     MetricSpec {
         name: "nornicdb_auth_attempts_total",
         label_shapes: &[&["result", "protocol"]],

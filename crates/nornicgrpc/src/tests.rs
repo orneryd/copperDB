@@ -1,4 +1,15 @@
 use super::*;
+
+#[test]
+fn grpc_status_mapping_preserves_request_cancellation() {
+    let cancelled = status_from_grpc_error(GrpcError::RequestCancelled(RequestCancelled));
+    assert_eq!(cancelled.code(), tonic::Code::Cancelled);
+    assert_eq!(cancelled.message(), "request cancelled");
+
+    let transport = status_from_grpc_error(GrpcError::Transport("offline".into()));
+    assert_eq!(transport.code(), tonic::Code::Internal);
+    assert_eq!(transport.message(), "gRPC transport error: offline");
+}
 use crate::proto::nornic_replica_server::NornicReplica;
 use std::sync::Mutex;
 
