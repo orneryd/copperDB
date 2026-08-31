@@ -51,13 +51,15 @@ use copperdb_cypher::{
     EdgeDirection, Expression, LiteralValue, Parser, Pattern, QueryType, ReturnItem, SetItem,
     WhereClause, WithClause,
 };
-use copperdb_eval::{EvalEngine, QueryStats};
+use copperdb_eval::{EvalEngine, ProcedureMode, ProcedureRegistrar, ProcedureRegistry, QueryStats};
 use copperdb_fabric::{
     merge_fabric_aggregates, merge_fabric_paths, merge_fabric_rows, FabricAggregateOptions,
     FabricMergedPaths, FabricMergedRows, FabricPathBatch, FabricPathMergeOptions, FabricReadPlan,
     FabricReadRequest, FabricRowBatch, FabricRowMergeOptions, FabricTopology,
 };
-use copperdb_filter::{eval_expression, eval_predicate};
+use copperdb_filter::{
+    eval_expression, eval_predicate, FunctionExecutionContext, FunctionRegistrar,
+};
 use copperdb_kms::{new_provider, ProviderFactoryConfig};
 use copperdb_replication::{
     CassandraCoordinator, Command, DistributedReadOutcome, DistributedWriteOutcome,
@@ -89,6 +91,29 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryProcedureMode {
+    Read,
+    Write,
+    Dbms,
+}
+
+pub fn query_procedure_mode(cypher: &str) -> Option<QueryProcedureMode> {
+    let query = Parser::new().parse(cypher).ok()?;
+    query.clauses.iter().find_map(|clause| {
+        let Clause::Call(call) = clause else {
+            return None;
+        };
+        ProcedureRegistry::builtins()
+            .get(&call.procedure)
+            .map(|descriptor| match descriptor.mode() {
+                ProcedureMode::Read => QueryProcedureMode::Read,
+                ProcedureMode::Write => QueryProcedureMode::Write,
+                ProcedureMode::Dbms => QueryProcedureMode::Dbms,
+            })
+    })
+}
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
 

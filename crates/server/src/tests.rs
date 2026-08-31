@@ -2,6 +2,18 @@
 
 use super::*;
 
+#[test]
+fn procedure_modes_drive_statement_authorization_classification() {
+    assert!(!statement_requires_write("CALL db.labels()"));
+    assert!(statement_requires_write(
+        "CALL db.create.setNodeVectorProperty(null, 'embedding', [])"
+    ));
+    assert!(!statement_requires_write("CALL dbms.procedures()"));
+    assert!(statement_requires_admin("CALL dbms.procedures()"));
+    assert!(!statement_requires_admin("CALL db.labels()"));
+    assert!(statement_requires_write("CALL extension.unknown()"));
+}
+
 fn encode_bolt_message(signature: u8, fields: &[copperdb_bolt::packstream::Value]) -> Vec<u8> {
     use bytes::BytesMut;
 

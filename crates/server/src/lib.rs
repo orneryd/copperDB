@@ -15,7 +15,8 @@ use axum::{
     Extension, Json, Router,
 };
 use copperdb_auth::{
-    AuthConfig, AuthError, Authenticator, Claims, DatabaseAccessMode, TokenManager,
+    AuthConfig, AuthError, Authenticator, Claims, DatabaseAccessMode, Permission,
+    PermissionsForRoles, TokenManager,
 };
 use copperdb_bolt::server::{
     BoltAuthProvider, BoltExecutionError, BoltPrincipal, BoltQueryResult, BoltResultStats,
@@ -23,7 +24,10 @@ use copperdb_bolt::server::{
 };
 use copperdb_buildinfo::{display_version, server_announcement, version};
 use copperdb_config::Config as RuntimeConfig;
-use copperdb_engine::{CopperDb as GraphEngine, DatabaseConfig as EngineConfig, ResultStats};
+use copperdb_engine::{
+    query_procedure_mode, CopperDb as GraphEngine, DatabaseConfig as EngineConfig,
+    QueryProcedureMode, ResultStats,
+};
 use copperdb_envutil::{get as env_get, get_bool_loose, parse_duration};
 use copperdb_fabric::{FabricReadRequest, FabricReadScope};
 use copperdb_graphql::GraphQlSchema;
@@ -1743,20 +1747,48 @@ fn ensure_database_access(
     database: &str,
     write: bool,
 ) -> Result<(), StatusCode> {
-    let roles = claims.roles.clone();
+    ensure_roles_database_access(state, &claims.roles, database, write)
+}
+
+fn ensure_roles_database_access(
+    state: &AppState,
+    roles: &[String],
+    database: &str,
+    write: bool,
+) -> Result<(), StatusCode> {
     let authenticator = state
         .auth
         .open_authenticator()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let access_mode = authenticator.allowlist.access_mode_for_roles(roles.clone());
+    let access_mode = authenticator
+        .allowlist
+        .access_mode_for_roles(roles.to_vec());
     if !access_mode.can_access_database(database) {
         return Err(StatusCode::FORBIDDEN);
     }
-    let resolved = authenticator.privileges.resolve(&roles, database);
+    let resolved = authenticator.privileges.resolve(roles, database);
     if (write && !resolved.write) || (!write && !resolved.read) {
         return Err(StatusCode::FORBIDDEN);
     }
     Ok(())
+}
+
+fn ensure_admin_access(state: &AppState, claims: &Claims) -> Result<(), StatusCode> {
+    ensure_roles_admin_access(state, &claims.roles)
+}
+
+fn ensure_roles_admin_access(state: &AppState, roles: &[String]) -> Result<(), StatusCode> {
+    let authenticator = state
+        .auth
+        .open_authenticator()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if PermissionsForRoles::from_role_names(roles, Some(&authenticator.entitlements))
+        .contains(&Permission::Admin)
+    {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
 }
 
 fn roles_for_claims(claims: Option<&Claims>) -> Vec<String> {
@@ -2424,6 +2456,17 @@ async fn neo4j_tx_commit_handler(
         Ok(claims) => claims,
         Err(status) => return status.into_response(),
     };
+    if request
+        .statements
+        .iter()
+        .any(|statement| statement_requires_admin(&statement.statement))
+    {
+        if let Some(claims) = claims.as_ref() {
+            if let Err(status) = ensure_admin_access(&state, claims) {
+                return status.into_response();
+            }
+        }
+    }
     let roles = roles_for_claims(claims.as_ref());
     let distributed = distributed_cypher_requested(&state, &headers);
     let caller_auth_token = authenticated_token(&state, &headers).map(str::to_owned);
@@ -2748,6 +2791,19 @@ impl QueryExecutor for AppStateBoltExecutor {
             None if !self.state.auth.security_enabled => vec!["admin".into()],
             None => return Err("authentication required".into()),
         };
+        if self.state.auth.security_enabled {
+            ensure_roles_database_access(
+                &self.state,
+                &roles,
+                database,
+                statement_requires_write(query),
+            )
+            .map_err(|_| "caller is not authorized for database")?;
+            if statement_requires_admin(query) {
+                ensure_roles_admin_access(&self.state, &roles)
+                    .map_err(|_| "procedure requires admin permission")?;
+            }
+        }
         let result = execute_statement(
             Arc::clone(&self.state),
             database.to_owned(),
@@ -3075,10 +3131,28 @@ fn parse_database_name(statement: &str, prefix: &str) -> Result<String, String> 
 
 fn statement_requires_write(statement: &str) -> bool {
     let upper = statement.trim_start().to_ascii_uppercase();
-    !(upper.starts_with("MATCH ")
-        || upper.starts_with("RETURN ")
-        || upper.starts_with("WITH ")
-        || upper.starts_with("SHOW "))
+    let mutates = upper.contains("CREATE")
+        || upper.contains("DELETE")
+        || upper.contains("SET ")
+        || upper.contains("MERGE")
+        || upper.contains("REMOVE ");
+    if mutates {
+        return true;
+    }
+    match query_procedure_mode(statement) {
+        Some(QueryProcedureMode::Read | QueryProcedureMode::Dbms) => false,
+        Some(QueryProcedureMode::Write) => true,
+        None => {
+            !(upper.starts_with("MATCH ")
+                || upper.starts_with("RETURN ")
+                || upper.starts_with("WITH ")
+                || upper.starts_with("SHOW "))
+        }
+    }
+}
+
+fn statement_requires_admin(statement: &str) -> bool {
+    query_procedure_mode(statement) == Some(QueryProcedureMode::Dbms)
 }
 
 fn distributed_cypher_requested(state: &AppState, headers: &HeaderMap) -> bool {

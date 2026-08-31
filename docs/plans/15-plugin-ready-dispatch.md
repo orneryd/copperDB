@@ -1,6 +1,6 @@
 # 15: Plugin-Ready Function And Procedure Dispatch
 
-Status: planned. Priority: P1. Owners: `filter`, `eval`, `engine`.
+Status: complete. Priority: P1. Owners: `filter`, `eval`, `engine`.
 
 ## Objective
 
@@ -29,3 +29,14 @@ Build immutable maps at engine startup. Dispatch should be O(1) with no per-row 
 ## Definition Of Done
 
 Every advertised built-in dispatches, every public handler is advertised unless intentionally hidden, extensions can register without editing core matches, and auth/cancellation/error contracts are enforced centrally.
+
+## Completion Notes
+
+- Added immutable startup-built scalar and procedure registries with case-insensitive canonical names, aliases, deterministic collision rejection, descriptors, and O(1) lookup.
+- Migrated built-in dispatch and `dbms.functions`/`dbms.procedures` discovery to registry descriptors while preserving CopperDB's existing advertised rows and behavior snapshots.
+- Added constructor-level scalar and procedure registrar injection through `EvalEngine` and `CopperDb`, including restricted row/parameter, capability, role, database, and request contexts.
+- Enforced extension capability and role requirements, panic isolation, cancellation before and after handlers, stable extension errors, consistent procedure columns, and unknown-name errors containing the requested spelling.
+- Enforced procedure `READ`, `WRITE`, and `DBMS` modes at HTTP and authenticated Bolt authorization boundaries. Unknown extension calls remain conservatively write-classified.
+- Added a Criterion dispatch benchmark. On the completion run, canonical immutable-registry lookup measured approximately 13.7 ns versus 30.1 ns for the previous lowercase-plus-match shape; mixed-case lookup measured approximately 50.8 ns and allocates only for normalization.
+- Validated 27 filter tests, 364 eval tests, 118 engine tests, and 100 server tests. Workspace Clippy passed for all targets and features with warnings denied; touched-file rustfmt and `git diff --check` passed.
+- Dynamic-library ABI and APOC compatibility remain intentionally deferred.

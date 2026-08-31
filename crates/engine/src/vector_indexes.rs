@@ -360,6 +360,11 @@ impl VectorIndexManager {
         })
     }
 
+    pub(crate) fn refresh_persistence(&self, storage: &StorageEngine) {
+        self.refresh_file_store_bindings(storage);
+        self.persist_artifact(storage);
+    }
+
     fn refresh_file_store_bindings(&self, storage: &StorageEngine) {
         let bindings = match file_store_bindings(storage, &self.registry) {
             Ok(bindings) => bindings,

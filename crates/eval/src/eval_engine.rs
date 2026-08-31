@@ -3,11 +3,25 @@ use std::cell::RefCell;
 
 thread_local! {
     static CURRENT_REQUEST_CONTEXT: RefCell<Option<RequestContext>> = const { RefCell::new(None) };
+    static CURRENT_EXECUTION_CONTEXT: RefCell<FunctionExecutionContext> = RefCell::new(FunctionExecutionContext::default());
 }
 
 use super::*;
 impl EvalEngine {
     pub fn new(storage: Arc<StorageEngine>) -> Self {
+        Self::try_new_with_function_registrars(storage, &[])
+            .expect("the built-in function registry must be valid")
+    }
+
+    pub fn try_new_with_function_registrars(
+        storage: Arc<StorageEngine>,
+        registrars: &[FunctionRegistrar],
+    ) -> Result<Self, FunctionRegistryError> {
+        let mut builder = FunctionRegistryBuilder::with_builtins();
+        for registrar in registrars {
+            registrar(&mut builder)?;
+        }
+        let function_registry = Arc::new(builder.build());
         let vector_indexes = Arc::new(HnswRegistry::new());
         let query_indexes = Arc::clone(&vector_indexes);
         let vector_index_query = Arc::new(
@@ -15,7 +29,43 @@ impl EvalEngine {
                 query_indexes.knn_with_cancellation(name, query, limit, cancellation)
             },
         );
-        Self::new_with_vector_index_service(storage, vector_indexes, None, vector_index_query)
+        Ok(Self::new_with_vector_index_service_and_function_registry(
+            storage,
+            vector_indexes,
+            None,
+            vector_index_query,
+            function_registry,
+        ))
+    }
+
+    pub fn try_new_with_registrars(
+        storage: Arc<StorageEngine>,
+        function_registrars: &[FunctionRegistrar],
+        procedure_registrars: &[ProcedureRegistrar],
+    ) -> Result<Self, EvalRegistryError> {
+        let mut function_builder = FunctionRegistryBuilder::with_builtins();
+        for registrar in function_registrars {
+            registrar(&mut function_builder)?;
+        }
+        let mut procedure_builder = ProcedureRegistryBuilder::with_builtins();
+        for registrar in procedure_registrars {
+            registrar(&mut procedure_builder)?;
+        }
+        let vector_indexes = Arc::new(HnswRegistry::new());
+        let query_indexes = Arc::clone(&vector_indexes);
+        let vector_index_query = Arc::new(
+            move |cancellation: &RequestCancellation, name: &str, query: &[f32], limit: usize| {
+                query_indexes.knn_with_cancellation(name, query, limit, cancellation)
+            },
+        );
+        Ok(Self::new_with_vector_index_service_and_registries(
+            storage,
+            vector_indexes,
+            None,
+            vector_index_query,
+            Arc::new(function_builder.build()),
+            Arc::new(procedure_builder.build()),
+        ))
     }
 
     pub fn new_with_vector_index_service(
@@ -23,6 +73,66 @@ impl EvalEngine {
         vector_indexes: Arc<HnswRegistry>,
         vector_index_artifact_refresh: Option<Arc<dyn Fn() + Send + Sync>>,
         vector_index_query: VectorIndexQuery,
+    ) -> Self {
+        Self::new_with_vector_index_service_and_function_registry(
+            storage,
+            vector_indexes,
+            vector_index_artifact_refresh,
+            vector_index_query,
+            Arc::new(FunctionRegistry::builtins().clone()),
+        )
+    }
+
+    pub fn new_with_vector_index_service_and_function_registry(
+        storage: Arc<StorageEngine>,
+        vector_indexes: Arc<HnswRegistry>,
+        vector_index_artifact_refresh: Option<Arc<dyn Fn() + Send + Sync>>,
+        vector_index_query: VectorIndexQuery,
+        function_registry: Arc<FunctionRegistry>,
+    ) -> Self {
+        Self::new_with_vector_index_service_and_registries(
+            storage,
+            vector_indexes,
+            vector_index_artifact_refresh,
+            vector_index_query,
+            function_registry,
+            Arc::new(ProcedureRegistry::builtins().clone()),
+        )
+    }
+
+    pub fn try_new_with_vector_index_service_and_registrars(
+        storage: Arc<StorageEngine>,
+        vector_indexes: Arc<HnswRegistry>,
+        vector_index_artifact_refresh: Option<Arc<dyn Fn() + Send + Sync>>,
+        vector_index_query: VectorIndexQuery,
+        function_registrars: &[FunctionRegistrar],
+        procedure_registrars: &[ProcedureRegistrar],
+    ) -> Result<Self, EvalRegistryError> {
+        let mut function_builder = FunctionRegistryBuilder::with_builtins();
+        for registrar in function_registrars {
+            registrar(&mut function_builder)?;
+        }
+        let mut procedure_builder = ProcedureRegistryBuilder::with_builtins();
+        for registrar in procedure_registrars {
+            registrar(&mut procedure_builder)?;
+        }
+        Ok(Self::new_with_vector_index_service_and_registries(
+            storage,
+            vector_indexes,
+            vector_index_artifact_refresh,
+            vector_index_query,
+            Arc::new(function_builder.build()),
+            Arc::new(procedure_builder.build()),
+        ))
+    }
+
+    pub fn new_with_vector_index_service_and_registries(
+        storage: Arc<StorageEngine>,
+        vector_indexes: Arc<HnswRegistry>,
+        vector_index_artifact_refresh: Option<Arc<dyn Fn() + Send + Sync>>,
+        vector_index_query: VectorIndexQuery,
+        function_registry: Arc<FunctionRegistry>,
+        procedure_registry: Arc<ProcedureRegistry>,
     ) -> Self {
         let query_result_cache = Arc::new(QueryResultCache::new(1_000, None));
         let query_result_policy_generation =
@@ -75,6 +185,8 @@ impl EvalEngine {
         }));
         Self {
             storage,
+            function_registry,
+            procedure_registry,
             vector_indexes,
             vector_index_query,
             vector_index_artifact_refresh,
@@ -129,8 +241,7 @@ impl EvalEngine {
             Expression::PatternComprehension(comp) => {
                 self.evaluate_pattern_comprehension(comp, row, params)
             }
-            _ => copperdb_filter::eval_expression(expr, row, params)
-                .map_err(|e| EvalError::FilterError(e.to_string())),
+            _ => copperdb_filter::eval_expression(expr, row, params).map_err(EvalError::from),
         }
     }
 
@@ -515,8 +626,23 @@ impl EvalEngine {
         query: &Query,
         params: &HashMap<String, Value>,
     ) -> Result<EvalResult, EvalError> {
+        self.execute_with_context_and_function_context(
+            request_context,
+            &FunctionExecutionContext::default(),
+            query,
+            params,
+        )
+    }
+
+    pub fn execute_with_context_and_function_context(
+        &self,
+        request_context: &RequestContext,
+        function_context: &FunctionExecutionContext,
+        query: &Query,
+        params: &HashMap<String, Value>,
+    ) -> Result<EvalResult, EvalError> {
         self.hot_path_trace.reset();
-        self.with_request_context(request_context, || {
+        self.with_request_and_function_context(request_context, function_context, || {
             self.with_access_buffer(|| {
                 if let Some(result) =
                     self.execute_count_all_relationships_fast_path(request_context, query)?
@@ -2218,9 +2344,33 @@ impl EvalEngine {
         request_context: &RequestContext,
         run: impl FnOnce() -> Result<T, EvalError>,
     ) -> Result<T, EvalError> {
+        self.with_request_and_function_context(
+            request_context,
+            &FunctionExecutionContext::default(),
+            run,
+        )
+    }
+
+    fn with_request_and_function_context<T>(
+        &self,
+        request_context: &RequestContext,
+        function_context: &FunctionExecutionContext,
+        run: impl FnOnce() -> Result<T, EvalError>,
+    ) -> Result<T, EvalError> {
+        let mut function_context = function_context.clone();
+        function_context.request_context = Some(request_context.clone());
         CURRENT_REQUEST_CONTEXT.with(|slot| {
             let previous = slot.replace(Some(request_context.clone()));
-            let result = run();
+            let result = CURRENT_EXECUTION_CONTEXT.with(|execution_slot| {
+                let previous_execution = execution_slot.replace(function_context.clone());
+                let result = copperdb_filter::with_function_registry(
+                    Arc::clone(&self.function_registry),
+                    function_context,
+                    run,
+                );
+                execution_slot.replace(previous_execution);
+                result
+            });
             slot.replace(previous);
             result
         })
@@ -2281,6 +2431,7 @@ impl EvalEngine {
                             |item| matches!(&item.expression, Expression::Variable(v) if v == "*"),
                         );
                         if !is_wildcard {
+                            let procedure_columns = call_result.columns.clone();
                             let yield_columns: Vec<String> = call
                                 .yield_items
                                 .iter()
@@ -2294,6 +2445,11 @@ impl EvalEngine {
                                     for col in &yield_columns {
                                         if let Some(val) = row.remove(col) {
                                             filtered.insert(col.clone(), val);
+                                        }
+                                    }
+                                    for (key, value) in row {
+                                        if !procedure_columns.contains(&key) {
+                                            filtered.insert(key, value);
                                         }
                                     }
                                     filtered
@@ -3263,60 +3419,96 @@ impl EvalEngine {
         compound_match: Option<&ShapeMatch>,
         pipeline_clauses: Option<&[PipelineClause]>,
     ) -> Result<EvalResult, EvalError> {
-        self.hot_path_trace.reset();
-        self.with_access_buffer(|| {
-            request_context.check_active()?;
-            if let Some(result) =
-                self.execute_count_all_relationships_fast_path(request_context, query)?
-            {
-                return Ok(result);
-            }
-            match pattern_info.pattern {
-                QueryPattern::SimpleMatchLimit if self.can_execute_simple_match_limit(query) => {
-                    return self.execute_simple_match_limit_optimized(
-                        request_context,
-                        query,
-                        params,
-                    );
-                }
-                QueryPattern::MutualRelationship if self.can_execute_simple_match_return(query) => {
-                    return self.execute_mutual_relationship_optimized(query, pattern_info);
-                }
-                QueryPattern::IncomingCountAgg if self.can_execute_simple_match_return(query) => {
-                    return self.execute_count_agg_optimized(query, pattern_info, true);
-                }
-                QueryPattern::OutgoingCountAgg if self.can_execute_simple_match_return(query) => {
-                    return self.execute_count_agg_optimized(query, pattern_info, false);
-                }
-                QueryPattern::EdgePropertyAgg if self.can_execute_edge_property_agg(query) => {
-                    return self.execute_edge_property_agg_optimized(query, pattern_info, params);
-                }
-                _ => {}
-            }
+        self.execute_with_routes_with_context_and_function_context(
+            request_context,
+            &FunctionExecutionContext::default(),
+            query,
+            params,
+            pattern_info,
+            compound_match,
+            pipeline_clauses,
+        )
+    }
 
-            if let Some(shape_match) = compound_match {
-                if self.can_execute_compound_fast_path(query, shape_match) {
-                    if let Some(result) = self.execute_compound_fast_path(query, shape_match)? {
-                        return Ok(result);
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_with_routes_with_context_and_function_context(
+        &self,
+        request_context: &RequestContext,
+        function_context: &FunctionExecutionContext,
+        query: &Query,
+        params: &HashMap<String, Value>,
+        pattern_info: &PatternInfo,
+        compound_match: Option<&ShapeMatch>,
+        pipeline_clauses: Option<&[PipelineClause]>,
+    ) -> Result<EvalResult, EvalError> {
+        self.hot_path_trace.reset();
+        self.with_request_and_function_context(request_context, function_context, || {
+            self.with_access_buffer(|| {
+                request_context.check_active()?;
+                if let Some(result) =
+                    self.execute_count_all_relationships_fast_path(request_context, query)?
+                {
+                    return Ok(result);
+                }
+                match pattern_info.pattern {
+                    QueryPattern::SimpleMatchLimit
+                        if self.can_execute_simple_match_limit(query) =>
+                    {
+                        return self.execute_simple_match_limit_optimized(
+                            request_context,
+                            query,
+                            params,
+                        );
+                    }
+                    QueryPattern::MutualRelationship
+                        if self.can_execute_simple_match_return(query) =>
+                    {
+                        return self.execute_mutual_relationship_optimized(query, pattern_info);
+                    }
+                    QueryPattern::IncomingCountAgg
+                        if self.can_execute_simple_match_return(query) =>
+                    {
+                        return self.execute_count_agg_optimized(query, pattern_info, true);
+                    }
+                    QueryPattern::OutgoingCountAgg
+                        if self.can_execute_simple_match_return(query) =>
+                    {
+                        return self.execute_count_agg_optimized(query, pattern_info, false);
+                    }
+                    QueryPattern::EdgePropertyAgg if self.can_execute_edge_property_agg(query) => {
+                        return self.execute_edge_property_agg_optimized(
+                            query,
+                            pattern_info,
+                            params,
+                        );
+                    }
+                    _ => {}
+                }
+
+                if let Some(shape_match) = compound_match {
+                    if self.can_execute_compound_fast_path(query, shape_match) {
+                        if let Some(result) = self.execute_compound_fast_path(query, shape_match)? {
+                            return Ok(result);
+                        }
                     }
                 }
-            }
 
-            if let Some(clauses) = pipeline_clauses {
-                if self.can_execute_pipeline_route(query, clauses) {
-                    return self.execute_pipeline_routed(query, params, clauses);
+                if let Some(clauses) = pipeline_clauses {
+                    if self.can_execute_pipeline_route(query, clauses) {
+                        return self.execute_pipeline_routed(query, params, clauses);
+                    }
                 }
-            }
 
-            // Route shortestPath() / allShortestPaths() to a dedicated BFS handler
-            // matching NornicDB's pkg/cypher/shortest_path.go executor.
-            if let Some(result) =
-                self.execute_dedicated_shortest_path(request_context, query, params)?
-            {
-                return Ok(result);
-            }
+                // Route shortestPath() / allShortestPaths() to a dedicated BFS handler
+                // matching NornicDB's pkg/cypher/shortest_path.go executor.
+                if let Some(result) =
+                    self.execute_dedicated_shortest_path(request_context, query, params)?
+                {
+                    return Ok(result);
+                }
 
-            self.execute_inner(request_context, query, params)
+                self.execute_inner(request_context, query, params)
+            })
         })
     }
 
@@ -7775,7 +7967,7 @@ fn is_range_comparable_value(value: &Value) -> bool {
 }
 
 #[path = "eval_engine_policy.rs"]
-mod eval_engine_policy;
+pub(crate) mod eval_engine_policy;
 
 // ── Aggregation helpers ────────────────────────────────────────────────────
 

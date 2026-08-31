@@ -2,6 +2,7 @@
 //!
 //! Executes Cypher ASTs from `copperdb-cypher` against the storage engine.
 
+use copperdb_cache::QueryResultCache;
 use copperdb_cypher::{
     hot_path_trace::{HotPathTrace, HotPathTraceState},
     Clause, ConstraintEntityType as CypherConstraintEntityType, ConstraintKind, EdgeDirection,
@@ -10,8 +11,10 @@ use copperdb_cypher::{
     ReturnClause, ReturnItem, SetItem, ShapeKind, ShapeMatch, ShapeValue, SubqueryClause,
     WithClause,
 };
-use copperdb_cache::QueryResultCache;
-use copperdb_filter::{eval_expression, eval_predicate};
+use copperdb_filter::{
+    eval_expression, eval_predicate, FunctionExecutionContext, FunctionRegistrar, FunctionRegistry,
+    FunctionRegistryBuilder, FunctionRegistryError,
+};
 use copperdb_indexing::{CatalogRangeIndexComparison, IndexCatalog, IndexError};
 use copperdb_knowledgepolicy::{
     access_metadata_after_policy_access, build_binding_table, build_bundles_by_name,
@@ -37,6 +40,11 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub use copperdb_filter::Row;
+pub use procedure_registry::{
+    ProcedureCallContext, ProcedureDescriptor, ProcedureError, ProcedureHandler, ProcedureMode,
+    ProcedureOutput, ProcedureRegistrar, ProcedureRegistry, ProcedureRegistryBuilder,
+    ProcedureRegistryError,
+};
 
 const VAR_LENGTH_UNBOUNDED_MAX_HOPS: u32 = 1 << 16;
 const BFS_CANCEL_CHECK_MASK: usize = 0xFF;
@@ -68,6 +76,14 @@ pub enum EvalError {
     RequestCancelled(#[from] RequestCancelled),
 }
 
+#[derive(Debug, Error)]
+pub enum EvalRegistryError {
+    #[error(transparent)]
+    Function(#[from] FunctionRegistryError),
+    #[error(transparent)]
+    Procedure(#[from] ProcedureRegistryError),
+}
+
 impl From<copperdb_storage::StorageError> for EvalError {
     fn from(e: copperdb_storage::StorageError) -> Self {
         match e {
@@ -92,7 +108,12 @@ impl From<IndexError> for EvalError {
 
 impl From<copperdb_filter::FilterError> for EvalError {
     fn from(e: copperdb_filter::FilterError) -> Self {
-        EvalError::FilterError(e.to_string())
+        match e {
+            copperdb_filter::FilterError::RequestCancelled => {
+                EvalError::RequestCancelled(RequestCancelled)
+            }
+            error => EvalError::FilterError(error.to_string()),
+        }
     }
 }
 
@@ -240,6 +261,8 @@ type BfsAdjacencyMap = HashMap<String, Vec<Arc<EdgeRecord>>>;
 
 pub struct EvalEngine {
     storage: Arc<StorageEngine>,
+    function_registry: Arc<FunctionRegistry>,
+    procedure_registry: Arc<ProcedureRegistry>,
     vector_indexes: Arc<HnswRegistry>,
     vector_index_query: VectorIndexQuery,
     vector_index_artifact_refresh: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -259,6 +282,7 @@ pub struct EvalEngine {
 }
 
 mod eval_engine;
+mod procedure_registry;
 // ─── Legacy Executor (kept for backwards compat) ─────────────────────────────
 
 /// Legacy executor stub (use EvalEngine instead).

@@ -2,6 +2,7 @@ use super::*;
 use copperdb_cypher::{
     can_execute_as_pipeline, detect_query_pattern, match_compound_query_shape, Parser, QueryPattern,
 };
+use copperdb_filter::FunctionDescriptor;
 use copperdb_storage::{
     EdgeRecord, IndexDefinition, IndexEntityType, IndexKind, NodeRecord, StorageEngine,
     StorageError,
@@ -169,6 +170,556 @@ fn seed_social_graph(engine: &EvalEngine) {
 fn make_engine() -> EvalEngine {
     let storage = Arc::new(StorageEngine::open_temporary().unwrap());
     EvalEngine::new(storage)
+}
+
+#[allow(clippy::arc_with_non_send_sync)]
+fn make_engine_with_function_registrars(registrars: &[FunctionRegistrar]) -> EvalEngine {
+    let storage = Arc::new(StorageEngine::open_temporary().unwrap());
+    EvalEngine::try_new_with_function_registrars(storage, registrars).unwrap()
+}
+
+#[allow(clippy::arc_with_non_send_sync)]
+fn make_engine_with_registrars(
+    function_registrars: &[FunctionRegistrar],
+    procedure_registrars: &[ProcedureRegistrar],
+) -> EvalEngine {
+    let storage = Arc::new(StorageEngine::open_temporary().unwrap());
+    EvalEngine::try_new_with_registrars(storage, function_registrars, procedure_registrars).unwrap()
+}
+
+fn one_column_output(column: &str, value: Value) -> ProcedureOutput {
+    let mut row = Row::new();
+    row.insert(column.to_string(), value);
+    ProcedureOutput::new(vec![column.to_string()], vec![row])
+}
+
+#[test]
+fn injected_procedure_dispatch_preserves_row_order_and_restricted_context() {
+    let registrar: ProcedureRegistrar = Arc::new(|builder| {
+        builder.register(ProcedureDescriptor::extension(
+            "test.echo",
+            ["test.echoAlias"],
+            "test.echo(input :: INTEGER, increment :: INTEGER) :: (value :: INTEGER)",
+            "Echoes an incremented value",
+            ProcedureMode::Read,
+            Arc::new(|context, args| {
+                assert!(context.row.contains_key("input"));
+                assert_eq!(context.params["increment"], Value::from(10));
+                assert_eq!(context.capabilities, ["procedure:execute"]);
+                assert_eq!(context.caller_roles, ["reader"]);
+                assert_eq!(context.database, Some("neo4j"));
+                assert_eq!(context.request_context.request_id(), "procedure-test");
+                Ok(one_column_output(
+                    "value",
+                    Value::from(args[0].as_i64().unwrap() + args[1].as_i64().unwrap()),
+                ))
+            }),
+        ))?;
+        Ok(())
+    });
+    let engine = make_engine_with_registrars(&[], &[registrar]);
+    let (request_context, _guard) =
+        RequestContext::from_metadata(copperdb_util::RequestContextMetadata {
+            request_id: "procedure-test".into(),
+            deadline_unix_ms: None,
+        });
+    let execution_context = FunctionExecutionContext {
+        capabilities: vec!["procedure:execute".into()],
+        caller_roles: vec!["reader".into()],
+        database: Some("neo4j".into()),
+        request_context: None,
+    };
+    let params = HashMap::from([("increment".to_string(), Value::from(10))]);
+    let query = Parser::new()
+        .parse("UNWIND [1, 2] AS input CALL TEST.ECHOALIAS(input, $increment) YIELD value RETURN input, value ORDER BY input")
+        .unwrap();
+
+    let result = engine
+        .execute_with_context_and_function_context(
+            &request_context,
+            &execution_context,
+            &query,
+            &params,
+        )
+        .unwrap();
+
+    assert_eq!(result.columns, vec!["input", "value"]);
+    assert_eq!(result.rows.len(), 2);
+    assert_eq!(result.rows[0]["input"], Value::from(1));
+    assert_eq!(result.rows[0]["value"], Value::from(11));
+    assert_eq!(result.rows[1]["input"], Value::from(2));
+    assert_eq!(result.rows[1]["value"], Value::from(12));
+}
+
+#[test]
+fn procedure_discovery_uses_public_canonical_descriptors_only() {
+    let registrar: ProcedureRegistrar = Arc::new(|builder| {
+        builder.register(ProcedureDescriptor::extension(
+            "test.visible",
+            ["test.visibleAlias"],
+            "test.visible() :: (value :: STRING)",
+            "Visible procedure",
+            ProcedureMode::Write,
+            Arc::new(|_, _| Ok(one_column_output("value", Value::String("ok".into())))),
+        ))?;
+        builder.register(
+            ProcedureDescriptor::extension(
+                "test.hidden",
+                std::iter::empty::<&str>(),
+                "test.hidden() :: (value :: STRING)",
+                "Hidden procedure",
+                ProcedureMode::Read,
+                Arc::new(|_, _| Ok(ProcedureOutput::default())),
+            )
+            .hidden(),
+        )?;
+        Ok(())
+    });
+    let engine = make_engine_with_registrars(&[], &[registrar]);
+    let result = engine
+        .execute_cypher("CALL dbms.procedures()", &HashMap::new())
+        .unwrap();
+    let names = result
+        .rows
+        .iter()
+        .map(|row| row["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert!(names.contains(&"dbms.procedures"));
+    assert!(names.contains(&"test.visible"));
+    assert!(!names.contains(&"test.visibleAlias"));
+    assert!(!names.contains(&"test.hidden"));
+    let visible = result
+        .rows
+        .iter()
+        .find(|row| row["name"] == "test.visible")
+        .unwrap();
+    assert_eq!(visible["signature"], "test.visible() :: (value :: STRING)");
+    assert_eq!(visible["description"], "Visible procedure");
+    assert_eq!(visible["mode"], "WRITE");
+
+    for descriptor in engine.procedure_registry.descriptors() {
+        if !descriptor.is_hidden() {
+            assert!(names.contains(&descriptor.name()));
+            assert!(engine.procedure_registry.get(descriptor.name()).is_some());
+        }
+    }
+}
+
+#[test]
+fn procedure_authorization_requirements_are_allowed_or_denied_deterministically() {
+    let registrar: ProcedureRegistrar = Arc::new(|builder| {
+        builder.register(
+            ProcedureDescriptor::extension(
+                "test.secured",
+                std::iter::empty::<&str>(),
+                "test.secured() :: (allowed :: BOOLEAN)",
+                "Secured procedure",
+                ProcedureMode::Dbms,
+                Arc::new(|_, _| Ok(one_column_output("allowed", Value::Bool(true)))),
+            )
+            .requiring_capabilities(["procedure:admin"])
+            .requiring_roles(["admin"]),
+        )?;
+        Ok(())
+    });
+    let engine = make_engine_with_registrars(&[], &[registrar]);
+    let query = Parser::new().parse("CALL test.secured()").unwrap();
+    let request_context = RequestContext::detached();
+
+    let missing_capability = engine
+        .execute_with_context_and_function_context(
+            &request_context,
+            &FunctionExecutionContext {
+                caller_roles: vec!["admin".into()],
+                ..Default::default()
+            },
+            &query,
+            &HashMap::new(),
+        )
+        .unwrap_err();
+    assert_eq!(
+        missing_capability.to_string(),
+        "execution error: procedure test.secured requires capability procedure:admin"
+    );
+
+    let missing_role = engine
+        .execute_with_context_and_function_context(
+            &request_context,
+            &FunctionExecutionContext {
+                capabilities: vec!["procedure:admin".into()],
+                caller_roles: vec!["reader".into()],
+                ..Default::default()
+            },
+            &query,
+            &HashMap::new(),
+        )
+        .unwrap_err();
+    assert_eq!(
+        missing_role.to_string(),
+        "execution error: procedure test.secured requires role admin"
+    );
+
+    let allowed = engine
+        .execute_with_context_and_function_context(
+            &request_context,
+            &FunctionExecutionContext {
+                capabilities: vec!["procedure:admin".into()],
+                caller_roles: vec!["admin".into()],
+                ..Default::default()
+            },
+            &query,
+            &HashMap::new(),
+        )
+        .unwrap();
+    assert_eq!(allowed.rows[0]["allowed"], Value::Bool(true));
+}
+
+#[test]
+fn procedure_extension_failures_panics_cancellation_and_unknown_names_are_stable() {
+    let registrar: ProcedureRegistrar = Arc::new(|builder| {
+        builder.register(ProcedureDescriptor::extension(
+            "test.failure",
+            std::iter::empty::<&str>(),
+            "",
+            "",
+            ProcedureMode::Read,
+            Arc::new(|_, _| Err(ProcedureError::Message("stable failure".into()))),
+        ))?;
+        builder.register(ProcedureDescriptor::extension(
+            "test.panic",
+            std::iter::empty::<&str>(),
+            "",
+            "",
+            ProcedureMode::Read,
+            Arc::new(|_, _| panic!("isolated procedure panic")),
+        ))?;
+        builder.register(ProcedureDescriptor::extension(
+            "test.cancel",
+            std::iter::empty::<&str>(),
+            "",
+            "",
+            ProcedureMode::Read,
+            Arc::new(|context, _| {
+                context.request_context.cancel();
+                Ok(ProcedureOutput::default())
+            }),
+        ))?;
+        Ok(())
+    });
+    let engine = make_engine_with_registrars(&[], &[registrar]);
+
+    let failure = engine
+        .execute_cypher("CALL test.failure()", &HashMap::new())
+        .unwrap_err();
+    assert_eq!(
+        failure.to_string(),
+        "execution error: extension procedure test.failure failed: stable failure"
+    );
+    let panic = engine
+        .execute_cypher("CALL test.panic()", &HashMap::new())
+        .unwrap_err();
+    assert_eq!(
+        panic.to_string(),
+        "execution error: extension procedure test.panic panicked"
+    );
+    let cancelled = engine
+        .execute_cypher("CALL test.cancel()", &HashMap::new())
+        .unwrap_err();
+    assert!(matches!(cancelled, EvalError::RequestCancelled(_)));
+    let unknown = engine
+        .execute_cypher("CALL MiSsInG.OriginalName()", &HashMap::new())
+        .unwrap_err();
+    assert!(unknown.to_string().contains("MiSsInG.OriginalName"));
+}
+
+#[test]
+fn procedure_registration_collisions_fail_before_engine_creation() {
+    let registrar: ProcedureRegistrar = Arc::new(|builder| {
+        builder.register(ProcedureDescriptor::extension(
+            "test.extension",
+            ["DB.LABELS"],
+            "",
+            "",
+            ProcedureMode::Read,
+            Arc::new(|_, _| Ok(ProcedureOutput::default())),
+        ))?;
+        Ok(())
+    });
+    let storage = Arc::new(StorageEngine::open_temporary().unwrap());
+    let error = match EvalEngine::try_new_with_registrars(storage, &[], &[registrar]) {
+        Ok(_) => panic!("colliding procedure registrar unexpectedly created an engine"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.to_string(),
+        "procedure name or alias collision: db.labels"
+    );
+}
+
+#[test]
+fn built_in_procedure_metadata_preserves_legacy_rows_and_advertises_vector_setters() {
+    let engine = make_engine();
+    let discovered = engine
+        .execute_cypher("CALL dbms.procedures()", &HashMap::new())
+        .unwrap();
+    for legacy in eval_engine::eval_engine_policy::legacy_builtin_procedure_rows() {
+        let name = legacy["name"].as_str().unwrap();
+        let current = discovered
+            .rows
+            .iter()
+            .find(|row| row["name"] == name)
+            .unwrap_or_else(|| panic!("legacy procedure {name} is missing"));
+        assert_eq!(current, &legacy);
+    }
+    for (name, mode) in [
+        ("db.create.setNodeVectorProperty", "WRITE"),
+        ("db.create.setRelationshipVectorProperty", "WRITE"),
+    ] {
+        let row = discovered
+            .rows
+            .iter()
+            .find(|row| row["name"] == name)
+            .unwrap();
+        assert_eq!(row["mode"], mode);
+    }
+}
+
+#[test]
+fn injected_scalar_nested_alias_receives_execution_context() {
+    let registrar: FunctionRegistrar = Arc::new(|builder| {
+        builder.register(FunctionDescriptor::extension(
+            "test.increment",
+            ["test.inc"],
+            "test.increment(input :: INTEGER) :: INTEGER",
+            "Increments an integer",
+            "Testing",
+            Arc::new(|context, args| {
+                assert_eq!(context.capabilities, ["function:execute"]);
+                assert_eq!(context.caller_roles, ["reader"]);
+                assert_eq!(context.database, Some("neo4j"));
+                assert_eq!(
+                    context.request_context.map(RequestContext::request_id),
+                    Some("registry-test")
+                );
+                Ok(Value::from(args[0].as_i64().unwrap() + 1))
+            }),
+        ))?;
+        Ok(())
+    });
+    let engine = make_engine_with_function_registrars(&[registrar]);
+    let (request_context, _request_guard) =
+        RequestContext::from_metadata(copperdb_util::RequestContextMetadata {
+            request_id: "registry-test".into(),
+            deadline_unix_ms: None,
+        });
+    let function_context = FunctionExecutionContext {
+        capabilities: vec!["function:execute".into()],
+        caller_roles: vec!["reader".into()],
+        database: Some("neo4j".into()),
+        request_context: None,
+    };
+    let query = Parser::new()
+        .parse("RETURN test.increment(test.inc(1)) AS value")
+        .unwrap();
+
+    let result = engine
+        .execute_with_context_and_function_context(
+            &request_context,
+            &function_context,
+            &query,
+            &HashMap::new(),
+        )
+        .unwrap();
+
+    assert_eq!(result.rows[0]["value"], Value::from(3));
+}
+
+#[test]
+fn function_discovery_comes_from_visible_descriptors() {
+    let registrar: FunctionRegistrar = Arc::new(|builder| {
+        builder.register(FunctionDescriptor::extension(
+            "test.visible",
+            ["test.visibleAlias"],
+            "test.visible() :: STRING",
+            "Visible extension",
+            "Testing",
+            Arc::new(|_, _| Ok(Value::String("visible".into()))),
+        ))?;
+        builder.register(
+            FunctionDescriptor::extension(
+                "test.hidden",
+                std::iter::empty::<&str>(),
+                "test.hidden() :: STRING",
+                "Hidden extension",
+                "Testing",
+                Arc::new(|_, _| Ok(Value::String("hidden".into()))),
+            )
+            .hidden(),
+        )?;
+        Ok(())
+    });
+    let engine = make_engine_with_function_registrars(&[registrar]);
+    let query = Parser::new().parse("CALL dbms.functions()").unwrap();
+
+    let result = engine.execute(&query, &HashMap::new()).unwrap();
+    let discovered = result
+        .rows
+        .iter()
+        .map(|row| row["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert!(discovered.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert!(discovered.contains(&"test.visible"));
+    assert!(discovered.contains(&"test.visibleAlias"));
+    assert!(!discovered.contains(&"test.hidden"));
+    let expected_descriptor_names = engine
+        .function_registry
+        .descriptors()
+        .iter()
+        .filter(|descriptor| !descriptor.is_hidden())
+        .map(|descriptor| 1 + descriptor.aliases().len())
+        .sum::<usize>();
+    assert_eq!(result.rows.len(), expected_descriptor_names);
+    for legacy_row in eval_engine::eval_engine_policy::builtin_function_rows() {
+        let legacy_name = legacy_row["name"].as_str().unwrap();
+        let discovered_row = result
+            .rows
+            .iter()
+            .find(|row| {
+                row["name"]
+                    .as_str()
+                    .unwrap()
+                    .eq_ignore_ascii_case(legacy_name)
+            })
+            .unwrap_or_else(|| {
+                panic!("previously advertised function {legacy_name} must remain discoverable")
+            });
+        assert_eq!(discovered_row["signature"], legacy_row["signature"]);
+        assert_eq!(discovered_row["category"], legacy_row["category"]);
+        assert_eq!(discovered_row["description"], legacy_row["description"]);
+    }
+    let visible_row = result
+        .rows
+        .iter()
+        .find(|row| row["name"] == "test.visible")
+        .unwrap();
+    assert_eq!(visible_row["signature"], "test.visible() :: STRING");
+    assert_eq!(visible_row["description"], "Visible extension");
+    assert_eq!(visible_row["category"], "Testing");
+}
+
+#[test]
+fn injected_scalar_registration_rejects_collisions_before_engine_creation() {
+    let registrar: FunctionRegistrar = Arc::new(|builder| {
+        builder.register(FunctionDescriptor::extension(
+            "test.extension",
+            ["TOUPPER"],
+            "",
+            "",
+            "Testing",
+            Arc::new(|_, _| Ok(Value::Null)),
+        ))?;
+        Ok(())
+    });
+    let storage = Arc::new(StorageEngine::open_temporary().unwrap());
+
+    let error = match EvalEngine::try_new_with_function_registrars(storage, &[registrar]) {
+        Ok(_) => panic!("colliding registrar unexpectedly created an engine"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error,
+        FunctionRegistryError::NameCollision {
+            name: "toupper".into()
+        }
+    );
+}
+
+#[test]
+fn injected_scalar_errors_panics_cancellation_and_unknown_names_are_stable() {
+    let registrar: FunctionRegistrar = Arc::new(|builder| {
+        builder.register(FunctionDescriptor::extension(
+            "test.failure",
+            ["test.failAlias"],
+            "",
+            "",
+            "Testing",
+            Arc::new(|_, _| {
+                Err(copperdb_filter::FilterError::PredicateError(
+                    "stable failure".into(),
+                ))
+            }),
+        ))?;
+        builder.register(FunctionDescriptor::extension(
+            "test.panic",
+            ["test.panicAlias"],
+            "",
+            "",
+            "Testing",
+            Arc::new(|_, _| panic!("handler panic must be isolated")),
+        ))?;
+        builder.register(FunctionDescriptor::extension(
+            "test.cancel",
+            std::iter::empty::<&str>(),
+            "",
+            "",
+            "Testing",
+            Arc::new(|context, _| {
+                context.request_context.unwrap().cancel();
+                Ok(Value::Null)
+            }),
+        ))?;
+        Ok(())
+    });
+    let engine = make_engine_with_function_registrars(&[registrar]);
+
+    let failure = engine
+        .execute_cypher("RETURN test.failAlias() AS value", &HashMap::new())
+        .unwrap_err();
+    assert_eq!(
+        failure.to_string(),
+        "filter error: extension function test.failure failed: predicate evaluation error: stable failure"
+    );
+
+    let panic = engine
+        .execute_cypher("RETURN test.panicAlias() AS value", &HashMap::new())
+        .unwrap_err();
+    assert_eq!(
+        panic.to_string(),
+        "filter error: extension function test.panic panicked"
+    );
+
+    let cancellation = engine
+        .execute_cypher("RETURN test.cancel() AS value", &HashMap::new())
+        .unwrap_err();
+    assert!(matches!(cancellation, EvalError::RequestCancelled(_)));
+
+    let unknown = engine
+        .execute_cypher("RETURN Original.UnknownName() AS value", &HashMap::new())
+        .unwrap_err();
+    assert_eq!(
+        unknown.to_string(),
+        "filter error: unknown function: Original.UnknownName"
+    );
+}
+
+#[test]
+fn prof_hot_scalar_registry_lookup() {
+    let registry = FunctionRegistry::builtins();
+    let started = std::time::Instant::now();
+    let mut checksum = 0usize;
+    for _ in 0..100_000 {
+        checksum += std::hint::black_box(registry.get("toUpper"))
+            .unwrap()
+            .name()
+            .len();
+    }
+    let elapsed = started.elapsed();
+
+    assert_eq!(checksum, 700_000);
+    eprintln!("100000 scalar registry lookups: {elapsed:?}");
 }
 
 #[test]

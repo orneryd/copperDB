@@ -1,4 +1,5 @@
 use super::*;
+use crate::procedure_registry::BuiltinProcedure;
 
 const MAX_FULLTEXT_VOCABULARY_TERMS: usize = 2_048;
 const MAX_FULLTEXT_VOCABULARY_ENTRIES: usize = 16_384;
@@ -11,118 +12,185 @@ impl EvalEngine {
         params: &HashMap<String, Value>,
         rows: &[Row],
     ) -> Result<EvalResult, EvalError> {
-        let result = if call.procedure.eq_ignore_ascii_case("db.labels") {
-            self.execute_db_labels_call(call)
-        } else if call.procedure.eq_ignore_ascii_case("db.relationshipTypes") {
-            self.execute_db_relationship_types_call(call)
-        } else if call.procedure.eq_ignore_ascii_case("db.propertyKeys") {
-            self.execute_db_property_keys_call(call)
-        } else if call.procedure.eq_ignore_ascii_case("db.constraints") {
-            self.execute_db_constraints_call(call)
-        } else if call.procedure.eq_ignore_ascii_case("db.indexes") {
-            self.execute_db_indexes_call(call)
-        } else if call.procedure.eq_ignore_ascii_case("db.ping") {
-            self.execute_db_ping_call(call)
-        } else if call.procedure.eq_ignore_ascii_case("db.info") {
-            self.execute_db_info_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("db.schema.nodeProperties")
-        {
-            self.execute_db_schema_node_properties_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("db.schema.relProperties")
-        {
-            self.execute_db_schema_rel_properties_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("db.schema.visualization")
-        {
-            self.execute_db_schema_visualization_call(call)
-        } else if call.procedure.eq_ignore_ascii_case("nornicdb.version") {
-            self.execute_nornicdb_version_call(call)
-        } else if call.procedure.eq_ignore_ascii_case("nornicdb.stats") {
-            self.execute_nornicdb_stats_call(call)
-        } else if call.procedure.eq_ignore_ascii_case("nornicdb.decay.info") {
-            self.execute_nornicdb_decay_info_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("nornicdb.knowledgepolicy.info")
-        {
-            self.execute_nornicdb_knowledgepolicy_info_call(call)
-        } else if call.procedure.eq_ignore_ascii_case("dbms.procedures") {
-            self.execute_dbms_procedures_call(call)
-        } else if call.procedure.eq_ignore_ascii_case("dbms.functions") {
-            self.execute_dbms_functions_call(call)
-        } else if call.procedure.eq_ignore_ascii_case("dbms.components") {
-            self.execute_dbms_components_call(call)
-        } else if call.procedure.eq_ignore_ascii_case("dbms.info") {
-            self.execute_dbms_info_call(call)
-        } else if call.procedure.eq_ignore_ascii_case("dbms.listConfig") {
-            self.execute_dbms_list_config_call(call)
-        } else if call.procedure.eq_ignore_ascii_case("dbms.clientConfig") {
-            self.execute_dbms_client_config_call(call)
-        } else if call.procedure.eq_ignore_ascii_case("dbms.listConnections") {
-            self.execute_dbms_list_connections_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("db.index.fulltext.listAvailableAnalyzers")
-        {
-            self.execute_fulltext_list_analyzers_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("nornicdb.knowledgepolicy.resolve")
-        {
-            self.execute_knowledge_policy_resolve_call(call, params)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("nornicdb.knowledgepolicy.profiles")
-        {
-            self.execute_nornicdb_knowledgepolicy_profiles_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("nornicdb.knowledgepolicy.policies")
-        {
-            self.execute_nornicdb_knowledgepolicy_policies_call(call)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("db.index.fulltext.queryNodes")
-        {
-            self.execute_fulltext_query_nodes_call(request_context, call, params)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("db.index.fulltext.queryRelationships")
-        {
-            self.execute_fulltext_query_relationships_call(request_context, call, params)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("db.index.vector.queryNodes")
-        {
-            self.execute_vector_query_nodes_call(request_context, call, params)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("db.index.vector.queryRelationships")
-        {
-            self.execute_vector_query_relationships_call(request_context, call, params)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("db.create.setNodeVectorProperty")
-        {
-            self.execute_set_node_vector_property(call, params, rows)
-        } else if call
-            .procedure
-            .eq_ignore_ascii_case("db.create.setRelationshipVectorProperty")
-        {
-            self.execute_set_relationship_vector_property(call, params, rows)
+        request_context.check_active()?;
+        let descriptor = self
+            .procedure_registry
+            .get(&call.procedure)
+            .ok_or_else(|| {
+                EvalError::ExecutionError(format!("CALL {} is not supported yet", call.procedure))
+            })?;
+        let result = if let Some(implementation) = descriptor.builtin_implementation() {
+            self.execute_builtin_procedure(implementation, request_context, call, params, rows)
         } else {
-            Err(EvalError::ExecutionError(format!(
-                "CALL {} is not supported yet",
-                call.procedure
-            )))
+            self.execute_extension_procedure(descriptor, request_context, call, params, rows)
         }?;
+        request_context.check_active()?;
 
         self.project_call_result(call, result, params)
+    }
+
+    fn execute_builtin_procedure(
+        &self,
+        implementation: BuiltinProcedure,
+        request_context: &copperdb_util::RequestContext,
+        call: &copperdb_cypher::CallClause,
+        params: &HashMap<String, Value>,
+        rows: &[Row],
+    ) -> Result<EvalResult, EvalError> {
+        match implementation {
+            BuiltinProcedure::DbLabels => self.execute_db_labels_call(call),
+            BuiltinProcedure::DbRelationshipTypes => self.execute_db_relationship_types_call(call),
+            BuiltinProcedure::DbPropertyKeys => self.execute_db_property_keys_call(call),
+            BuiltinProcedure::DbConstraints => self.execute_db_constraints_call(call),
+            BuiltinProcedure::DbIndexes => self.execute_db_indexes_call(call),
+            BuiltinProcedure::DbPing => self.execute_db_ping_call(call),
+            BuiltinProcedure::DbInfo => self.execute_db_info_call(call),
+            BuiltinProcedure::DbSchemaNodeProperties => {
+                self.execute_db_schema_node_properties_call(call)
+            }
+            BuiltinProcedure::DbSchemaRelProperties => {
+                self.execute_db_schema_rel_properties_call(call)
+            }
+            BuiltinProcedure::DbSchemaVisualization => {
+                self.execute_db_schema_visualization_call(call)
+            }
+            BuiltinProcedure::NornicDbVersion => self.execute_nornicdb_version_call(call),
+            BuiltinProcedure::NornicDbStats => self.execute_nornicdb_stats_call(call),
+            BuiltinProcedure::NornicDbDecayInfo => self.execute_nornicdb_decay_info_call(call),
+            BuiltinProcedure::NornicDbKnowledgePolicyInfo => {
+                self.execute_nornicdb_knowledgepolicy_info_call(call)
+            }
+            BuiltinProcedure::DbmsProcedures => self.execute_dbms_procedures_call(call),
+            BuiltinProcedure::DbmsFunctions => self.execute_dbms_functions_call(call),
+            BuiltinProcedure::DbmsComponents => self.execute_dbms_components_call(call),
+            BuiltinProcedure::DbmsInfo => self.execute_dbms_info_call(call),
+            BuiltinProcedure::DbmsListConfig => self.execute_dbms_list_config_call(call),
+            BuiltinProcedure::DbmsClientConfig => self.execute_dbms_client_config_call(call),
+            BuiltinProcedure::DbmsListConnections => self.execute_dbms_list_connections_call(call),
+            BuiltinProcedure::FulltextListAnalyzers => {
+                self.execute_fulltext_list_analyzers_call(call)
+            }
+            BuiltinProcedure::KnowledgePolicyResolve => {
+                self.execute_knowledge_policy_resolve_call(call, params)
+            }
+            BuiltinProcedure::KnowledgePolicyProfiles => {
+                self.execute_nornicdb_knowledgepolicy_profiles_call(call)
+            }
+            BuiltinProcedure::KnowledgePolicyPolicies => {
+                self.execute_nornicdb_knowledgepolicy_policies_call(call)
+            }
+            BuiltinProcedure::FulltextQueryNodes => {
+                self.execute_fulltext_query_nodes_call(request_context, call, params)
+            }
+            BuiltinProcedure::FulltextQueryRelationships => {
+                self.execute_fulltext_query_relationships_call(request_context, call, params)
+            }
+            BuiltinProcedure::VectorQueryNodes => {
+                self.execute_vector_query_nodes_call(request_context, call, params)
+            }
+            BuiltinProcedure::VectorQueryRelationships => {
+                self.execute_vector_query_relationships_call(request_context, call, params)
+            }
+            BuiltinProcedure::SetNodeVectorProperty => {
+                self.execute_set_node_vector_property(call, params, rows)
+            }
+            BuiltinProcedure::SetRelationshipVectorProperty => {
+                self.execute_set_relationship_vector_property(call, params, rows)
+            }
+        }
+    }
+
+    fn execute_extension_procedure(
+        &self,
+        descriptor: &ProcedureDescriptor,
+        request_context: &copperdb_util::RequestContext,
+        call: &copperdb_cypher::CallClause,
+        params: &HashMap<String, Value>,
+        rows: &[Row],
+    ) -> Result<EvalResult, EvalError> {
+        let execution_context = CURRENT_EXECUTION_CONTEXT.with(|slot| slot.borrow().clone());
+        for capability in descriptor.required_capabilities() {
+            if !execution_context
+                .capabilities
+                .iter()
+                .any(|actual| actual == capability)
+            {
+                return Err(EvalError::ExecutionError(format!(
+                    "procedure {} requires capability {}",
+                    descriptor.canonical_name(),
+                    capability
+                )));
+            }
+        }
+        for role in descriptor.required_roles() {
+            if !execution_context
+                .caller_roles
+                .iter()
+                .any(|actual| actual == role)
+            {
+                return Err(EvalError::ExecutionError(format!(
+                    "procedure {} requires role {}",
+                    descriptor.canonical_name(),
+                    role
+                )));
+            }
+        }
+        let handler = descriptor
+            .extension_handler()
+            .expect("extension descriptor must have a handler");
+        let mut columns = None;
+        let mut result_rows = Vec::new();
+        for row in rows {
+            request_context.check_active()?;
+            let args = call
+                .args
+                .iter()
+                .map(|arg| self.evaluate_expression(arg, row, params))
+                .collect::<Result<Vec<_>, _>>()?;
+            let context = ProcedureCallContext {
+                row,
+                params,
+                capabilities: &execution_context.capabilities,
+                caller_roles: &execution_context.caller_roles,
+                database: execution_context.database.as_deref(),
+                request_context,
+            };
+            let output =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&context, &args)))
+                    .map_err(|_| {
+                        EvalError::ExecutionError(format!(
+                            "extension procedure {} panicked",
+                            descriptor.canonical_name()
+                        ))
+                    })?
+                    .map_err(|error| match error {
+                        ProcedureError::RequestCancelled(cancelled) => {
+                            EvalError::RequestCancelled(cancelled)
+                        }
+                        ProcedureError::Message(message) => EvalError::ExecutionError(format!(
+                            "extension procedure {} failed: {}",
+                            descriptor.canonical_name(),
+                            message
+                        )),
+                    })?;
+            if let Some(expected) = &columns {
+                if expected != &output.columns {
+                    return Err(EvalError::ExecutionError(format!(
+                        "extension procedure {} returned inconsistent columns",
+                        descriptor.canonical_name()
+                    )));
+                }
+            } else {
+                columns = Some(output.columns.clone());
+            }
+            for output_row in output.rows {
+                let mut merged = row.clone();
+                merged.extend(output_row);
+                result_rows.push(merged);
+            }
+            request_context.check_active()?;
+        }
+        Ok(ProcedureOutput::new(columns.unwrap_or_default(), result_rows).into())
     }
 
     fn execute_db_labels_call(
@@ -204,7 +272,33 @@ impl EvalEngine {
             ));
         }
 
-        let rows = builtin_procedure_rows();
+        let mut rows = self
+            .procedure_registry
+            .descriptors()
+            .iter()
+            .filter(|descriptor| !descriptor.is_hidden())
+            .map(|descriptor| {
+                let mut row = Row::new();
+                row.insert(
+                    "name".to_string(),
+                    Value::String(descriptor.name().to_string()),
+                );
+                row.insert(
+                    "signature".to_string(),
+                    Value::String(descriptor.signature().to_string()),
+                );
+                row.insert(
+                    "description".to_string(),
+                    Value::String(descriptor.description().to_string()),
+                );
+                row.insert(
+                    "mode".to_string(),
+                    Value::String(descriptor.mode().as_str().to_string()),
+                );
+                row
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| left["name"].as_str().cmp(&right["name"].as_str()));
         Ok(EvalResult {
             columns: vec![
                 "name".to_string(),
@@ -227,7 +321,36 @@ impl EvalEngine {
             ));
         }
 
-        let functions = builtin_function_rows();
+        let mut functions = self
+            .function_registry
+            .descriptors()
+            .iter()
+            .filter(|descriptor| !descriptor.is_hidden())
+            .flat_map(|descriptor| {
+                std::iter::once(descriptor.name())
+                    .chain(descriptor.aliases().iter().map(String::as_str))
+                    .map(|name| {
+                        let signature = descriptor.signature().replacen(descriptor.name(), name, 1);
+                        let mut row = Row::new();
+                        row.insert("name".to_string(), Value::String(name.to_string()));
+                        row.insert("signature".to_string(), Value::String(signature));
+                        row.insert(
+                            "description".to_string(),
+                            Value::String(descriptor.description_for_name(name).to_string()),
+                        );
+                        row.insert(
+                            "category".to_string(),
+                            Value::String(descriptor.category().to_string()),
+                        );
+                        row
+                    })
+            })
+            .collect::<Vec<_>>();
+        functions.sort_by(|left, right| {
+            left.get("name")
+                .and_then(Value::as_str)
+                .cmp(&right.get("name").and_then(Value::as_str))
+        });
         Ok(EvalResult {
             columns: vec![
                 "name".to_string(),
@@ -1264,10 +1387,19 @@ impl EvalEngine {
         }
 
         let columns = call.yield_items.iter().map(column_name).collect();
+        let procedure_columns = &result.columns;
         let rows = result
             .rows
             .iter()
-            .map(|row| project_row(row, &call.yield_items, params))
+            .map(|row| {
+                let mut projected = project_row(row, &call.yield_items, params)?;
+                for (key, value) in row {
+                    if !procedure_columns.contains(key) {
+                        projected.insert(key.clone(), value.clone());
+                    }
+                }
+                Ok::<Row, EvalError>(projected)
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(EvalResult {
@@ -2267,7 +2399,8 @@ struct FulltextCallOptions {
     limit: Option<usize>,
 }
 
-fn builtin_procedure_rows() -> Vec<Row> {
+#[cfg(test)]
+pub(crate) fn legacy_builtin_procedure_rows() -> Vec<Row> {
     let mut procedures = vec![
         (
             "db.constraints",
@@ -2465,7 +2598,8 @@ fn builtin_procedure_rows() -> Vec<Row> {
         .collect()
 }
 
-fn builtin_function_rows() -> Vec<Row> {
+#[cfg(test)]
+pub(crate) fn builtin_function_rows() -> Vec<Row> {
     let mut functions = vec![
         (
             "abs",

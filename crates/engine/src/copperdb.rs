@@ -867,18 +867,32 @@ impl CopperDb {
         storage: Arc<StorageEngine>,
         config: DatabaseConfig,
     ) -> Result<Self, CopperDbError> {
+        Self::from_storage_with_registrars(storage, config, &[], &[])
+    }
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    /// Construct a database with injected scalar functions and procedures.
+    pub fn from_storage_with_registrars(
+        storage: Arc<StorageEngine>,
+        config: DatabaseConfig,
+        function_registrars: &[FunctionRegistrar],
+        procedure_registrars: &[ProcedureRegistrar],
+    ) -> Result<Self, CopperDbError> {
         let vector_indexes = Arc::new(VectorIndexManager::build(storage.as_ref())?);
         let embedding_runtime = Arc::new(EmbeddingRuntime::from_config(
             Arc::clone(&storage),
             &config.runtime_config,
         ));
         embedding_runtime.start_workers(config.runtime_config.embedding_workers);
-        let eval = EvalEngine::new_with_vector_index_service(
+        let eval = EvalEngine::try_new_with_vector_index_service_and_registrars(
             Arc::clone(&storage),
             vector_indexes.registry(),
             Some(vector_indexes.artifact_refresh_callback(&storage)),
             vector_indexes.query_callback(),
-        );
+            function_registrars,
+            procedure_registrars,
+        )
+        .map_err(|error| CopperDbError::Init(error.to_string()))?;
         let cypher_result_cache = Arc::new(QueryResultCache::new(
             1024,
             Some(std::time::Duration::from_secs(300)),
@@ -1033,17 +1047,30 @@ impl CopperDb {
         let pattern_info = detect_query_pattern(cypher);
         let (compound_shape, compound_ok) = match_compound_query_shape(cypher);
         let (pipeline_clauses, pipeline_ok) = can_execute_as_pipeline(cypher);
+        let refresh_vector_persistence_after_audit = parsed
+            .clauses
+            .iter()
+            .any(|clause| matches!(clause, Clause::CreateIndex(_) | Clause::DropIndex(_)));
         let t_pattern = t2.elapsed();
 
         let t3 = std::time::Instant::now();
-        let eval_result = match self.eval.execute_with_routes_with_context(
-            request_context,
-            &parsed,
-            &params,
-            &pattern_info,
-            compound_ok.then_some(&compound_shape),
-            pipeline_ok.then_some(pipeline_clauses.as_slice()),
-        ) {
+        let function_context = FunctionExecutionContext {
+            capabilities: Vec::new(),
+            caller_roles: normalized_roles,
+            database: Some(self.config.default_database.clone()),
+            request_context: None,
+        };
+        let eval_result = match self
+            .eval
+            .execute_with_routes_with_context_and_function_context(
+                request_context,
+                &function_context,
+                &parsed,
+                &params,
+                &pattern_info,
+                compound_ok.then_some(&compound_shape),
+                pipeline_ok.then_some(pipeline_clauses.as_slice()),
+            ) {
             Ok(result) => result,
             Err(err) => {
                 self.record_query_audit(
@@ -1071,6 +1098,9 @@ impl CopperDb {
             Some(hash),
             elapsed_ms,
         )?;
+        if refresh_vector_persistence_after_audit {
+            self.vector_indexes.refresh_persistence(&self.storage);
+        }
 
         // ── Profiling: log phase timings (after audit) ────────────
         let t_total = start.elapsed();

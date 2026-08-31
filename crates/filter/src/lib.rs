@@ -8,6 +8,14 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use thiserror::Error;
 
+mod registry;
+
+pub use registry::{
+    with_function_registry, FunctionCallContext, FunctionDescriptor, FunctionExecutionContext,
+    FunctionHandler, FunctionRegistrar, FunctionRegistry, FunctionRegistryBuilder,
+    FunctionRegistryError,
+};
+
 /// A result row: variable → value bindings.
 pub type Row = HashMap<String, Value>;
 
@@ -21,6 +29,12 @@ pub enum FilterError {
     UnknownVariable(String),
     #[error("unknown function: {0}")]
     UnknownFunction(String),
+    #[error("extension function {name} failed: {message}")]
+    ExtensionError { name: String, message: String },
+    #[error("extension function {0} panicked")]
+    ExtensionPanic(String),
+    #[error("request cancelled")]
+    RequestCancelled,
 }
 
 // ─── Expression evaluator ────────────────────────────────────────────────────
@@ -500,14 +514,70 @@ fn eval_function(
     row: &Row,
     params: &HashMap<String, Value>,
 ) -> Result<Value, FilterError> {
-    let name_lower = name.to_lowercase();
+    registry::with_current_function_registry(|registry, execution_context| {
+        eval_registered_function(name, args, row, params, registry, execution_context)
+    })
+}
+
+fn eval_registered_function(
+    name: &str,
+    args: &[Expression],
+    row: &Row,
+    params: &HashMap<String, Value>,
+    registry: &FunctionRegistry,
+    execution_context: &FunctionExecutionContext,
+) -> Result<Value, FilterError> {
+    let descriptor = registry
+        .get(name)
+        .ok_or_else(|| FilterError::UnknownFunction(name.to_string()))?;
+    if let Some(handler) = descriptor.extension_handler() {
+        let check_cancellation = || {
+            execution_context
+                .request_context
+                .as_ref()
+                .map_or(Ok(()), |context| {
+                    context
+                        .check_active()
+                        .map_err(|_| FilterError::RequestCancelled)
+                })
+        };
+        check_cancellation()?;
+        let values = args
+            .iter()
+            .map(|arg| eval_expression(arg, row, params))
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handler(
+                &FunctionCallContext {
+                    row,
+                    params,
+                    capabilities: &execution_context.capabilities,
+                    caller_roles: &execution_context.caller_roles,
+                    database: execution_context.database.as_deref(),
+                    request_context: execution_context.request_context.as_ref(),
+                },
+                &values,
+            )
+        }));
+        check_cancellation()?;
+        let canonical_name = descriptor.name().to_string();
+        return match result {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(FilterError::ExtensionError {
+                name: canonical_name,
+                message: error.to_string(),
+            }),
+            Err(_) => Err(FilterError::ExtensionPanic(canonical_name)),
+        };
+    }
+    let name_lower = descriptor.dispatch_name();
     let eval_arg = |i: usize| -> Result<Value, FilterError> {
         args.get(i)
             .ok_or_else(|| FilterError::PredicateError(format!("missing arg {i} for {name}")))
             .and_then(|e| eval_expression(e, row, params))
     };
 
-    match name_lower.as_str() {
+    match name_lower {
         "count" => {
             if args.is_empty() {
                 return Ok(Value::Number(0.into()));
@@ -885,7 +955,7 @@ fn eval_function(
             let v = eval_arg(0)?;
             if let Value::Number(n) = &v {
                 if let Some(f) = n.as_f64() {
-                    let result = match name_lower.as_str() {
+                    let result = match name_lower {
                         "ceil" => f.ceil(),
                         "floor" => f.floor(),
                         _ => f.round(),
@@ -1051,7 +1121,7 @@ fn eval_function(
         "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" | "degrees" | "radians" => {
             let v = eval_arg(0)?;
             if let Some(f) = v.as_f64() {
-                let result = match name_lower.as_str() {
+                let result = match name_lower {
                     "sin" => f.sin(),
                     "cos" => f.cos(),
                     "tan" => f.tan(),
@@ -1136,7 +1206,7 @@ fn eval_function(
         "sinh" | "cosh" | "tanh" => {
             let v = eval_arg(0)?;
             if let Some(f) = v.as_f64() {
-                let result = match name_lower.as_str() {
+                let result = match name_lower {
                     "sinh" => f.sinh(),
                     "cosh" => f.cosh(),
                     "tanh" => f.tanh(),

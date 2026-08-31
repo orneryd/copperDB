@@ -366,7 +366,10 @@ fn local_hybrid_search_fuses_duplicate_lexical_and_semantic_hits() {
         )
         .unwrap();
 
-    assert_eq!(vector_only_weighted.results[0].global_id.local_id, "document:a");
+    assert_eq!(
+        vector_only_weighted.results[0].global_id.local_id,
+        "document:a"
+    );
 }
 
 #[test]

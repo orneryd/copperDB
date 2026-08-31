@@ -30,16 +30,68 @@ fn test_open_memory() {
 }
 
 #[test]
+fn from_storage_accepts_function_and_procedure_registrars() {
+    let function_registrar: FunctionRegistrar = Arc::new(|builder| {
+        builder.register(copperdb_filter::FunctionDescriptor::extension(
+            "test.scalar",
+            std::iter::empty::<&str>(),
+            "test.scalar() :: STRING",
+            "Injected scalar",
+            "Testing",
+            Arc::new(|_, _| Ok(Value::String("scalar".into()))),
+        ))?;
+        Ok(())
+    });
+    let procedure_registrar: ProcedureRegistrar = Arc::new(|builder| {
+        builder.register(copperdb_eval::ProcedureDescriptor::extension(
+            "test.procedure",
+            std::iter::empty::<&str>(),
+            "test.procedure() :: (value :: STRING)",
+            "Injected procedure",
+            copperdb_eval::ProcedureMode::Read,
+            Arc::new(|_, _| {
+                let mut row = copperdb_eval::Row::new();
+                row.insert("value".into(), Value::String("procedure".into()));
+                Ok(copperdb_eval::ProcedureOutput::new(
+                    vec!["value".into()],
+                    vec![row],
+                ))
+            }),
+        ))?;
+        Ok(())
+    });
+    let storage = Arc::new(StorageEngine::open_temporary().unwrap());
+    let db = CopperDb::from_storage_with_registrars(
+        storage,
+        DatabaseConfig::default(),
+        &[function_registrar],
+        &[procedure_registrar],
+    )
+    .unwrap();
+
+    let scalar = db
+        .execute("RETURN test.scalar() AS value", HashMap::new())
+        .unwrap();
+    assert_eq!(scalar.rows[0]["value"], Value::String("scalar".into()));
+    let procedure = db
+        .execute(
+            "CALL test.procedure() YIELD value RETURN value",
+            HashMap::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        procedure.rows[0]["value"],
+        Value::String("procedure".into())
+    );
+}
+
+#[test]
 fn lower_layer_error_conversion_preserves_request_cancellation() {
     let storage_error = CopperDbError::from(StorageError::RequestCancelled(RequestCancelled));
-    assert!(matches!(
-        storage_error,
-        CopperDbError::RequestCancelled(_)
-    ));
+    assert!(matches!(storage_error, CopperDbError::RequestCancelled(_)));
 
-    let eval_error = CopperDbError::from(copperdb_eval::EvalError::RequestCancelled(
-        RequestCancelled,
-    ));
+    let eval_error =
+        CopperDbError::from(copperdb_eval::EvalError::RequestCancelled(RequestCancelled));
     assert!(matches!(eval_error, CopperDbError::RequestCancelled(_)));
 
     let storage_error = CopperDbError::from(StorageError::NotFound("missing".into()));
