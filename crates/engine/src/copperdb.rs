@@ -166,7 +166,16 @@ impl CopperDb {
     /// Embed search text with this database's configured embedding provider.
     /// Returns `None` when embedding is disabled or the query is empty.
     pub fn embed_search_query(&self, text: &str) -> Result<Option<Vec<f32>>, CopperDbError> {
-        self.embedding_runtime.embed_query(text)
+        self.embed_search_query_with_context(&RequestContext::detached(), text)
+    }
+
+    pub fn embed_search_query_with_context(
+        &self,
+        request_context: &RequestContext,
+        text: &str,
+    ) -> Result<Option<Vec<f32>>, CopperDbError> {
+        self.embedding_runtime
+            .embed_query_with_context(request_context, text)
     }
 
     /// Queue one node for managed chunk re-embedding while preserving named vectors.

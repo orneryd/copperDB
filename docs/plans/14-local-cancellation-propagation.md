@@ -38,6 +38,7 @@ Cancel before work, mid-loop, during rebuild/hydration, on disconnect/deadline, 
 - Complete: distributed ranked-search and hydration collectors propagate typed remote cancellation immediately instead of classifying the cancelled child as a failed node. Mixed-success regressions verify earlier shard results are discarded when a later remote child reports cancellation.
 - Complete: HTTP transaction execution preserves typed engine cancellation through the server helper and maps it to the same upstream-compatible `503` transaction-timeout response used by route deadlines. Bolt adapters retain their existing string contract at the explicit protocol boundary.
 - Complete: context-aware Bolt RUN execution preserves typed cancellation through its executor contract. Unsolicited cancellation maps to NornicDB's default `Neo.ClientError.Statement.SyntaxError` query failure with `request cancelled`, while ordinary execution strings retain `ExecutionFailed` and active explicit transactions are rolled back.
+- Complete: query embedding uses the ingress request context and checks immediately before and after the blocking provider call. Pre-cancelled requests never invoke the provider, results produced after cancellation are discarded as typed `RequestCancelled`, and hybrid HTTP search does not swallow cancellation as a BM25 fallback.
 - Pending: complete context-aware internal APIs, bounded cooperative checkpoints, typed protocol error mapping, and cancellation telemetry.
 
 ## Definition Of Done

@@ -1636,7 +1636,7 @@ struct DatabaseConfigUpdateRequest {
     overrides: BTreeMap<String, String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct SearchRequest {
     #[serde(default)]
     database: String,
@@ -1861,8 +1861,15 @@ async fn search_handler(
     } else if vector_indexes.is_empty() {
         None
     } else {
-        match engine.embed_search_query(&request.query) {
+        match engine.embed_search_query_with_context(&request_context, &request.query) {
             Ok(vector) => vector,
+            Err(error @ copperdb_engine::CopperDbError::RequestCancelled(_)) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({"error": error.to_string()})),
+                )
+                    .into_response();
+            }
             Err(error) if !bm25_indexes.is_empty() => {
                 tracing::warn!(database, %error, "query embedding failed; falling back to BM25");
                 None

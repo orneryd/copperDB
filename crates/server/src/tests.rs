@@ -864,7 +864,7 @@ async fn copperdb_search_combines_text_and_direct_vector_when_embedding_is_disab
         }
     }
 
-    let weighted_response = build_router(Arc::new(state))
+    let weighted_response = build_router(Arc::new(state.clone()))
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -892,6 +892,28 @@ async fn copperdb_search_combines_text_and_direct_vector_when_embedding_is_disab
         .unwrap();
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(payload[0]["node"]["id"], "document:hybrid");
+
+    let request_context = RequestContext::detached();
+    request_context.cancel();
+    let cancelled_response = search_handler(
+        Arc::new(state),
+        request_context,
+        HeaderMap::new(),
+        SearchRequest {
+            database: "direct-hybrid".into(),
+            query: "graph".into(),
+            ..SearchRequest::default()
+        },
+        None,
+    )
+    .await;
+
+    assert_eq!(cancelled_response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(cancelled_response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload, serde_json::json!({"error": "request cancelled"}));
 }
 
 #[tokio::test]

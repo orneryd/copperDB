@@ -2,6 +2,7 @@ use crate::CopperDbError;
 use copperdb_config::EffectiveDatabaseConfig;
 use copperdb_embed::{CachedEmbedder, Embedder, LocalGgufEmbedder};
 use copperdb_storage::{NodeRecord, StorageEngine};
+use copperdb_util::RequestContext;
 use serde_json::json;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -297,7 +298,12 @@ impl EmbeddingRuntime {
         })
     }
 
-    pub(crate) fn embed_query(&self, text: &str) -> Result<Option<Vec<f32>>, CopperDbError> {
+    pub(crate) fn embed_query_with_context(
+        &self,
+        request_context: &RequestContext,
+        text: &str,
+    ) -> Result<Option<Vec<f32>>, CopperDbError> {
+        request_context.check_active()?;
         if text.trim().is_empty()
             || *self.state.lock().expect("embedding runtime state lock")
                 == EmbeddingRuntimeState::Disabled
@@ -305,8 +311,9 @@ impl EmbeddingRuntime {
             return Ok(None);
         }
         let embedder = self.ensure_embedder()?;
-        let embedding = embedder
-            .embed_batch_blocking(&[text.to_string()])
+        let embedding_result = embedder.embed_batch_blocking(&[text.to_string()]);
+        request_context.check_active()?;
+        let embedding = embedding_result
             .map_err(|error| CopperDbError::Init(format!("query embedding failed: {error}")))?
             .into_iter()
             .next()
@@ -751,6 +758,8 @@ mod tests {
         release: Mutex<Receiver<()>>,
     }
 
+    struct UnexpectedEmbedder;
+
     #[async_trait::async_trait]
     impl Embedder for TestEmbedder {
         async fn embed(&self, texts: &[String]) -> Result<Vec<Embedding>, EmbedError> {
@@ -791,6 +800,21 @@ mod tests {
                     model: "test-model".to_string(),
                 })
                 .collect())
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Embedder for UnexpectedEmbedder {
+        async fn embed(&self, _texts: &[String]) -> Result<Vec<Embedding>, EmbedError> {
+            panic!("cancelled query must not invoke the embedding provider")
+        }
+
+        fn embed_batch_blocking(&self, _texts: &[String]) -> Result<Vec<Embedding>, EmbedError> {
+            panic!("cancelled query must not invoke the embedding provider")
         }
 
         fn dimensions(&self) -> usize {
@@ -841,7 +865,12 @@ mod tests {
             }
         );
         assert!(!runtime.drain_one().unwrap());
-        assert_eq!(runtime.embed_query("graph database").unwrap(), None);
+        assert_eq!(
+            runtime
+                .embed_query_with_context(&RequestContext::detached(), "graph database")
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -851,10 +880,59 @@ mod tests {
             EmbeddingRuntime::ready(storage, 2, Arc::new(TestEmbedder(Ok(vec![0.25, 0.75]))));
 
         assert_eq!(
-            runtime.embed_query("graph database").unwrap(),
+            runtime
+                .embed_query_with_context(&RequestContext::detached(), "graph database")
+                .unwrap(),
             Some(vec![0.25, 0.75])
         );
-        assert_eq!(runtime.embed_query("   ").unwrap(), None);
+        assert_eq!(
+            runtime
+                .embed_query_with_context(&RequestContext::detached(), "   ")
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn query_embedding_rejects_pre_cancelled_context_before_provider_call() {
+        let storage = Arc::new(StorageEngine::open_temporary().unwrap());
+        let runtime = EmbeddingRuntime::ready(storage, 2, Arc::new(UnexpectedEmbedder));
+        let request_context = RequestContext::detached();
+        request_context.cancel();
+
+        let error = runtime
+            .embed_query_with_context(&request_context, "graph database")
+            .unwrap_err();
+
+        assert!(matches!(error, CopperDbError::RequestCancelled(_)));
+    }
+
+    #[test]
+    fn query_embedding_discards_result_cancelled_during_provider_call() {
+        let storage = Arc::new(StorageEngine::open_temporary().unwrap());
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let runtime = Arc::new(EmbeddingRuntime::ready(
+            storage,
+            2,
+            Arc::new(BlockingEmbedder {
+                started: started_tx,
+                release: Mutex::new(release_rx),
+            }),
+        ));
+        let request_context = RequestContext::detached();
+        let worker_context = request_context.clone();
+        let worker_runtime = Arc::clone(&runtime);
+        let worker = thread::spawn(move || {
+            worker_runtime.embed_query_with_context(&worker_context, "graph database")
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        request_context.cancel();
+        release_tx.send(()).unwrap();
+        let error = worker.join().unwrap().unwrap_err();
+
+        assert!(matches!(error, CopperDbError::RequestCancelled(_)));
     }
 
     #[test]
