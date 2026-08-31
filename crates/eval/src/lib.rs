@@ -81,7 +81,12 @@ impl From<copperdb_storage::StorageError> for EvalError {
 
 impl From<IndexError> for EvalError {
     fn from(e: IndexError) -> Self {
-        EvalError::ExecutionError(e.to_string())
+        match e {
+            IndexError::Storage(copperdb_storage::StorageError::RequestCancelled(cancelled)) => {
+                EvalError::RequestCancelled(cancelled)
+            }
+            error => EvalError::ExecutionError(error.to_string()),
+        }
     }
 }
 

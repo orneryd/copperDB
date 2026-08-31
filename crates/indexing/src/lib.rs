@@ -633,6 +633,7 @@ fn validate_definition(definition: &IndexDefinition) -> Result<(), IndexError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use copperdb_util::RequestCancellation;
     use serde_json::json;
     use std::collections::BTreeMap;
     use tempfile::tempdir;
@@ -769,6 +770,27 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, IndexError::InvalidDefinition(_)));
+        assert!(catalog.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn catalog_preserves_storage_cancellation_without_persisting() {
+        let (_temp_dir, storage) = open_test_storage("catalog-cancelled");
+        let catalog = IndexCatalog::new(&storage);
+        let cancellation = RequestCancellation::new();
+        cancellation.cancel();
+
+        let error = catalog
+            .create_with_cancellation(
+                sample_definition("person_email_idx", "Person", &["email"]),
+                &cancellation,
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            IndexError::Storage(StorageError::RequestCancelled(_))
+        ));
         assert!(catalog.list().unwrap().is_empty());
     }
 

@@ -21,6 +21,21 @@
         ));
     }
 
+    #[test]
+    fn index_error_conversion_preserves_only_request_cancellation() {
+        let error = EvalError::from(IndexError::Storage(StorageError::RequestCancelled(
+            RequestCancelled,
+        )));
+        assert!(matches!(error, EvalError::RequestCancelled(_)));
+
+        let error = EvalError::from(IndexError::AlreadyExists("person_idx".into()));
+        assert!(matches!(
+            error,
+            EvalError::ExecutionError(message)
+                if message == "index already exists: person_idx"
+        ));
+    }
+
     fn node_props(name: &str) -> HashMap<String, Value> {
         [("name".to_string(), Value::String(name.to_string()))]
             .into_iter()
@@ -155,6 +170,24 @@
     fn make_engine() -> EvalEngine {
         let storage = Arc::new(StorageEngine::open_temporary().unwrap());
         EvalEngine::new(storage)
+    }
+
+    #[test]
+    fn context_aware_create_index_preserves_cancellation_without_catalog_mutation() {
+        let engine = make_engine();
+        let query = Parser::new()
+            .parse("CREATE INDEX person_idx FOR (n:Person) ON (n.email)")
+            .unwrap();
+        let request_context = RequestContext::detached();
+        request_context.cancel();
+
+        let error = engine
+            .execute_with_context(&request_context, &query, &HashMap::new())
+            .unwrap_err();
+
+        assert!(matches!(error, EvalError::RequestCancelled(_)));
+        assert!(engine.storage.load_index_definitions().unwrap().is_empty());
+        assert_eq!(engine.storage.index_schema_generation(), 0);
     }
 
     #[test]
