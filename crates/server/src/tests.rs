@@ -127,6 +127,36 @@ fn transaction_request_timeout_accepts_only_positive_duration_overrides() {
 }
 
 #[tokio::test]
+async fn transaction_handler_maps_engine_cancellation_to_upstream_timeout_response() {
+    use axum::body::to_bytes;
+    use axum::response::IntoResponse;
+
+    let request_context = RequestContext::detached();
+    request_context.cancel();
+    let mut state = AppState::default();
+    state.auth.security_enabled = false;
+    let response = neo4j_tx_commit_handler(
+        State(Arc::new(state)),
+        Path("copperdb".into()),
+        Extension(request_context),
+        HeaderMap::new(),
+        Json(Neo4jCommitRequest {
+            statements: vec![Neo4jStatement {
+                statement: "RETURN 1 AS value".into(),
+                parameters: None,
+            }],
+            bookmarks: Vec::new(),
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = to_bytes(response.into_body(), 1024).await.unwrap();
+    assert_eq!(&body[..], b"request timeout: transaction busy");
+}
+
+#[tokio::test]
 async fn request_context_middleware_returns_timeout_and_cancels_context() {
     use axum::{body::Body, http::Request, routing::get, Extension, Router};
     use tower::ServiceExt;
@@ -4723,7 +4753,7 @@ fn server_statement_execution_passes_roles_to_compliance() {
         Ok(_) => panic!("reader role should be denied by compliance policy"),
         Err(err) => err,
     };
-    assert!(err.contains("compliance error"));
+    assert!(err.to_string().contains("compliance error"));
 
     let doctor_roles = vec!["doctor".to_string()];
     execute_statement(

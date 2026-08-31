@@ -2294,18 +2294,50 @@ async fn neo4j_tx_commit_handler(
             )
         })
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| StatementExecutionError::Message(error.to_string()))
         .and_then(|result| result);
         match result {
             Ok(result) => results.push(result),
+            Err(StatementExecutionError::RequestCancelled(_)) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "request timeout: transaction busy",
+                )
+                    .into_response();
+            }
             Err(error) => errors.push(Neo4jError {
                 code: "Neo.ClientError.Statement.ExecutionFailed".into(),
-                message: error,
+                message: error.to_string(),
             }),
         }
     }
 
     Json(Neo4jCommitResponse { results, errors }).into_response()
+}
+
+#[derive(Debug, Error)]
+enum StatementExecutionError {
+    #[error("{0}")]
+    Message(String),
+    #[error(transparent)]
+    RequestCancelled(#[from] copperdb_util::RequestCancelled),
+}
+
+impl From<String> for StatementExecutionError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<copperdb_engine::CopperDbError> for StatementExecutionError {
+    fn from(error: copperdb_engine::CopperDbError) -> Self {
+        match error {
+            copperdb_engine::CopperDbError::RequestCancelled(cancelled) => {
+                Self::RequestCancelled(cancelled)
+            }
+            other => Self::Message(other.to_string()),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2320,7 +2352,7 @@ fn execute_statement(
     distributed_read_fence: Option<LogicalTransactionId>,
     caller_auth_token: Option<String>,
     request_region: Option<String>,
-) -> Result<Neo4jResult, String> {
+) -> Result<Neo4jResult, StatementExecutionError> {
     let normalized = statement.trim();
     let upper = normalized.to_ascii_uppercase();
     let fulltext_started = is_fulltext_procedure_call(&upper).then(std::time::Instant::now);
@@ -2339,14 +2371,14 @@ fn execute_statement(
             drop_database(&state, &name)?;
             return Ok(empty_neo4j_result());
         }
-        return Err(format!("unsupported system statement: {}", statement));
+        return Err(format!("unsupported system statement: {}", statement).into());
     }
 
     if state.db_manager.get(&database).is_none() {
-        return Err(format!("database not found: {database}"));
+        return Err(format!("database not found: {database}").into());
     }
 
-    let result = (|| -> Result<copperdb_engine::QueryResult, String> {
+    let result = (|| -> Result<copperdb_engine::QueryResult, StatementExecutionError> {
         let engine = open_engine(&state, &database)?;
         if distributed {
             let placement = PlacementKey::default_for_database(&database);
@@ -2380,12 +2412,12 @@ fn execute_statement(
                         )
                         .await
                         .map(|outcome| outcome.result)
-                        .map_err(|error| error.to_string())
+                        .map_err(StatementExecutionError::from)
                 })
         } else {
             engine
                 .execute_as_with_context(&request_context, normalized, parameters, &roles)
-                .map_err(|error| error.to_string())
+                .map_err(StatementExecutionError::from)
         }
     })();
 
@@ -2503,7 +2535,8 @@ impl QueryExecutor for AppStateBoltExecutor {
             None,
             None,
             None,
-        )?;
+        )
+        .map_err(|error| error.to_string())?;
         Ok(BoltQueryResult {
             columns: result.columns,
             rows: result.data.into_iter().map(|row| row.row).collect(),
@@ -2536,7 +2569,8 @@ impl QueryExecutor for AppStateBoltExecutor {
             None,
             None,
             None,
-        )?;
+        )
+        .map_err(|error| error.to_string())?;
         Ok(BoltQueryResult {
             columns: result.columns,
             rows: result.data.into_iter().map(|row| row.row).collect(),
