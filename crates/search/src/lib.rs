@@ -851,6 +851,9 @@ pub async fn collect_planned_fabric_ranked_batches_with_context(
                     responded_nodes.push(peer.node_id.clone());
                     batches.push(batch);
                 }
+                Err(SearchError::RequestCancelled(cancelled)) => {
+                    return Err(SearchError::RequestCancelled(cancelled));
+                }
                 Err(_) => failed_nodes.push(peer.node_id.clone()),
             }
         }
@@ -909,6 +912,9 @@ pub async fn collect_fabric_hydration_records_with_context(
             Ok(mut node_records) => {
                 responded_nodes.push(request.node_id);
                 records.append(&mut node_records);
+            }
+            Err(SearchError::RequestCancelled(cancelled)) => {
+                return Err(SearchError::RequestCancelled(cancelled));
             }
             Err(_) => failed_nodes.push(request.node_id),
         }
@@ -1155,6 +1161,55 @@ mod tests {
                     global_id,
                     labels: vec!["Document".into()],
                     entity: serde_json::json!({"id": "doc-1"}),
+                })
+                .collect())
+        }
+    }
+
+    struct RemotelyCancellingTransport;
+
+    #[async_trait]
+    impl RankedSearchTransport for RemotelyCancellingTransport {
+        async fn search_ranked_node(
+            &self,
+            node_id: &str,
+            placement: &PlacementKey,
+            _query: &SearchQuery,
+            _read_fence: Option<LogicalTransactionId>,
+            _request_context: Option<&RequestContext>,
+        ) -> Result<RrfSearchBatch, SearchError> {
+            if node_id == "cancelled" {
+                return Err(SearchError::RequestCancelled(RequestCancelled));
+            }
+            Ok(RrfSearchBatch {
+                shard: placement.clone(),
+                source: "lexical".into(),
+                hits: Vec::new(),
+                filtered_hits: 0,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl HydrationTransport for RemotelyCancellingTransport {
+        async fn hydrate_node(
+            &self,
+            node_id: &str,
+            _placement: &PlacementKey,
+            global_ids: &[FabricGlobalId],
+            _read_fence: Option<LogicalTransactionId>,
+            _request_context: Option<&RequestContext>,
+        ) -> Result<Vec<RrfHydrationRecord>, SearchError> {
+            if node_id == "cancelled" {
+                return Err(SearchError::RequestCancelled(RequestCancelled));
+            }
+            Ok(global_ids
+                .iter()
+                .cloned()
+                .map(|global_id| RrfHydrationRecord {
+                    global_id,
+                    labels: vec!["Document".into()],
+                    entity: serde_json::json!({"id": "Document:1"}),
                 })
                 .collect())
         }
@@ -1466,10 +1521,8 @@ mod tests {
         ];
 
         let default_order = merge_rrf_search_hits(ranked_hits.clone(), RrfConfig::new(60.0, 2));
-        let vector_weighted = merge_rrf_search_hits(
-            ranked_hits,
-            RrfConfig::new(60.0, 2).with_weights(2.0, 1.0),
-        );
+        let vector_weighted =
+            merge_rrf_search_hits(ranked_hits, RrfConfig::new(60.0, 2).with_weights(2.0, 1.0));
 
         assert_eq!(default_order[0].global_id.local_id, "document:lexical");
         assert_eq!(vector_weighted[0].global_id.local_id, "document:vector");
@@ -1560,8 +1613,7 @@ mod tests {
     fn rrf_merge_matches_nornicdb_fifty_result_fixture_threshold() {
         let shard = PlacementKey::new("default", "copper", "primary");
         let fixture_id = |position: usize, offset: usize| {
-            let prefix = char::from_u32('a' as u32 + ((position + offset) % 26) as u32)
-                .unwrap();
+            let prefix = char::from_u32('a' as u32 + ((position + offset) % 26) as u32).unwrap();
             let suffix = char::from_u32(position as u32).unwrap();
             format!("{prefix}{suffix}")
         };
@@ -1907,6 +1959,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ranked_search_discards_partial_results_on_remote_cancellation() {
+        use copperdb_topology::{MeshPeer, SearchRoutingPolicy};
+
+        let placement = PlacementKey::default_for_database("copper");
+        let result = collect_planned_fabric_ranked_batches_with_context(
+            &RequestContext::detached(),
+            vec![DistributedSearchPlan {
+                placement,
+                fanout: vec![
+                    MeshPeer::new("success", "success.mesh.local:9000"),
+                    MeshPeer::new("cancelled", "cancelled.mesh.local:9000"),
+                ],
+                policy: SearchRoutingPolicy::default(),
+                parallelism: 1,
+                hedge_after_micros: 0,
+            }],
+            SearchQuery::FullText {
+                query: "alice".into(),
+                fields: vec!["body".into()],
+                limit: 10,
+            },
+            None,
+            Arc::new(RemotelyCancellingTransport),
+        )
+        .await;
+
+        assert!(matches!(result, Err(SearchError::RequestCancelled(_))));
+    }
+
+    #[tokio::test]
     async fn hydration_transport_collects_records_and_tracks_missing_ids() {
         let primary = PlacementKey::new("default", "copper", "primary");
         let person = PlacementKey::new("default", "copper", "person-00");
@@ -1963,6 +2045,34 @@ mod tests {
                 read_fence: None,
             }],
             Arc::new(CancellingHydrationTransport),
+        )
+        .await;
+
+        assert!(matches!(result, Err(SearchError::RequestCancelled(_))));
+    }
+
+    #[tokio::test]
+    async fn hydration_discards_partial_results_on_remote_cancellation() {
+        let placement = PlacementKey::default_for_database("copper");
+        let first_id = FabricGlobalId::new(placement.clone(), "node", "Document:1");
+        let second_id = FabricGlobalId::new(placement.clone(), "node", "Document:2");
+        let result = collect_fabric_hydration_records_with_context(
+            &RequestContext::detached(),
+            vec![
+                FabricHydrationRequest {
+                    node_id: "success".into(),
+                    placement: placement.clone(),
+                    global_ids: vec![first_id],
+                    read_fence: None,
+                },
+                FabricHydrationRequest {
+                    node_id: "cancelled".into(),
+                    placement,
+                    global_ids: vec![second_id],
+                    read_fence: None,
+                },
+            ],
+            Arc::new(RemotelyCancellingTransport),
         )
         .await;
 
