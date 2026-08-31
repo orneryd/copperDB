@@ -219,6 +219,13 @@ fn status_from_grpc_error(error: GrpcError) -> Status {
     }
 }
 
+fn search_error_from_grpc(error: GrpcError) -> SearchError {
+    match error {
+        GrpcError::RequestCancelled(cancelled) => SearchError::RequestCancelled(cancelled),
+        other => SearchError::Transport(other.to_string()),
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum GrpcError {
     #[error("gRPC transport error: {0}")]
@@ -1528,7 +1535,7 @@ impl RankedSearchTransport for NornicGrpcRankedSearchTransport {
                 request_context: request_context.map(RequestContext::metadata),
             })
             .await
-            .map_err(|error| SearchError::Transport(error.to_string()))
+            .map_err(search_error_from_grpc)
     }
 }
 
@@ -1553,7 +1560,7 @@ impl HydrationTransport for NornicGrpcHydrationTransport {
                 request_context: request_context.map(RequestContext::metadata),
             })
             .await
-            .map_err(|error| SearchError::Transport(error.to_string()))
+            .map_err(search_error_from_grpc)
     }
 }
 

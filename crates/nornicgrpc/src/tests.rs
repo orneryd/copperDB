@@ -31,6 +31,28 @@ struct RecordingRemoteHydrationClient {
     records: Mutex<HashMap<String, Vec<RrfHydrationRecord>>>,
 }
 
+struct CancellingRemoteSearchClient;
+
+#[async_trait]
+impl RemoteRankedSearchClient for CancellingRemoteSearchClient {
+    async fn search_ranked(
+        &self,
+        _request: RemoteRankedSearchRequest,
+    ) -> Result<RrfSearchBatch, GrpcError> {
+        Err(GrpcError::RequestCancelled(RequestCancelled))
+    }
+}
+
+#[async_trait]
+impl RemoteHydrationClient for CancellingRemoteSearchClient {
+    async fn hydrate_entities(
+        &self,
+        _request: RemoteHydrationRequest,
+    ) -> Result<Vec<RrfHydrationRecord>, GrpcError> {
+        Err(GrpcError::RequestCancelled(RequestCancelled))
+    }
+}
+
 #[async_trait]
 impl RemoteReplicaClient for RecordingRemoteReplicaClient {
     async fn apply_replica(&self, request: RemoteReplicaApplyRequest) -> Result<(), GrpcError> {
@@ -676,7 +698,7 @@ async fn ranked_search_transport_sends_requests_to_target_endpoint() {
                 label: "Person".into(),
                 snippet: None,
             }],
-                filtered_hits: 0,
+            filtered_hits: 0,
         },
     );
 
@@ -707,6 +729,56 @@ async fn ranked_search_transport_sends_requests_to_target_endpoint() {
         SearchQuery::FullText { query, .. } => assert_eq!(query, "alice"),
         other => panic!("expected full-text query, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn ranked_search_transport_preserves_request_cancellation() {
+    let placement = PlacementKey::default_for_database("copper");
+    let transport = NornicGrpcRankedSearchTransport::new(
+        [("search-a".into(), "search-a.mesh.local:50051".into())],
+        Arc::new(CancellingRemoteSearchClient),
+    );
+
+    let error = transport
+        .search_ranked_node(
+            "search-a",
+            &placement,
+            &SearchQuery::FullText {
+                query: "alice".into(),
+                fields: vec!["body".into()],
+                limit: 10,
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, SearchError::RequestCancelled(_)));
+
+    let transport = NornicGrpcRankedSearchTransport::new(
+        [("search-a".into(), "search-a.mesh.local:50051".into())],
+        Arc::new(RecordingRemoteRankedSearchClient::default()),
+    );
+    let error = transport
+        .search_ranked_node(
+            "search-a",
+            &placement,
+            &SearchQuery::FullText {
+                query: "alice".into(),
+                fields: vec!["body".into()],
+                limit: 10,
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        SearchError::Transport(message)
+            if message == "gRPC transport error: no ranked batch for search-a"
+    ));
 }
 
 #[tokio::test]
@@ -761,6 +833,23 @@ async fn hydration_transport_sends_requests_to_target_endpoint() {
     assert_eq!(requests[0].target_node, "node-a");
     assert_eq!(requests[0].target_addr, "node-a.mesh.local:50051");
     assert_eq!(requests[0].placement, placement);
+}
+
+#[tokio::test]
+async fn hydration_transport_preserves_request_cancellation() {
+    let placement = PlacementKey::default_for_database("copper");
+    let global_id = FabricGlobalId::new(placement.clone(), "node", "Document:1");
+    let transport = NornicGrpcHydrationTransport::new(
+        [("node-a".into(), "node-a.mesh.local:50051".into())],
+        Arc::new(CancellingRemoteSearchClient),
+    );
+
+    let error = transport
+        .hydrate_node("node-a", &placement, &[global_id], None, None)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, SearchError::RequestCancelled(_)));
 }
 
 #[test]

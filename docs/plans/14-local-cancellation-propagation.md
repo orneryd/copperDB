@@ -34,6 +34,7 @@ Cancel before work, mid-loop, during rebuild/hydration, on disconnect/deadline, 
 - Complete: GraphQL attaches the HTTP request context to async-graphql execution and requires it in every resolver. Point reads and mutations check before storage work, node listing uses cancellable streaming, storage cancellation remains typed, and cancelled mutations are rejected before writing. Detached schema execution remains an explicit embedded/test wrapper.
 - Complete: distributed ranked-search and hydration collectors recheck cancellation after every awaited transport response, discard response assembly when cancellation wins the race, and check hydration materialization every 256 items. Cancel-on-return transport regressions verify no partial collection escapes as success.
 - Complete: storage cancellation remains typed when converted through eval and engine errors, including direct engine storage adapters. Focused regressions also verify ordinary storage and eval failures retain their existing generic classifications.
+- Complete: remote ranked-search and hydration transports preserve tonic `Cancelled` as typed search cancellation instead of flattening it into a transport string. Adapter regressions verify both cancellation paths and unchanged classification of ordinary gRPC transport failures.
 - Pending: complete context-aware internal APIs, bounded cooperative checkpoints, typed protocol error mapping, and cancellation telemetry.
 
 ## Definition Of Done
