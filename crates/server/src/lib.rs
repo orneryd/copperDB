@@ -942,6 +942,7 @@ const STATUS_SCHEMA_VERSION: u32 = 1;
 const STORAGE_SIZE_SNAPSHOT_MAX_AGE: Duration = Duration::from_secs(5);
 const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const SEARCH_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_TRANSACTION_REQUEST_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const TRANSACTION_REQUEST_TIMEOUT_ENV: &str = "COPPERDB_HTTP_TX_TIMEOUT";
 const UPSTREAM_TRANSACTION_REQUEST_TIMEOUT_ENV: &str = "NORNICDB_HTTP_TX_TIMEOUT";
@@ -1410,6 +1411,10 @@ fn http_request_timeout(path: &str) -> Option<HttpRequestTimeout> {
         "/copperdb/search" => Some(HttpRequestTimeout {
             duration: SEARCH_REQUEST_TIMEOUT,
             message: "request timeout: search busy",
+        }),
+        "/mcp" => Some(HttpRequestTimeout {
+            duration: MCP_REQUEST_TIMEOUT,
+            message: "request timeout: mcp busy",
         }),
         path if path.starts_with("/db/") && path.ends_with("/search") => Some(HttpRequestTimeout {
             duration: SEARCH_REQUEST_TIMEOUT,
@@ -4903,6 +4908,9 @@ async fn mcp_handler(
     headers: HeaderMap,
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Response {
+    if !mcp_accepts_json(&headers) {
+        return StatusCode::NOT_ACCEPTABLE.into_response();
+    }
     let Json(body) = match body {
         Ok(body) => body,
         Err(rejection)
@@ -4990,6 +4998,48 @@ async fn mcp_handler(
         Ok(None) => StatusCode::ACCEPTED.into_response(),
         Err(status) => status.into_response(),
     }
+}
+
+fn mcp_accepts_json(headers: &HeaderMap) -> bool {
+    let Some(accept) = headers.get(header::ACCEPT) else {
+        return true;
+    };
+    let Ok(accept) = accept.to_str() else {
+        return false;
+    };
+    accept
+        .split(',')
+        .filter_map(|range| {
+            let mut parts = range.split(';');
+            let media_type = parts.next().unwrap_or_default().trim().to_ascii_lowercase();
+            let specificity = match media_type.as_str() {
+                "*/*" => 0,
+                "application/*" => 1,
+                "application/json" => 2,
+                media_type
+                    if media_type.starts_with("application/") && media_type.ends_with("+json") =>
+                {
+                    2
+                }
+                _ => return None,
+            };
+            let quality = parts
+                .find_map(|parameter| {
+                    let mut pair = parameter.trim().splitn(2, '=');
+                    pair.next()
+                        .is_some_and(|name| name.trim().eq_ignore_ascii_case("q"))
+                        .then(|| {
+                            pair.next()
+                                .and_then(|value| value.trim().parse::<f32>().ok())
+                                .filter(|quality| (0.0..=1.0).contains(quality))
+                                .unwrap_or(0.0)
+                        })
+                })
+                .unwrap_or(1.0);
+            Some((specificity, quality))
+        })
+        .max_by_key(|(specificity, _)| *specificity)
+        .is_some_and(|(_, quality)| quality > 0.0)
 }
 
 async fn execute_mcp_request(

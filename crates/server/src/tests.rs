@@ -206,6 +206,71 @@ async fn mcp_http_enforces_request_size_and_json_media_types() {
     assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
 }
 
+#[test]
+fn mcp_accept_negotiation_requires_a_json_compatible_range() {
+    use axum::http::HeaderValue;
+
+    let mut headers = HeaderMap::new();
+    assert!(mcp_accepts_json(&headers));
+    for value in [
+        "*/*",
+        "application/*",
+        "application/json",
+        "application/json; q=0.5",
+        "application/vnd.copperdb.mcp+json",
+        "text/event-stream, application/json",
+        "text/plain; q=0.9, application/json; q=0.1",
+    ] {
+        headers.insert(header::ACCEPT, HeaderValue::from_str(value).unwrap());
+        assert!(mcp_accepts_json(&headers), "expected to accept {value}");
+    }
+    for value in [
+        "text/plain",
+        "text/event-stream",
+        "application/json; q=0",
+        "application/json; q=-1",
+        "application/json; q=2",
+        "application/json; q=invalid",
+        "text/plain, application/json; q=0",
+        "application/json; q=0, */*; q=1",
+    ] {
+        headers.insert(header::ACCEPT, HeaderValue::from_str(value).unwrap());
+        assert!(!mcp_accepts_json(&headers), "expected to reject {value}");
+    }
+}
+
+#[tokio::test]
+async fn mcp_http_rejects_incompatible_accept_without_dispatch() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let mut state = AppState::default();
+    state.auth.security_enabled = false;
+    let response = build_router(Arc::new(state))
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .header("accept", "text/event-stream")
+                .body(Body::from(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 4,
+                        "method": "tools/list"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
+    assert!(axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
 #[tokio::test]
 async fn mcp_http_maps_json_and_request_shape_errors() {
     use axum::{body::Body, http::Request};
@@ -1292,6 +1357,10 @@ fn request_context_middleware_selects_upstream_route_timeouts() {
         assert_eq!(search.duration, Duration::from_secs(20));
         assert_eq!(search.message, "request timeout: search busy");
     }
+
+    let mcp = http_request_timeout("/mcp").expect("MCP timeout");
+    assert_eq!(mcp.duration, Duration::from_secs(30));
+    assert_eq!(mcp.message, "request timeout: mcp busy");
 
     assert!(http_request_timeout("/health").is_none());
     assert!(http_request_timeout("/admin/retention/status").is_none());
