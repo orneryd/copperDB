@@ -174,6 +174,31 @@ async fn runtime_configuration_rejects_settings_for_disabled_packages() {
     assert!(state.package_runtime.is_none());
 }
 
+#[tokio::test]
+async fn runtime_configuration_rejects_undeclared_package_settings() {
+    let mut state = AppState::default();
+    let mut config = RuntimeConfig::default();
+    config.packages.enabled = vec![copperdb_apoc::PACKAGE_ID.into()];
+    config.packages.required = vec![copperdb_apoc::PACKAGE_ID.into()];
+    config.packages.grants.insert(
+        copperdb_apoc::PACKAGE_ID.into(),
+        vec![copperdb_plugin::PackageCapability::QueryRead],
+    );
+    config.packages.configuration.insert(
+        copperdb_apoc::PACKAGE_ID.into(),
+        serde_json::json!({"unknown": true}),
+    );
+
+    let error = state.configure_runtime(Arc::new(config)).await.unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "engine error: package copperdb.apoc configuration does not match its schema"
+    );
+    assert!(state.packages.packages().is_empty());
+    assert!(state.package_runtime.is_none());
+}
+
 #[test]
 fn http_trace_context_excludes_baggage_and_credentials() {
     use axum::http::{header, HeaderValue};

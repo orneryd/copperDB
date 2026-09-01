@@ -97,7 +97,10 @@ impl PackageDescriptor {
             host_api: VersionReq::parse("^1.0").expect("static host API requirement is valid"),
             dependencies: Vec::new(),
             requested_capabilities: BTreeSet::new(),
-            configuration_schema: Value::Object(Default::default()),
+            configuration_schema: serde_json::json!({
+                "type": "object",
+                "additionalProperties": false
+            }),
         }
     }
 
@@ -496,6 +499,8 @@ pub enum PackageRuntimeError {
         package_id: String,
         capability: PackageCapability,
     },
+    #[error("package {package_id} configuration does not match its schema")]
+    InvalidConfiguration { package_id: String },
     #[error("required package {failure:?} failed")]
     RequiredFailure { failure: PackageFailure },
     #[error("package shutdown completed with failures: {failures:?}")]
@@ -570,6 +575,14 @@ impl PackageRuntime {
             let spec = spec_by_id
                 .get(&package.id)
                 .expect("validated package specification is present");
+            let validator =
+                jsonschema::validator_for(definition.descriptor().configuration_schema())
+                    .expect("package configuration schema was validated during resolution");
+            if !validator.is_valid(&spec.configuration) {
+                return Err(PackageRuntimeError::InvalidConfiguration {
+                    package_id: package.id.clone(),
+                });
+            }
             for capability in definition.descriptor().requested_capabilities() {
                 if !spec.granted_capabilities.contains(capability) {
                     return Err(PackageRuntimeError::MissingCapability {
@@ -859,6 +872,8 @@ pub enum PackageLoadError {
     EmptyProvider { package_id: String },
     #[error("duplicate package ID: {package_id}")]
     DuplicatePackage { package_id: String },
+    #[error("package {package_id} has an invalid configuration schema")]
+    InvalidConfigurationSchema { package_id: String },
     #[error("package {package_id} is incompatible with host API {host_api}; requires {required}")]
     IncompatibleHost {
         package_id: String,
@@ -910,6 +925,11 @@ pub fn resolve_packages(
         validate_package_id(descriptor.id())?;
         if descriptor.provider().trim().is_empty() {
             return Err(PackageLoadError::EmptyProvider {
+                package_id: descriptor.id().to_string(),
+            });
+        }
+        if jsonschema::validator_for(descriptor.configuration_schema()).is_err() {
+            return Err(PackageLoadError::InvalidConfigurationSchema {
                 package_id: descriptor.id().to_string(),
             });
         }
@@ -1234,6 +1254,21 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn rejects_invalid_configuration_schema_transactionally() {
+        let definition = PackageDefinition::new(
+            descriptor("example.invalid-schema", "1.0.0")
+                .with_configuration_schema(json!({"type": "not-a-json-schema-type"})),
+        );
+
+        assert_eq!(
+            resolve_packages([definition]).unwrap_err(),
+            PackageLoadError::InvalidConfigurationSchema {
+                package_id: "example.invalid-schema".into(),
+            }
+        );
+    }
+
     #[derive(Debug)]
     struct RecordingFactory {
         definition: PackageDefinition,
@@ -1376,7 +1411,13 @@ mod tests {
         let base_definition = PackageDefinition::new(descriptor("example.base", "1.0.0"));
         let consumer_definition = PackageDefinition::new(
             descriptor("example.consumer", "1.0.0")
-                .with_dependency(PackageDependency::new("example.base", VersionReq::STAR)),
+                .with_dependency(PackageDependency::new("example.base", VersionReq::STAR))
+                .with_configuration_schema(json!({
+                    "type": "object",
+                    "properties": {"mode": {"type": "string"}},
+                    "required": ["mode"],
+                    "additionalProperties": false
+                })),
         );
         let (base, _) = RecordingFactory::new(base_definition, Arc::clone(&events));
         let (consumer, _) = RecordingFactory::new(consumer_definition, Arc::clone(&events));
@@ -1559,6 +1600,35 @@ mod tests {
                 package_id,
                 capability: PackageCapability::Network,
             } if package_id == "example.network"
+        ));
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_configuration_fails_before_factory_creation() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let definition = PackageDefinition::new(
+            descriptor("example.configured", "1.0.0").with_configuration_schema(json!({
+                "type": "object",
+                "properties": {"mode": {"type": "string"}},
+                "required": ["mode"],
+                "additionalProperties": false
+            })),
+        );
+        let (factory, _) = RecordingFactory::new(definition, Arc::clone(&events));
+
+        let error = PackageRuntime::start(
+            [dyn_factory(factory)],
+            [PackageSpec::new("example.configured").with_configuration(json!({"mode": 42}))],
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            PackageRuntimeError::InvalidConfiguration { package_id }
+                if package_id == "example.configured"
         ));
         assert!(events.lock().unwrap().is_empty());
     }

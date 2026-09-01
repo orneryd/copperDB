@@ -26,7 +26,14 @@ pub fn factory() -> StaticPackageFactory {
 pub fn package() -> PackageDefinition {
     let descriptor =
         PackageDescriptor::new(PACKAGE_ID, Version::new(1, 0, 0), "copperdb contributors")
-            .requesting([PackageCapability::QueryRead]);
+            .requesting([PackageCapability::QueryRead])
+            .with_configuration_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_access_root": {"type": "string", "minLength": 1}
+                },
+                "additionalProperties": false
+            }));
     PackageDefinition::new(descriptor)
         .with_function(function(
             "apoc.create.uuid",
