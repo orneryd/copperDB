@@ -1522,6 +1522,27 @@ fn engine_enforces_durable_compliance_label_and_property_policies() {
         )
         .unwrap_err();
     assert!(matches!(err, CopperDbError::Compliance(_)));
+
+    let properties = serde_json::Map::from_iter([
+        ("name".into(), serde_json::json!("Alice")),
+        ("ssn".into(), serde_json::json!("111")),
+    ]);
+    assert!(db
+        .filter_readable_node_properties(&["Patient".into()], &properties, &reader_roles)
+        .unwrap()
+        .is_none());
+    let readable = db
+        .filter_readable_node_properties(&["Memory".into()], &properties, &reader_roles)
+        .unwrap()
+        .unwrap();
+    assert_eq!(readable.get("name"), Some(&serde_json::json!("Alice")));
+    assert!(!readable.contains_key("ssn"));
+    assert_eq!(
+        db.filter_readable_node_properties(&["Patient".into()], &properties, &doctor_roles)
+            .unwrap()
+            .unwrap(),
+        properties
+    );
 }
 
 #[test]

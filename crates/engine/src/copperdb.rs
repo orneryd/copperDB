@@ -94,6 +94,72 @@ impl CopperDb {
         Ok(self.storage.get_node_record(id)?)
     }
 
+    pub fn get_readable_node_with_context(
+        &self,
+        request_context: &RequestContext,
+        id: &str,
+        roles: &[String],
+    ) -> Result<Option<copperdb_storage::NodeRecord>, CopperDbError> {
+        request_context.check_active()?;
+        let started = Instant::now();
+        let result = (|| {
+            let Some(mut node) = self.storage.get_node_record(id)? else {
+                return Ok(None);
+            };
+            let compliance_policies = self.compliance.enabled_policies_snapshot()?;
+            let policy_resolver = self.eval.knowledge_policy_resolver()?;
+            if !self.node_is_search_visible(&node, roles, &compliance_policies, &policy_resolver)? {
+                return Ok(None);
+            }
+            let Some(properties) = self.filter_readable_node_properties(
+                &node.labels,
+                &serde_json::Map::from_iter(node.properties.clone()),
+                roles,
+            )?
+            else {
+                return Ok(None);
+            };
+            node.properties = properties.into_iter().collect();
+            Ok(Some(node))
+        })();
+        self.record_query_audit(
+            "MATCH (n) WHERE elementId(n) = $id RETURN n",
+            "MATCH",
+            result.is_ok(),
+            result.as_ref().err().map(ToString::to_string),
+            None,
+            started.elapsed().as_millis() as u64,
+        )?;
+        result
+    }
+
+    pub fn filter_readable_node_properties(
+        &self,
+        labels: &[String],
+        properties: &serde_json::Map<String, serde_json::Value>,
+        roles: &[String],
+    ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, CopperDbError> {
+        let policies = self.compliance.enabled_policies_snapshot()?;
+        if labels.iter().any(|label| {
+            self.compliance
+                .check_label_access_with_policies(label, roles, &policies)
+                .is_err()
+        }) {
+            return Ok(None);
+        }
+        Ok(Some(
+            properties
+                .iter()
+                .filter(|(property, _)| {
+                    self.compliance
+                        .check_property_access_with_policies(property, roles, &policies)
+                        .is_ok()
+                })
+                .map(|(property, value)| (property.clone(), value.clone()))
+                .collect(),
+        ))
+    }
+
     /// Access the underlying storage engine (for subsystems like RetentionManager
     /// that need to share the same storage instance).
     pub fn storage_engine(&self) -> &Arc<copperdb_storage::StorageEngine> {

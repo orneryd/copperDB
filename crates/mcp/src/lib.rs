@@ -926,6 +926,201 @@ fn generate_title(content: &str, max_characters: usize) -> String {
     )
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecallArgs {
+    #[serde(default)]
+    id: String,
+    #[serde(default, rename = "type")]
+    node_types: Vec<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    since: String,
+    #[serde(default = "default_search_limit")]
+    limit: usize,
+    #[serde(default, rename = "database")]
+    _database: Option<String>,
+}
+
+struct RecallHandler;
+
+#[async_trait]
+impl ToolHandler for RecallHandler {
+    async fn call(
+        &self,
+        context: ToolExecutionContext,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let arguments: RecallArgs =
+            serde_json::from_value(arguments).map_err(|error| error.to_string())?;
+        let engine = context.engine.ok_or("no graph engine configured")?;
+        let requested_id = arguments.id.clone();
+        let nodes = tokio::task::spawn_blocking(move || {
+            if !arguments.id.is_empty() {
+                let node = engine.get_readable_node_with_context(
+                    &context.request_context,
+                    &arguments.id,
+                    &context.roles,
+                )?;
+                return Ok::<_, copperdb_engine::CopperDbError>(
+                    node.and_then(|node| {
+                        recall_node_from_parts(
+                            node.id,
+                            &node.labels,
+                            serde_json::Map::from_iter(node.properties),
+                        )
+                    })
+                    .into_iter()
+                    .collect(),
+                );
+            }
+            let (query, params) = if arguments.id.is_empty() {
+                let mut query = "MATCH (n)".to_string();
+                let mut params = HashMap::new();
+                if !arguments.since.is_empty() {
+                    query.push_str(" WHERE coalesce(n.created_at, '') >= $since");
+                    params.insert("since".into(), serde_json::json!(arguments.since));
+                }
+                query.push_str(
+                    " RETURN elementId(n) AS id, labels(n) AS labels, n AS properties LIMIT $limit",
+                );
+                params.insert("limit".into(), serde_json::json!(arguments.limit));
+                (query, params)
+            } else {
+                unreachable!("direct ID recall returns before filter query construction")
+            };
+            let result = engine.execute_as_with_context(
+                &context.request_context,
+                &query,
+                params,
+                &context.roles,
+            )?;
+            let mut nodes = Vec::new();
+            for mut row in result.rows {
+                let labels = row
+                    .get("labels")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|labels| {
+                        labels
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let Some(properties) = row.get("properties").and_then(serde_json::Value::as_object)
+                else {
+                    continue;
+                };
+                let Some(properties) =
+                    engine.filter_readable_node_properties(&labels, properties, &context.roles)?
+                else {
+                    continue;
+                };
+                row.insert("properties".into(), serde_json::Value::Object(properties));
+                let Some(node) = recall_node(&row) else {
+                    continue;
+                };
+                if arguments
+                    .node_types
+                    .first()
+                    .is_some_and(|node_type| node["type"] != *node_type)
+                {
+                    continue;
+                }
+                if !has_all_tags(&node["properties"], &arguments.tags) {
+                    continue;
+                }
+                nodes.push(node);
+                if nodes.len() >= arguments.limit {
+                    break;
+                }
+            }
+            Ok::<_, copperdb_engine::CopperDbError>(nodes)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("failed to recall nodes: {error}"))?;
+        if !requested_id.is_empty() && nodes.is_empty() {
+            return Err(format!("node not found: {requested_id}"));
+        }
+        Ok(serde_json::json!({"count": nodes.len(), "nodes": nodes}))
+    }
+}
+
+fn recall_node(row: &HashMap<String, serde_json::Value>) -> Option<serde_json::Value> {
+    let id = row.get("id")?.as_str()?.to_string();
+    let labels = row
+        .get("labels")?
+        .as_array()?
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let properties = row.get("properties")?.as_object()?;
+    recall_node_from_parts(id, &labels, properties.clone())
+}
+
+fn recall_node_from_parts(
+    id: String,
+    labels: &[String],
+    properties: serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let node_type = labels.first().map(String::as_str).unwrap_or("Node");
+    let title = properties
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let content = properties
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let properties = sanitize_properties_for_llm(&properties);
+    let mut node = serde_json::Map::from_iter([
+        ("id".into(), serde_json::json!(id)),
+        ("type".into(), serde_json::json!(node_type)),
+    ]);
+    if !title.is_empty() {
+        node.insert("title".into(), serde_json::json!(title));
+    }
+    if !content.is_empty() {
+        node.insert("content".into(), serde_json::json!(content));
+    }
+    if !properties.is_empty() {
+        node.insert("properties".into(), serde_json::Value::Object(properties));
+    }
+    Some(serde_json::Value::Object(node))
+}
+
+fn has_all_tags(properties: &serde_json::Value, requested: &[String]) -> bool {
+    requested.iter().all(|requested_tag| {
+        properties
+            .get("tags")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|tags| tags.iter().any(|tag| tag == requested_tag))
+    })
+}
+
+fn sanitize_properties_for_llm(
+    properties: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    properties
+        .iter()
+        .filter(|(name, value)| {
+            !matches!(
+                name.as_str(),
+                "embedding"
+                    | "embedding_model"
+                    | "embedding_dimensions"
+                    | "has_embedding"
+                    | "embedded_at"
+            ) && value.as_array().is_none_or(|values| values.len() <= 100)
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
 /// Built-in copperdb MCP tools.
 pub fn copperdb_tools() -> Vec<Tool> {
     copperdb_tools_with_access()
@@ -957,6 +1152,26 @@ fn copperdb_tools_with_access() -> Vec<(Tool, ToolAccess, Arc<dyn ToolHandler>)>
             },
             ToolAccess::Write,
             Arc::new(StoreHandler),
+        ),
+        (
+            Tool {
+                name: "recall".into(),
+                description: "Retrieve specific knowledge by ID, or search by criteria (type, tags, date range). Use when you know what you're looking for; use discover for semantic search.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Node ID to retrieve directly. If provided, ignores other filters."},
+                        "type": {"type": "array", "items": {"type": "string"}, "description": "Filter by node types."},
+                        "tags": {"type": "array", "items": {"type": "string"}, "description": "Filter by tags; nodes must have all specified tags."},
+                        "since": {"type": "string", "format": "date-time", "description": "Filter by creation time in RFC3339 format."},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10, "description": "Maximum number of results."},
+                        "database": {"type": "string", "description": "Database name to use. If omitted, uses the server's configured default database."}
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            ToolAccess::Read,
+            Arc::new(RecallHandler),
         ),
         (
             Tool {
@@ -1075,7 +1290,7 @@ mod tests {
 
         assert_eq!(responses.len(), 5);
         assert_eq!(responses[0]["id"], 1);
-        assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 3);
+        assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 4);
         assert_eq!(responses[1].as_array().unwrap().len(), 1);
         assert_eq!(responses[1][0]["id"], 2);
         assert_eq!(responses[2]["error"]["code"], -32600);
@@ -1104,8 +1319,8 @@ mod tests {
     #[test]
     fn test_tool_registry_default_tools() {
         let registry = ToolRegistry::new();
-        assert_eq!(registry.len(), 3);
-        for name in ["store", "run_cypher", "find_similar"] {
+        assert_eq!(registry.len(), 4);
+        for name in ["store", "recall", "run_cypher", "find_similar"] {
             let tool = registry.get(name).expect("built-in tool");
             assert_eq!(
                 tool.input_schema["properties"]["database"]["type"],
@@ -1132,7 +1347,7 @@ mod tests {
                 Arc::new(EchoHandler),
             )
             .unwrap();
-        assert_eq!(registry.len(), 4);
+        assert_eq!(registry.len(), 5);
     }
 
     #[tokio::test]
@@ -1235,6 +1450,121 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(default_node.labels, vec!["Memory"]);
+    }
+
+    #[tokio::test]
+    async fn recall_retrieves_by_id_and_applies_upstream_filters() {
+        let engine = Arc::new(copperdb_engine::CopperDb::open_temporary().unwrap());
+        let registry = ToolRegistry::with_engine_and_roles(engine.clone(), vec!["admin".into()]);
+        let access_request = McpRequest::new(
+            25,
+            "tools/call",
+            Some(serde_json::json!({"name": "recall", "arguments": {}})),
+        );
+        assert_eq!(
+            registry.required_access(&access_request).unwrap(),
+            Some(ToolAccess::Read)
+        );
+        let create = |label: &str,
+                      title: &str,
+                      created_at: &str,
+                      tags: serde_json::Value,
+                      large: serde_json::Value| {
+            engine
+                .execute(
+                    &format!("CREATE (n:{label}) SET n += $props RETURN elementId(n) AS id"),
+                    HashMap::from([(
+                        "props".into(),
+                        serde_json::json!({
+                            "title": title,
+                            "content": format!("{title} content"),
+                            "created_at": created_at,
+                            "tags": tags,
+                            "embedding": [1, 2, 3],
+                            "embedding_model": "test",
+                            "large": large
+                        }),
+                    )]),
+                )
+                .unwrap()
+                .rows[0]["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let memory_id = create(
+            "Memory",
+            "Recent Memory",
+            "2026-03-01T10:00:00Z",
+            serde_json::json!(["alpha", "beta"]),
+            serde_json::json!(vec![0; 101]),
+        );
+        create(
+            "Task",
+            "Old Task",
+            "2025-01-01T10:00:00Z",
+            serde_json::json!(["beta"]),
+            serde_json::json!([1, 2]),
+        );
+
+        let by_id = registry
+            .dispatch(&McpRequest::new(
+                26,
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": "recall",
+                    "arguments": {"id": memory_id, "type": ["Task"], "limit": 1}
+                })),
+            ))
+            .await;
+        assert!(by_id.error.is_none(), "{:?}", by_id.error);
+        let by_id = by_id.result.unwrap();
+        assert_eq!(by_id["count"], 1);
+        assert_eq!(by_id["nodes"][0]["id"], memory_id);
+        assert_eq!(by_id["nodes"][0]["type"], "Memory");
+        assert_eq!(by_id["nodes"][0]["title"], "Recent Memory");
+        assert_eq!(by_id["nodes"][0]["content"], "Recent Memory content");
+        assert!(by_id["nodes"][0]["properties"].get("embedding").is_none());
+        assert!(by_id["nodes"][0]["properties"]
+            .get("embedding_model")
+            .is_none());
+        assert!(by_id["nodes"][0]["properties"].get("large").is_none());
+
+        let filtered = registry
+            .dispatch(&McpRequest::new(
+                27,
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": "recall",
+                    "arguments": {
+                        "type": ["Memory", "Task"],
+                        "tags": ["alpha", "beta"],
+                        "since": "2026-01-01T00:00:00Z",
+                        "limit": 5
+                    }
+                })),
+            ))
+            .await;
+        assert!(filtered.error.is_none(), "{:?}", filtered.error);
+        let filtered = filtered.result.unwrap();
+        assert_eq!(filtered["count"], 1);
+        assert_eq!(filtered["nodes"][0]["id"], memory_id);
+
+        let missing = registry
+            .dispatch(&McpRequest::new(
+                28,
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": "recall",
+                    "arguments": {"id": "missing"}
+                })),
+            ))
+            .await;
+        assert_eq!(missing.error.unwrap().message, "node not found: missing");
+        let events = engine.audit_log().events().unwrap();
+        assert_eq!(events.last().unwrap().event_type.as_str(), "DATA_READ");
+        assert_eq!(events.last().unwrap().action.as_deref(), Some("MATCH"));
+        assert!(engine.audit_log().verify_chain().unwrap().valid);
     }
 
     #[tokio::test]
@@ -1472,7 +1802,7 @@ mod tests {
         let resp = registry.dispatch(&req).await;
         assert!(resp.error.is_none());
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().len();
-        assert_eq!(tools, 3);
+        assert_eq!(tools, 4);
     }
 
     #[test]

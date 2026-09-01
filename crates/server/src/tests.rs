@@ -293,16 +293,16 @@ async fn mcp_store_requires_write_access_and_routes_to_the_selected_database() {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
 
-    let selected_database = "mcp-store-selected";
+    let selected_database = format!("mcp-store-selected-{}", uuid::Uuid::new_v4());
     let temp_dir = tempfile::tempdir().unwrap();
     let mut state = AppState::default();
     state
         .db_manager
         .create(
-            selected_database,
+            &selected_database,
             temp_dir
                 .path()
-                .join(selected_database)
+                .join(&selected_database)
                 .to_string_lossy()
                 .into_owned(),
         )
@@ -323,10 +323,10 @@ async fn mcp_store_requires_write_access_and_routes_to_the_selected_database() {
             (copperdb_auth::ROLE_EDITOR, true, true),
         ] {
             auth.allowlist
-                .save_role_databases(role, vec![selected_database.into()])
+                .save_role_databases(role, vec![selected_database.clone()])
                 .unwrap();
             auth.privileges
-                .save_privilege(role, selected_database, read, write)
+                .save_privilege(role, &selected_database, read, write)
                 .unwrap();
         }
         auth.create_user(
@@ -381,9 +381,10 @@ async fn mcp_store_requires_write_access_and_routes_to_the_selected_database() {
         .await
         .unwrap();
     assert_eq!(denied.status(), StatusCode::FORBIDDEN);
-    assert!(!state.engine_cache.read().contains_key(selected_database));
+    assert!(!state.engine_cache.read().contains_key(&selected_database));
 
     let allowed = app
+        .clone()
         .oneshot(
             Request::post("/mcp")
                 .header("content-type", "application/json")
@@ -401,7 +402,7 @@ async fn mcp_store_requires_write_access_and_routes_to_the_selected_database() {
     assert!(payload["error"].is_null(), "{payload}");
     assert_eq!(payload["result"]["title"], "Selected database knowledge");
     assert_eq!(payload["result"]["embedded"], true);
-    let nodes = open_engine(&state, selected_database)
+    let nodes = open_engine(&state, &selected_database)
         .unwrap()
         .storage()
         .get_nodes_by_label("Memory")
@@ -412,6 +413,42 @@ async fn mcp_store_requires_write_access_and_routes_to_the_selected_database() {
         "Selected database knowledge"
     );
     assert!(!state.engine_cache.read().contains_key(&state.db_name));
+
+    let recalled = app
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {viewer_token}"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 702,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "recall",
+                            "arguments": {
+                                "database": selected_database,
+                                "id": payload["result"]["id"]
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recalled.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(recalled.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(payload["error"].is_null(), "{payload}");
+    assert_eq!(payload["result"]["count"], 1);
+    assert_eq!(
+        payload["result"]["nodes"][0]["content"],
+        "Selected database knowledge"
+    );
 }
 
 #[tokio::test]
@@ -1075,7 +1112,7 @@ async fn mcp_http_batches_preserve_order_and_omit_notifications() {
     let responses = payload.as_array().unwrap();
     assert_eq!(responses.len(), 3);
     assert_eq!(responses[0]["id"], "first");
-    assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 4);
     assert_eq!(responses[1]["id"], serde_json::Value::Null);
     assert_eq!(responses[1]["error"]["code"], -32600);
     assert_eq!(responses[2]["id"], "last");
