@@ -33,10 +33,11 @@ These plans expand the numbered findings in [../COPPERDB_NORNICDB_PARITY_PLAN.md
 | 14 | P1 | [Local cancellation propagation](14-local-cancellation-propagation.md) | None; consumed by 9-13 |
 | 15 | P1 | [Plugin-ready dispatch](15-plugin-ready-dispatch.md) | None |
 | 16 | P2 | [Observability exporters and tracing](16-observability-exporters-tracing.md) | 13 ownership contracts |
-| 17 | P2 | [GraphQL completeness](17-graphql-completeness.md) | 1, 2/8, 12, 14 |
-| 18 | P2 | [MCP transport and tools](18-mcp-transport-tools.md) | 1, 8, 12, 14, 15 |
-| 19 | P2 | [Heimdall, inference, link prediction, and reranking](19-ai-governance-runtime.md) | 11, 12, 16 |
+| 17 | P2 | [Plugin packages and APOC verification](17-plugin-packages-apoc-verification.md) | 15, 16 |
+| 18 | P2 | [MCP transport and tools](18-mcp-transport-tools.md) | 1, 8, 12, 14, 17 |
+| 19 | P2 | [Heimdall, inference, link prediction, and reranking](19-ai-governance-runtime.md) | 11, 12, 16, 17 |
 | 20 | P2 | [GPU and SIMD acceleration](20-gpu-simd-acceleration.md) | 10, 12 and CPU benchmarks |
+| 21 | P2 | [GraphQL completeness](21-graphql-completeness.md) | 1, 2/8, 12, 14, 17 |
 
 TBD:   36f2e532..2ec94c08  main       -> origin/main - apply changes from upstream NornicDB security codeQL flagged items (security)
 ## Status Convention

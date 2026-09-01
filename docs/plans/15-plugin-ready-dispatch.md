@@ -39,4 +39,4 @@ Every advertised built-in dispatches, every public handler is advertised unless 
 - Enforced procedure `READ`, `WRITE`, and `DBMS` modes at HTTP and authenticated Bolt authorization boundaries. Unknown extension calls remain conservatively write-classified.
 - Added a Criterion dispatch benchmark. On the completion run, canonical immutable-registry lookup measured approximately 13.7 ns versus 30.1 ns for the previous lowercase-plus-match shape; mixed-case lookup measured approximately 50.8 ns and allocates only for normalization.
 - Validated 27 filter tests, 364 eval tests, 118 engine tests, and 100 server tests. Workspace Clippy passed for all targets and features with warnings denied; touched-file rustfmt and `git diff --check` passed.
-- Dynamic-library ABI and APOC compatibility remain intentionally deferred.
+- Package loading, APOC compatibility, and representative Heimdall verification continue in [item 17](17-plugin-packages-apoc-verification.md). Item 17 begins with statically linked package factories rather than exposing Rust's unstable dynamic-library ABI.

@@ -1,6 +1,10 @@
-# 17: GraphQL Completeness
+# 21: GraphQL Completeness
 
-Status: planned. Priority: P2. Owners: `graphql`, `server`, `engine`, `auth`.
+Status: deferred. Priority: P2. Owners: `graphql`, `server`, `engine`, `auth`.
+
+## Sequencing
+
+GraphQL work is deferred until item 17 proves the external package boundary with representative APOC and Heimdall packages. This avoids expanding another protocol adapter before extension registration, authorization, lifecycle, and database-scoped host services are stable.
 
 ## Objective
 

@@ -6,6 +6,8 @@ Status: planned. Priority: P2. Owners: `heimdall`, `inference`, `linkpredict`, `
 
 Add deterministic read-only reranking and governed link/inference suggestions before any opt-in automatic graph mutation.
 
+Item 17 owns the package loader and representative Heimdall action/hook verification. This item consumes that proven lifecycle and expands Heimdall behavior; it does not define a second plugin system.
+
 ## Product Safety Boundary
 
 Defaults remain disabled. Reranking may reorder visible candidates but cannot add hidden entities. Link prediction and inference produce durable suggestions with evidence/provenance; they do not mutate the graph automatically until review, audit, policy, and kill-switch controls are complete.

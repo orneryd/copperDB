@@ -122,17 +122,18 @@ The first work must close verified audit findings. New feature expansion should 
     - Thread it through HTTP, Bolt, engine, eval traversal, scans, index rebuild, BM25/vector loops, embedding, and result materialization.
     - Cancellation is cooperative stop, not automatic rollback after a commit decision.
 
-15. **Make built-in function and procedure dispatch plugin-ready.**
-    - Preserve a registry boundary for later APOC-style extensions without making APOC an MVP dependency.
+15. **Complete: make built-in function and procedure dispatch plugin-ready.**
+   - Preserve the immutable registry boundary used by item 17's package loader and separate APOC/Heimdall packages.
     - Unknown procedure behavior remains deterministic and names the missing procedure.
 
 ### P2: Protocol And Operational Breadth
 
 16. Expand OpenTelemetry/OpenMetrics exporters, runtime tracing, redaction, and live metric producers.
-17. Complete GraphQL traversal, pagination, mutation, error, database-selection, and auth behavior.
+17. Implement versioned plugin packages and startup loading; verify the architecture with separate representative APOC and Heimdall packages before mechanically expanding either suite.
 18. Implement MCP transport and production tools only after search/vector and auth are stable.
-19. Expand Heimdall, inference, link prediction, and reranking after the benchmark-ready single-node core.
+19. Expand Heimdall inference, link prediction, and reranking behavior after item 17 proves the package/action lifecycle and the benchmark-ready single-node core is stable.
 20. Add GPU/SIMD acceleration only behind behaviorally identical CPU contracts and measured crossover thresholds.
+21. Complete GraphQL traversal, pagination, mutation, error, database-selection, and auth behavior after item 17.
 
 ## Current Implementation Audit
 
@@ -159,7 +160,7 @@ Status meanings:
 | Temporal/decay/knowledge policy | Operational baseline | Policy persistence, scoring, ON ACCESS buffering, access metadata | Adaptive/Kalman behavior, computed mutations, search-time integration |
 | Convert/admin import | Partial | Scalar and serialization conversion helpers | Full bounded offline import/export pipeline |
 | Observability | Partial | Metric catalog, validation, redaction/readiness foundations | Exporters, live ownership, protocol/search/storage instrumentation |
-| GraphQL | Partial | Storage-backed baseline operations | Full schema/resolver/auth/pagination behavior |
+| GraphQL | Deferred to item 21 | Storage-backed baseline operations | Resume full schema/resolver/auth/pagination behavior after plugin package verification |
 | MCP, Heimdall, inference, linkpredict | Partial/deferred | Contracts or narrow local algorithms exist | Production runtime intentionally after single-node core |
 | GPU and SIMD | Deferred | Configuration and utility foundations | Measured vector/graph acceleration with CPU parity |
 | Replication, fabric, topology, nornicgrpc, qdrantgrpc | Deferred | Placement, merge, transport, and topology contracts are substantial | No supported distributed runtime until deferred completion gates pass |

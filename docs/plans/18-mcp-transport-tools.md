@@ -12,7 +12,7 @@ Dispatch is synchronous/ad hoc, `run_cypher` ignores parameters, `find_similar` 
 
 ## Phases
 
-1. Add async typed tool handlers, strict JSON Schema validation, protocol negotiation, cancellation, bounded output, and structured tool errors using item 15's registry principles.
+1. Add async typed tool handlers, strict JSON Schema validation, protocol negotiation, cancellation, bounded output, and structured tool errors using item 17's package/action descriptors and item 15's immutable dispatch principles.
 2. Harden HTTP JSON-RPC with limits, timeouts, content types, notifications/batches, sessions, and per-tool/database authorization. Add stdio as a separate local mode; WebSocket is not required.
 3. Implement transactional `store`, `recall`, and `link` with identifier/metadata validation and audit.
 4. Implement durable `task`/`tasks`, valid status transitions, cycle-free dependencies, deletion rules, stable sort, and pagination.
