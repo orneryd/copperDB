@@ -4935,11 +4935,16 @@ async fn mcp_handler(
             .into_response()
         }
     };
+    let is_notification = request.is_notification();
     let registry = copperdb_mcp::ToolRegistry::new();
     let access = match registry.required_access(&request) {
         Ok(access) => access,
         Err(_) => {
-            return Json(registry.dispatch_with_context(&request_context, &request)).into_response()
+            if is_notification {
+                return StatusCode::ACCEPTED.into_response();
+            }
+            return Json(registry.dispatch_with_context(&request_context, &request))
+                .into_response();
         }
     };
     let registry = if let Some(access) = access {
@@ -4962,8 +4967,15 @@ async fn mcp_handler(
         let engine = match open_engine(&state, &state.db_name) {
             Ok(engine) => engine,
             Err(error) => {
-                return Json(copperdb_mcp::McpResponse::error(request.id, -32000, error))
-                    .into_response()
+                if is_notification {
+                    return StatusCode::ACCEPTED.into_response();
+                }
+                return Json(copperdb_mcp::McpResponse::error(
+                    request.id.unwrap_or(serde_json::Value::Null),
+                    -32000,
+                    error,
+                ))
+                .into_response();
             }
         };
         copperdb_mcp::ToolRegistry::with_engine_and_roles(engine, roles_for_claims(claims.as_ref()))
@@ -4975,7 +4987,9 @@ async fn mcp_handler(
     })
     .await
     {
+        Ok(_) if is_notification => StatusCode::ACCEPTED.into_response(),
         Ok(response) => Json(response).into_response(),
+        Err(_) if is_notification => StatusCode::ACCEPTED.into_response(),
         Err(error) => Json(copperdb_mcp::McpResponse::error(
             serde_json::Value::Null,
             -32000,

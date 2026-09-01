@@ -51,7 +51,8 @@ pub struct Tool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpRequest {
     pub jsonrpc: String,
-    pub id: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<serde_json::Value>,
     pub method: String,
     pub params: Option<serde_json::Value>,
 }
@@ -64,10 +65,18 @@ impl McpRequest {
     ) -> Self {
         Self {
             jsonrpc: "2.0".into(),
-            id: id.into(),
+            id: Some(id.into()),
             method: method.into(),
             params,
         }
+    }
+
+    pub fn is_notification(&self) -> bool {
+        self.id.is_none()
+    }
+
+    fn response_id(&self) -> serde_json::Value {
+        self.id.clone().unwrap_or(serde_json::Value::Null)
     }
 }
 
@@ -282,7 +291,7 @@ impl ToolRegistry {
     ) -> McpResponse {
         if request.jsonrpc != "2.0" {
             return McpResponse::error_with_data(
-                request.id.clone(),
+                request.response_id(),
                 -32600,
                 "Invalid Request",
                 Some(serde_json::json!({"expected": "2.0"})),
@@ -291,22 +300,24 @@ impl ToolRegistry {
         match request.method.as_str() {
             "tools/list" => {
                 let tools: Vec<&Tool> = self.list();
-                McpResponse::ok(request.id.clone(), serde_json::json!({ "tools": tools }))
+                McpResponse::ok(request.response_id(), serde_json::json!({ "tools": tools }))
             }
             "tools/call" => {
                 let params = match &request.params {
                     Some(p) => p,
                     None => {
-                        return McpResponse::error(request.id.clone(), -32602, "missing params")
+                        return McpResponse::error(request.response_id(), -32602, "missing params")
                     }
                 };
                 let call: ToolCallParams = match serde_json::from_value(params.clone()) {
                     Ok(c) => c,
-                    Err(e) => return McpResponse::error(request.id.clone(), -32602, e.to_string()),
+                    Err(e) => {
+                        return McpResponse::error(request.response_id(), -32602, e.to_string())
+                    }
                 };
                 if self.get(&call.name).is_none() {
                     return McpResponse::error(
-                        request.id.clone(),
+                        request.response_id(),
                         -32601,
                         format!("tool not found: {}", call.name),
                     );
@@ -321,7 +332,7 @@ impl ToolRegistry {
                     .expect("registered MCP tool must have a compiled validator");
                 if let Err(error) = validator.validate(&arguments) {
                     return McpResponse::error_with_data(
-                        request.id.clone(),
+                        request.response_id(),
                         -32602,
                         "Invalid params",
                         Some(serde_json::json!({
@@ -333,10 +344,10 @@ impl ToolRegistry {
                 }
                 match self.execute_tool(request_context, &call.name, &call.arguments) {
                     Ok(result) => McpResponse::ok(
-                        request.id.clone(),
+                        request.response_id(),
                         self.enforce_tool_output_limit(&call.name, result),
                     ),
-                    Err(e) => McpResponse::error(request.id.clone(), -32000, e),
+                    Err(e) => McpResponse::error(request.response_id(), -32000, e),
                 }
             }
             "initialize" => {
@@ -345,7 +356,7 @@ impl ToolRegistry {
                         Ok(params) => params,
                         Err(error) => {
                             return McpResponse::error_with_data(
-                                request.id.clone(),
+                                request.response_id(),
                                 -32602,
                                 "Invalid params",
                                 Some(serde_json::json!({"detail": error.to_string()})),
@@ -360,14 +371,14 @@ impl ToolRegistry {
                     .is_some_and(|version| version != MCP_PROTOCOL_VERSION)
                 {
                     return McpResponse::error_with_data(
-                        request.id.clone(),
+                        request.response_id(),
                         -32602,
                         "Unsupported protocol version",
                         Some(serde_json::json!({"supported": [MCP_PROTOCOL_VERSION]})),
                     );
                 }
                 McpResponse::ok(
-                    request.id.clone(),
+                    request.response_id(),
                     serde_json::json!({
                         "protocolVersion": MCP_PROTOCOL_VERSION,
                         "capabilities": { "tools": {"listChanged": false} },
@@ -375,7 +386,11 @@ impl ToolRegistry {
                     }),
                 )
             }
-            _ => McpResponse::error(request.id.clone(), -32601, "method not found"),
+            "notifications/initialized" => McpResponse::ok(
+                request.response_id(),
+                serde_json::Value::Object(serde_json::Map::new()),
+            ),
+            _ => McpResponse::error(request.response_id(), -32601, "method not found"),
         }
     }
 
@@ -585,6 +600,23 @@ mod tests {
         let result = resp.result.unwrap();
         assert_eq!(result["protocolVersion"], MCP_PROTOCOL_VERSION);
         assert_eq!(result["capabilities"]["tools"]["listChanged"], false);
+    }
+
+    #[test]
+    fn notification_request_omits_id_and_accepts_initialized_method() {
+        let request: McpRequest = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }))
+        .unwrap();
+
+        assert!(request.is_notification());
+        assert!(serde_json::to_value(&request).unwrap().get("id").is_none());
+        let response = ToolRegistry::new().dispatch(&request);
+        assert!(response.error.is_none());
+        assert_eq!(response.id, serde_json::Value::Null);
+        assert_eq!(response.result, Some(serde_json::json!({})));
     }
 
     #[test]

@@ -243,6 +243,116 @@ async fn mcp_http_maps_json_and_request_shape_errors() {
 }
 
 #[tokio::test]
+async fn mcp_http_notifications_execute_without_response_bodies() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let database = "mcp-notifications";
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager
+        .create(
+            database,
+            temp_dir
+                .path()
+                .join(database)
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .unwrap();
+    let mut state = AppState {
+        db_name: database.into(),
+        db_manager,
+        ..Default::default()
+    };
+    state.auth.security_enabled = false;
+    let state = Arc::new(state);
+    let app = build_router(Arc::clone(&state));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "notifications/initialized",
+                        "params": {}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap()
+        .is_empty());
+
+    let response = app
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "tools/call",
+                        "params": {
+                            "name": "run_cypher",
+                            "arguments": {
+                                "query": "CREATE (:Notification {id: $id})",
+                                "params": {"id": "notification-1"}
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap()
+        .is_empty());
+
+    let result = open_engine(&state, database)
+        .unwrap()
+        .execute(
+            "MATCH (n:Notification {id: 'notification-1'}) RETURN count(n) AS count",
+            HashMap::new(),
+        )
+        .unwrap();
+    assert_eq!(result.rows[0]["count"], serde_json::json!(1));
+
+    let response = build_router(Arc::clone(&state))
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "tools/call",
+                        "params": {"name": "unknown", "arguments": {}}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
 async fn runtime_configuration_loads_apoc_only_when_enabled() {
     let mut state = AppState::default();
     assert!(state.packages.packages().is_empty());
