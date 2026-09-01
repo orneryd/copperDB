@@ -8,7 +8,7 @@ Implement secure, cancellable MCP transport and durable database-scoped `store`,
 
 ## Current Defects
 
-Dispatch is synchronous/ad hoc, `run_cypher` ignores parameters, `find_similar` is a misleading fulltext call, and ingress applies read authorization to every tool. Arbitrary Cypher can therefore attempt writes through a read-gated tool.
+Tool handlers remain ad hoc rather than typed and async, and `find_similar` is a misleading fulltext call. HTTP still lacks explicit MCP request limits, content negotiation, notifications, batches, sessions, and database selection. The six durable production tools and stdio transport are not implemented.
 
 ## Phases
 
@@ -23,9 +23,10 @@ Dispatch is synchronous/ad hoc, `run_cypher` ignores parameters, `find_similar` 
 - The JSON-RPC dispatch boundary validates version `2.0`, negotiates the supported MCP protocol version `2024-11-05`, and reports protocol failures with stable codes and structured data.
 - Tool schemas are compiled when registered. Invalid schemas are rejected atomically, and `tools/call` arguments are validated before execution against closed built-in schemas and bounded numeric inputs.
 - Tool listing advertises the upstream-compatible immutable registry capability with `tools.listChanged: false`.
+- Every serialized tool result is bounded to 1 MiB. Oversized output is replaced rather than truncated with a valid MCP `isError` result containing deterministic size metadata.
 - Tool access metadata now drives HTTP database authorization. Read tools require read access, future write tools require write access, and the unrestricted compatibility-only `run_cypher` tool requires admin access.
 - HTTP execution preserves authenticated caller roles, forwards declared Cypher parameters, avoids opening databases for protocol-only methods, and moves synchronous dispatch off the async runtime.
-- Typed async handlers, bounded output, remaining transport hardening, database selection, and production tools remain pending.
+- Typed async handlers, remaining transport hardening, database selection, and production tools remain pending.
 
 ## Tests And Security
 

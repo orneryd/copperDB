@@ -16,6 +16,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+pub const DEFAULT_MAX_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum McpError {
@@ -29,6 +30,12 @@ pub enum McpError {
     InvalidSchema { tool: String, message: String },
     #[error("execution error: {0}")]
     ExecutionError(String),
+    #[error("tool {tool} output is {actual_bytes} bytes; limit is {max_bytes} bytes")]
+    OutputTooLarge {
+        tool: String,
+        actual_bytes: usize,
+        max_bytes: usize,
+    },
 }
 
 /// MCP tool definition (exposed to LLMs).
@@ -158,13 +165,26 @@ impl ToolAccess {
 }
 
 /// Registry of available MCP tools.
-#[derive(Default)]
 pub struct ToolRegistry {
     tools: HashMap<String, Tool>,
     validators: HashMap<String, jsonschema::Validator>,
     access: HashMap<String, ToolAccess>,
     engine: Option<Arc<GraphEngine>>,
     roles: Vec<String>,
+    max_tool_output_bytes: usize,
+}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self {
+            tools: HashMap::new(),
+            validators: HashMap::new(),
+            access: HashMap::new(),
+            engine: None,
+            roles: Vec::new(),
+            max_tool_output_bytes: DEFAULT_MAX_TOOL_OUTPUT_BYTES,
+        }
+    }
 }
 
 impl ToolRegistry {
@@ -188,6 +208,12 @@ impl ToolRegistry {
         registry.engine = Some(engine);
         registry.roles = roles;
         registry
+    }
+
+    #[cfg(test)]
+    fn with_max_tool_output_bytes(mut self, max_tool_output_bytes: usize) -> Self {
+        self.max_tool_output_bytes = max_tool_output_bytes;
+        self
     }
 
     pub fn register(&mut self, tool: Tool) -> Result<(), McpError> {
@@ -305,7 +331,10 @@ impl ToolRegistry {
                     );
                 }
                 match self.execute_tool(request_context, &call.name, &call.arguments) {
-                    Ok(result) => McpResponse::ok(request.id.clone(), result),
+                    Ok(result) => McpResponse::ok(
+                        request.id.clone(),
+                        self.enforce_tool_output_limit(&call.name, result),
+                    ),
                     Err(e) => McpResponse::error(request.id.clone(), -32000, e),
                 }
             }
@@ -347,6 +376,32 @@ impl ToolRegistry {
             }
             _ => McpResponse::error(request.id.clone(), -32601, "method not found"),
         }
+    }
+
+    fn enforce_tool_output_limit(
+        &self,
+        tool: &str,
+        result: serde_json::Value,
+    ) -> serde_json::Value {
+        let actual_bytes = serde_json::to_vec(&result).map_or(usize::MAX, |bytes| bytes.len());
+        if actual_bytes <= self.max_tool_output_bytes {
+            return result;
+        }
+        let error = McpError::OutputTooLarge {
+            tool: tool.to_string(),
+            actual_bytes,
+            max_bytes: self.max_tool_output_bytes,
+        };
+        serde_json::json!({
+            "content": [{"type": "text", "text": error.to_string()}],
+            "isError": true,
+            "_meta": {
+                "kind": "output_too_large",
+                "tool": tool,
+                "actualBytes": actual_bytes,
+                "maxBytes": self.max_tool_output_bytes
+            }
+        })
     }
 
     /// Execute a named tool with the given arguments.
@@ -674,6 +729,42 @@ mod tests {
         let data = error.data.unwrap();
         assert_eq!(data["tool"], "find_similar");
         assert_eq!(data["kind"], "schema_validation");
+    }
+
+    #[test]
+    fn tool_output_within_limit_is_unchanged() {
+        let registry = ToolRegistry::new().with_max_tool_output_bytes(512);
+        let result = serde_json::json!({
+            "content": [{"type": "text", "text": "small result"}]
+        });
+
+        assert_eq!(
+            registry.enforce_tool_output_limit("find_similar", result.clone()),
+            result
+        );
+    }
+
+    #[test]
+    fn oversized_tool_output_becomes_bounded_structured_error() {
+        let registry = ToolRegistry::new().with_max_tool_output_bytes(512);
+        let oversized = serde_json::json!({
+            "content": [{"type": "text", "text": "é".repeat(400)}]
+        });
+        let actual_bytes = serde_json::to_vec(&oversized).unwrap().len();
+        assert!(actual_bytes > 512);
+
+        let result = registry.enforce_tool_output_limit("find_similar", oversized);
+
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["_meta"]["kind"], "output_too_large");
+        assert_eq!(result["_meta"]["tool"], "find_similar");
+        assert_eq!(result["_meta"]["actualBytes"], actual_bytes);
+        assert_eq!(result["_meta"]["maxBytes"], 512);
+        assert_eq!(
+            result["content"][0]["text"],
+            format!("tool find_similar output is {actual_bytes} bytes; limit is 512 bytes")
+        );
+        assert!(serde_json::to_vec(&result).unwrap().len() <= 512);
     }
 
     #[test]
