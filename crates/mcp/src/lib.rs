@@ -1285,11 +1285,9 @@ impl ToolHandler for LinkHandler {
             ("strength".into(), serde_json::json!(arguments.strength)),
             (
                 "created_at".into(),
-                serde_json::json!(
-                    OffsetDateTime::now_utc()
-                        .format(&Rfc3339)
-                        .map_err(|error| error.to_string())?
-                ),
+                serde_json::json!(OffsetDateTime::now_utc()
+                    .format(&Rfc3339)
+                    .map_err(|error| error.to_string())?),
             ),
         ]);
         properties.extend(arguments.metadata);
@@ -1362,6 +1360,482 @@ impl ToolHandler for LinkHandler {
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskArgs {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    priority: String,
+    #[serde(default)]
+    depends_on: Vec<String>,
+    #[serde(default)]
+    assign: String,
+    #[serde(default)]
+    complete: bool,
+    #[serde(default)]
+    delete: bool,
+    #[serde(default, rename = "database")]
+    _database: Option<String>,
+}
+
+struct TaskHandler;
+
+#[async_trait]
+impl ToolHandler for TaskHandler {
+    async fn call(
+        &self,
+        context: ToolExecutionContext,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let mut arguments: TaskArgs =
+            serde_json::from_value(arguments).map_err(|error| error.to_string())?;
+        if arguments.status.eq_ignore_ascii_case("done") {
+            arguments.status = "completed".into();
+        }
+        let engine = context.engine.ok_or("no graph engine configured")?;
+        tokio::task::spawn_blocking(move || {
+            let now = OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .map_err(|error| error.to_string())?;
+            if !arguments.id.is_empty() {
+                let task_id = arguments.id.trim().to_string();
+                if arguments.delete {
+                    let mut transaction = engine.begin_storage_transaction()?;
+                    let result = engine.execute_in_storage_transaction_as_with_context(
+                        &context.request_context,
+                        &mut transaction,
+                        "MATCH (t:Task) WHERE elementId(t) = $id DETACH DELETE t RETURN count(t) AS deleted",
+                        HashMap::from([("id".into(), serde_json::json!(task_id))]),
+                        &context.roles,
+                    )
+                    .map_err(|error| format!("failed to delete task: {error}"))?;
+                    let deleted = result
+                        .rows
+                        .first()
+                        .and_then(|row| row.get("deleted"))
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(0);
+                    transaction.commit()?;
+                    return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(serde_json::json!({
+                        "task": {"id": task_id, "type": "Task"},
+                        "next_action": format!("Deleted {deleted} task(s).")
+                    }));
+                }
+
+                let mut task = engine
+                    .get_readable_node_with_context(
+                        &context.request_context,
+                        &task_id,
+                        &context.roles,
+                    )?
+                    .filter(|node| node.labels.iter().any(|label| label == "Task"))
+                    .ok_or_else(|| format!("task not found: {}", arguments.id))?;
+                let mut updates = serde_json::Map::new();
+                if arguments.complete {
+                    updates.insert("status".into(), serde_json::json!("completed"));
+                } else if !arguments.status.is_empty() {
+                    updates.insert("status".into(), serde_json::json!(arguments.status));
+                } else {
+                    match task
+                        .properties
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                    {
+                        "" | "pending" => {
+                            updates.insert("status".into(), serde_json::json!("active"));
+                        }
+                        "active" => {
+                            updates.insert("status".into(), serde_json::json!("completed"));
+                        }
+                        _ => {}
+                    }
+                }
+                for (name, value) in [
+                    ("title", arguments.title),
+                    ("description", arguments.description),
+                    ("priority", arguments.priority),
+                    ("assigned_to", arguments.assign),
+                ] {
+                    if !value.is_empty() {
+                        updates.insert(name.into(), serde_json::json!(value));
+                    }
+                }
+                updates.insert("updated_at".into(), serde_json::json!(now));
+                let mut transaction = engine.begin_storage_transaction()?;
+                engine.execute_in_storage_transaction_as_with_context(
+                    &context.request_context,
+                    &mut transaction,
+                    "MATCH (t:Task) WHERE elementId(t) = $id SET t += $props RETURN elementId(t) AS id",
+                    HashMap::from([
+                        ("id".into(), serde_json::json!(task_id)),
+                        ("props".into(), serde_json::Value::Object(updates.clone())),
+                    ]),
+                    &context.roles,
+                )
+                .map_err(|error| format!("failed to update task: {error}"))?;
+                transaction.commit()?;
+                task.properties.extend(updates);
+                return Ok(task_result_json(task, None));
+            }
+
+            if arguments.delete {
+                return Err("id is required for delete".into());
+            }
+            if arguments.title.is_empty() {
+                return Err("title is required for new tasks".into());
+            }
+            let status = if arguments.complete {
+                "completed".to_string()
+            } else if arguments.status.is_empty() {
+                "pending".to_string()
+            } else {
+                arguments.status
+            };
+            let priority = if arguments.priority.is_empty() {
+                "medium".to_string()
+            } else {
+                arguments.priority
+            };
+            let mut properties = serde_json::Map::from_iter([
+                ("title".into(), serde_json::json!(arguments.title)),
+                (
+                    "description".into(),
+                    serde_json::json!(arguments.description),
+                ),
+                ("status".into(), serde_json::json!(status)),
+                ("priority".into(), serde_json::json!(priority)),
+                ("created_at".into(), serde_json::json!(now)),
+            ]);
+            if !arguments.assign.is_empty() {
+                properties.insert("assigned_to".into(), serde_json::json!(arguments.assign));
+            }
+            let mut transaction = engine.begin_storage_transaction()?;
+            let result = engine.execute_in_storage_transaction_as_with_context(
+                &context.request_context,
+                &mut transaction,
+                "CREATE (t:Task) SET t += $props RETURN elementId(t) AS id",
+                HashMap::from([(
+                    "props".into(),
+                    serde_json::Value::Object(properties.clone()),
+                )]),
+                &context.roles,
+            )
+            .map_err(|error| format!("failed to create task: {error}"))?;
+            let task_id = result
+                .rows
+                .first()
+                .and_then(|row| row.get("id"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or("task create returned invalid id")?
+                .to_string();
+            for dependency_id in arguments
+                .depends_on
+                .into_iter()
+                .filter(|id| !id.trim().is_empty())
+            {
+                engine.execute_in_storage_transaction_as_with_context(
+                    &context.request_context,
+                    &mut transaction,
+                    "MATCH (t:Task), (d:Task) WHERE elementId(t) = $id AND elementId(d) = $dep CREATE (t)-[:DEPENDS_ON]->(d)",
+                    HashMap::from([
+                        ("id".into(), serde_json::json!(task_id)),
+                        ("dep".into(), serde_json::json!(dependency_id.trim())),
+                    ]),
+                    &context.roles,
+                )
+                .map_err(|error| {
+                    format!(
+                        "failed to create task dependency {dependency_id:?}: {error}"
+                    )
+                })?;
+            }
+            transaction.commit()?;
+            let task = copperdb_storage::NodeRecord {
+                id: task_id,
+                labels: vec!["Task".into()],
+                properties: properties.into_iter().collect(),
+                named_embeddings: Default::default(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            };
+            Ok(task_result_json(
+                task,
+                Some("Task created. Consider adding dependencies or subtasks."),
+            ))
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+    }
+}
+
+fn task_result_json(
+    task: copperdb_storage::NodeRecord,
+    next_action: Option<&str>,
+) -> serde_json::Value {
+    let mut result = serde_json::Map::from_iter([("task".into(), task_node_json(&task, false))]);
+    if let Some(next_action) = next_action {
+        result.insert("next_action".into(), serde_json::json!(next_action));
+    }
+    serde_json::Value::Object(result)
+}
+
+fn task_node_json(task: &copperdb_storage::NodeRecord, list_projection: bool) -> serde_json::Value {
+    let mut node = serde_json::Map::from_iter([
+        ("id".into(), serde_json::json!(task.id)),
+        ("type".into(), serde_json::json!("Task")),
+    ]);
+    for (field, property) in [("title", "title"), ("content", "description")] {
+        if let Some(value) = task
+            .properties
+            .get(property)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            node.insert(field.into(), serde_json::json!(value));
+        }
+    }
+    let properties = if list_projection {
+        serde_json::Map::from_iter(["status", "priority", "assigned_to"].map(|name| {
+            (
+                name.into(),
+                task.properties
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!("")),
+            )
+        }))
+    } else {
+        sanitize_properties_for_llm(&serde_json::Map::from_iter(task.properties.clone()))
+    };
+    if !properties.is_empty() {
+        node.insert("properties".into(), serde_json::Value::Object(properties));
+    }
+    serde_json::Value::Object(node)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TasksArgs {
+    #[serde(default)]
+    status: Vec<String>,
+    #[serde(default)]
+    priority: Vec<String>,
+    #[serde(default)]
+    assigned_to: String,
+    #[serde(default)]
+    unblocked_only: bool,
+    #[serde(default = "default_tasks_limit")]
+    limit: usize,
+    #[serde(default, rename = "database")]
+    _database: Option<String>,
+}
+
+fn default_tasks_limit() -> usize {
+    20
+}
+
+struct TasksHandler;
+
+#[async_trait]
+impl ToolHandler for TasksHandler {
+    async fn call(
+        &self,
+        context: ToolExecutionContext,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let mut arguments: TasksArgs =
+            serde_json::from_value(arguments).map_err(|error| error.to_string())?;
+        for status in &mut arguments.status {
+            if status.eq_ignore_ascii_case("done") {
+                *status = "completed".into();
+            }
+        }
+        let engine = context.engine.ok_or("no graph engine configured")?;
+        tokio::task::spawn_blocking(move || {
+            let result = engine.execute_as_with_context(
+                &context.request_context,
+                "MATCH (t:Task) RETURN elementId(t) AS id, labels(t) AS labels, t AS properties",
+                HashMap::new(),
+                &context.roles,
+            )?;
+            let mut all_tasks = Vec::new();
+            for row in result.rows {
+                context.request_context.check_active()?;
+                let Some(id) = row.get("id").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                let labels = row
+                    .get("labels")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|labels| {
+                        labels
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_else(|| vec!["Task".into()]);
+                let Some(properties) = row
+                    .get("properties")
+                    .and_then(serde_json::Value::as_object)
+                    .and_then(|properties| {
+                        engine
+                            .filter_readable_node_properties(&labels, properties, &context.roles)
+                            .transpose()
+                    })
+                    .transpose()?
+                else {
+                    continue;
+                };
+                let task = copperdb_storage::NodeRecord {
+                    id: id.to_string(),
+                    labels,
+                    properties: properties.into_iter().collect(),
+                    named_embeddings: Default::default(),
+                    chunk_embeddings: Vec::new(),
+                    embed_meta: Default::default(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                };
+                all_tasks.push(task);
+            }
+            let status_by_id = all_tasks
+                .iter()
+                .map(|task| {
+                    (
+                        task.id.clone(),
+                        task.properties
+                            .get("status")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+            let mut tasks = all_tasks
+                .into_iter()
+                .filter(|task| {
+                    let status = task
+                        .properties
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    let priority = task
+                        .properties
+                        .get("priority")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    let assigned_to = task
+                        .properties
+                        .get("assigned_to")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default();
+                    (arguments.status.is_empty()
+                        || arguments.status.iter().any(|expected| expected == status))
+                        && (arguments.priority.is_empty()
+                            || arguments
+                                .priority
+                                .iter()
+                                .any(|expected| expected == priority))
+                        && (arguments.assigned_to.is_empty()
+                            || arguments.assigned_to == assigned_to)
+                })
+                .collect::<Vec<_>>();
+            let dependencies = if arguments.unblocked_only {
+                context.request_context.check_active()?;
+                engine.storage().get_edges_by_type("DEPENDS_ON")?
+            } else {
+                Vec::new()
+            };
+            let is_blocked = |task: &copperdb_storage::NodeRecord| {
+                arguments.unblocked_only
+                    && dependencies.iter().any(|edge| {
+                        edge.start_node == task.id
+                            && status_by_id
+                                .get(&edge.end_node)
+                                .is_none_or(|status| status != "completed")
+                    })
+            };
+            tasks.sort_by(|left, right| {
+                let left_created = left
+                    .properties
+                    .get("created_at")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let right_created = right
+                    .properties
+                    .get("created_at")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                right_created
+                    .cmp(left_created)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            let mut by_status = HashMap::from([
+                ("pending".to_string(), 0_usize),
+                ("active".to_string(), 0),
+                ("completed".to_string(), 0),
+                ("blocked".to_string(), 0),
+            ]);
+            let mut by_priority = HashMap::from([
+                ("critical".to_string(), 0_usize),
+                ("high".to_string(), 0),
+                ("medium".to_string(), 0),
+                ("low".to_string(), 0),
+            ]);
+            for task in tasks.iter().filter(|task| !is_blocked(task)) {
+                context.request_context.check_active()?;
+                if let Some(status) = task
+                    .properties
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|status| !status.is_empty())
+                {
+                    *by_status.entry(status.to_string()).or_default() += 1;
+                }
+                if let Some(priority) = task
+                    .properties
+                    .get("priority")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|priority| !priority.is_empty())
+                {
+                    *by_priority.entry(priority.to_string()).or_default() += 1;
+                }
+            }
+            let total = tasks.iter().filter(|task| !is_blocked(task)).count();
+            let tasks = tasks
+                .iter()
+                .take(arguments.limit)
+                .filter(|task| !is_blocked(task))
+                .map(|task| task_node_json(task, true))
+                .collect::<Vec<_>>();
+            Ok::<_, copperdb_engine::CopperDbError>(serde_json::json!({
+                "tasks": tasks,
+                "stats": {
+                    "total": total,
+                    "by_status": by_status,
+                    "by_priority": by_priority
+                }
+            }))
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("failed to list tasks: {error}"))
     }
 }
 
@@ -1458,6 +1932,50 @@ fn copperdb_tools_with_access() -> Vec<(Tool, ToolAccess, Arc<dyn ToolHandler>)>
             },
             ToolAccess::Write,
             Arc::new(LinkHandler),
+        ),
+        (
+            Tool {
+                name: "task".into(),
+                description: "Create or manage a durable task with status, priority, assignment, and dependencies.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Task ID for update, completion, or deletion."},
+                        "title": {"type": "string", "description": "Task title, required for creation."},
+                        "description": {"type": "string", "description": "Detailed task description."},
+                        "status": {"type": "string", "enum": ["pending", "active", "completed", "blocked"], "description": "Task status. Omit when updating to auto-toggle."},
+                        "priority": {"type": "string", "enum": ["low", "medium", "high", "critical"], "default": "medium", "description": "Task priority."},
+                        "depends_on": {"type": "array", "items": {"type": "string"}, "description": "Task IDs that must complete first."},
+                        "assign": {"type": "string", "description": "Agent or person assigned to the task."},
+                        "complete": {"type": "boolean", "description": "Mark the task completed."},
+                        "delete": {"type": "boolean", "description": "Delete the task and attached relationships."},
+                        "database": {"type": "string", "description": "Database name to use. If omitted, uses the server's configured default database."}
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            ToolAccess::Write,
+            Arc::new(TaskHandler),
+        ),
+        (
+            Tool {
+                name: "tasks".into(),
+                description: "List durable tasks with status, priority, assignee, and dependency filters.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "array", "items": {"type": "string", "enum": ["pending", "active", "completed", "blocked"]}, "description": "Filter by status."},
+                        "priority": {"type": "array", "items": {"type": "string", "enum": ["low", "medium", "high", "critical"]}, "description": "Filter by priority."},
+                        "assigned_to": {"type": "string", "description": "Filter by assignee."},
+                        "unblocked_only": {"type": "boolean", "default": false, "description": "Only return tasks with no incomplete dependencies."},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Maximum number of returned tasks."},
+                        "database": {"type": "string", "description": "Database name to use. If omitted, uses the server's configured default database."}
+                    },
+                    "additionalProperties": false
+                }),
+            },
+            ToolAccess::Read,
+            Arc::new(TasksHandler),
         ),
         (
             Tool {
@@ -1576,7 +2094,7 @@ mod tests {
 
         assert_eq!(responses.len(), 5);
         assert_eq!(responses[0]["id"], 1);
-        assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 6);
+        assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 8);
         assert_eq!(responses[1].as_array().unwrap().len(), 1);
         assert_eq!(responses[1][0]["id"], 2);
         assert_eq!(responses[2]["error"]["code"], -32600);
@@ -1605,12 +2123,14 @@ mod tests {
     #[test]
     fn test_tool_registry_default_tools() {
         let registry = ToolRegistry::new();
-        assert_eq!(registry.len(), 6);
+        assert_eq!(registry.len(), 8);
         for name in [
             "store",
             "recall",
             "discover",
             "link",
+            "task",
+            "tasks",
             "run_cypher",
             "find_similar",
         ] {
@@ -1640,7 +2160,7 @@ mod tests {
                 Arc::new(EchoHandler),
             )
             .unwrap();
-        assert_eq!(registry.len(), 7);
+        assert_eq!(registry.len(), 9);
     }
 
     #[tokio::test]
@@ -2012,7 +2532,11 @@ mod tests {
             "target node not found: missing"
         );
         assert_eq!(
-            engine.storage().get_edges_by_type("RELATES_TO").unwrap().len(),
+            engine
+                .storage()
+                .get_edges_by_type("RELATES_TO")
+                .unwrap()
+                .len(),
             1
         );
 
@@ -2026,11 +2550,7 @@ mod tests {
                 })),
             ))
             .await;
-        assert!(invalid
-            .error
-            .unwrap()
-            .message
-            .contains("invalid relation"));
+        assert!(invalid.error.unwrap().message.contains("invalid relation"));
         let whitespace_relation = registry
             .dispatch(&McpRequest::new(
                 33,
@@ -2050,6 +2570,255 @@ mod tests {
         assert_eq!(events.last().unwrap().event_type.as_str(), "DATA_READ");
         assert_eq!(events.last().unwrap().action.as_deref(), Some("MATCH"));
         assert!(engine.audit_log().verify_chain().unwrap().valid);
+    }
+
+    #[tokio::test]
+    async fn task_and_tasks_preserve_durable_dependency_contract() {
+        let engine = Arc::new(copperdb_engine::CopperDb::open_temporary().unwrap());
+        let registry = ToolRegistry::with_engine_and_roles(engine.clone(), vec!["admin".into()]);
+        let dependency_request = McpRequest::new(
+            40,
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "task",
+                "arguments": {
+                    "title": "Dependency",
+                    "status": "active",
+                    "priority": "high",
+                    "assign": "alice"
+                }
+            })),
+        );
+        assert_eq!(
+            registry.required_access(&dependency_request).unwrap(),
+            Some(ToolAccess::Write)
+        );
+        let dependency = registry.dispatch(&dependency_request).await;
+        assert!(dependency.error.is_none(), "{:?}", dependency.error);
+        let dependency = dependency.result.unwrap();
+        let dependency_id = dependency["task"]["id"].as_str().unwrap().to_string();
+        assert_eq!(dependency["task"]["properties"]["status"], "active");
+        assert_eq!(dependency["task"]["properties"]["priority"], "high");
+        assert_eq!(
+            dependency["next_action"],
+            "Task created. Consider adding dependencies or subtasks."
+        );
+
+        let main = registry
+            .dispatch(&McpRequest::new(
+                41,
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": "task",
+                    "arguments": {
+                        "title": "Main Task",
+                        "description": "needs dependency",
+                        "assign": "alice",
+                        "depends_on": [dependency_id, "", "missing-task"]
+                    }
+                })),
+            ))
+            .await;
+        assert!(main.error.is_none(), "{:?}", main.error);
+        let main = main.result.unwrap();
+        let main_id = main["task"]["id"].as_str().unwrap().to_string();
+        assert_eq!(main["task"]["properties"]["status"], "pending");
+        assert_eq!(main["task"]["properties"]["priority"], "medium");
+        let dependencies = engine.storage().get_edges_by_type("DEPENDS_ON").unwrap();
+        assert_eq!(dependencies.len(), 1);
+        assert_eq!(dependencies[0].start_node, main_id);
+        assert_eq!(dependencies[0].end_node, dependency_id);
+        assert!(!dependencies
+            .iter()
+            .any(|edge| { edge.start_node == dependency_id && edge.end_node == main_id }));
+
+        let unblocked_request = McpRequest::new(
+            42,
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "tasks",
+                "arguments": {"status": ["pending"], "unblocked_only": true, "limit": 1}
+            })),
+        );
+        assert_eq!(
+            registry.required_access(&unblocked_request).unwrap(),
+            Some(ToolAccess::Read)
+        );
+        let blocked = registry.dispatch(&unblocked_request).await;
+        assert!(blocked.error.is_none(), "{:?}", blocked.error);
+        assert_eq!(blocked.result.unwrap()["stats"]["total"], 0);
+
+        let completed = registry
+            .dispatch(&McpRequest::new(
+                43,
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": "task",
+                    "arguments": {"id": dependency_id, "complete": true}
+                })),
+            ))
+            .await;
+        assert!(completed.error.is_none(), "{:?}", completed.error);
+        assert_eq!(
+            completed.result.unwrap()["task"]["properties"]["status"],
+            "completed"
+        );
+        let unblocked = registry.dispatch(&unblocked_request).await;
+        assert!(unblocked.error.is_none(), "{:?}", unblocked.error);
+        let unblocked = unblocked.result.unwrap();
+        assert_eq!(unblocked["stats"]["total"], 1);
+        assert_eq!(unblocked["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(unblocked["tasks"][0]["id"], main_id);
+
+        let activated = registry
+            .dispatch(&McpRequest::new(
+                44,
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": "task",
+                    "arguments": {
+                        "id": main_id,
+                        "title": "Main Task Updated",
+                        "description": "updated description",
+                        "priority": "critical",
+                        "assign": "carol"
+                    }
+                })),
+            ))
+            .await;
+        assert!(activated.error.is_none(), "{:?}", activated.error);
+        let activated = activated.result.unwrap();
+        assert_eq!(activated["task"]["title"], "Main Task Updated");
+        assert_eq!(activated["task"]["content"], "updated description");
+        assert_eq!(activated["task"]["properties"]["status"], "active");
+        assert_eq!(activated["task"]["properties"]["priority"], "critical");
+        assert_eq!(activated["task"]["properties"]["assigned_to"], "carol");
+        let toggled = registry
+            .dispatch(&McpRequest::new(
+                45,
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": "task",
+                    "arguments": {"id": main_id}
+                })),
+            ))
+            .await;
+        assert_eq!(
+            toggled.result.unwrap()["task"]["properties"]["status"],
+            "completed"
+        );
+
+        for (id, title) in [(46, "Pending A"), (47, "Pending B")] {
+            let created = registry
+                .dispatch(&McpRequest::new(
+                    id,
+                    "tools/call",
+                    Some(serde_json::json!({
+                        "name": "task",
+                        "arguments": {"title": title}
+                    })),
+                ))
+                .await;
+            assert!(created.error.is_none(), "{:?}", created.error);
+        }
+        let limited_request = McpRequest::new(
+            48,
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "tasks",
+                "arguments": {"status": ["pending"], "limit": 1}
+            })),
+        );
+        let first_list = registry.dispatch(&limited_request).await.result.unwrap();
+        let second_list = registry.dispatch(&limited_request).await.result.unwrap();
+        assert_eq!(first_list, second_list);
+        assert_eq!(first_list["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(first_list["stats"]["total"], 2);
+        assert_eq!(first_list["stats"]["by_status"]["pending"], 2);
+        assert_eq!(first_list["stats"]["by_priority"]["medium"], 2);
+
+        let deleted = registry
+            .dispatch(&McpRequest::new(
+                49,
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": "task",
+                    "arguments": {"id": dependency_id, "delete": true}
+                })),
+            ))
+            .await;
+        assert!(deleted.error.is_none(), "{:?}", deleted.error);
+        assert_eq!(deleted.result.unwrap()["next_action"], "Deleted 1 task(s).");
+        assert!(engine
+            .storage()
+            .get_edges_by_type("DEPENDS_ON")
+            .unwrap()
+            .is_empty());
+
+        let invalid_status = registry
+            .dispatch(&McpRequest::new(
+                50,
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": "task",
+                    "arguments": {"title": "Invalid", "status": "unknown"}
+                })),
+            ))
+            .await;
+        assert_eq!(invalid_status.error.unwrap().code, -32602);
+        let missing_title = registry
+            .dispatch(&McpRequest::new(
+                51,
+                "tools/call",
+                Some(serde_json::json!({"name": "task", "arguments": {}})),
+            ))
+            .await;
+        assert_eq!(
+            missing_title.error.unwrap().message,
+            "title is required for new tasks"
+        );
+        let missing_task = registry
+            .dispatch(&McpRequest::new(
+                52,
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": "task",
+                    "arguments": {"id": "missing-task"}
+                })),
+            ))
+            .await;
+        assert_eq!(
+            missing_task.error.unwrap().message,
+            "task not found: missing-task"
+        );
+        let delete_without_id = registry
+            .dispatch(&McpRequest::new(
+                53,
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": "task",
+                    "arguments": {"delete": true}
+                })),
+            ))
+            .await;
+        assert_eq!(
+            delete_without_id.error.unwrap().message,
+            "id is required for delete"
+        );
+        assert!(engine.audit_log().verify_chain().unwrap().valid);
+        let events = engine.audit_log().events().unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.action.as_deref() == Some("CREATE")));
+        assert!(events
+            .iter()
+            .any(|event| event.action.as_deref() == Some("UPDATE")));
+        assert!(events
+            .iter()
+            .any(|event| event.action.as_deref() == Some("DELETE")));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type.as_str() == "DATA_READ"));
     }
 
     #[tokio::test]
@@ -2287,7 +3056,7 @@ mod tests {
         let resp = registry.dispatch(&req).await;
         assert!(resp.error.is_none());
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().len();
-        assert_eq!(tools, 6);
+        assert_eq!(tools, 8);
     }
 
     #[test]

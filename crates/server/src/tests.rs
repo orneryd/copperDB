@@ -296,6 +296,16 @@ async fn mcp_store_requires_write_access_and_routes_to_the_selected_database() {
     let selected_database = format!("mcp-store-selected-{}", uuid::Uuid::new_v4());
     let temp_dir = tempfile::tempdir().unwrap();
     let mut state = AppState::default();
+    state.db_manager = Arc::new(
+        DatabaseManager::open(
+            temp_dir
+                .path()
+                .join("multidb")
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .unwrap(),
+    );
     state
         .db_manager
         .create(
@@ -453,10 +463,26 @@ async fn mcp_store_requires_write_access_and_routes_to_the_selected_database() {
 
 #[tokio::test]
 async fn local_mcp_dispatch_selects_the_requested_database() {
-    let state = Arc::new(AppState::default());
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut state = AppState::default();
+    state.db_manager = Arc::new(
+        DatabaseManager::open(
+            temp_dir
+                .path()
+                .join("multidb")
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .unwrap(),
+    );
     let database = format!("stdio-target-{}", uuid::Uuid::new_v4());
-    let storage_path = state.db_manager.default_storage_path(&database);
+    let storage_path = temp_dir
+        .path()
+        .join(&database)
+        .to_string_lossy()
+        .into_owned();
     state.db_manager.create(&database, storage_path).unwrap();
+    let state = Arc::new(state);
     let request = copperdb_mcp::McpRequest::new(
         700,
         "tools/call",
@@ -1112,7 +1138,7 @@ async fn mcp_http_batches_preserve_order_and_omit_notifications() {
     let responses = payload.as_array().unwrap();
     assert_eq!(responses.len(), 3);
     assert_eq!(responses[0]["id"], "first");
-    assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 8);
     assert_eq!(responses[1]["id"], serde_json::Value::Null);
     assert_eq!(responses[1]["error"]["code"], -32600);
     assert_eq!(responses[2]["id"], "last");
