@@ -3,6 +3,141 @@
 use super::*;
 
 #[tokio::test]
+async fn mcp_run_cypher_requires_admin_access() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let mut state = AppState::default();
+    state.auth = AuthState::from_storage_path(
+        unique_auth_path(),
+        true,
+        true,
+        "admin".into(),
+        "password".into(),
+        "test-secret".into(),
+    )
+    .unwrap();
+    let (editor_token, admin_token) = {
+        let auth = state.auth.open_authenticator().unwrap();
+        auth.allowlist
+            .save_role_databases(copperdb_auth::ROLE_EDITOR, vec!["copperdb".into()])
+            .unwrap();
+        auth.privileges
+            .save_privilege(copperdb_auth::ROLE_EDITOR, "copperdb", true, true)
+            .unwrap();
+        auth.create_user(
+            "editor",
+            "password",
+            vec![copperdb_auth::ROLE_EDITOR.into()],
+        )
+        .unwrap();
+        (
+            auth.authenticate("editor", "password")
+                .unwrap()
+                .0
+                .access_token,
+            auth.authenticate("admin", "password")
+                .unwrap()
+                .0
+                .access_token,
+        )
+    };
+
+    let app = build_router(Arc::new(state));
+    let request_body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "run_cypher",
+            "arguments": {
+                "query": "RETURN $value AS value",
+                "params": {"value": "forwarded"}
+            }
+        }
+    })
+    .to_string();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {editor_token}"))
+                .body(Body::from(request_body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {admin_token}"))
+                .body(Body::from(request_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(payload["error"].is_null(), "{payload}");
+    assert!(payload["result"]["isError"].is_null(), "{payload}");
+    assert!(payload["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Rows: 1"));
+}
+
+#[tokio::test]
+async fn mcp_protocol_methods_do_not_require_database_access() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let mut state = AppState::default();
+    state.auth.security_enabled = true;
+    let response = build_router(Arc::new(state))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "initialize",
+                        "params": {"protocolVersion": copperdb_mcp::MCP_PROTOCOL_VERSION}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        payload["result"]["protocolVersion"],
+        copperdb_mcp::MCP_PROTOCOL_VERSION
+    );
+}
+
+#[tokio::test]
 async fn runtime_configuration_loads_apoc_only_when_enabled() {
     let mut state = AppState::default();
     assert!(state.packages.packages().is_empty());

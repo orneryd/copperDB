@@ -4898,9 +4898,6 @@ async fn mcp_handler(
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Response {
-    if let Err(status) = authorize_database_access(&state, &headers, &state.db_name, false) {
-        return status.into_response();
-    }
     let request: copperdb_mcp::McpRequest = match serde_json::from_value(body) {
         Ok(req) => req,
         Err(e) => {
@@ -4912,20 +4909,54 @@ async fn mcp_handler(
             .into_response()
         }
     };
-    let engine = match open_engine(&state, &state.db_name) {
-        Ok(engine) => engine, // already Arc<GraphEngine>
-        Err(e) => {
-            return Json(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": request.id,
-                "error": { "code": -32000, "message": e }
-            }))
-            .into_response()
+    let registry = copperdb_mcp::ToolRegistry::new();
+    let access = match registry.required_access(&request) {
+        Ok(access) => access,
+        Err(_) => {
+            return Json(registry.dispatch_with_context(&request_context, &request)).into_response()
         }
     };
-    let registry = copperdb_mcp::ToolRegistry::with_engine(engine);
-    let response = registry.dispatch_with_context(&request_context, &request);
-    Json(response).into_response()
+    let registry = if let Some(access) = access {
+        let claims = match authorize_database_access(
+            &state,
+            &headers,
+            &state.db_name,
+            access.requires_write(),
+        ) {
+            Ok(claims) => claims,
+            Err(status) => return status.into_response(),
+        };
+        if access.requires_admin() {
+            if let Some(claims) = claims.as_ref() {
+                if let Err(status) = ensure_admin_access(&state, claims) {
+                    return status.into_response();
+                }
+            }
+        }
+        let engine = match open_engine(&state, &state.db_name) {
+            Ok(engine) => engine,
+            Err(error) => {
+                return Json(copperdb_mcp::McpResponse::error(request.id, -32000, error))
+                    .into_response()
+            }
+        };
+        copperdb_mcp::ToolRegistry::with_engine_and_roles(engine, roles_for_claims(claims.as_ref()))
+    } else {
+        registry
+    };
+    match tokio::task::spawn_blocking(move || {
+        registry.dispatch_with_context(&request_context, &request)
+    })
+    .await
+    {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => Json(copperdb_mcp::McpResponse::error(
+            serde_json::Value::Null,
+            -32000,
+            error.to_string(),
+        ))
+        .into_response(),
+    }
 }
 
 #[cfg(test)]

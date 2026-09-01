@@ -23,7 +23,9 @@ Dispatch is synchronous/ad hoc, `run_cypher` ignores parameters, `find_similar` 
 - The JSON-RPC dispatch boundary validates version `2.0`, negotiates the supported MCP protocol version `2024-11-05`, and reports protocol failures with stable codes and structured data.
 - Tool schemas are compiled when registered. Invalid schemas are rejected atomically, and `tools/call` arguments are validated before execution against closed built-in schemas and bounded numeric inputs.
 - Tool listing advertises the upstream-compatible immutable registry capability with `tools.listChanged: false`.
-- Async typed handlers, bounded output, hardened transports, per-tool authorization, and production tools remain pending.
+- Tool access metadata now drives HTTP database authorization. Read tools require read access, future write tools require write access, and the unrestricted compatibility-only `run_cypher` tool requires admin access.
+- HTTP execution preserves authenticated caller roles, forwards declared Cypher parameters, avoids opening databases for protocol-only methods, and moves synchronous dispatch off the async runtime.
+- Typed async handlers, bounded output, remaining transport hardening, database selection, and production tools remain pending.
 
 ## Tests And Security
 

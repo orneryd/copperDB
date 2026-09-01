@@ -140,20 +140,39 @@ pub struct ClientInfo {
     pub version: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolAccess {
+    Read,
+    Write,
+    Admin,
+}
+
+impl ToolAccess {
+    pub fn requires_write(self) -> bool {
+        matches!(self, Self::Write | Self::Admin)
+    }
+
+    pub fn requires_admin(self) -> bool {
+        self == Self::Admin
+    }
+}
+
 /// Registry of available MCP tools.
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: HashMap<String, Tool>,
     validators: HashMap<String, jsonschema::Validator>,
+    access: HashMap<String, ToolAccess>,
     engine: Option<Arc<GraphEngine>>,
+    roles: Vec<String>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         let mut registry = Self::default();
-        for tool in copperdb_tools() {
+        for (tool, access) in copperdb_tools_with_access() {
             registry
-                .register(tool)
+                .register_with_access(tool, access)
                 .expect("built-in MCP tool schemas must be valid");
         }
         registry
@@ -161,12 +180,21 @@ impl ToolRegistry {
 
     /// Create a registry with a graph engine for real Cypher execution.
     pub fn with_engine(engine: Arc<GraphEngine>) -> Self {
+        Self::with_engine_and_roles(engine, vec!["admin".into()])
+    }
+
+    pub fn with_engine_and_roles(engine: Arc<GraphEngine>, roles: Vec<String>) -> Self {
         let mut registry = Self::new();
         registry.engine = Some(engine);
+        registry.roles = roles;
         registry
     }
 
     pub fn register(&mut self, tool: Tool) -> Result<(), McpError> {
+        self.register_with_access(tool, ToolAccess::Read)
+    }
+
+    pub fn register_with_access(&mut self, tool: Tool, access: ToolAccess) -> Result<(), McpError> {
         let validator = jsonschema::validator_for(&tool.input_schema).map_err(|error| {
             McpError::InvalidSchema {
                 tool: tool.name.clone(),
@@ -174,8 +202,26 @@ impl ToolRegistry {
             }
         })?;
         self.validators.insert(tool.name.clone(), validator);
+        self.access.insert(tool.name.clone(), access);
         self.tools.insert(tool.name.clone(), tool);
         Ok(())
+    }
+
+    pub fn required_access(&self, request: &McpRequest) -> Result<Option<ToolAccess>, McpError> {
+        if request.method != "tools/call" {
+            return Ok(None);
+        }
+        let params = request
+            .params
+            .clone()
+            .ok_or_else(|| McpError::InvalidParams("missing params".into()))?;
+        let call: ToolCallParams = serde_json::from_value(params)
+            .map_err(|error| McpError::InvalidParams(error.to_string()))?;
+        self.access
+            .get(&call.name)
+            .copied()
+            .map(Some)
+            .ok_or(McpError::ToolNotFound(call.name))
     }
 
     pub fn get(&self, name: &str) -> Option<&Tool> {
@@ -318,12 +364,18 @@ impl ToolRegistry {
                     .and_then(|v| v.as_str())
                     .ok_or("missing 'query' parameter")?;
                 let engine = self.engine.as_ref().ok_or("no graph engine configured")?;
-                match engine.execute_as_with_context(
-                    request_context,
-                    query,
-                    HashMap::new(),
-                    &["admin".to_string()],
-                ) {
+                let params = arguments
+                    .as_ref()
+                    .and_then(|args| args.get("params"))
+                    .and_then(serde_json::Value::as_object)
+                    .map(|params| {
+                        params
+                            .iter()
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                match engine.execute_as_with_context(request_context, query, params, &self.roles) {
                     Ok(result) => {
                         let text = format!(
                             "Query executed successfully.\nRows: {}\nStats: {:?}",
@@ -373,34 +425,47 @@ impl ToolRegistry {
 
 /// Built-in copperdb MCP tools.
 pub fn copperdb_tools() -> Vec<Tool> {
+    copperdb_tools_with_access()
+        .into_iter()
+        .map(|(tool, _)| tool)
+        .collect()
+}
+
+fn copperdb_tools_with_access() -> Vec<(Tool, ToolAccess)> {
     vec![
-        Tool {
-            name: "run_cypher".into(),
-            description: "Execute a Cypher query against the copperdb graph database".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "The Cypher query to execute" },
-                    "params": { "type": "object", "description": "Query parameters" }
-                },
-                "required": ["query"]
-                ,"additionalProperties": false
-            }),
-        },
-        Tool {
-            name: "find_similar".into(),
-            description: "Find semantically similar nodes using vector search".into(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "text": { "type": "string", "description": "Text to find similar nodes for" },
-                    "k": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Number of results", "default": 10 },
-                    "label": { "type": "string", "description": "Filter by node label" }
-                },
-                "required": ["text"],
-                "additionalProperties": false
-            }),
-        },
+        (
+            Tool {
+                name: "run_cypher".into(),
+                description: "Execute a Cypher query against the copperdb graph database".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "The Cypher query to execute" },
+                        "params": { "type": "object", "description": "Query parameters" }
+                    },
+                    "required": ["query"]
+                    ,"additionalProperties": false
+                }),
+            },
+            ToolAccess::Admin,
+        ),
+        (
+            Tool {
+                name: "find_similar".into(),
+                description: "Find semantically similar nodes using vector search".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string", "description": "Text to find similar nodes for" },
+                        "k": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Number of results", "default": 10 },
+                        "label": { "type": "string", "description": "Filter by node label" }
+                    },
+                    "required": ["text"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolAccess::Read,
+        ),
     ]
 }
 
@@ -509,6 +574,42 @@ mod tests {
     }
 
     #[test]
+    fn tool_access_is_classified_before_execution() {
+        let registry = ToolRegistry::new();
+        let run_cypher = McpRequest::new(
+            serde_json::json!(14),
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "run_cypher",
+                "arguments": {"query": "RETURN 1"}
+            })),
+        );
+        let find_similar = McpRequest::new(
+            serde_json::json!(15),
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "find_similar",
+                "arguments": {"text": "graph"}
+            })),
+        );
+
+        assert_eq!(
+            registry.required_access(&run_cypher).unwrap(),
+            Some(ToolAccess::Admin)
+        );
+        assert_eq!(
+            registry.required_access(&find_similar).unwrap(),
+            Some(ToolAccess::Read)
+        );
+        assert_eq!(
+            registry
+                .required_access(&McpRequest::new(serde_json::json!(16), "tools/list", None))
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn test_dispatch_tool_call() {
         let engine = Arc::new(copperdb_engine::CopperDb::open_temporary().unwrap());
         let registry = ToolRegistry::with_engine(engine);
@@ -525,6 +626,33 @@ mod tests {
             "expected success, got: {:?}",
             resp.error
         );
+    }
+
+    #[test]
+    fn run_cypher_forwards_declared_parameters() {
+        let engine = Arc::new(copperdb_engine::CopperDb::open_temporary().unwrap());
+        let registry = ToolRegistry::with_engine_and_roles(engine, vec!["reader".into()]);
+        let request = McpRequest::new(
+            serde_json::json!(17),
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "run_cypher",
+                "arguments": {
+                    "query": "RETURN $value AS value",
+                    "params": {"value": "forwarded"}
+                }
+            })),
+        );
+
+        let response = registry.dispatch(&request);
+
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let result = response.result.unwrap();
+        assert!(result.get("isError").is_none(), "{result}");
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Rows: 1"));
     }
 
     #[test]
