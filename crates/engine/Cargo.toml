@@ -44,6 +44,7 @@ copperdb-fabric = { workspace = true }
 copperdb-util = { workspace = true }
 copperdb-kms = { workspace = true }
 copperdb-knowledgepolicy = { workspace = true }
+copperdb-otel = { workspace = true }
 
 [dev-dependencies]
 async-trait.workspace = true

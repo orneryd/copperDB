@@ -957,12 +957,14 @@ impl CopperDb {
         let start = Instant::now();
 
         if self.config.log_queries {
-            tracing::info!(query = cypher, "executing query");
+            tracing::info!("executing query");
         }
 
         let _flush_guard = self.storage.hold_flush();
 
         let t0 = std::time::Instant::now();
+        let parse_span = tracing::info_span!("nornicdb.cypher.parse");
+        let parse_span_guard = parse_span.enter();
         let hash = QueryCache::<copperdb_cypher::Query>::key(cypher, &[]);
         let parsed = if let Some(cached) = self.query_cache.get(hash) {
             cached
@@ -985,9 +987,12 @@ impl CopperDb {
             self.query_cache.put(hash, q.clone());
             q
         };
+        drop(parse_span_guard);
         let t_parse_cache = t0.elapsed();
 
         let t1 = std::time::Instant::now();
+        let compliance_span = tracing::info_span!("nornicdb.cypher.compliance");
+        let compliance_span_guard = compliance_span.enter();
         if let Err(err) = self.enforce_compliance(&parsed, roles) {
             self.record_query_audit(
                 cypher,
@@ -999,6 +1004,7 @@ impl CopperDb {
             )?;
             return Err(err.into());
         }
+        drop(compliance_span_guard);
         let t_compliance = t1.elapsed();
 
         let mut normalized_roles = roles.to_vec();
@@ -1032,7 +1038,7 @@ impl CopperDb {
                     elapsed_ms,
                 )?;
                 tracing::info!(
-                    query = cypher,
+                    query_hash = hash,
                     phase_parse_cache_us = t_parse_cache.as_micros(),
                     phase_compliance_us = t_compliance.as_micros(),
                     phase_audit_spawn_us = audit_started.elapsed().as_micros(),
@@ -1044,6 +1050,8 @@ impl CopperDb {
         }
 
         let t2 = std::time::Instant::now();
+        let plan_span = tracing::info_span!("nornicdb.cypher.plan");
+        let plan_span_guard = plan_span.enter();
         let pattern_info = detect_query_pattern(cypher);
         let (compound_shape, compound_ok) = match_compound_query_shape(cypher);
         let (pipeline_clauses, pipeline_ok) = can_execute_as_pipeline(cypher);
@@ -1051,9 +1059,12 @@ impl CopperDb {
             .clauses
             .iter()
             .any(|clause| matches!(clause, Clause::CreateIndex(_) | Clause::DropIndex(_)));
+        drop(plan_span_guard);
         let t_pattern = t2.elapsed();
 
         let t3 = std::time::Instant::now();
+        let execute_span = tracing::info_span!("nornicdb.cypher.eval");
+        let execute_span_guard = execute_span.enter();
         let function_context = FunctionExecutionContext {
             capabilities: Vec::new(),
             caller_roles: normalized_roles,
@@ -1084,6 +1095,7 @@ impl CopperDb {
                 return Err(err.into());
             }
         };
+        drop(execute_span_guard);
         let t_eval = t3.elapsed();
 
         let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -1109,7 +1121,7 @@ impl CopperDb {
             + t_pattern.as_micros()
             + t_eval.as_micros();
         tracing::info!(
-            query = cypher,
+            query_hash = hash,
             phase_parse_cache_us = t_parse_cache.as_micros(),
             phase_compliance_us = t_compliance.as_micros(),
             phase_pattern_us = t_pattern.as_micros(),

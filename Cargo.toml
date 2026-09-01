@@ -86,6 +86,10 @@ anyhow = "1.0.102"
 # Logging / tracing
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-opentelemetry = "0.32"
+opentelemetry = { version = "0.31", features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "trace", "testing"] }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto", "reqwest-client", "tls-roots", "trace"] }
 
 # Cryptography (replaces golang.org/x/crypto)
 aes-gcm = "0.11.0-rc.3"

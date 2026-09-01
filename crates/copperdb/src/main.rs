@@ -11,15 +11,20 @@ use copperdb_buildinfo::display_version;
 use copperdb_config::{load_with_precedence, ConfigOverrides};
 use copperdb_lifecycle::{BoxError, Component, Supervisor};
 use copperdb_multidb::DatabaseStatus;
-use copperdb_otel::{Health, ObservabilityConfig, Telemetry};
+use copperdb_otel::{
+    install_global_telemetry, resolve_instance_id, Health, ObservabilityConfig, ServiceInfo,
+    TelemetryProvider,
+};
 use copperdb_server::{
-    build_local_nornic_replica_service, build_router, build_telemetry_router, AppState,
+    build_local_nornic_replica_service, build_observability_router, build_router, AppState,
     AppStateBoltExecutor,
 };
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tracing::{info, warn};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 fn ensure_tls_crypto_provider() {
@@ -126,6 +131,8 @@ struct HttpComponent {
 struct TelemetryComponent {
     listen_addr: String,
     app: Router,
+    provider: Arc<TelemetryProvider>,
+    flush_timeout: std::time::Duration,
 }
 
 #[async_trait]
@@ -148,7 +155,9 @@ impl Component for TelemetryComponent {
     }
 
     async fn shutdown(&self) -> Result<(), BoxError> {
-        Ok(())
+        self.provider
+            .shutdown(self.flush_timeout)
+            .map_err(Into::into)
     }
 }
 
@@ -305,16 +314,44 @@ impl Component for GrpcComponent {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let env = std::env::vars().collect();
+    let mut observability_config = ObservabilityConfig::default();
+    observability_config.apply_env_map(&env);
+    let telemetry_provider = Arc::new(TelemetryProvider::initialize(
+        &observability_config,
+        &ServiceInfo {
+            name: "copperdb".into(),
+            version: copperdb_buildinfo::version().into(),
+            component: None,
+            node_id: None,
+            cluster_mode: None,
+            replication_role: None,
+        },
+        &env,
+    ));
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("copperdb=info,fjall=warn,info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .compact()
+    let otel_layer = telemetry_provider
+        .tracer()
+        .map(|tracer| tracing_opentelemetry::layer().with_tracer(tracer));
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .compact(),
+        )
+        .with(otel_layer)
         .init();
 
-    let cli = Cli::parse();
     let startup = resolve_startup_config(&cli).await?;
+    if let Some(error) = telemetry_provider.tracing_error() {
+        warn!(
+            error,
+            "OTLP trace exporter unavailable; continuing without export"
+        );
+    }
     info!(version = %display_version(), "starting copperdb");
     if cli.no_auth {
         warn!("authentication disabled by explicit --no-auth override");
@@ -324,8 +361,8 @@ async fn main() -> Result<()> {
             "resolved authentication configuration"
         );
     }
-    let telemetry = Arc::new(Telemetry::new());
-    telemetry.seed_zero_catalog_metrics();
+    let telemetry = telemetry_provider.telemetry();
+    let _ = install_global_telemetry(Arc::clone(&telemetry));
     let auth = copperdb_server::AuthState::from_runtime_config(startup.runtime_config.as_ref())
         .context("failed to initialize configured authentication")?;
     let mut state = AppState::with_auth(auth);
@@ -348,8 +385,6 @@ async fn main() -> Result<()> {
     let app = build_router(Arc::clone(&state));
     let mut supervisor = Supervisor::new();
 
-    let mut observability_config = ObservabilityConfig::default();
-    observability_config.apply_env_map(&std::env::vars().collect());
     let readiness = Arc::new(Health::new());
     let storage_state = Arc::clone(&state);
     readiness.register("storage", false, move || {
@@ -362,7 +397,14 @@ async fn main() -> Result<()> {
     });
     supervisor.register(TelemetryComponent {
         listen_addr: observability_config.metrics.listen,
-        app: build_telemetry_router(readiness),
+        app: build_observability_router(
+            readiness,
+            Arc::clone(&telemetry),
+            observability_config.metrics.enabled,
+            resolve_instance_id(None, &env).0,
+        ),
+        provider: Arc::clone(&telemetry_provider),
+        flush_timeout: observability_config.tracing.timeout,
     });
 
     if startup.http_enabled {
@@ -465,6 +507,49 @@ fn cli_config_overrides(cli: &Cli) -> ConfigOverrides {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn telemetry_component_reports_listener_bind_failure() {
+        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = occupied.local_addr().unwrap();
+        let provider = Arc::new(TelemetryProvider::test());
+        let component = TelemetryComponent {
+            listen_addr: address.to_string(),
+            app: build_observability_router(
+                Arc::new(Health::new()),
+                provider.telemetry(),
+                true,
+                "test-instance".into(),
+            ),
+            provider,
+            flush_timeout: std::time::Duration::from_millis(50),
+        };
+
+        let error = component.start(CancellationToken::new()).await.unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("failed to bind telemetry listener"));
+    }
+
+    #[tokio::test]
+    async fn telemetry_component_shutdown_is_bounded_and_idempotent() {
+        let component = TelemetryComponent {
+            listen_addr: "127.0.0.1:0".into(),
+            app: Router::new(),
+            provider: Arc::new(TelemetryProvider::test()),
+            flush_timeout: std::time::Duration::from_millis(50),
+        };
+
+        tokio::time::timeout(std::time::Duration::from_millis(100), component.shutdown())
+            .await
+            .expect("telemetry shutdown exceeded its bound")
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_millis(100), component.shutdown())
+            .await
+            .expect("repeated telemetry shutdown exceeded its bound")
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn startup_config_enables_auth_by_default() {

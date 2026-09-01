@@ -7,7 +7,7 @@
 use async_graphql_axum::GraphQLRequest;
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
+    extract::{MatchedPath, Path, Query, State},
     http::{header, HeaderMap, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -22,7 +22,7 @@ use copperdb_bolt::server::{
     BoltAuthProvider, BoltExecutionError, BoltPrincipal, BoltQueryResult, BoltResultStats,
     BoltRuntimeCounters, BoltTransaction, BoltTransactionError, QueryExecutor,
 };
-use copperdb_buildinfo::{display_version, server_announcement, version};
+use copperdb_buildinfo::{display_version, server_announcement, version, BUILD_INFO};
 use copperdb_config::Config as RuntimeConfig;
 use copperdb_engine::{
     query_procedure_mode, CopperDb as GraphEngine, DatabaseConfig as EngineConfig,
@@ -39,7 +39,9 @@ use copperdb_nornicgrpc::{
     RemoteReplicaClient, TonicRemoteHydrationClient, TonicRemoteRankedSearchClient,
     TonicRemoteReplicaClient,
 };
-use copperdb_otel::{CancellationProtocol, CancellationStage, Health, Telemetry};
+use copperdb_otel::{
+    classify_cypher_op_type, CancellationProtocol, CancellationStage, Health, Telemetry,
+};
 use copperdb_replication::{Command, ReplicaTransport, ReplicationStorage, StorageEngineAdapter};
 use copperdb_retention::{
     ErasureRequest, LegalHold, Manager as RetentionManager, Policy, RetentionError,
@@ -62,6 +64,8 @@ use copperdb_topology::{
 };
 use copperdb_txsession::{BookmarkMode, SessionConfig, TransactionMode};
 use copperdb_util::{RequestContext, RequestContextGuard};
+use opentelemetry::global;
+use opentelemetry::propagation::Extractor;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -70,6 +74,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -1040,10 +1046,45 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 /// This is deliberately separate from the application router, matching
 /// NornicDB's network-isolated observability listener.
 pub fn build_telemetry_router(health: Arc<Health>) -> Router {
-    Router::new()
+    build_observability_router(
+        health,
+        Arc::new(Telemetry::new()),
+        false,
+        "standalone".into(),
+    )
+}
+
+#[derive(Clone)]
+struct TelemetryRouterState {
+    health: Arc<Health>,
+    telemetry: Arc<Telemetry>,
+    service_instance_id: String,
+    started_at: Instant,
+}
+
+pub fn build_observability_router(
+    health: Arc<Health>,
+    telemetry: Arc<Telemetry>,
+    metrics_enabled: bool,
+    service_instance_id: String,
+) -> Router {
+    let state = TelemetryRouterState {
+        health,
+        telemetry,
+        service_instance_id,
+        started_at: Instant::now(),
+    };
+    if metrics_enabled {
+        let _ = state.telemetry.set_gauge("nornicdb_build_info", &[], 1.0);
+    }
+    let mut router = Router::new()
         .route("/livez", any(livez_handler))
         .route("/readyz", any(readyz_handler))
-        .with_state(health)
+        .route("/version", any(version_handler));
+    if metrics_enabled {
+        router = router.route("/metrics", any(metrics_handler));
+    }
+    router.with_state(state)
 }
 
 async fn request_context_middleware(
@@ -1187,17 +1228,86 @@ async fn http_metrics_middleware(
     request: Request<Body>,
     next: Next,
 ) -> Response {
+    let started = Instant::now();
+    let method = request.method().as_str().to_string();
+    let path_template = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or("_NOT_FOUND_", MatchedPath::as_str)
+        .to_string();
     state.http_counters.requests.fetch_add(1, Ordering::Relaxed);
-    state.http_counters.active.fetch_add(1, Ordering::Relaxed);
-    let _active_request = ActiveHttpRequest {
+    let active = state.http_counters.active.fetch_add(1, Ordering::Relaxed) + 1;
+    let active_request = ActiveHttpRequest {
         counters: Arc::clone(&state.http_counters),
     };
+    let _ = state
+        .telemetry
+        .set_gauge("nornicdb_http_in_flight_requests", &[], active as f64);
 
-    let response = next.run(request).await;
+    let span = tracing::info_span!(
+        "nornicdb.http.request",
+        http.request.method = %method,
+        http.route = %path_template,
+        http.response.status_code = tracing::field::Empty,
+    );
+    let parent = global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderExtractor(request.headers()))
+    });
+    let _ = span.set_parent(parent);
+
+    let response = next.run(request).instrument(span.clone()).await;
+    span.record("http.response.status_code", response.status().as_u16());
     if response.status().is_client_error() || response.status().is_server_error() {
         state.http_counters.errors.fetch_add(1, Ordering::Relaxed);
     }
+    let status_class = http_status_class(response.status());
+    let labels = [
+        ("method", method.as_str()),
+        ("path_template", path_template.as_str()),
+        ("status_class", status_class),
+    ];
+    let _ = state
+        .telemetry
+        .record_counter("nornicdb_http_requests_total", &labels);
+    let _ = state.telemetry.observe_histogram(
+        "nornicdb_http_request_duration_seconds",
+        &labels,
+        started.elapsed().as_secs_f64(),
+    );
+    drop(active_request);
+    let remaining = state.http_counters.active.load(Ordering::Relaxed);
+    let _ = state
+        .telemetry
+        .set_gauge("nornicdb_http_in_flight_requests", &[], remaining as f64);
     response
+}
+
+struct HeaderExtractor<'a>(&'a HeaderMap);
+
+impl Extractor for HeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        if !matches!(key, "traceparent" | "tracestate") {
+            return None;
+        }
+        self.0.get(key).and_then(|value| value.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        ["traceparent", "tracestate"]
+            .into_iter()
+            .filter(|key| self.0.contains_key(*key))
+            .collect()
+    }
+}
+
+fn http_status_class(status: StatusCode) -> &'static str {
+    match status.as_u16() / 100 {
+        1 => "1xx",
+        2 => "2xx",
+        3 => "3xx",
+        4 => "4xx",
+        _ => "5xx",
+    }
 }
 
 async fn security_validation_middleware(
@@ -1452,14 +1562,66 @@ async fn livez_handler() -> StatusCode {
 }
 
 /// /readyz reports the telemetry-owned readiness registry.
-async fn readyz_handler(State(health): State<Arc<Health>>) -> Response {
-    let response = health.ready().await;
+async fn readyz_handler(State(state): State<TelemetryRouterState>) -> Response {
+    let response = state.health.ready().await;
     let status = if response.ok {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
     (status, Json(response)).into_response()
+}
+
+const MAX_METRICS_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+async fn metrics_handler(
+    State(state): State<TelemetryRouterState>,
+    headers: HeaderMap,
+) -> Response {
+    let _ = state.telemetry.set_gauge(
+        "nornicdb_process_uptime_seconds",
+        &[],
+        state.started_at.elapsed().as_secs_f64(),
+    );
+    let openmetrics = headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("application/openmetrics-text"));
+    let body = if openmetrics {
+        state.telemetry.encode_openmetrics()
+    } else {
+        state.telemetry.encode_prometheus()
+    };
+    if body.len() > MAX_METRICS_RESPONSE_BYTES {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    let content_type = if openmetrics {
+        "application/openmetrics-text; version=1.0.0; charset=utf-8"
+    } else {
+        "text/plain; version=0.0.4; charset=utf-8"
+    };
+    ([(header::CONTENT_TYPE, content_type)], body).into_response()
+}
+
+#[derive(Serialize)]
+struct TelemetryVersionResponse {
+    version: String,
+    commit: String,
+    go: String,
+    build_date: String,
+    service_instance_id: String,
+}
+
+async fn version_handler(
+    State(state): State<TelemetryRouterState>,
+) -> Json<TelemetryVersionResponse> {
+    Json(TelemetryVersionResponse {
+        version: version().into(),
+        commit: BUILD_INFO.git_commit.into(),
+        go: BUILD_INFO.rust_version.into(),
+        build_date: BUILD_INFO.build_date.into(),
+        service_instance_id: state.service_instance_id,
+    })
 }
 
 async fn status_handler(
@@ -2061,6 +2223,8 @@ async fn search_handler(
     }
 
     let embedding_started = std::time::Instant::now();
+    let embedding_span = tracing::info_span!("nornicdb.search.embed");
+    let embedding_span_guard = embedding_span.enter();
     let query_vector = if request.vector.is_some() {
         request.vector.clone()
     } else if vector_indexes.is_empty() {
@@ -2088,6 +2252,7 @@ async fn search_handler(
             }
         }
     };
+    drop(embedding_span_guard);
     let embedding_elapsed = embedding_started.elapsed();
     let embedding_time_ms = embedding_elapsed.as_millis() as u64;
     let missing_query = || {
@@ -2128,10 +2293,6 @@ async fn search_handler(
             "hybrid",
         ),
         (Some(_), _) => {
-            let _ = state.telemetry.record_counter(
-                "nornicdb_search_requests_total",
-                &[("mode", "unknown"), ("result", "error")],
-            );
             return missing_query();
         }
         (None, Some(vector)) if !request.query.is_empty() && !bm25_indexes.is_empty() => (
@@ -2161,16 +2322,17 @@ async fn search_handler(
             },
             "bm25",
         ),
-        _ => {
-            let _ = state.telemetry.record_counter(
-                "nornicdb_search_requests_total",
-                &[("mode", "unknown"), ("result", "error")],
-            );
-            return missing_query();
-        }
+        _ => return missing_query(),
+    };
+    let metric_mode = if search_method == "semantic" {
+        "vector"
+    } else {
+        search_method
     };
 
     let search_started = std::time::Instant::now();
+    let search_span = tracing::info_span!("nornicdb.search", search.mode = search_method);
+    let search_span_guard = search_span.enter();
     let placement = PlacementKey::default_for_database(&database);
     let outcome = match engine
         .search_fabric_ranked_outcome_locally_scoped_with_context_and_roles_and_indexes_and_rrf_config(
@@ -2187,7 +2349,7 @@ async fn search_handler(
         Err(error) => {
             let _ = state.telemetry.record_counter(
                 "nornicdb_search_requests_total",
-                &[("mode", search_method), ("result", "error")],
+                &[("mode", metric_mode), ("result", "error")],
             );
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -2196,6 +2358,7 @@ async fn search_handler(
                 .into_response();
         }
     };
+    drop(search_span_guard);
     let search_elapsed = search_started.elapsed();
     let search_time_ms = search_elapsed.as_millis() as u64;
     let hydration_started = std::time::Instant::now();
@@ -2233,16 +2396,12 @@ async fn search_handler(
     };
     let _ = state.telemetry.record_counter(
         "nornicdb_search_requests_total",
-        &[("mode", search_method), ("result", result)],
+        &[("mode", metric_mode), ("result", result)],
     );
-    for (stage, elapsed) in [
-        ("embedding", embedding_elapsed),
-        ("index", search_elapsed),
-        ("hydration", hydration_elapsed),
-    ] {
+    for (stage, elapsed) in [("embed", embedding_elapsed), ("index", search_elapsed)] {
         let _ = state.telemetry.observe_histogram(
             "nornicdb_search_duration_seconds",
-            &[("mode", search_method), ("stage", stage)],
+            &[("mode", metric_mode), ("stage", stage)],
             elapsed.as_secs_f64(),
         );
     }
@@ -2252,7 +2411,6 @@ async fn search_handler(
         candidate_count as f64,
     );
     tracing::debug!(
-        database,
         search_method,
         embedding_time_ms,
         search_time_ms,
@@ -2502,19 +2660,22 @@ async fn neo4j_tx_commit_handler(
         let caller_auth_token = caller_auth_token.clone();
         let request_region = request_region.clone();
         let request_context = request_context.clone();
+        let parent_span = tracing::Span::current();
         let result = tokio::task::spawn_blocking(move || {
-            execute_statement(
-                Arc::clone(&state),
-                database,
-                request_context,
-                statement.statement,
-                statement.parameters.unwrap_or_default(),
-                roles,
-                distributed,
-                distributed_read_fence,
-                caller_auth_token,
-                request_region,
-            )
+            parent_span.in_scope(|| {
+                execute_statement(
+                    Arc::clone(&state),
+                    database,
+                    request_context,
+                    statement.statement,
+                    statement.parameters.unwrap_or_default(),
+                    roles,
+                    distributed,
+                    distributed_read_fence,
+                    caller_auth_token,
+                    request_region,
+                )
+            })
         })
         .await
         .map_err(|error| StatementExecutionError::Message(error.to_string()))
@@ -2585,8 +2746,12 @@ fn execute_statement(
     caller_auth_token: Option<String>,
     request_region: Option<String>,
 ) -> Result<Neo4jResult, StatementExecutionError> {
+    let query_started = Instant::now();
     let normalized = statement.trim();
     let upper = normalized.to_ascii_uppercase();
+    let op_type = classify_cypher_op_type(normalized);
+    let query_span = tracing::info_span!("nornicdb.cypher.execute", db.operation.name = op_type,);
+    let _query_span_guard = query_span.enter();
     let fulltext_started = is_fulltext_procedure_call(&upper).then(std::time::Instant::now);
 
     if database == "system" {
@@ -2658,6 +2823,21 @@ fn execute_statement(
             &state,
             started,
             result.as_ref().ok().map(|result| result.rows.len()),
+        );
+    }
+    let _ = state
+        .telemetry
+        .record_counter("nornicdb_cypher_queries_total", &[("op_type", op_type)]);
+    let _ = state.telemetry.observe_histogram(
+        "nornicdb_cypher_query_duration_seconds",
+        &[("op_type", op_type)],
+        query_started.elapsed().as_secs_f64(),
+    );
+    if let Ok(result) = &result {
+        let _ = state.telemetry.set_gauge(
+            "nornicdb_cypher_rows_returned_rows",
+            &[("op_type", op_type)],
+            result.rows.len() as f64,
         );
     }
     result.map(convert_engine_result)

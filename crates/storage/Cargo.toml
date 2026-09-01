@@ -22,6 +22,7 @@ fjall.workspace = true
 tempfile.workspace = true
 hex.workspace = true
 copperdb-util = { workspace = true }
+copperdb-otel = { workspace = true }
 copperdb-topology = { workspace = true }
 copperdb-encryption = { workspace = true }
 copperdb-kms = { workspace = true }

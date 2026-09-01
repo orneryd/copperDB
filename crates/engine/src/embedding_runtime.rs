@@ -121,6 +121,59 @@ struct EmbeddingDrainContext<'a> {
     total_batch_latency_ms: &'a AtomicU64,
     last_batch_latency_ms: &'a AtomicU64,
     last_error: &'a Mutex<Option<String>>,
+    provider: &'a str,
+    model: &'a str,
+    backend: &'a Mutex<Option<String>>,
+}
+
+struct EmbeddingObservation {
+    provider: String,
+    model: String,
+    mode: String,
+    started: Instant,
+    result: &'static str,
+}
+
+impl EmbeddingObservation {
+    fn new(provider: &str, model: &str, backend: Option<&str>) -> Self {
+        Self {
+            provider: metric_provider(provider).into(),
+            model: metric_model(model),
+            mode: metric_backend(backend).into(),
+            started: Instant::now(),
+            result: "failure",
+        }
+    }
+
+    fn succeed(&mut self) {
+        self.result = "success";
+    }
+}
+
+impl Drop for EmbeddingObservation {
+    fn drop(&mut self) {
+        if let Some(telemetry) = copperdb_otel::global_telemetry() {
+            let labels = [
+                ("provider", self.provider.as_str()),
+                ("model", self.model.as_str()),
+                ("mode", self.mode.as_str()),
+            ];
+            let _ = telemetry.observe_histogram(
+                "nornicdb_embed_duration_seconds",
+                &labels,
+                self.started.elapsed().as_secs_f64(),
+            );
+            let _ = telemetry.record_counter(
+                "nornicdb_embed_processed_total",
+                &[
+                    ("provider", self.provider.as_str()),
+                    ("model", self.model.as_str()),
+                    ("result", self.result),
+                    ("mode", self.mode.as_str()),
+                ],
+            );
+        }
+    }
 }
 
 type BuiltEmbedder = (Arc<dyn Embedder>, String, Option<Arc<CachedEmbedder>>);
@@ -311,6 +364,9 @@ impl EmbeddingRuntime {
             return Ok(None);
         }
         let embedder = self.ensure_embedder()?;
+        let backend = self.backend.lock().expect("embedding backend lock").clone();
+        let mut observation =
+            EmbeddingObservation::new(&self.provider, &self.model, backend.as_deref());
         let embedding_result = embedder.embed_batch_blocking(&[text.to_string()]);
         request_context.check_active()?;
         let embedding = embedding_result
@@ -327,10 +383,15 @@ impl EmbeddingRuntime {
                 embedding.vector.len()
             )));
         }
+        observation.succeed();
         Ok(Some(embedding.vector))
     }
 
     pub(crate) fn drain_one(&self) -> Result<bool, CopperDbError> {
+        record_embedding_runtime_gauges(
+            self.storage.pending_embeddings_count_snapshot(),
+            self.active_workers.load(Ordering::Relaxed),
+        );
         if *self.state.lock().expect("embedding runtime state lock")
             == EmbeddingRuntimeState::Disabled
         {
@@ -354,6 +415,9 @@ impl EmbeddingRuntime {
             total_batch_latency_ms: &self.total_batch_latency_ms,
             last_batch_latency_ms: &self.last_batch_latency_ms,
             last_error: &self.last_error,
+            provider: &self.provider,
+            model: &self.model,
+            backend: &self.backend,
         };
         drain_one_with(&context, embedder)
     }
@@ -414,7 +478,14 @@ impl EmbeddingRuntime {
                     total_batch_latency_ms: &total_batch_latency_ms,
                     last_batch_latency_ms: &last_batch_latency_ms,
                     last_error: &last_error,
+                    provider: &provider_config.embedding_provider,
+                    model: &provider_config.embedding_model,
+                    backend: &backend,
                 };
+                record_embedding_runtime_gauges(
+                    storage.pending_embeddings_count_snapshot(),
+                    active_workers.load(Ordering::Relaxed),
+                );
                 while !stop.load(Ordering::Acquire) {
                     let loaded_embedder = match ensure_embedder_with(&provider_context) {
                         Ok(embedder) => embedder,
@@ -437,6 +508,10 @@ impl EmbeddingRuntime {
                     }
                 }
                 active_workers.fetch_sub(1, Ordering::Relaxed);
+                record_embedding_runtime_gauges(
+                    storage.pending_embeddings_count_snapshot(),
+                    active_workers.load(Ordering::Relaxed),
+                );
             }));
         }
     }
@@ -592,6 +667,13 @@ fn embed_claimed_node(
     node: NodeRecord,
     embedder: Arc<dyn Embedder>,
 ) -> Result<bool, CopperDbError> {
+    let backend = context
+        .backend
+        .lock()
+        .expect("embedding backend lock")
+        .clone();
+    let mut observation =
+        EmbeddingObservation::new(context.provider, context.model, backend.as_deref());
     let batch_started_at = Instant::now();
     let embeddings = embedder.embed_batch_blocking(&[canonical_input(&node)]);
     let batch_latency_ms = batch_started_at.elapsed().as_millis() as u64;
@@ -659,7 +741,45 @@ fn embed_claimed_node(
         .last_error
         .lock()
         .expect("embedding runtime error lock") = None;
+    observation.succeed();
     Ok(true)
+}
+
+fn record_embedding_runtime_gauges(pending: u64, workers: usize) {
+    if let Some(telemetry) = copperdb_otel::global_telemetry() {
+        let _ = telemetry.set_gauge("nornicdb_embed_queue_depth", &[], pending as f64);
+        let _ = telemetry.set_gauge("nornicdb_embed_worker_running", &[], workers as f64);
+    }
+}
+
+fn metric_provider(provider: &str) -> &'static str {
+    match provider {
+        "ollama" => "ollama",
+        "openai" => "openai",
+        "local" | "local_gguf" => "local",
+        _ => "other",
+    }
+}
+
+fn metric_backend(backend: Option<&str>) -> &'static str {
+    match backend {
+        Some("gpu") => "gpu",
+        Some("cuda") => "cuda",
+        Some("metal") => "metal",
+        Some("vulkan") => "vulkan",
+        _ => "cpu",
+    }
+}
+
+fn metric_model(model: &str) -> String {
+    Path::new(model)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("unknown")
+        .chars()
+        .take(64)
+        .collect()
 }
 
 fn record_failure(
@@ -746,6 +866,20 @@ fn build_embedder(config: &EffectiveDatabaseConfig) -> Result<BuiltEmbedder, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn telemetry_identity_is_bounded_and_does_not_expose_model_paths() {
+        assert_eq!(metric_provider("local_gguf"), "local");
+        assert_eq!(metric_provider("tenant-provider"), "other");
+        assert_eq!(metric_backend(Some("metal")), "metal");
+        assert_eq!(metric_backend(Some("tenant-backend")), "cpu");
+        assert_eq!(
+            metric_model("/private/models/bge-m3.gguf"),
+            "bge-m3".to_string()
+        );
+        assert!(!metric_model("/private/models/bge-m3.gguf").contains("private"));
+        assert!(metric_model(&format!("{}.gguf", "x".repeat(100))).len() <= 64);
+    }
     use copperdb_embed::{EmbedError, Embedding};
     use copperdb_storage::{NodeEmbeddingMetadata, NodeRecord};
     use std::collections::BTreeMap;

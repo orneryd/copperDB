@@ -21,6 +21,32 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+
+struct StorageOperationObservation {
+    operation: &'static str,
+    started: std::time::Instant,
+}
+
+impl StorageOperationObservation {
+    fn new(operation: &'static str) -> Self {
+        Self {
+            operation,
+            started: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for StorageOperationObservation {
+    fn drop(&mut self) {
+        if let Some(telemetry) = copperdb_otel::global_telemetry() {
+            let _ = telemetry.observe_histogram(
+                "nornicdb_storage_op_duration_seconds",
+                &[("op", self.operation)],
+                self.started.elapsed().as_secs_f64(),
+            );
+        }
+    }
+}
 use uuid::Uuid;
 
 use crate::storage_edge_property_index::edge_property_index_definition_prefix;
@@ -2795,6 +2821,7 @@ impl StorageEngine {
     }
 
     pub fn get_node_record(&self, id: &str) -> Result<Option<NodeRecord>, StorageError> {
+        let _observation = StorageOperationObservation::new("get");
         let cache_key = id.to_string();
         if let Some(cached) = self.graph_node_cache.lock().get(&cache_key) {
             return Ok(cached);
@@ -2853,6 +2880,7 @@ impl StorageEngine {
         F: FnOnce(&mut BatchWriter<'_>) -> Result<(), E>,
         E: From<StorageError>,
     {
+        let _observation = StorageOperationObservation::new("put");
         let _commit_guard = self.batch_commit_lock.lock();
         let mut writer = BatchWriter {
             engine: self,
@@ -4464,6 +4492,7 @@ impl StorageEngine {
     }
 
     pub fn get_edge_record(&self, id: &str) -> Result<Option<EdgeRecord>, StorageError> {
+        let _observation = StorageOperationObservation::new("get");
         let cache_key = id.to_string();
         if let Some(cached) = self.graph_edge_cache.lock().get(&cache_key) {
             return Ok(cached);

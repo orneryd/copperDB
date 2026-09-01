@@ -19,6 +19,7 @@ tokio-util.workspace = true
 tonic.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracing-opentelemetry.workspace = true
 rustls.workspace = true
 serde_json.workspace = true
 copperdb-kms = { workspace = true }

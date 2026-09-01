@@ -574,6 +574,7 @@ impl TransactionManager {
         tx.bookmarks = normalize_bookmarks(&config.bookmarks, config.bookmark_mode)?;
         let id = tx.id;
         self.active.insert(id, tx);
+        self.record_active_transactions();
         Ok(id)
     }
 
@@ -588,7 +589,7 @@ impl TransactionManager {
             .remove(&id)
             .ok_or(TxError::NoActiveTransaction)?;
         let commit_timestamp = self.time_oracle.issue();
-        match tx.commit_at(commit_timestamp) {
+        let result = match tx.commit_at(commit_timestamp) {
             Ok(()) => Ok(commit_timestamp.stable_id()),
             Err(err) => {
                 if tx.is_active() {
@@ -596,7 +597,9 @@ impl TransactionManager {
                 }
                 Err(err)
             }
-        }
+        };
+        self.record_active_transactions();
+        result
     }
 
     /// Commit the transaction with the given ID.
@@ -614,7 +617,7 @@ impl TransactionManager {
             .active
             .remove(&id)
             .ok_or(TxError::NoActiveTransaction)?;
-        match tx.rollback() {
+        let result = match tx.rollback() {
             Ok(()) => Ok(()),
             Err(err) => {
                 // Same policy: only keep the transaction around if it's still active.
@@ -623,7 +626,9 @@ impl TransactionManager {
                 }
                 Err(err)
             }
-        }
+        };
+        self.record_active_transactions();
+        result
     }
 
     /// Check if a transaction is active.
@@ -659,11 +664,23 @@ impl TransactionManager {
     /// Remove expired transactions.
     pub fn cleanup_expired(&self) {
         self.active.retain(|_, tx| !tx.is_expired());
+        self.record_active_transactions();
     }
 
     /// Remove a transaction after it's been fully processed.
     pub fn remove(&self, id: &Uuid) {
         self.active.remove(id);
+        self.record_active_transactions();
+    }
+
+    fn record_active_transactions(&self) {
+        if let Some(telemetry) = copperdb_otel::global_telemetry() {
+            let _ = telemetry.set_gauge(
+                "nornicdb_cypher_active_transactions",
+                &[],
+                self.active.len() as f64,
+            );
+        }
     }
 }
 

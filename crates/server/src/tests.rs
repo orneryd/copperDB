@@ -3,6 +3,77 @@
 use super::*;
 
 #[test]
+fn http_trace_context_excludes_baggage_and_credentials() {
+    use axum::http::{header, HeaderValue};
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "traceparent",
+        HeaderValue::from_static("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+    );
+    headers.insert("baggage", HeaderValue::from_static("tenant=secret"));
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer secret"),
+    );
+    let extractor = HeaderExtractor(&headers);
+
+    assert!(extractor.get("traceparent").is_some());
+    assert_eq!(extractor.get("baggage"), None);
+    assert_eq!(extractor.get("authorization"), None);
+    assert_eq!(extractor.keys(), vec!["traceparent"]);
+}
+
+#[tokio::test]
+async fn http_request_span_preserves_remote_parent_trace_identity() {
+    use opentelemetry::trace::{SpanId, TraceId, TracerProvider as _};
+    use opentelemetry_sdk::propagation::TraceContextPropagator;
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use tower::ServiceExt as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let tracer = provider.tracer("http-parent-test");
+    let subscriber =
+        tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+    let state = Arc::new(AppState::default());
+
+    let response = build_router(state)
+        .oneshot(
+            Request::get("/health")
+                .header(
+                    "traceparent",
+                    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    provider.force_flush().unwrap();
+    let spans = exporter.get_finished_spans().unwrap();
+    let request_span = spans
+        .iter()
+        .find(|span| span.name == "nornicdb.http.request")
+        .expect("HTTP request span was not exported");
+    assert_eq!(
+        request_span.span_context.trace_id(),
+        TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736").unwrap()
+    );
+    assert_eq!(
+        request_span.parent_span_id,
+        SpanId::from_hex("00f067aa0ba902b7").unwrap()
+    );
+}
+
+#[test]
 fn procedure_modes_drive_statement_authorization_classification() {
     assert!(!statement_requires_write("CALL db.labels()"));
     assert!(statement_requires_write(
@@ -371,13 +442,7 @@ async fn copperdb_search_reports_not_ready_when_no_search_indexes_are_declared()
             .telemetry
             .snapshot_metric("nornicdb_search_requests_total")
             .unwrap(),
-        vec![copperdb_otel::MetricSample {
-            labels: vec![
-                ("mode".to_string(), "unknown".to_string()),
-                ("result".to_string(), "error".to_string()),
-            ],
-            value: copperdb_otel::MetricValue::Counter(1.0),
-        }]
+        Vec::<copperdb_otel::MetricSample>::new()
     );
 }
 
@@ -518,7 +583,7 @@ async fn copperdb_search_accepts_direct_vector_when_embedding_is_disabled() {
             .unwrap(),
         vec![copperdb_otel::MetricSample {
             labels: vec![
-                ("mode".to_string(), "semantic".to_string()),
+                ("mode".to_string(), "vector".to_string()),
                 ("result".to_string(), "success".to_string()),
             ],
             value: copperdb_otel::MetricValue::Counter(2.0),
@@ -890,7 +955,7 @@ async fn copperdb_search_combines_text_and_direct_vector_when_embedding_is_disab
             },
             copperdb_otel::MetricSample {
                 labels: vec![
-                    ("mode".to_string(), "semantic".to_string()),
+                    ("mode".to_string(), "vector".to_string()),
                     ("result".to_string(), "success".to_string()),
                 ],
                 value: copperdb_otel::MetricValue::Counter(1.0),
@@ -901,19 +966,19 @@ async fn copperdb_search_combines_text_and_direct_vector_when_embedding_is_disab
         .telemetry
         .snapshot_metric("nornicdb_search_duration_seconds")
         .unwrap();
-    assert_eq!(durations.len(), 6);
-    for mode in ["hybrid", "semantic"] {
-        for stage in ["embedding", "index", "hydration"] {
+    assert_eq!(durations.len(), 4);
+    for mode in ["hybrid", "vector"] {
+        for stage in ["embed", "index"] {
             assert!(durations.iter().any(|sample| {
                 matches!(
                     sample,
                     copperdb_otel::MetricSample {
                         labels,
-                        value: copperdb_otel::MetricValue::Histogram(values),
+                        value: copperdb_otel::MetricValue::Histogram { count, .. },
                     } if labels == &vec![
                         ("mode".to_string(), mode.to_string()),
                         ("stage".to_string(), stage.to_string()),
-                    ] && values.len() == 1
+                    ] && *count == 1
                 )
             }));
         }
@@ -1032,13 +1097,7 @@ async fn copperdb_search_rejects_empty_text_without_a_direct_vector() {
             .telemetry
             .snapshot_metric("nornicdb_search_requests_total")
             .unwrap(),
-        vec![copperdb_otel::MetricSample {
-            labels: vec![
-                ("mode".to_string(), "unknown".to_string()),
-                ("result".to_string(), "error".to_string()),
-            ],
-            value: copperdb_otel::MetricValue::Counter(1.0),
-        }]
+        Vec::<copperdb_otel::MetricSample>::new()
     );
 }
 
@@ -1124,13 +1183,7 @@ async fn copperdb_search_records_unavailable_query_embedding_before_mode_selecti
             .telemetry
             .snapshot_metric("nornicdb_search_requests_total")
             .unwrap(),
-        vec![copperdb_otel::MetricSample {
-            labels: vec![
-                ("mode".to_string(), "unknown".to_string()),
-                ("result".to_string(), "error".to_string()),
-            ],
-            value: copperdb_otel::MetricValue::Counter(1.0),
-        }]
+        Vec::<copperdb_otel::MetricSample>::new()
     );
 }
 
@@ -1547,13 +1600,6 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
                 ],
                 value: copperdb_otel::MetricValue::Counter(3.0),
             },
-            copperdb_otel::MetricSample {
-                labels: vec![
-                    ("mode".to_string(), "unknown".to_string()),
-                    ("result".to_string(), "error".to_string()),
-                ],
-                value: copperdb_otel::MetricValue::Counter(1.0),
-            }
         ]
     );
     assert_eq!(
@@ -1570,15 +1616,15 @@ async fn copperdb_search_endpoints_fall_back_to_bm25_when_query_embedding_is_dis
         .telemetry
         .snapshot_metric("nornicdb_search_duration_seconds")
         .unwrap();
-    assert_eq!(durations.len(), 3);
+    assert_eq!(durations.len(), 2);
     assert!(durations.iter().all(|sample| {
         matches!(
             sample,
             copperdb_otel::MetricSample {
                 labels,
-                value: copperdb_otel::MetricValue::Histogram(values),
+                value: copperdb_otel::MetricValue::Histogram { count, .. },
             } if labels.iter().any(|(key, value)| key == "mode" && value == "bm25")
-                && values.len() == 4
+                && *count == 4
         )
     }));
 }
@@ -2037,6 +2083,113 @@ async fn liveness_and_readiness_probes_are_public_and_report_database_availabili
         "informational failure"
     );
     assert_eq!(readiness["checks"]["required"]["error"], "required failure");
+}
+
+#[tokio::test]
+async fn observability_router_negotiates_metrics_and_reports_version() {
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use tower::ServiceExt;
+
+    let telemetry = Arc::new(Telemetry::new());
+    telemetry
+        .record_counter(
+            "nornicdb_http_requests_total",
+            &[
+                ("method", "GET"),
+                ("path_template", "/health"),
+                ("status_class", "2xx"),
+            ],
+        )
+        .unwrap();
+    let app = build_observability_router(
+        Arc::new(Health::new()),
+        telemetry,
+        true,
+        "instance-1".into(),
+    );
+
+    let prometheus = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(prometheus.status(), StatusCode::OK);
+    assert!(prometheus.headers()[header::CONTENT_TYPE]
+        .to_str()
+        .unwrap()
+        .starts_with("text/plain"));
+    let body = axum::body::to_bytes(prometheus.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body = std::str::from_utf8(&body).unwrap();
+    assert!(body.contains("nornicdb_http_requests_total"));
+    assert!(!body.contains("# EOF"));
+
+    let openmetrics = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .header(header::ACCEPT, "application/openmetrics-text")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(openmetrics.headers()[header::CONTENT_TYPE]
+        .to_str()
+        .unwrap()
+        .starts_with("application/openmetrics-text"));
+    let body = axum::body::to_bytes(openmetrics.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(std::str::from_utf8(&body).unwrap().ends_with("# EOF\n"));
+
+    let version = app
+        .oneshot(
+            Request::builder()
+                .uri("/version")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(version.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let version: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(version["service_instance_id"], "instance-1");
+    assert_eq!(version.as_object().unwrap().len(), 5);
+}
+
+#[tokio::test]
+async fn observability_router_omits_metrics_when_disabled() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let app = build_observability_router(
+        Arc::new(Health::new()),
+        Arc::new(Telemetry::new()),
+        false,
+        "instance-1".into(),
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -6513,11 +6666,11 @@ fn appstate_bolt_executor_records_fulltext_procedure_metrics() {
         duration.as_slice(),
         [copperdb_otel::MetricSample {
             labels,
-            value: copperdb_otel::MetricValue::Histogram(values),
+            value: copperdb_otel::MetricValue::Histogram { count, .. },
         }] if labels == &vec![
             ("mode".to_string(), "bm25".to_string()),
             ("stage".to_string(), "index".to_string()),
-        ] && values.len() == 1
+        ] && *count == 1
     ));
 }
 

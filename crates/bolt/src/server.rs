@@ -10,6 +10,8 @@ use crate::wsconn;
 use crate::BoltError;
 use copperdb_errors::{map_transient_transaction_error, TransientTransactionCode};
 use copperdb_otel::{CancellationProtocol, CancellationStage, Telemetry};
+use opentelemetry::global;
+use opentelemetry::propagation::Extractor;
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,11 +21,49 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::accept_async;
 use tracing::{debug, info, warn};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 const BOLT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(120);
 const BOLT_STATEMENT_TIMEOUT_ENV: &str = "COPPERDB_BOLT_STATEMENT_TIMEOUT";
 const UPSTREAM_BOLT_STATEMENT_TIMEOUT_ENV: &str = "NORNICDB_BOLT_STATEMENT_TIMEOUT";
 const MAX_BOLT_CURSORS: usize = 64;
+
+struct BoltTraceContext<'a> {
+    metadata: &'a HashMap<String, serde_json::Value>,
+}
+
+impl<'a> BoltTraceContext<'a> {
+    fn new(metadata: &'a HashMap<String, serde_json::Value>) -> Self {
+        Self { metadata }
+    }
+}
+
+impl Extractor for BoltTraceContext<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        let metadata_key = match key {
+            "traceparent" => "nornicdb.traceparent",
+            "tracestate" => "nornicdb.tracestate",
+            _ => return None,
+        };
+        self.metadata
+            .get(metadata_key)
+            .and_then(serde_json::Value::as_str)
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        [
+            ("nornicdb.traceparent", "traceparent"),
+            ("nornicdb.tracestate", "tracestate"),
+        ]
+        .into_iter()
+        .filter_map(|(metadata_key, propagation_key)| {
+            self.metadata
+                .contains_key(metadata_key)
+                .then_some(propagation_key)
+        })
+        .collect()
+    }
+}
 
 /// Result of executing a Cypher query through Bolt.
 #[derive(Debug, Clone)]
@@ -1403,6 +1443,11 @@ async fn process_message_with_telemetry(
             let bookmarks = bookmarks_from_metadata(&extra);
             let execution_executor = Arc::clone(&executor);
             let statement_timeout = bolt_statement_timeout(&extra);
+            let run_span = tracing::info_span!("nornicdb.bolt.run", db.system = "neo4j");
+            let parent = global::get_text_map_propagator(|propagator| {
+                propagator.extract(&BoltTraceContext::new(&extra))
+            });
+            let _ = run_span.set_parent(parent);
 
             // Create request context OUTSIDE spawn_blocking so the guard
             // lives in the async scope.  When the client disconnects, the
@@ -1417,22 +1462,24 @@ async fn process_message_with_telemetry(
             };
             let execution_context = request_context.clone();
 
-            let execution_task = tokio::task::spawn_blocking(move || match transaction.as_ref() {
-                Some(transaction) => execution_executor.execute_in_transaction_with_context(
-                    transaction,
-                    &execution_query,
-                    &execution_parameters,
-                    execution_context,
-                    principal.as_ref(),
-                ),
-                None => execution_executor.execute_as_on_database_with_context_and_bookmarks(
-                    execution_database.as_deref().unwrap_or("copperdb"),
-                    &execution_query,
-                    &execution_parameters,
-                    execution_context,
-                    principal.as_ref(),
-                    &bookmarks,
-                ),
+            let execution_task = tokio::task::spawn_blocking(move || {
+                run_span.in_scope(|| match transaction.as_ref() {
+                    Some(transaction) => execution_executor.execute_in_transaction_with_context(
+                        transaction,
+                        &execution_query,
+                        &execution_parameters,
+                        execution_context,
+                        principal.as_ref(),
+                    ),
+                    None => execution_executor.execute_as_on_database_with_context_and_bookmarks(
+                        execution_database.as_deref().unwrap_or("copperdb"),
+                        &execution_query,
+                        &execution_parameters,
+                        execution_context,
+                        principal.as_ref(),
+                        &bookmarks,
+                    ),
+                })
             });
             let execution_result = match statement_timeout {
                 Some(timeout) => match tokio::time::timeout(timeout, execution_task).await {
@@ -1666,6 +1713,35 @@ mod tests {
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
+
+    #[test]
+    fn bolt_trace_context_allows_only_w3c_parent_fields() {
+        let metadata = HashMap::from([
+            (
+                "nornicdb.traceparent".into(),
+                serde_json::Value::String(
+                    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into(),
+                ),
+            ),
+            (
+                "nornicdb.tracestate".into(),
+                serde_json::Value::String("vendor=value".into()),
+            ),
+            (
+                "authorization".into(),
+                serde_json::Value::String("secret".into()),
+            ),
+        ]);
+        let extractor = BoltTraceContext::new(&metadata);
+
+        assert_eq!(
+            extractor.get("traceparent"),
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+        );
+        assert_eq!(extractor.get("tracestate"), Some("vendor=value"));
+        assert_eq!(extractor.get("authorization"), None);
+        assert_eq!(extractor.keys(), vec!["traceparent", "tracestate"]);
+    }
 
     /// Helper: encode a Bolt struct message into PackStream bytes.
     fn encode_bolt_struct(signature: u8, fields: &[Value]) -> Vec<u8> {

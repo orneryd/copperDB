@@ -29,6 +29,8 @@ CopperDB wins 12 of the 13 cleanly comparable rows. NornicDB wins the 1024D HNSW
 
 ### Supplemental Benchmarks
 
+Plan 16 observability microbenchmarks measured validated counter recording at `712 ns`, a disabled request span at `616 ps`, and an always-sampled request span at `878 ns`. The end-to-end `/health` router measured `6.10 us` with tracing off and `7.40 us` with the opt-in 1% parent-based sampler. Default trace overhead is effectively zero because tracing remains disabled by default; enabled tracing on this minimal handler exceeds the aspirational 2% target and remains an explicit optimization guardrail.
+
 | Operation | NornicDB | CopperDB | Winner |
 |---|---:|---:|---|
 | Hybrid RRF, high limit (`k=100`) | Not collected | 2.7008 ms | No valid winner |
