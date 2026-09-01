@@ -16,13 +16,15 @@ use copperdb_otel::{
     TelemetryProvider,
 };
 use copperdb_server::{
-    build_local_nornic_replica_service, build_observability_router, build_router, AppState,
-    AppStateBoltExecutor,
+    build_local_nornic_replica_service, build_observability_router, build_router,
+    execute_local_mcp_request, AppState, AppStateBoltExecutor,
 };
+use tokio::io::BufReader;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tracing::{info, warn};
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
@@ -104,6 +106,10 @@ struct Cli {
 
     #[arg(long)]
     static_dir: Option<String>,
+
+    /// Run MCP over stdin/stdout without starting network listeners.
+    #[arg(long)]
+    mcp_stdio: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -361,11 +367,17 @@ async fn main() -> Result<()> {
     let otel_layer = telemetry_provider
         .tracer()
         .map(|tracer| tracing_opentelemetry::layer().with_tracer(tracer));
+    let log_writer = if cli.mcp_stdio {
+        BoxMakeWriter::new(std::io::stderr)
+    } else {
+        BoxMakeWriter::new(std::io::stdout)
+    };
     tracing_subscriber::registry()
         .with(filter)
         .with(
             tracing_subscriber::fmt::layer()
                 .with_target(false)
+                .with_writer(log_writer)
                 .compact(),
         )
         .with(otel_layer)
@@ -409,6 +421,26 @@ async fn main() -> Result<()> {
             .db_manager
             .create(startup.db_name.clone(), storage_path)
             .with_context(|| format!("failed to create home database {}", startup.db_name))?;
+    }
+
+    if cli.mcp_stdio {
+        let dispatch_state = Arc::clone(&state);
+        let transport_result = copperdb_mcp::serve_stdio_with(
+            BufReader::new(tokio::io::stdin()),
+            tokio::io::stdout(),
+            move |request| execute_local_mcp_request(Arc::clone(&dispatch_state), request),
+        )
+        .await
+        .context("MCP stdio transport failed");
+        state
+            .shutdown_packages()
+            .await
+            .context("failed to shut down packages")?;
+        telemetry_provider
+            .shutdown(observability_config.tracing.timeout)
+            .map_err(anyhow::Error::msg)
+            .context("failed to shut down telemetry")?;
+        return transport_result;
     }
 
     let app = build_router(Arc::clone(&state));
@@ -590,6 +622,13 @@ mod tests {
         let startup = resolve_startup_config(&cli).await.unwrap();
 
         assert!(startup.runtime_config.auth.enabled);
+    }
+
+    #[test]
+    fn mcp_stdio_is_an_explicit_local_mode() {
+        let cli = Cli::parse_from(["copperdb", "--mcp-stdio"]);
+
+        assert!(cli.mcp_stdio);
     }
 
     #[tokio::test]

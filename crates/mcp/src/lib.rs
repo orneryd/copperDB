@@ -13,8 +13,10 @@ use copperdb_engine::CopperDb as GraphEngine;
 use copperdb_util::RequestContext;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 10 * 1024 * 1024;
@@ -23,6 +25,10 @@ pub const DEFAULT_MAX_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum McpError {
+    #[error("stdio transport error: {0}")]
+    Stdio(#[from] std::io::Error),
+    #[error("MCP serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
     #[error("JSON-RPC error: {0}")]
     JsonRpc(String),
     #[error("tool not found: {0}")]
@@ -518,6 +524,168 @@ impl ToolRegistry {
     }
 }
 
+pub async fn serve_stdio<R, W>(
+    registry: &ToolRegistry,
+    reader: R,
+    writer: W,
+) -> Result<(), McpError>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    serve_stdio_with(reader, writer, |request| async move {
+        registry.dispatch(&request).await
+    })
+    .await
+}
+
+pub async fn serve_stdio_with<R, W, D, F>(
+    mut reader: R,
+    mut writer: W,
+    mut dispatch: D,
+) -> Result<(), McpError>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+    D: FnMut(McpRequest) -> F,
+    F: Future<Output = McpResponse>,
+{
+    while let Some(message) = read_stdio_message(&mut reader).await? {
+        let response = match message {
+            StdioMessage::Payload(payload) => match serde_json::from_slice(&payload) {
+                Ok(value) => dispatch_stdio_value(&mut dispatch, value).await?,
+                Err(error) => Some(serde_json::to_value(McpResponse::error_with_data(
+                    serde_json::Value::Null,
+                    -32700,
+                    "Parse error",
+                    Some(serde_json::json!({"detail": error.to_string()})),
+                ))?),
+            },
+            StdioMessage::TooLarge(actual_bytes) => {
+                Some(serde_json::to_value(McpResponse::error_with_data(
+                    serde_json::Value::Null,
+                    -32600,
+                    "Invalid Request",
+                    Some(serde_json::json!({
+                        "kind": "request_too_large",
+                        "actualBytes": actual_bytes,
+                        "maxBytes": DEFAULT_MAX_REQUEST_BYTES
+                    })),
+                ))?)
+            }
+        };
+        if let Some(response) = response {
+            let mut encoded = serde_json::to_vec(&response)?;
+            encoded.push(b'\n');
+            writer.write_all(&encoded).await?;
+            writer.flush().await?;
+        }
+    }
+    Ok(())
+}
+
+enum StdioMessage {
+    Payload(Vec<u8>),
+    TooLarge(usize),
+}
+
+async fn read_stdio_message<R>(reader: &mut R) -> std::io::Result<Option<StdioMessage>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut payload = Vec::new();
+    let mut actual_bytes = 0usize;
+    let mut read_any = false;
+
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if !read_any {
+                return Ok(None);
+            }
+            break;
+        }
+        read_any = true;
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let payload_bytes = newline.unwrap_or(available.len());
+        actual_bytes = actual_bytes.saturating_add(payload_bytes);
+        if payload.len() < DEFAULT_MAX_REQUEST_BYTES {
+            let retained = payload_bytes.min(DEFAULT_MAX_REQUEST_BYTES - payload.len());
+            payload.extend_from_slice(&available[..retained]);
+        }
+        let consumed = newline.map_or(available.len(), |position| position + 1);
+        reader.consume(consumed);
+        if newline.is_some() {
+            break;
+        }
+    }
+
+    if actual_bytes > DEFAULT_MAX_REQUEST_BYTES {
+        Ok(Some(StdioMessage::TooLarge(actual_bytes)))
+    } else {
+        Ok(Some(StdioMessage::Payload(payload)))
+    }
+}
+
+async fn dispatch_stdio_value<D, F>(
+    dispatch: &mut D,
+    value: serde_json::Value,
+) -> Result<Option<serde_json::Value>, McpError>
+where
+    D: FnMut(McpRequest) -> F,
+    F: Future<Output = McpResponse>,
+{
+    if let serde_json::Value::Array(entries) = value {
+        if entries.is_empty() || entries.len() > DEFAULT_MAX_BATCH_ENTRIES {
+            return Ok(Some(serde_json::to_value(McpResponse::error_with_data(
+                serde_json::Value::Null,
+                -32600,
+                "Invalid Request",
+                Some(serde_json::json!({
+                    "kind": "invalid_batch_size",
+                    "maxEntries": DEFAULT_MAX_BATCH_ENTRIES
+                })),
+            ))?));
+        }
+        let mut responses = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if let Some(response) = dispatch_stdio_entry(dispatch, entry).await? {
+                responses.push(response);
+            }
+        }
+        return Ok((!responses.is_empty()).then_some(serde_json::Value::Array(responses)));
+    }
+    dispatch_stdio_entry(dispatch, value).await
+}
+
+async fn dispatch_stdio_entry<D, F>(
+    dispatch: &mut D,
+    value: serde_json::Value,
+) -> Result<Option<serde_json::Value>, McpError>
+where
+    D: FnMut(McpRequest) -> F,
+    F: Future<Output = McpResponse>,
+{
+    let request = match serde_json::from_value::<McpRequest>(value) {
+        Ok(request) => request,
+        Err(error) => {
+            return Ok(Some(serde_json::to_value(McpResponse::error_with_data(
+                serde_json::Value::Null,
+                -32600,
+                "Invalid Request",
+                Some(serde_json::json!({"detail": error.to_string()})),
+            ))?));
+        }
+    };
+    let is_notification = request.is_notification();
+    let response = dispatch(request).await;
+    if is_notification {
+        Ok(None)
+    } else {
+        Ok(Some(serde_json::to_value(response)?))
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RunCypherArgs {
@@ -675,6 +843,7 @@ fn copperdb_tools_with_access() -> Vec<(Tool, ToolAccess, Arc<dyn ToolHandler>)>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, BufReader};
 
     struct EchoHandler;
 
@@ -706,6 +875,72 @@ mod tests {
         ) -> Result<serde_json::Value, String> {
             panic!("schema-invalid arguments reached the tool handler")
         }
+    }
+
+    async fn run_stdio(input: impl AsRef<[u8]>) -> Vec<serde_json::Value> {
+        let (server_reader, mut client_writer) = tokio::io::duplex(1024 * 1024);
+        let (mut client_reader, server_writer) = tokio::io::duplex(1024 * 1024);
+        let server = tokio::spawn(async move {
+            serve_stdio(
+                &ToolRegistry::new(),
+                BufReader::new(server_reader),
+                server_writer,
+            )
+            .await
+            .unwrap();
+        });
+        client_writer.write_all(input.as_ref()).await.unwrap();
+        client_writer.shutdown().await.unwrap();
+        let mut output = String::new();
+        client_reader.read_to_string(&mut output).await.unwrap();
+        server.await.unwrap();
+        output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn stdio_frames_requests_notifications_batches_and_errors() {
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+            "[{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\"},",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}]\n",
+            "[{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}]\n",
+            "[]\n",
+            "42\n",
+            "not-json\n"
+        );
+
+        let responses = run_stdio(input).await;
+
+        assert_eq!(responses.len(), 5);
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(responses[1].as_array().unwrap().len(), 1);
+        assert_eq!(responses[1][0]["id"], 2);
+        assert_eq!(responses[2]["error"]["code"], -32600);
+        assert_eq!(responses[2]["error"]["data"]["kind"], "invalid_batch_size");
+        assert_eq!(responses[3]["error"]["code"], -32600);
+        assert_eq!(responses[4]["error"]["code"], -32700);
+    }
+
+    #[tokio::test]
+    async fn stdio_bounds_input_and_recovers_at_the_next_message() {
+        let mut input = vec![b' '; DEFAULT_MAX_REQUEST_BYTES + 1];
+        input.extend_from_slice(b"\n{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}\n");
+
+        let responses = run_stdio(input).await;
+
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["error"]["code"], -32600);
+        assert_eq!(responses[0]["error"]["data"]["kind"], "request_too_large");
+        assert_eq!(
+            responses[0]["error"]["data"]["actualBytes"],
+            DEFAULT_MAX_REQUEST_BYTES + 1
+        );
+        assert_eq!(responses[1]["id"], 3);
     }
 
     #[test]

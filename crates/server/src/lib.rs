@@ -5265,6 +5265,57 @@ async fn execute_mcp_request(
     }
 }
 
+pub async fn execute_local_mcp_request(
+    state: Arc<AppState>,
+    mut request: copperdb_mcp::McpRequest,
+) -> copperdb_mcp::McpResponse {
+    let response_id = request.id.clone().flatten().unwrap_or(Value::Null);
+    let (request_context, request_guard) =
+        RequestContext::root(Some(SystemTime::now() + MCP_REQUEST_TIMEOUT));
+    let dispatch_response_id = response_id.clone();
+    let response = tokio::time::timeout(MCP_REQUEST_TIMEOUT, async move {
+        let registry = copperdb_mcp::ToolRegistry::new();
+        let access = match registry.required_access(&request) {
+            Ok(access) => access,
+            Err(_) => {
+                return registry
+                    .dispatch_with_context(&request_context, &request)
+                    .await;
+            }
+        };
+        let registry = if access.is_some() {
+            let database = request
+                .take_database()
+                .unwrap_or_else(|| state.db_name.clone());
+            let engine = match open_engine(&state, &database) {
+                Ok(engine) => engine,
+                Err(error) => {
+                    return copperdb_mcp::McpResponse::error(dispatch_response_id, -32000, error);
+                }
+            };
+            copperdb_mcp::ToolRegistry::with_engine_and_roles(engine, vec!["admin".into()])
+        } else {
+            registry
+        };
+        registry
+            .dispatch_with_context(&request_context, &request)
+            .await
+    })
+    .await;
+    drop(request_guard);
+    response.unwrap_or_else(|_| {
+        copperdb_mcp::McpResponse::error_with_data(
+            response_id,
+            -32000,
+            "request timeout",
+            Some(serde_json::json!({
+                "kind": "request_timeout",
+                "timeoutMs": MCP_REQUEST_TIMEOUT.as_millis()
+            })),
+        )
+    })
+}
+
 fn mcp_authorization_error(id: serde_json::Value, status: StatusCode) -> copperdb_mcp::McpResponse {
     let (code, message) = match status {
         StatusCode::UNAUTHORIZED => (-32001, "Unauthorized"),

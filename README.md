@@ -60,6 +60,16 @@ cargo run --release --package copperdb
 
 > See [docs/BUILDING.md](docs/BUILDING.md) for full configuration options.
 
+### MCP Stdio
+
+Run copperDB as a local MCP subprocess without opening HTTP, Bolt, gRPC, or metrics listeners:
+
+```bash
+cargo run --package copperdb -- --mcp-stdio
+```
+
+The transport reads one JSON-RPC message per line from stdin and writes MCP messages only to stdout; diagnostics are written to stderr. Tool calls honor `arguments.database`, and stdin EOF shuts the process down. Because the child process has direct database-file access, permission to launch this mode is the admin security boundary.
+
 ### Authentication Configuration
 
 Authentication is enabled by default for HTTP, Bolt, and internal gRPC services. Configure it with the canonical `auth.enabled` setting or `COPPERDB_AUTH_ENABLED`. Resolution order is built-in defaults, configuration file, environment, then the explicit `--no-auth` bypass.

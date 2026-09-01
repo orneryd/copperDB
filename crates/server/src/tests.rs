@@ -289,6 +289,31 @@ async fn mcp_tool_calls_select_database_with_default_fallback() {
 }
 
 #[tokio::test]
+async fn local_mcp_dispatch_selects_the_requested_database() {
+    let state = Arc::new(AppState::default());
+    let database = "stdio_target";
+    let storage_path = state.db_manager.default_storage_path(database);
+    state.db_manager.create(database, storage_path).unwrap();
+    let request = copperdb_mcp::McpRequest::new(
+        700,
+        "tools/call",
+        Some(serde_json::json!({
+            "name": "run_cypher",
+            "arguments": {
+                "database": database,
+                "query": "RETURN 1 AS value"
+            }
+        })),
+    );
+
+    let response = execute_local_mcp_request(Arc::clone(&state), request).await;
+
+    assert!(response.error.is_none(), "{:?}", response.error);
+    assert!(state.engine_cache.read().contains_key(database));
+    assert!(!state.engine_cache.read().contains_key(&state.db_name));
+}
+
+#[tokio::test]
 async fn mcp_database_selection_authorizes_target_before_opening_engine() {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
