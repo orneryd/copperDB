@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 
+pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+
 #[derive(Debug, Error)]
 pub enum McpError {
     #[error("JSON-RPC error: {0}")]
@@ -23,6 +25,8 @@ pub enum McpError {
     ToolNotFound(String),
     #[error("invalid params: {0}")]
     InvalidParams(String),
+    #[error("invalid schema for tool {tool}: {message}")]
+    InvalidSchema { tool: String, message: String },
     #[error("execution error: {0}")]
     ExecutionError(String),
 }
@@ -81,6 +85,15 @@ impl McpResponse {
     }
 
     pub fn error(id: serde_json::Value, code: i32, message: impl Into<String>) -> Self {
+        Self::error_with_data(id, code, message, None)
+    }
+
+    pub fn error_with_data(
+        id: serde_json::Value,
+        code: i32,
+        message: impl Into<String>,
+        data: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             jsonrpc: "2.0".into(),
             id,
@@ -88,6 +101,7 @@ impl McpResponse {
             error: Some(McpResponseError {
                 code,
                 message: message.into(),
+                data,
             }),
         }
     }
@@ -98,19 +112,39 @@ impl McpResponse {
 pub struct McpResponseError {
     pub code: i32,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
 }
 
 /// Tool call parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolCallParams {
     pub name: String,
     pub arguments: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InitializeParams {
+    pub protocol_version: Option<String>,
+    #[serde(default)]
+    pub capabilities: serde_json::Map<String, serde_json::Value>,
+    pub client_info: Option<ClientInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientInfo {
+    pub name: String,
+    pub version: String,
 }
 
 /// Registry of available MCP tools.
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: HashMap<String, Tool>,
+    validators: HashMap<String, jsonschema::Validator>,
     engine: Option<Arc<GraphEngine>>,
 }
 
@@ -118,7 +152,9 @@ impl ToolRegistry {
     pub fn new() -> Self {
         let mut registry = Self::default();
         for tool in copperdb_tools() {
-            registry.register(tool);
+            registry
+                .register(tool)
+                .expect("built-in MCP tool schemas must be valid");
         }
         registry
     }
@@ -130,8 +166,16 @@ impl ToolRegistry {
         registry
     }
 
-    pub fn register(&mut self, tool: Tool) {
+    pub fn register(&mut self, tool: Tool) -> Result<(), McpError> {
+        let validator = jsonschema::validator_for(&tool.input_schema).map_err(|error| {
+            McpError::InvalidSchema {
+                tool: tool.name.clone(),
+                message: error.to_string(),
+            }
+        })?;
+        self.validators.insert(tool.name.clone(), validator);
         self.tools.insert(tool.name.clone(), tool);
+        Ok(())
     }
 
     pub fn get(&self, name: &str) -> Option<&Tool> {
@@ -163,6 +207,14 @@ impl ToolRegistry {
         request_context: &RequestContext,
         request: &McpRequest,
     ) -> McpResponse {
+        if request.jsonrpc != "2.0" {
+            return McpResponse::error_with_data(
+                request.id.clone(),
+                -32600,
+                "Invalid Request",
+                Some(serde_json::json!({"expected": "2.0"})),
+            );
+        }
         match request.method.as_str() {
             "tools/list" => {
                 let tools: Vec<&Tool> = self.list();
@@ -186,19 +238,67 @@ impl ToolRegistry {
                         format!("tool not found: {}", call.name),
                     );
                 }
+                let arguments = call
+                    .arguments
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let validator = self
+                    .validators
+                    .get(&call.name)
+                    .expect("registered MCP tool must have a compiled validator");
+                if let Err(error) = validator.validate(&arguments) {
+                    return McpResponse::error_with_data(
+                        request.id.clone(),
+                        -32602,
+                        "Invalid params",
+                        Some(serde_json::json!({
+                            "tool": call.name,
+                            "kind": "schema_validation",
+                            "detail": error.to_string()
+                        })),
+                    );
+                }
                 match self.execute_tool(request_context, &call.name, &call.arguments) {
                     Ok(result) => McpResponse::ok(request.id.clone(), result),
                     Err(e) => McpResponse::error(request.id.clone(), -32000, e),
                 }
             }
-            "initialize" => McpResponse::ok(
-                request.id.clone(),
-                serde_json::json!({
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": { "tools": {} },
-                    "serverInfo": { "name": "copperdb", "version": env!("CARGO_PKG_VERSION") }
-                }),
-            ),
+            "initialize" => {
+                let params = match request.params.clone() {
+                    Some(params) => match serde_json::from_value::<InitializeParams>(params) {
+                        Ok(params) => params,
+                        Err(error) => {
+                            return McpResponse::error_with_data(
+                                request.id.clone(),
+                                -32602,
+                                "Invalid params",
+                                Some(serde_json::json!({"detail": error.to_string()})),
+                            )
+                        }
+                    },
+                    None => InitializeParams::default(),
+                };
+                if params
+                    .protocol_version
+                    .as_deref()
+                    .is_some_and(|version| version != MCP_PROTOCOL_VERSION)
+                {
+                    return McpResponse::error_with_data(
+                        request.id.clone(),
+                        -32602,
+                        "Unsupported protocol version",
+                        Some(serde_json::json!({"supported": [MCP_PROTOCOL_VERSION]})),
+                    );
+                }
+                McpResponse::ok(
+                    request.id.clone(),
+                    serde_json::json!({
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "capabilities": { "tools": {"listChanged": false} },
+                        "serverInfo": { "name": "copperdb", "version": env!("CARGO_PKG_VERSION") }
+                    }),
+                )
+            }
             _ => McpResponse::error(request.id.clone(), -32601, "method not found"),
         }
     }
@@ -284,6 +384,7 @@ pub fn copperdb_tools() -> Vec<Tool> {
                     "params": { "type": "object", "description": "Query parameters" }
                 },
                 "required": ["query"]
+                ,"additionalProperties": false
             }),
         },
         Tool {
@@ -293,10 +394,11 @@ pub fn copperdb_tools() -> Vec<Tool> {
                 "type": "object",
                 "properties": {
                     "text": { "type": "string", "description": "Text to find similar nodes for" },
-                    "k": { "type": "integer", "description": "Number of results", "default": 10 },
+                    "k": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Number of results", "default": 10 },
                     "label": { "type": "string", "description": "Filter by node label" }
                 },
-                "required": ["text"]
+                "required": ["text"],
+                "additionalProperties": false
             }),
         },
     ]
@@ -317,21 +419,83 @@ mod tests {
     #[test]
     fn test_tool_registry_register() {
         let mut registry = ToolRegistry::new();
-        registry.register(Tool {
-            name: "custom_tool".into(),
-            description: "A custom tool".into(),
-            input_schema: serde_json::json!({}),
-        });
+        registry
+            .register(Tool {
+                name: "custom_tool".into(),
+                description: "A custom tool".into(),
+                input_schema: serde_json::json!({}),
+            })
+            .unwrap();
         assert_eq!(registry.len(), 3);
+    }
+
+    #[test]
+    fn tool_registry_rejects_invalid_schema_without_registering_tool() {
+        let mut registry = ToolRegistry::new();
+        let error = registry
+            .register(Tool {
+                name: "invalid_tool".into(),
+                description: "Invalid schema".into(),
+                input_schema: serde_json::json!({"type": "not-a-json-schema-type"}),
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            McpError::InvalidSchema { ref tool, .. } if tool == "invalid_tool"
+        ));
+        assert!(registry.get("invalid_tool").is_none());
     }
 
     #[test]
     fn test_dispatch_initialize() {
         let registry = ToolRegistry::new();
-        let req = McpRequest::new(serde_json::json!(1), "initialize", None);
+        let req = McpRequest::new(
+            serde_json::json!(1),
+            "initialize",
+            Some(serde_json::json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {"tools": {}},
+                "clientInfo": {"name": "test-client", "version": "1.0"}
+            })),
+        );
         let resp = registry.dispatch(&req);
         assert!(resp.error.is_none());
-        assert!(resp.result.is_some());
+        let result = resp.result.unwrap();
+        assert_eq!(result["protocolVersion"], MCP_PROTOCOL_VERSION);
+        assert_eq!(result["capabilities"]["tools"]["listChanged"], false);
+    }
+
+    #[test]
+    fn initialize_rejects_unsupported_protocol_version() {
+        let registry = ToolRegistry::new();
+        let request = McpRequest::new(
+            serde_json::json!(11),
+            "initialize",
+            Some(serde_json::json!({"protocolVersion": "2099-01-01"})),
+        );
+
+        let error = registry.dispatch(&request).error.unwrap();
+
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "Unsupported protocol version");
+        assert_eq!(
+            error.data.unwrap()["supported"],
+            serde_json::json!([MCP_PROTOCOL_VERSION])
+        );
+    }
+
+    #[test]
+    fn dispatch_rejects_invalid_json_rpc_version() {
+        let registry = ToolRegistry::new();
+        let mut request = McpRequest::new(serde_json::json!(12), "tools/list", None);
+        request.jsonrpc = "1.0".into();
+
+        let error = registry.dispatch(&request).error.unwrap();
+
+        assert_eq!(error.code, -32600);
+        assert_eq!(error.message, "Invalid Request");
+        assert_eq!(error.data.unwrap()["expected"], "2.0");
     }
 
     #[test]
@@ -361,6 +525,27 @@ mod tests {
             "expected success, got: {:?}",
             resp.error
         );
+    }
+
+    #[test]
+    fn tool_call_rejects_arguments_that_do_not_match_advertised_schema() {
+        let registry = ToolRegistry::new();
+        let request = McpRequest::new(
+            serde_json::json!(13),
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "find_similar",
+                "arguments": {"text": "graph", "k": 101, "unexpected": true}
+            })),
+        );
+
+        let error = registry.dispatch(&request).error.unwrap();
+
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "Invalid params");
+        let data = error.data.unwrap();
+        assert_eq!(data["tool"], "find_similar");
+        assert_eq!(data["kind"], "schema_validation");
     }
 
     #[test]

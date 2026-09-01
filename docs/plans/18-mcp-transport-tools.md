@@ -1,6 +1,6 @@
 # 18: MCP Transport And Production Tools
 
-Status: planned. Priority: P2. Owners: `mcp`, `server`, `engine`, `auth`, `search`.
+Status: in progress. Priority: P2. Owners: `mcp`, `server`, `engine`, `auth`, `search`.
 
 ## Objective
 
@@ -17,6 +17,13 @@ Dispatch is synchronous/ad hoc, `run_cypher` ignores parameters, `find_similar` 
 3. Implement transactional `store`, `recall`, and `link` with identifier/metadata validation and audit.
 4. Implement durable `task`/`tasks`, valid status transitions, cycle-free dependencies, deletion rules, stable sort, and pagination.
 5. Implement `discover` over item 12 with depth capped at 3, feature gates, policy-filtered hydration, and documented lexical fallback. Remove or explicitly classify unrestricted `run_cypher` as non-production/admin-only.
+
+## Progress
+
+- The JSON-RPC dispatch boundary validates version `2.0`, negotiates the supported MCP protocol version `2024-11-05`, and reports protocol failures with stable codes and structured data.
+- Tool schemas are compiled when registered. Invalid schemas are rejected atomically, and `tools/call` arguments are validated before execution against closed built-in schemas and bounded numeric inputs.
+- Tool listing advertises the upstream-compatible immutable registry capability with `tools.listChanged: false`.
+- Async typed handlers, bounded output, hardened transports, per-tool authorization, and production tools remain pending.
 
 ## Tests And Security
 
