@@ -41,8 +41,9 @@ use uuid::Uuid;
 
 pub use copperdb_filter::Row;
 pub use procedure_registry::{
-    DeniedImportFileService, GraphDirection, GraphNode, GraphReadError, GraphReadService,
-    GraphRelationship, ImportFileError, ImportFileService, ProcedureCallContext,
+    DeniedGraphWriteService, DeniedImportFileService, GraphDirection, GraphNode, GraphReadError,
+    GraphReadService, GraphRelationship, GraphWriteError, GraphWriteNode, GraphWriteRelationship,
+    GraphWriteService, GraphWriteSummary, ImportFileError, ImportFileService, ProcedureCallContext,
     ProcedureDescriptor, ProcedureError, ProcedureHandler, ProcedureMode, ProcedureOutput,
     ProcedureRegistrar, ProcedureRegistry, ProcedureRegistryBuilder, ProcedureRegistryError,
     RootedImportFileService,
@@ -120,7 +121,7 @@ impl From<copperdb_filter::FilterError> for EvalError {
 }
 
 /// Statistics about what a query did.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct QueryStats {
     pub nodes_created: usize,
     pub nodes_deleted: usize,
@@ -266,6 +267,7 @@ pub struct EvalEngine {
     function_registry: Arc<FunctionRegistry>,
     procedure_registry: Arc<ProcedureRegistry>,
     import_files: Arc<dyn ImportFileService>,
+    package_graph_write_enabled: bool,
     vector_indexes: Arc<HnswRegistry>,
     vector_index_query: VectorIndexQuery,
     vector_index_artifact_refresh: Option<Arc<dyn Fn() + Send + Sync>>,

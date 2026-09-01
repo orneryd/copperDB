@@ -1,8 +1,8 @@
 //! Representative APOC package loaded through `copperdb-plugin`.
 
 use copperdb_eval::{
-    GraphDirection, GraphNode, ProcedureCallContext, ProcedureDescriptor, ProcedureError,
-    ProcedureMode, ProcedureOutput, Row,
+    GraphDirection, GraphNode, GraphWriteNode, GraphWriteRelationship, ProcedureCallContext,
+    ProcedureDescriptor, ProcedureError, ProcedureMode, ProcedureOutput, QueryStats, Row,
 };
 use copperdb_filter::{FunctionDescriptor, FunctionHandler};
 use copperdb_plugin::{
@@ -26,7 +26,11 @@ pub fn factory() -> StaticPackageFactory {
 pub fn package() -> PackageDefinition {
     let descriptor =
         PackageDescriptor::new(PACKAGE_ID, Version::new(1, 0, 0), "copperdb contributors")
-            .requesting([PackageCapability::QueryRead])
+            .requesting([
+                PackageCapability::QueryRead,
+                PackageCapability::QueryWrite,
+                PackageCapability::FileImport,
+            ])
             .with_configuration_schema(serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -113,6 +117,17 @@ pub fn package() -> PackageDefinition {
             )
             .requiring_capabilities(["query:read"]),
         )
+        .with_procedure(
+            ProcedureDescriptor::extension(
+                "apoc.import.json",
+                std::iter::empty::<&str>(),
+                "apoc.import.json(url :: STRING, config :: MAP = {}) :: (file :: STRING, source :: STRING, format :: STRING, nodes :: INTEGER, relationships :: INTEGER, properties :: INTEGER, time :: INTEGER, rows :: INTEGER, batchSize :: INTEGER, batches :: INTEGER, done :: BOOLEAN, data :: STRING)",
+                "Imports JSON",
+                ProcedureMode::Write,
+                Arc::new(import_json),
+            )
+            .requiring_capabilities(["query:write"]),
+        )
 }
 
 fn load_json(
@@ -165,6 +180,179 @@ fn load_json(
         rows.push(row);
     }
     Ok(ProcedureOutput::new(vec!["value".into()], rows))
+}
+
+fn import_json(
+    context: &ProcedureCallContext<'_>,
+    args: &[Value],
+) -> Result<ProcedureOutput, ProcedureError> {
+    if args.is_empty() {
+        return Err(ProcedureError::Message(
+            "procedure apoc.import.json requires at least 1 arguments, got 0".into(),
+        ));
+    }
+    if args.len() > 2 {
+        return Err(ProcedureError::Message(format!(
+            "procedure apoc.import.json accepts at most 2 arguments, got {}",
+            args.len()
+        )));
+    }
+    let source = args[0]
+        .as_str()
+        .filter(|source| !source.is_empty())
+        .ok_or_else(|| {
+            ProcedureError::Message("apoc.import.json requires a URL or file path".into())
+        })?;
+    if args
+        .get(1)
+        .is_some_and(|config| !config.is_object() && !config.is_null())
+    {
+        return Err(ProcedureError::Message(
+            "apoc.import.json config must be a map".into(),
+        ));
+    }
+
+    let bytes = context
+        .import_files
+        .read(context.request_context, source, MAX_JSON_BYTES)
+        .map_err(|error| ProcedureError::Message(format!("failed to load JSON: {error}")))?;
+    context.request_context.check_active()?;
+    let document = serde_json::from_slice::<Value>(&bytes)
+        .map(json_numbers_to_float)
+        .map_err(|error| ProcedureError::Message(format!("failed to load JSON: {error}")))?;
+    let root = document.as_object().ok_or_else(|| {
+        ProcedureError::Message("failed to import JSON: root must be an object".into())
+    })?;
+    let nodes = parse_import_nodes(context, root.get("nodes"))?;
+    let relationships = parse_import_relationships(context, root.get("relationships"))?;
+    if nodes.len().saturating_add(relationships.len()) > MAX_JSON_ROWS {
+        return Err(ProcedureError::Message(format!(
+            "failed to import JSON: input exceeds the {MAX_JSON_ROWS} record limit"
+        )));
+    }
+    let summary = context
+        .graph_write
+        .import_batch(context.request_context, &nodes, &relationships)
+        .map_err(|error| ProcedureError::Message(format!("failed to import JSON: {error}")))?;
+
+    let mut row = Row::new();
+    row.insert("source".into(), Value::String(source.into()));
+    row.insert("nodes".into(), Value::from(summary.nodes_created as u64));
+    row.insert(
+        "relationships".into(),
+        Value::from(summary.relationships_created as u64),
+    );
+    Ok(ProcedureOutput::new(
+        vec!["source".into(), "nodes".into(), "relationships".into()],
+        vec![row],
+    )
+    .with_stats(QueryStats {
+        nodes_created: summary.nodes_created,
+        relationships_created: summary.relationships_created,
+        properties_set: summary.properties_set,
+        ..QueryStats::default()
+    }))
+}
+
+fn parse_import_nodes(
+    context: &ProcedureCallContext<'_>,
+    value: Option<&Value>,
+) -> Result<Vec<GraphWriteNode>, ProcedureError> {
+    let records = import_records(value, "nodes")?;
+    records
+        .iter()
+        .map(|record| {
+            context.request_context.check_active()?;
+            let record = record
+                .as_object()
+                .ok_or_else(|| import_shape_error("node"))?;
+            let id = required_import_string(record, "id", "node")?;
+            let labels = record
+                .get("labels")
+                .map(|labels| {
+                    labels
+                        .as_array()
+                        .ok_or_else(|| import_shape_error("node labels"))?
+                        .iter()
+                        .map(|label| {
+                            label
+                                .as_str()
+                                .map(str::to_owned)
+                                .ok_or_else(|| import_shape_error("node label"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+            Ok(GraphWriteNode {
+                id,
+                labels,
+                properties: import_properties(record.get("properties"), "node")?,
+            })
+        })
+        .collect()
+}
+
+fn parse_import_relationships(
+    context: &ProcedureCallContext<'_>,
+    value: Option<&Value>,
+) -> Result<Vec<GraphWriteRelationship>, ProcedureError> {
+    let records = import_records(value, "relationships")?;
+    records
+        .iter()
+        .map(|record| {
+            context.request_context.check_active()?;
+            let record = record
+                .as_object()
+                .ok_or_else(|| import_shape_error("relationship"))?;
+            Ok(GraphWriteRelationship {
+                id: required_import_string(record, "id", "relationship")?,
+                start_node: required_import_string(record, "startNode", "relationship")?,
+                end_node: required_import_string(record, "endNode", "relationship")?,
+                relationship_type: required_import_string(record, "type", "relationship")?,
+                properties: import_properties(record.get("properties"), "relationship")?,
+            })
+        })
+        .collect()
+}
+
+fn import_records<'a>(
+    value: Option<&'a Value>,
+    field: &str,
+) -> Result<&'a [Value], ProcedureError> {
+    match value {
+        None | Some(Value::Null) => Ok(&[]),
+        Some(Value::Array(records)) => Ok(records),
+        Some(_) => Err(import_shape_error(field)),
+    }
+}
+
+fn required_import_string(
+    record: &Map<String, Value>,
+    field: &str,
+    kind: &str,
+) -> Result<String, ProcedureError> {
+    record
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| import_shape_error(&format!("{kind} {field}")))
+}
+
+fn import_properties(
+    value: Option<&Value>,
+    kind: &str,
+) -> Result<std::collections::BTreeMap<String, Value>, ProcedureError> {
+    match value {
+        None | Some(Value::Null) => Ok(Default::default()),
+        Some(Value::Object(properties)) => Ok(properties.clone().into_iter().collect()),
+        Some(_) => Err(import_shape_error(&format!("{kind} properties"))),
+    }
+}
+
+fn import_shape_error(field: &str) -> ProcedureError {
+    ProcedureError::Message(format!("failed to import JSON: invalid {field}"))
 }
 
 fn function(
@@ -668,6 +856,14 @@ mod tests {
             descriptor.signature(),
             "apoc.load.json(urlOrKeyOrBinary :: STRING, path :: STRING = '', config :: MAP = {}) :: (value :: MAP)"
         );
+        let descriptor = procedures.get("apoc.import.json").unwrap();
+        assert_eq!(descriptor.mode(), ProcedureMode::Write);
+        assert_eq!(descriptor.required_capabilities(), ["query:write"]);
+        assert_eq!(descriptor.description(), "Imports JSON");
+        assert_eq!(
+            descriptor.signature(),
+            "apoc.import.json(url :: STRING, config :: MAP = {}) :: (file :: STRING, source :: STRING, format :: STRING, nodes :: INTEGER, relationships :: INTEGER, properties :: INTEGER, time :: INTEGER, rows :: INTEGER, batchSize :: INTEGER, batches :: INTEGER, done :: BOOLEAN, data :: STRING)"
+        );
     }
 
     #[test]
@@ -693,6 +889,7 @@ mod tests {
             database: Some("copperdb"),
             request_context: &request_context,
             graph_read: &storage,
+            graph_write: &storage,
             import_files: &import_files,
         };
 
@@ -721,6 +918,7 @@ mod tests {
             database: Some("copperdb"),
             request_context: &request_context,
             graph_read: &storage,
+            graph_write: &storage,
             import_files: &denied,
         };
         assert_eq!(
@@ -741,6 +939,232 @@ mod tests {
             .unwrap_err()
             .to_string()
             .starts_with("failed to load JSON:"));
+    }
+
+    #[test]
+    fn import_json_atomically_creates_upstream_graph_shape_with_real_stats() {
+        let root = tempdir().unwrap();
+        fs::write(
+            root.path().join("graph.json"),
+            br#"{
+                "nodes": [
+                    {"id":"n1","labels":["Person"],"properties":{"name":"Alice"}},
+                    {"id":"n2","labels":["Person"],"properties":{"name":"Bob"}}
+                ],
+                "relationships": [
+                    {"id":"e1","type":"KNOWS","startNode":"n1","endNode":"n2","properties":{"since":2020}}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let storage = StorageEngine::open_temporary().unwrap();
+        let import_files = RootedImportFileService::new(root.path()).unwrap();
+        let request_context = copperdb_util::RequestContext::detached();
+        let row = Row::new();
+        let params = HashMap::new();
+        let capabilities = ["query:write".into()];
+        let caller_roles = ["admin".into()];
+        let context = ProcedureCallContext {
+            row: &row,
+            params: &params,
+            capabilities: &capabilities,
+            caller_roles: &caller_roles,
+            database: Some("copperdb"),
+            request_context: &request_context,
+            graph_read: &storage,
+            graph_write: &storage,
+            import_files: &import_files,
+        };
+
+        let output = import_json(&context, &[json!("graph.json")]).unwrap();
+
+        assert_eq!(output.columns, ["source", "nodes", "relationships"]);
+        assert_eq!(
+            output.rows,
+            [Row::from_iter([
+                ("source".into(), json!("graph.json")),
+                ("nodes".into(), json!(2)),
+                ("relationships".into(), json!(1)),
+            ])]
+        );
+        assert_eq!(output.stats.nodes_created, 2);
+        assert_eq!(output.stats.relationships_created, 1);
+        assert_eq!(output.stats.properties_set, 3);
+        assert_eq!(
+            storage.get_node_record("n1").unwrap().unwrap().labels,
+            ["Person"]
+        );
+        let edge = storage.get_edge_record("e1").unwrap().unwrap();
+        assert_eq!(edge.start_node, "n1");
+        assert_eq!(edge.end_node, "n2");
+        assert_eq!(edge.edge_type, "KNOWS");
+    }
+
+    #[test]
+    fn import_json_rejects_invalid_batch_without_partial_nodes() {
+        let root = tempdir().unwrap();
+        fs::write(
+            root.path().join("invalid.json"),
+            br#"{
+                "nodes": [{"id":"n1","labels":[],"properties":{}}],
+                "relationships": [{"id":"e1","type":"KNOWS","startNode":"n1","endNode":"missing"}]
+            }"#,
+        )
+        .unwrap();
+        let storage = StorageEngine::open_temporary().unwrap();
+        let import_files = RootedImportFileService::new(root.path()).unwrap();
+        let request_context = copperdb_util::RequestContext::detached();
+        let row = Row::new();
+        let params = HashMap::new();
+        let capabilities = ["query:write".into()];
+        let caller_roles = ["admin".into()];
+        let context = ProcedureCallContext {
+            row: &row,
+            params: &params,
+            capabilities: &capabilities,
+            caller_roles: &caller_roles,
+            database: Some("copperdb"),
+            request_context: &request_context,
+            graph_read: &storage,
+            graph_write: &storage,
+            import_files: &import_files,
+        };
+
+        assert_eq!(
+            import_json(&context, &[json!("invalid.json")])
+                .unwrap_err()
+                .to_string(),
+            "failed to import JSON: package graph write relationship endpoint does not exist"
+        );
+        assert!(storage.get_node_record("n1").unwrap().is_none());
+        assert!(storage.get_edge_record("e1").unwrap().is_none());
+    }
+
+    fn transactional_import_database(root: &std::path::Path) -> CopperDb {
+        let packages = resolve_packages([package()]).unwrap();
+        CopperDb::from_storage_with_packages(
+            Arc::new(StorageEngine::open_memory().unwrap()),
+            DatabaseConfig {
+                package_import_file_root: Some(root.to_string_lossy().into_owned()),
+                package_graph_write_enabled: true,
+                ..DatabaseConfig::default()
+            },
+            &packages,
+        )
+        .unwrap()
+    }
+
+    fn write_transactional_import_fixture(root: &std::path::Path) {
+        fs::write(
+            root.join("transactional.json"),
+            br#"{
+                "nodes": [
+                    {"id":"tx-n1","labels":["Person"],"properties":{"name":"Alice"}},
+                    {"id":"tx-n2","labels":["Person"],"properties":{"name":"Bob"}}
+                ],
+                "relationships": [
+                    {"id":"tx-e1","type":"KNOWS","startNode":"tx-n1","endNode":"tx-n2","properties":{"since":2020}}
+                ]
+            }"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn import_json_uses_explicit_transaction_overlay_and_rolls_back() {
+        let root = tempdir().unwrap();
+        write_transactional_import_fixture(root.path());
+        let database = transactional_import_database(root.path());
+        let request_context = copperdb_util::RequestContext::detached();
+        let roles = ["admin".to_string()];
+        let mut transaction = database.begin_storage_transaction().unwrap();
+
+        let import = database
+            .execute_in_storage_transaction_as_with_context(
+                &request_context,
+                &mut transaction,
+                "CALL apoc.import.json('transactional.json') YIELD source, nodes, relationships RETURN source, nodes, relationships",
+                HashMap::new(),
+                &roles,
+            )
+            .unwrap();
+
+        assert_eq!(
+            import.rows,
+            [Row::from_iter([
+                ("source".into(), json!("transactional.json")),
+                ("nodes".into(), json!(2)),
+                ("relationships".into(), json!(1)),
+            ])]
+        );
+        let inside = database
+            .execute_in_storage_transaction_as_with_context(
+                &request_context,
+                &mut transaction,
+                "MATCH (n:Person) RETURN count(n) AS count",
+                HashMap::new(),
+                &roles,
+            )
+            .unwrap();
+        assert_eq!(inside.rows[0]["count"], json!(2));
+        assert!(database
+            .storage()
+            .get_node_record("tx-n1")
+            .unwrap()
+            .is_none());
+
+        transaction.rollback();
+        assert!(database
+            .storage()
+            .get_node_record("tx-n1")
+            .unwrap()
+            .is_none());
+        assert!(database
+            .storage()
+            .get_edge_record("tx-e1")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn import_json_commits_explicit_transaction_with_real_stats() {
+        let root = tempdir().unwrap();
+        write_transactional_import_fixture(root.path());
+        let database = transactional_import_database(root.path());
+        let request_context = copperdb_util::RequestContext::detached();
+        let mut transaction = database.begin_storage_transaction().unwrap();
+
+        let result = database
+            .execute_in_storage_transaction_as_with_context(
+                &request_context,
+                &mut transaction,
+                "CALL apoc.import.json('transactional.json')",
+                HashMap::new(),
+                &["admin".into()],
+            )
+            .unwrap();
+
+        assert_eq!(result.stats.nodes_created, 2);
+        assert_eq!(result.stats.relationships_created, 1);
+        assert_eq!(result.stats.properties_set, 3);
+        transaction.commit().unwrap();
+        assert_eq!(
+            database
+                .storage()
+                .get_node_record("tx-n1")
+                .unwrap()
+                .unwrap()
+                .labels,
+            ["Person"]
+        );
+        let edge = database
+            .storage()
+            .get_edge_record("tx-e1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(edge.start_node, "tx-n1");
+        assert_eq!(edge.end_node, "tx-n2");
+        assert_eq!(edge.edge_type, "KNOWS");
     }
 
     #[test]

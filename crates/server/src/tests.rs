@@ -12,7 +12,11 @@ async fn runtime_configuration_loads_apoc_only_when_enabled() {
     config.packages.required = vec![copperdb_apoc::PACKAGE_ID.into()];
     config.packages.grants.insert(
         copperdb_apoc::PACKAGE_ID.into(),
-        vec![copperdb_plugin::PackageCapability::QueryRead],
+        vec![
+            copperdb_plugin::PackageCapability::QueryRead,
+            copperdb_plugin::PackageCapability::QueryWrite,
+            copperdb_plugin::PackageCapability::FileImport,
+        ],
     );
     state.configure_runtime(Arc::new(config)).await.unwrap();
 
@@ -49,6 +53,7 @@ async fn apoc_load_json_uses_explicit_rooted_file_import_grant() {
         copperdb_apoc::PACKAGE_ID.into(),
         vec![
             copperdb_plugin::PackageCapability::QueryRead,
+            copperdb_plugin::PackageCapability::QueryWrite,
             copperdb_plugin::PackageCapability::FileImport,
         ],
     );
@@ -73,6 +78,95 @@ async fn apoc_load_json_uses_explicit_rooted_file_import_grant() {
 }
 
 #[tokio::test]
+async fn apoc_import_json_requires_explicit_graph_write_grant() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("graph.json"),
+        br#"{"nodes":[{"id":"denied","labels":["Person"],"properties":{}}]}"#,
+    )
+    .unwrap();
+    let mut state = AppState::default();
+    let mut config = RuntimeConfig::default();
+    config.packages.enabled = vec![copperdb_apoc::PACKAGE_ID.into()];
+    config.packages.grants.insert(
+        copperdb_apoc::PACKAGE_ID.into(),
+        vec![
+            copperdb_plugin::PackageCapability::QueryRead,
+            copperdb_plugin::PackageCapability::FileImport,
+        ],
+    );
+    config.packages.configuration.insert(
+        copperdb_apoc::PACKAGE_ID.into(),
+        serde_json::json!({"file_access_root": root.path()}),
+    );
+    let error = state.configure_runtime(Arc::new(config)).await.unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("package copperdb.apoc was not granted capability QueryWrite"));
+}
+
+#[tokio::test]
+async fn apoc_import_json_uses_explicit_file_and_graph_write_grants() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("graph.json"),
+        br#"{
+            "nodes":[
+                {"id":"n1","labels":["Person"],"properties":{"name":"Alice"}},
+                {"id":"n2","labels":["Person"],"properties":{"name":"Bob"}}
+            ],
+            "relationships":[
+                {"id":"e1","type":"KNOWS","startNode":"n1","endNode":"n2","properties":{"since":2020}}
+            ]
+        }"#,
+    )
+    .unwrap();
+    let mut state = AppState::default();
+    let mut config = RuntimeConfig::default();
+    config.packages.enabled = vec![copperdb_apoc::PACKAGE_ID.into()];
+    config.packages.grants.insert(
+        copperdb_apoc::PACKAGE_ID.into(),
+        vec![
+            copperdb_plugin::PackageCapability::QueryRead,
+            copperdb_plugin::PackageCapability::QueryWrite,
+            copperdb_plugin::PackageCapability::FileImport,
+        ],
+    );
+    config.packages.configuration.insert(
+        copperdb_apoc::PACKAGE_ID.into(),
+        serde_json::json!({"file_access_root": root.path()}),
+    );
+    state.configure_runtime(Arc::new(config)).await.unwrap();
+    let database_name = format!("apoc-import-{}", uuid::Uuid::new_v4());
+    state
+        .db_manager
+        .create(
+            &database_name,
+            root.path().join("database").to_string_lossy().into_owned(),
+        )
+        .unwrap();
+    let engine = open_engine(&state, &database_name).unwrap();
+
+    let result = engine
+        .execute(
+            "CALL apoc.import.json('graph.json') YIELD source, nodes, relationships RETURN source, nodes, relationships",
+            HashMap::new(),
+        )
+        .unwrap();
+
+    assert_eq!(result.rows[0]["source"], serde_json::json!("graph.json"));
+    assert_eq!(result.rows[0]["nodes"], serde_json::json!(2));
+    assert_eq!(result.rows[0]["relationships"], serde_json::json!(1));
+    assert_eq!(result.stats.nodes_created, 2);
+    assert_eq!(result.stats.relationships_created, 1);
+    assert_eq!(result.stats.properties_set, 3);
+    assert!(engine.storage().get_node_record("n1").unwrap().is_some());
+    assert!(engine.storage().get_edge_record("e1").unwrap().is_some());
+    state.shutdown_packages().await.unwrap();
+}
+
+#[tokio::test]
 async fn http_transaction_executes_loaded_apoc_function() {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
@@ -83,7 +177,11 @@ async fn http_transaction_executes_loaded_apoc_function() {
     config.packages.required = vec![copperdb_apoc::PACKAGE_ID.into()];
     config.packages.grants.insert(
         copperdb_apoc::PACKAGE_ID.into(),
-        vec![copperdb_plugin::PackageCapability::QueryRead],
+        vec![
+            copperdb_plugin::PackageCapability::QueryRead,
+            copperdb_plugin::PackageCapability::QueryWrite,
+            copperdb_plugin::PackageCapability::FileImport,
+        ],
     );
     state.configure_runtime(Arc::new(config)).await.unwrap();
     state.auth.security_enabled = false;
@@ -135,7 +233,11 @@ async fn bolt_tcp_executes_loaded_apoc_function() {
     config.packages.required = vec![copperdb_apoc::PACKAGE_ID.into()];
     config.packages.grants.insert(
         copperdb_apoc::PACKAGE_ID.into(),
-        vec![copperdb_plugin::PackageCapability::QueryRead],
+        vec![
+            copperdb_plugin::PackageCapability::QueryRead,
+            copperdb_plugin::PackageCapability::QueryWrite,
+            copperdb_plugin::PackageCapability::FileImport,
+        ],
     );
     state.configure_runtime(Arc::new(config)).await.unwrap();
     state.auth.security_enabled = false;

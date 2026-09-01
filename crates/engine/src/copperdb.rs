@@ -948,7 +948,8 @@ impl CopperDb {
             function_registry,
             procedure_registry,
         )
-        .with_import_file_service(import_files);
+        .with_import_file_service(import_files)
+        .with_package_graph_write_enabled(config.package_graph_write_enabled);
         let cypher_result_cache = Arc::new(QueryResultCache::new(
             1024,
             Some(std::time::Duration::from_secs(300)),
@@ -1122,7 +1123,9 @@ impl CopperDb {
         let execute_span = tracing::info_span!("nornicdb.cypher.eval");
         let execute_span_guard = execute_span.enter();
         let mut capabilities = vec!["query:read".to_string()];
-        if is_mutating_query(&parsed.query_type) {
+        if is_mutating_query(&parsed.query_type)
+            || self.eval.query_requires_write_capability(&parsed)
+        {
             capabilities.push("query:write".to_string());
         }
         let function_context = FunctionExecutionContext {
@@ -1227,8 +1230,21 @@ impl CopperDb {
         let start = Instant::now();
         let parsed = Parser::new().parse(cypher)?;
         self.enforce_compliance(&parsed, roles)?;
+        let mut capabilities = vec!["query:read".to_string()];
+        if is_mutating_query(&parsed.query_type)
+            || self.eval.query_requires_write_capability(&parsed)
+        {
+            capabilities.push("query:write".to_string());
+        }
+        let function_context = FunctionExecutionContext {
+            capabilities,
+            caller_roles: roles.iter().map(|role| role.to_ascii_lowercase()).collect(),
+            database: Some(self.config.default_database.clone()),
+            request_context: None,
+        };
         let eval_result = self.eval.execute_in_storage_transaction_with_context(
             request_context,
+            &function_context,
             transaction,
             &parsed,
             &params,

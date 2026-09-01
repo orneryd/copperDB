@@ -1,4 +1,6 @@
-use self::eval_engine_policy::{edge_vector_for_property, vector_from_node};
+use self::eval_engine_policy::{
+    edge_vector_for_property, vector_from_node, ProcedureGraphServices,
+};
 use std::cell::RefCell;
 
 thread_local! {
@@ -8,6 +10,17 @@ thread_local! {
 
 use super::*;
 impl EvalEngine {
+    pub fn query_requires_write_capability(&self, query: &Query) -> bool {
+        query.clauses.iter().any(|clause| {
+            let Clause::Call(call) = clause else {
+                return false;
+            };
+            self.procedure_registry
+                .get(&call.procedure)
+                .is_none_or(|descriptor| descriptor.mode() == ProcedureMode::Write)
+        })
+    }
+
     pub fn new(storage: Arc<StorageEngine>) -> Self {
         Self::try_new_with_function_registrars(storage, &[])
             .expect("the built-in function registry must be valid")
@@ -188,6 +201,7 @@ impl EvalEngine {
             function_registry,
             procedure_registry,
             import_files: Arc::new(DeniedImportFileService),
+            package_graph_write_enabled: false,
             vector_indexes,
             vector_index_query,
             vector_index_artifact_refresh,
@@ -203,6 +217,11 @@ impl EvalEngine {
 
     pub fn with_import_file_service(mut self, service: Arc<dyn ImportFileService>) -> Self {
         self.import_files = service;
+        self
+    }
+
+    pub fn with_package_graph_write_enabled(mut self, enabled: bool) -> Self {
+        self.package_graph_write_enabled = enabled;
         self
     }
 
@@ -682,6 +701,19 @@ impl EvalEngine {
     pub fn execute_in_storage_transaction_with_context(
         &self,
         request_context: &RequestContext,
+        function_context: &FunctionExecutionContext,
+        transaction: &mut StorageTransaction<'_>,
+        query: &Query,
+        params: &HashMap<String, Value>,
+    ) -> Result<EvalResult, EvalError> {
+        self.with_request_and_function_context(request_context, function_context, || {
+            self.execute_in_storage_transaction_inner(request_context, transaction, query, params)
+        })
+    }
+
+    fn execute_in_storage_transaction_inner(
+        &self,
+        request_context: &RequestContext,
         transaction: &mut StorageTransaction<'_>,
         query: &Query,
         params: &HashMap<String, Value>,
@@ -856,6 +888,53 @@ impl EvalEngine {
                                 &mut stats,
                             )?;
                         }
+                    }
+                }
+                Clause::Call(call) => {
+                    let descriptor =
+                        self.procedure_registry
+                            .get(&call.procedure)
+                            .ok_or_else(|| {
+                                EvalError::ExecutionError(format!(
+                                    "CALL {} is not supported yet",
+                                    call.procedure
+                                ))
+                            })?;
+                    if descriptor.builtin_implementation().is_some() {
+                        return Err(EvalError::ExecutionError(
+                            "explicit transactions currently support extension procedures only"
+                                .to_string(),
+                        ));
+                    }
+                    let graph =
+                        crate::procedure_registry::TransactionGraphService::new(transaction);
+                    let denied_graph_write = DeniedGraphWriteService;
+                    let graph_write: &dyn GraphWriteService = if self.package_graph_write_enabled {
+                        &graph
+                    } else {
+                        &denied_graph_write
+                    };
+                    let call_result = self.execute_extension_procedure(
+                        descriptor,
+                        request_context,
+                        call,
+                        params,
+                        &current_rows,
+                        ProcedureGraphServices {
+                            read: &graph,
+                            write: graph_write,
+                        },
+                    )?;
+                    stats.nodes_created += call_result.stats.nodes_created;
+                    stats.nodes_deleted += call_result.stats.nodes_deleted;
+                    stats.relationships_created += call_result.stats.relationships_created;
+                    stats.relationships_deleted += call_result.stats.relationships_deleted;
+                    stats.properties_set += call_result.stats.properties_set;
+                    columns = call_result.columns;
+                    if std::ptr::eq(clause, query.clauses.last().expect("current clause exists")) {
+                        result_rows = call_result.rows;
+                    } else {
+                        current_rows = call_result.rows;
                     }
                 }
                 Clause::CreateConstraint(create) => {
@@ -2464,6 +2543,11 @@ impl EvalEngine {
                             call_result.columns = yield_columns;
                         }
                     }
+                    stats.nodes_created += call_result.stats.nodes_created;
+                    stats.nodes_deleted += call_result.stats.nodes_deleted;
+                    stats.relationships_created += call_result.stats.relationships_created;
+                    stats.relationships_deleted += call_result.stats.relationships_deleted;
+                    stats.properties_set += call_result.stats.properties_set;
                     columns = call_result.columns;
                     if clause_index + 1 == query.clauses.len() {
                         result_rows = call_result.rows;

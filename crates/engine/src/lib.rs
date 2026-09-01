@@ -294,6 +294,8 @@ pub struct DatabaseConfig {
     pub distributed_repair_queue_dir: Option<String>,
     /// Canonical root exposed through the package import-file host service.
     pub package_import_file_root: Option<String>,
+    /// Whether packages may stage graph mutations through the restricted host service.
+    pub package_graph_write_enabled: bool,
 }
 
 impl Default for DatabaseConfig {
@@ -315,6 +317,7 @@ impl Default for DatabaseConfig {
             storage_encryption_key_uri: "kms://local/storage".into(),
             distributed_repair_queue_dir: None,
             package_import_file_root: None,
+            package_graph_write_enabled: false,
         }
     }
 }

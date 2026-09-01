@@ -13,7 +13,8 @@ Status: in progress. Priority: P2. Owners: `eval`, `engine`, `server`, `copperdb
 - Complete: offline package configuration-schema compilation and instance validation before factory creation, closed-by-default package settings, stable package-attributed errors, and APOC's declared `file_access_root` contract.
 - Complete: loaded APOC dispatch through embedded execution, the HTTP transaction endpoint, and a real Bolt 4.4 TCP `HELLO`/`RUN`/`PULL` exchange with deterministic result assertions.
 - Complete: Criterion coverage for cold package lifecycle, canonical/mixed-case registry dispatch, representative APOC scalar execution, bounded traversal, rooted JSON loading, and event enqueue/saturation. Initial quick-mode baselines measured approximately `152 us` cold startup, `33 us` scalar query execution, `184 us` per 1,000-row JSON load, `47 us` per bounded 65-node traversal, `1.11 us` enqueue plus dispatcher turn, and `50 ns` saturated ingress rejection.
-- Remaining: restricted transactional write and allowlisted network host services, representative `apoc.import.json`, and remote `apoc.load.json`.
+- Complete: default-denied transactional graph-write host service and bounded representative `apoc.import.json` with explicit `QueryWrite` and `FileImport` grants, atomic implicit batches, caller-owned explicit transaction staging, rollback/commit visibility, pre-write validation, exact result columns, and real mutation statistics.
+- Remaining: allowlisted network host service and remote `apoc.load.json`.
 
 ## Objective
 

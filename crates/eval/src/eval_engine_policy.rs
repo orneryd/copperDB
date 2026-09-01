@@ -4,6 +4,11 @@ use crate::procedure_registry::BuiltinProcedure;
 const MAX_FULLTEXT_VOCABULARY_TERMS: usize = 2_048;
 const MAX_FULLTEXT_VOCABULARY_ENTRIES: usize = 16_384;
 
+pub(crate) struct ProcedureGraphServices<'a> {
+    pub(crate) read: &'a dyn GraphReadService,
+    pub(crate) write: &'a dyn GraphWriteService,
+}
+
 impl EvalEngine {
     pub(crate) fn execute_call_clause(
         &self,
@@ -22,7 +27,23 @@ impl EvalEngine {
         let result = if let Some(implementation) = descriptor.builtin_implementation() {
             self.execute_builtin_procedure(implementation, request_context, call, params, rows)
         } else {
-            self.execute_extension_procedure(descriptor, request_context, call, params, rows)
+            let denied_graph_write = DeniedGraphWriteService;
+            let graph_write: &dyn GraphWriteService = if self.package_graph_write_enabled {
+                self.storage.as_ref()
+            } else {
+                &denied_graph_write
+            };
+            self.execute_extension_procedure(
+                descriptor,
+                request_context,
+                call,
+                params,
+                rows,
+                ProcedureGraphServices {
+                    read: self.storage.as_ref(),
+                    write: graph_write,
+                },
+            )
         }?;
         request_context.check_active()?;
 
@@ -100,13 +121,14 @@ impl EvalEngine {
         }
     }
 
-    fn execute_extension_procedure(
+    pub(crate) fn execute_extension_procedure(
         &self,
         descriptor: &ProcedureDescriptor,
         request_context: &copperdb_util::RequestContext,
         call: &copperdb_cypher::CallClause,
         params: &HashMap<String, Value>,
         rows: &[Row],
+        graph: ProcedureGraphServices<'_>,
     ) -> Result<EvalResult, EvalError> {
         let execution_context = CURRENT_EXECUTION_CONTEXT.with(|slot| slot.borrow().clone());
         for capability in descriptor.required_capabilities() {
@@ -140,6 +162,7 @@ impl EvalEngine {
             .expect("extension descriptor must have a handler");
         let mut columns = None;
         let mut result_rows = Vec::new();
+        let mut stats = QueryStats::default();
         for row in rows {
             request_context.check_active()?;
             let args = call
@@ -154,7 +177,8 @@ impl EvalEngine {
                 caller_roles: &execution_context.caller_roles,
                 database: execution_context.database.as_deref(),
                 request_context,
-                graph_read: self.storage.as_ref(),
+                graph_read: graph.read,
+                graph_write: graph.write,
                 import_files: self.import_files.as_ref(),
             };
             let output =
@@ -175,6 +199,11 @@ impl EvalEngine {
                             message
                         )),
                     })?;
+            stats.nodes_created += output.stats.nodes_created;
+            stats.nodes_deleted += output.stats.nodes_deleted;
+            stats.relationships_created += output.stats.relationships_created;
+            stats.relationships_deleted += output.stats.relationships_deleted;
+            stats.properties_set += output.stats.properties_set;
             if let Some(expected) = &columns {
                 if expected != &output.columns {
                     return Err(EvalError::ExecutionError(format!(
@@ -192,7 +221,11 @@ impl EvalEngine {
             }
             request_context.check_active()?;
         }
-        Ok(ProcedureOutput::new(columns.unwrap_or_default(), result_rows).into())
+        Ok(
+            ProcedureOutput::new(columns.unwrap_or_default(), result_rows)
+                .with_stats(stats)
+                .into(),
+        )
     }
 
     fn execute_db_labels_call(

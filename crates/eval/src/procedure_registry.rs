@@ -1,5 +1,7 @@
 use crate::{EvalError, QueryStats, Row};
-use copperdb_storage::{EdgeAdjacencyDirection, StorageEngine};
+use copperdb_storage::{
+    EdgeAdjacencyDirection, EdgeRecord, NodeRecord, StorageEngine, StorageTransaction,
+};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
@@ -7,7 +9,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use thiserror::Error;
 use url::Url;
 
@@ -299,6 +301,72 @@ impl GraphReadService for StorageEngine {
     }
 }
 
+pub(crate) struct TransactionGraphService<'transaction, 'engine> {
+    transaction: Mutex<&'transaction mut StorageTransaction<'engine>>,
+}
+
+impl<'transaction, 'engine> TransactionGraphService<'transaction, 'engine> {
+    pub(crate) fn new(transaction: &'transaction mut StorageTransaction<'engine>) -> Self {
+        Self {
+            transaction: Mutex::new(transaction),
+        }
+    }
+}
+
+impl GraphReadService for TransactionGraphService<'_, '_> {
+    fn node(&self, id: &str) -> Result<Option<GraphNode>, GraphReadError> {
+        self.transaction
+            .lock()
+            .map_err(|_| graph_read_error())?
+            .get_node_record(id)
+            .map(|node| node.map(graph_node))
+            .map_err(|_| graph_read_error())
+    }
+
+    fn nodes(&self) -> Result<Vec<GraphNode>, GraphReadError> {
+        let mut nodes = self
+            .transaction
+            .lock()
+            .map_err(|_| graph_read_error())?
+            .all_node_records()
+            .map_err(|_| graph_read_error())?
+            .into_iter()
+            .map(graph_node)
+            .collect::<Vec<_>>();
+        nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(nodes)
+    }
+
+    fn relationships(
+        &self,
+        node_id: &str,
+        direction: GraphDirection,
+        relationship_types: &[String],
+    ) -> Result<Vec<GraphRelationship>, GraphReadError> {
+        let direction = match direction {
+            GraphDirection::Outgoing => EdgeAdjacencyDirection::Outgoing,
+            GraphDirection::Incoming => EdgeAdjacencyDirection::Incoming,
+            GraphDirection::Both => EdgeAdjacencyDirection::Both,
+        };
+        let transaction = self.transaction.lock().map_err(|_| graph_read_error())?;
+        let mut relationships = transaction
+            .get_adjacent_edges(node_id, direction, None)
+            .map_err(|_| graph_read_error())?;
+        if !relationship_types.is_empty() {
+            relationships.retain(|edge| relationship_types.contains(&edge.edge_type));
+        }
+        Ok(relationships
+            .into_iter()
+            .map(|relationship| GraphRelationship {
+                id: relationship.id,
+                start_node: relationship.start_node,
+                end_node: relationship.end_node,
+                relationship_type: relationship.edge_type,
+            })
+            .collect())
+    }
+}
+
 fn graph_node(node: copperdb_storage::NodeRecord) -> GraphNode {
     GraphNode {
         id: node.id,
@@ -313,6 +381,229 @@ fn graph_read_error() -> GraphReadError {
     GraphReadError {
         code: "graph_read_failed".into(),
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphWriteNode {
+    pub id: String,
+    pub labels: Vec<String>,
+    pub properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphWriteRelationship {
+    pub id: String,
+    pub start_node: String,
+    pub end_node: String,
+    pub relationship_type: String,
+    pub properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GraphWriteSummary {
+    pub nodes_created: usize,
+    pub relationships_created: usize,
+    pub properties_set: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum GraphWriteError {
+    #[error("package graph write access is disabled")]
+    Disabled,
+    #[error("package graph write batch contains a duplicate record")]
+    DuplicateRecord,
+    #[error("package graph write batch conflicts with an existing record")]
+    ExistingRecord,
+    #[error("package graph write relationship endpoint does not exist")]
+    MissingEndpoint,
+    #[error("package graph write batch failed")]
+    WriteFailed,
+    #[error(transparent)]
+    RequestCancelled(#[from] copperdb_util::RequestCancelled),
+}
+
+impl From<copperdb_storage::StorageError> for GraphWriteError {
+    fn from(_error: copperdb_storage::StorageError) -> Self {
+        Self::WriteFailed
+    }
+}
+
+pub trait GraphWriteService: Send + Sync {
+    fn import_batch(
+        &self,
+        request_context: &copperdb_util::RequestContext,
+        nodes: &[GraphWriteNode],
+        relationships: &[GraphWriteRelationship],
+    ) -> Result<GraphWriteSummary, GraphWriteError>;
+}
+
+#[derive(Debug, Default)]
+pub struct DeniedGraphWriteService;
+
+impl GraphWriteService for DeniedGraphWriteService {
+    fn import_batch(
+        &self,
+        _request_context: &copperdb_util::RequestContext,
+        _nodes: &[GraphWriteNode],
+        _relationships: &[GraphWriteRelationship],
+    ) -> Result<GraphWriteSummary, GraphWriteError> {
+        Err(GraphWriteError::Disabled)
+    }
+}
+
+impl GraphWriteService for StorageEngine {
+    fn import_batch(
+        &self,
+        request_context: &copperdb_util::RequestContext,
+        nodes: &[GraphWriteNode],
+        relationships: &[GraphWriteRelationship],
+    ) -> Result<GraphWriteSummary, GraphWriteError> {
+        validate_graph_write_batch(
+            request_context,
+            nodes,
+            relationships,
+            |id| self.get_node_record(id).map(|node| node.is_some()),
+            |id| self.get_edge_record(id).map(|edge| edge.is_some()),
+        )?;
+        let timestamp = unix_time_millis();
+        self.batch_write(|batch| {
+            for node in nodes {
+                request_context.check_active()?;
+                batch.put_node_record(&graph_write_node_record(node, timestamp));
+            }
+            for relationship in relationships {
+                request_context.check_active()?;
+                batch.put_edge_record(&graph_write_edge_record(relationship, timestamp));
+            }
+            Ok::<_, GraphWriteError>(())
+        })?;
+        Ok(graph_write_summary(nodes, relationships))
+    }
+}
+
+impl GraphWriteService for TransactionGraphService<'_, '_> {
+    fn import_batch(
+        &self,
+        request_context: &copperdb_util::RequestContext,
+        nodes: &[GraphWriteNode],
+        relationships: &[GraphWriteRelationship],
+    ) -> Result<GraphWriteSummary, GraphWriteError> {
+        let mut transaction = self
+            .transaction
+            .lock()
+            .map_err(|_| GraphWriteError::WriteFailed)?;
+        validate_graph_write_batch(
+            request_context,
+            nodes,
+            relationships,
+            |id| transaction.get_node_record(id).map(|node| node.is_some()),
+            |id| transaction.get_edge_record(id).map(|edge| edge.is_some()),
+        )?;
+        let timestamp = unix_time_millis();
+        for node in nodes {
+            request_context.check_active()?;
+            transaction.put_node_record(graph_write_node_record(node, timestamp));
+        }
+        for relationship in relationships {
+            request_context.check_active()?;
+            transaction.put_edge_record(graph_write_edge_record(relationship, timestamp));
+        }
+        Ok(graph_write_summary(nodes, relationships))
+    }
+}
+
+fn validate_graph_write_batch<NodeExists, EdgeExists>(
+    request_context: &copperdb_util::RequestContext,
+    nodes: &[GraphWriteNode],
+    relationships: &[GraphWriteRelationship],
+    mut node_exists: NodeExists,
+    mut edge_exists: EdgeExists,
+) -> Result<(), GraphWriteError>
+where
+    NodeExists: FnMut(&str) -> Result<bool, copperdb_storage::StorageError>,
+    EdgeExists: FnMut(&str) -> Result<bool, copperdb_storage::StorageError>,
+{
+    let mut node_ids = HashSet::with_capacity(nodes.len());
+    for node in nodes {
+        request_context.check_active()?;
+        if !node_ids.insert(node.id.as_str()) {
+            return Err(GraphWriteError::DuplicateRecord);
+        }
+        if node_exists(&node.id).map_err(|_| GraphWriteError::WriteFailed)? {
+            return Err(GraphWriteError::ExistingRecord);
+        }
+    }
+    let mut relationship_ids = HashSet::with_capacity(relationships.len());
+    for relationship in relationships {
+        request_context.check_active()?;
+        if !relationship_ids.insert(relationship.id.as_str()) {
+            return Err(GraphWriteError::DuplicateRecord);
+        }
+        if edge_exists(&relationship.id).map_err(|_| GraphWriteError::WriteFailed)? {
+            return Err(GraphWriteError::ExistingRecord);
+        }
+        for endpoint in [&relationship.start_node, &relationship.end_node] {
+            if !node_ids.contains(endpoint.as_str())
+                && !node_exists(endpoint).map_err(|_| GraphWriteError::WriteFailed)?
+            {
+                return Err(GraphWriteError::MissingEndpoint);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn graph_write_node_record(node: &GraphWriteNode, timestamp: i64) -> NodeRecord {
+    NodeRecord {
+        id: node.id.clone(),
+        labels: node.labels.clone(),
+        properties: node.properties.clone(),
+        named_embeddings: BTreeMap::new(),
+        chunk_embeddings: Vec::new(),
+        embed_meta: Default::default(),
+        created_at_unix_ms: timestamp,
+        updated_at_unix_ms: timestamp,
+    }
+}
+
+fn graph_write_edge_record(relationship: &GraphWriteRelationship, timestamp: i64) -> EdgeRecord {
+    EdgeRecord {
+        id: relationship.id.clone(),
+        start_node: relationship.start_node.clone(),
+        end_node: relationship.end_node.clone(),
+        edge_type: relationship.relationship_type.clone(),
+        properties: relationship.properties.clone(),
+        created_at_unix_ms: timestamp,
+        updated_at_unix_ms: timestamp,
+    }
+}
+
+fn graph_write_summary(
+    nodes: &[GraphWriteNode],
+    relationships: &[GraphWriteRelationship],
+) -> GraphWriteSummary {
+    GraphWriteSummary {
+        nodes_created: nodes.len(),
+        relationships_created: relationships.len(),
+        properties_set: nodes
+            .iter()
+            .map(|node| node.properties.len())
+            .chain(
+                relationships
+                    .iter()
+                    .map(|relationship| relationship.properties.len()),
+            )
+            .sum(),
+    }
+}
+
+fn unix_time_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
 }
 
 impl ProcedureMode {
@@ -333,6 +624,7 @@ pub struct ProcedureCallContext<'a> {
     pub database: Option<&'a str>,
     pub request_context: &'a copperdb_util::RequestContext,
     pub graph_read: &'a dyn GraphReadService,
+    pub graph_write: &'a dyn GraphWriteService,
     pub import_files: &'a dyn ImportFileService,
 }
 
@@ -340,11 +632,21 @@ pub struct ProcedureCallContext<'a> {
 pub struct ProcedureOutput {
     pub columns: Vec<String>,
     pub rows: Vec<Row>,
+    pub stats: QueryStats,
 }
 
 impl ProcedureOutput {
     pub fn new(columns: Vec<String>, rows: Vec<Row>) -> Self {
-        Self { columns, rows }
+        Self {
+            columns,
+            rows,
+            stats: QueryStats::default(),
+        }
+    }
+
+    pub fn with_stats(mut self, stats: QueryStats) -> Self {
+        self.stats = stats;
+        self
     }
 }
 
@@ -353,7 +655,7 @@ impl From<ProcedureOutput> for crate::EvalResult {
         Self {
             columns: output.columns,
             rows: output.rows,
-            stats: QueryStats::default(),
+            stats: output.stats,
         }
     }
 }
@@ -480,6 +782,32 @@ mod import_file_tests {
                 .unwrap_err(),
             ImportFileError::RootEscape
         );
+    }
+
+    #[test]
+    fn graph_write_service_rejects_invalid_batch_without_partial_writes() {
+        let storage = StorageEngine::open_memory().unwrap();
+        let nodes = [GraphWriteNode {
+            id: "node-1".into(),
+            labels: vec!["Person".into()],
+            properties: BTreeMap::from([("name".into(), Value::String("Ada".into()))]),
+        }];
+        let relationships = [GraphWriteRelationship {
+            id: "relationship-1".into(),
+            start_node: "node-1".into(),
+            end_node: "missing".into(),
+            relationship_type: "KNOWS".into(),
+            properties: BTreeMap::new(),
+        }];
+
+        assert_eq!(
+            storage
+                .import_batch(&RequestContext::detached(), &nodes, &relationships)
+                .unwrap_err(),
+            GraphWriteError::MissingEndpoint
+        );
+        assert!(storage.get_node_record("node-1").unwrap().is_none());
+        assert!(storage.get_edge_record("relationship-1").unwrap().is_none());
     }
 }
 

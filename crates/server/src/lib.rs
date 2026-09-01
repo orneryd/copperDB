@@ -3663,6 +3663,12 @@ fn open_engine(state: &AppState, database: &str) -> Result<Arc<GraphEngine>, Str
         .grants
         .get(copperdb_apoc::PACKAGE_ID)
         .is_some_and(|grants| grants.contains(&copperdb_plugin::PackageCapability::FileImport));
+    let package_graph_write_enabled = state
+        .runtime_config
+        .packages
+        .grants
+        .get(copperdb_apoc::PACKAGE_ID)
+        .is_some_and(|grants| grants.contains(&copperdb_plugin::PackageCapability::QueryWrite));
     let package_import_file_root = apoc_import_granted
         .then(|| {
             state
@@ -3684,6 +3690,7 @@ fn open_engine(state: &AppState, database: &str) -> Result<Arc<GraphEngine>, Str
         sync_writes: state.runtime_config.storage.sync_writes,
         runtime_config,
         package_import_file_root,
+        package_graph_write_enabled,
         ..Default::default()
     };
     let engine = Arc::new(
