@@ -8,6 +8,7 @@
 //! MCP is an open protocol for connecting LLMs to data sources.
 //! https://modelcontextprotocol.io/
 
+use async_trait::async_trait;
 use copperdb_engine::CopperDb as GraphEngine;
 use copperdb_util::RequestContext;
 use serde::{Deserialize, Serialize};
@@ -218,6 +219,43 @@ pub enum ToolAccess {
     Admin,
 }
 
+#[derive(Clone)]
+pub struct ToolExecutionContext {
+    request_context: RequestContext,
+    engine: Option<Arc<GraphEngine>>,
+    roles: Vec<String>,
+}
+
+impl ToolExecutionContext {
+    pub fn request_context(&self) -> &RequestContext {
+        &self.request_context
+    }
+
+    pub fn engine(&self) -> Option<&Arc<GraphEngine>> {
+        self.engine.as_ref()
+    }
+
+    pub fn roles(&self) -> &[String] {
+        &self.roles
+    }
+}
+
+#[async_trait]
+pub trait ToolHandler: Send + Sync {
+    async fn call(
+        &self,
+        context: ToolExecutionContext,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, String>;
+}
+
+struct RegisteredTool {
+    descriptor: Tool,
+    validator: jsonschema::Validator,
+    access: ToolAccess,
+    handler: Arc<dyn ToolHandler>,
+}
+
 impl ToolAccess {
     pub fn requires_write(self) -> bool {
         matches!(self, Self::Write | Self::Admin)
@@ -230,9 +268,7 @@ impl ToolAccess {
 
 /// Registry of available MCP tools.
 pub struct ToolRegistry {
-    tools: HashMap<String, Tool>,
-    validators: HashMap<String, jsonschema::Validator>,
-    access: HashMap<String, ToolAccess>,
+    tools: HashMap<String, RegisteredTool>,
     engine: Option<Arc<GraphEngine>>,
     roles: Vec<String>,
     max_tool_output_bytes: usize,
@@ -242,8 +278,6 @@ impl Default for ToolRegistry {
     fn default() -> Self {
         Self {
             tools: HashMap::new(),
-            validators: HashMap::new(),
-            access: HashMap::new(),
             engine: None,
             roles: Vec::new(),
             max_tool_output_bytes: DEFAULT_MAX_TOOL_OUTPUT_BYTES,
@@ -254,9 +288,9 @@ impl Default for ToolRegistry {
 impl ToolRegistry {
     pub fn new() -> Self {
         let mut registry = Self::default();
-        for (tool, access) in copperdb_tools_with_access() {
+        for (tool, access, handler) in copperdb_tools_with_access() {
             registry
-                .register_with_access(tool, access)
+                .register_with_handler(tool, access, handler)
                 .expect("built-in MCP tool schemas must be valid");
         }
         registry
@@ -280,20 +314,27 @@ impl ToolRegistry {
         self
     }
 
-    pub fn register(&mut self, tool: Tool) -> Result<(), McpError> {
-        self.register_with_access(tool, ToolAccess::Read)
-    }
-
-    pub fn register_with_access(&mut self, tool: Tool, access: ToolAccess) -> Result<(), McpError> {
+    pub fn register_with_handler(
+        &mut self,
+        tool: Tool,
+        access: ToolAccess,
+        handler: Arc<dyn ToolHandler>,
+    ) -> Result<(), McpError> {
         let validator = jsonschema::validator_for(&tool.input_schema).map_err(|error| {
             McpError::InvalidSchema {
                 tool: tool.name.clone(),
                 message: error.to_string(),
             }
         })?;
-        self.validators.insert(tool.name.clone(), validator);
-        self.access.insert(tool.name.clone(), access);
-        self.tools.insert(tool.name.clone(), tool);
+        self.tools.insert(
+            tool.name.clone(),
+            RegisteredTool {
+                descriptor: tool,
+                validator,
+                access,
+                handler,
+            },
+        );
         Ok(())
     }
 
@@ -307,19 +348,19 @@ impl ToolRegistry {
             .ok_or_else(|| McpError::InvalidParams("missing params".into()))?;
         let call: ToolCallParams = serde_json::from_value(params)
             .map_err(|error| McpError::InvalidParams(error.to_string()))?;
-        self.access
+        self.tools
             .get(&call.name)
-            .copied()
+            .map(|tool| tool.access)
             .map(Some)
             .ok_or(McpError::ToolNotFound(call.name))
     }
 
     pub fn get(&self, name: &str) -> Option<&Tool> {
-        self.tools.get(name)
+        self.tools.get(name).map(|tool| &tool.descriptor)
     }
 
     pub fn list(&self) -> Vec<&Tool> {
-        let mut tools: Vec<&Tool> = self.tools.values().collect();
+        let mut tools: Vec<&Tool> = self.tools.values().map(|tool| &tool.descriptor).collect();
         tools.sort_by_key(|t| &t.name);
         tools
     }
@@ -333,12 +374,12 @@ impl ToolRegistry {
     }
 
     /// Dispatch an MCP request. Returns an MCP response.
-    pub fn dispatch(&self, request: &McpRequest) -> McpResponse {
+    pub async fn dispatch(&self, request: &McpRequest) -> McpResponse {
         let request_context = RequestContext::detached();
-        self.dispatch_with_context(&request_context, request)
+        self.dispatch_with_context(&request_context, request).await
     }
 
-    pub fn dispatch_with_context(
+    pub async fn dispatch_with_context(
         &self,
         request_context: &RequestContext,
         request: &McpRequest,
@@ -369,22 +410,18 @@ impl ToolRegistry {
                         return McpResponse::error(request.response_id(), -32602, e.to_string())
                     }
                 };
-                if self.get(&call.name).is_none() {
+                let Some(tool) = self.tools.get(&call.name) else {
                     return McpResponse::error(
                         request.response_id(),
                         -32601,
                         format!("tool not found: {}", call.name),
                     );
-                }
+                };
                 let arguments = call
                     .arguments
                     .clone()
                     .unwrap_or_else(|| serde_json::json!({}));
-                let validator = self
-                    .validators
-                    .get(&call.name)
-                    .expect("registered MCP tool must have a compiled validator");
-                if let Err(error) = validator.validate(&arguments) {
+                if let Err(error) = tool.validator.validate(&arguments) {
                     return McpResponse::error_with_data(
                         request.response_id(),
                         -32602,
@@ -396,7 +433,13 @@ impl ToolRegistry {
                         })),
                     );
                 }
-                match self.execute_tool(request_context, &call.name, &call.arguments) {
+                let handler = Arc::clone(&tool.handler);
+                let context = ToolExecutionContext {
+                    request_context: request_context.clone(),
+                    engine: self.engine.clone(),
+                    roles: self.roles.clone(),
+                };
+                match handler.call(context, arguments).await {
                     Ok(result) => McpResponse::ok(
                         request.response_id(),
                         self.enforce_tool_output_limit(&call.name, result),
@@ -473,77 +516,108 @@ impl ToolRegistry {
             }
         })
     }
+}
 
-    /// Execute a named tool with the given arguments.
-    fn execute_tool(
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunCypherArgs {
+    query: String,
+    #[serde(default)]
+    params: HashMap<String, serde_json::Value>,
+    #[serde(default, rename = "database")]
+    _database: Option<String>,
+}
+
+struct RunCypherHandler;
+
+#[async_trait]
+impl ToolHandler for RunCypherHandler {
+    async fn call(
         &self,
-        request_context: &RequestContext,
-        name: &str,
-        arguments: &Option<serde_json::Value>,
+        context: ToolExecutionContext,
+        arguments: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        match name {
-            "run_cypher" => {
-                let query = arguments
-                    .as_ref()
-                    .and_then(|args| args.get("query"))
-                    .and_then(|v| v.as_str())
-                    .ok_or("missing 'query' parameter")?;
-                let engine = self.engine.as_ref().ok_or("no graph engine configured")?;
-                let params = arguments
-                    .as_ref()
-                    .and_then(|args| args.get("params"))
-                    .and_then(serde_json::Value::as_object)
-                    .map(|params| {
-                        params
-                            .iter()
-                            .map(|(key, value)| (key.clone(), value.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                match engine.execute_as_with_context(request_context, query, params, &self.roles) {
-                    Ok(result) => {
-                        let text = format!(
-                            "Query executed successfully.\nRows: {}\nStats: {:?}",
-                            result.rows.len(),
-                            result.stats
-                        );
-                        Ok(serde_json::json!({
-                            "content": [{ "type": "text", "text": text }]
-                        }))
-                    }
-                    Err(e) => Ok(serde_json::json!({
-                        "content": [{ "type": "text", "text": format!("Error: {e}") }],
-                        "isError": true
-                    })),
-                }
-            }
-            "find_similar" => {
-                let text = arguments
-                    .as_ref()
-                    .and_then(|args| args.get("text"))
-                    .and_then(|v| v.as_str())
-                    .ok_or("missing 'text' parameter")?;
-                let k = arguments
-                    .as_ref()
-                    .and_then(|args| args.get("k"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(10) as usize;
-                let engine = self.engine.as_ref().ok_or("no graph engine configured")?;
-                match engine.search_fulltext_nodes_with_context(request_context, "", &[], text, k) {
-                    Ok(results) => {
-                        let json = serde_json::to_string_pretty(&results)
-                            .unwrap_or_else(|_| "[]".to_string());
-                        Ok(serde_json::json!({
-                            "content": [{ "type": "text", "text": json }]
-                        }))
-                    }
-                    Err(e) => Ok(serde_json::json!({
-                        "content": [{ "type": "text", "text": format!("Search error: {e}") }],
-                        "isError": true
-                    })),
-                }
-            }
-            _ => Err(format!("tool not found: {name}")),
+        let arguments: RunCypherArgs =
+            serde_json::from_value(arguments).map_err(|error| error.to_string())?;
+        let engine = context.engine.ok_or("no graph engine configured")?;
+        let result = tokio::task::spawn_blocking(move || {
+            engine.execute_as_with_context(
+                &context.request_context,
+                &arguments.query,
+                arguments.params,
+                &context.roles,
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+        match result {
+            Ok(result) => Ok(serde_json::json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "Query executed successfully.\nRows: {}\nStats: {:?}",
+                        result.rows.len(), result.stats
+                    )
+                }]
+            })),
+            Err(error) => Ok(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Error: {error}") }],
+                "isError": true
+            })),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FindSimilarArgs {
+    text: String,
+    #[serde(default = "default_search_limit")]
+    k: usize,
+    label: Option<String>,
+    #[serde(default, rename = "database")]
+    _database: Option<String>,
+}
+
+fn default_search_limit() -> usize {
+    10
+}
+
+struct FindSimilarHandler;
+
+#[async_trait]
+impl ToolHandler for FindSimilarHandler {
+    async fn call(
+        &self,
+        context: ToolExecutionContext,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let arguments: FindSimilarArgs =
+            serde_json::from_value(arguments).map_err(|error| error.to_string())?;
+        let engine = context.engine.ok_or("no graph engine configured")?;
+        let result = tokio::task::spawn_blocking(move || {
+            let labels = arguments.label.into_iter().collect::<Vec<_>>();
+            engine.search_fulltext_nodes_with_context(
+                &context.request_context,
+                "",
+                &labels,
+                &arguments.text,
+                arguments.k,
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+        match result {
+            Ok(results) => Ok(serde_json::json!({
+                "content": [{
+                    "type": "text",
+                    "text": serde_json::to_string_pretty(&results).unwrap_or_else(|_| "[]".into())
+                }]
+            })),
+            Err(error) => Ok(serde_json::json!({
+                "content": [{ "type": "text", "text": format!("Search error: {error}") }],
+                "isError": true
+            })),
         }
     }
 }
@@ -552,11 +626,11 @@ impl ToolRegistry {
 pub fn copperdb_tools() -> Vec<Tool> {
     copperdb_tools_with_access()
         .into_iter()
-        .map(|(tool, _)| tool)
+        .map(|(tool, _, _)| tool)
         .collect()
 }
 
-fn copperdb_tools_with_access() -> Vec<(Tool, ToolAccess)> {
+fn copperdb_tools_with_access() -> Vec<(Tool, ToolAccess, Arc<dyn ToolHandler>)> {
     vec![
         (
             Tool {
@@ -574,6 +648,7 @@ fn copperdb_tools_with_access() -> Vec<(Tool, ToolAccess)> {
                 }),
             },
             ToolAccess::Admin,
+            Arc::new(RunCypherHandler),
         ),
         (
             Tool {
@@ -592,6 +667,7 @@ fn copperdb_tools_with_access() -> Vec<(Tool, ToolAccess)> {
                 }),
             },
             ToolAccess::Read,
+            Arc::new(FindSimilarHandler),
         ),
     ]
 }
@@ -599,6 +675,38 @@ fn copperdb_tools_with_access() -> Vec<(Tool, ToolAccess)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct EchoHandler;
+
+    struct MustNotRunHandler;
+
+    #[async_trait]
+    impl ToolHandler for EchoHandler {
+        async fn call(
+            &self,
+            context: ToolExecutionContext,
+            arguments: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            tokio::task::yield_now().await;
+            Ok(serde_json::json!({
+                "arguments": arguments,
+                "cancelled": context.request_context().is_cancelled(),
+                "hasEngine": context.engine().is_some(),
+                "roles": context.roles()
+            }))
+        }
+    }
+
+    #[async_trait]
+    impl ToolHandler for MustNotRunHandler {
+        async fn call(
+            &self,
+            _context: ToolExecutionContext,
+            _arguments: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            panic!("schema-invalid arguments reached the tool handler")
+        }
+    }
 
     #[test]
     fn test_tool_registry_default_tools() {
@@ -621,24 +729,107 @@ mod tests {
     fn test_tool_registry_register() {
         let mut registry = ToolRegistry::new();
         registry
-            .register(Tool {
-                name: "custom_tool".into(),
-                description: "A custom tool".into(),
-                input_schema: serde_json::json!({}),
-            })
+            .register_with_handler(
+                Tool {
+                    name: "custom_tool".into(),
+                    description: "A custom tool".into(),
+                    input_schema: serde_json::json!({}),
+                },
+                ToolAccess::Read,
+                Arc::new(EchoHandler),
+            )
             .unwrap();
         assert_eq!(registry.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn registered_async_handler_shares_descriptor_access_and_execution_entry() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register_with_handler(
+                Tool {
+                    name: "echo".into(),
+                    description: "Echo typed arguments".into(),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": ["value"],
+                        "additionalProperties": false
+                    }),
+                },
+                ToolAccess::Write,
+                Arc::new(EchoHandler),
+            )
+            .unwrap();
+        let request = McpRequest::new(
+            20,
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "echo",
+                "arguments": {"value": "async"}
+            })),
+        );
+
+        assert_eq!(
+            registry.required_access(&request).unwrap(),
+            Some(ToolAccess::Write)
+        );
+        assert_eq!(
+            registry.get("echo").unwrap().description,
+            "Echo typed arguments"
+        );
+        let response = registry.dispatch(&request).await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(
+            response.result.unwrap(),
+            serde_json::json!({
+                "arguments": {"value": "async"},
+                "cancelled": false,
+                "hasEngine": false,
+                "roles": []
+            })
+        );
+
+        let mut invalid_registry = ToolRegistry::default();
+        invalid_registry
+            .register_with_handler(
+                Tool {
+                    name: "strict".into(),
+                    description: "Reject invalid arguments".into(),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "required": ["requiredValue"]
+                    }),
+                },
+                ToolAccess::Read,
+                Arc::new(MustNotRunHandler),
+            )
+            .unwrap();
+        let invalid_response = invalid_registry
+            .dispatch(&McpRequest::new(
+                21,
+                "tools/call",
+                Some(serde_json::json!({"name": "strict", "arguments": {}})),
+            ))
+            .await;
+        let error = invalid_response.error.expect("schema validation error");
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.data.unwrap()["kind"], "schema_validation");
     }
 
     #[test]
     fn tool_registry_rejects_invalid_schema_without_registering_tool() {
         let mut registry = ToolRegistry::new();
         let error = registry
-            .register(Tool {
-                name: "invalid_tool".into(),
-                description: "Invalid schema".into(),
-                input_schema: serde_json::json!({"type": "not-a-json-schema-type"}),
-            })
+            .register_with_handler(
+                Tool {
+                    name: "invalid_tool".into(),
+                    description: "Invalid schema".into(),
+                    input_schema: serde_json::json!({"type": "not-a-json-schema-type"}),
+                },
+                ToolAccess::Read,
+                Arc::new(EchoHandler),
+            )
             .unwrap_err();
 
         assert!(matches!(
@@ -648,8 +839,8 @@ mod tests {
         assert!(registry.get("invalid_tool").is_none());
     }
 
-    #[test]
-    fn test_dispatch_initialize() {
+    #[tokio::test]
+    async fn test_dispatch_initialize() {
         let registry = ToolRegistry::new();
         let req = McpRequest::new(
             serde_json::json!(1),
@@ -660,15 +851,15 @@ mod tests {
                 "clientInfo": {"name": "test-client", "version": "1.0"}
             })),
         );
-        let resp = registry.dispatch(&req);
+        let resp = registry.dispatch(&req).await;
         assert!(resp.error.is_none());
         let result = resp.result.unwrap();
         assert_eq!(result["protocolVersion"], MCP_PROTOCOL_VERSION);
         assert_eq!(result["capabilities"]["tools"]["listChanged"], false);
     }
 
-    #[test]
-    fn notification_request_omits_id_and_accepts_initialized_method() {
+    #[tokio::test]
+    async fn notification_request_omits_id_and_accepts_initialized_method() {
         let request: McpRequest = serde_json::from_value(serde_json::json!({
             "jsonrpc": "2.0",
             "method": "notifications/initialized",
@@ -678,14 +869,14 @@ mod tests {
 
         assert!(request.is_notification());
         assert!(serde_json::to_value(&request).unwrap().get("id").is_none());
-        let response = ToolRegistry::new().dispatch(&request);
+        let response = ToolRegistry::new().dispatch(&request).await;
         assert!(response.error.is_none());
         assert_eq!(response.id, serde_json::Value::Null);
         assert_eq!(response.result, Some(serde_json::json!({})));
     }
 
-    #[test]
-    fn explicit_null_id_is_a_request_not_a_notification() {
+    #[tokio::test]
+    async fn explicit_null_id_is_a_request_not_a_notification() {
         let request: McpRequest = serde_json::from_value(serde_json::json!({
             "jsonrpc": "2.0",
             "id": null,
@@ -699,7 +890,7 @@ mod tests {
             serde_json::to_value(&request).unwrap()["id"],
             serde_json::Value::Null
         );
-        let response = ToolRegistry::new().dispatch(&request);
+        let response = ToolRegistry::new().dispatch(&request).await;
         assert_eq!(response.id, serde_json::Value::Null);
         assert!(response.result.is_some());
     }
@@ -747,8 +938,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn initialize_rejects_unsupported_protocol_version() {
+    #[tokio::test]
+    async fn initialize_rejects_unsupported_protocol_version() {
         let registry = ToolRegistry::new();
         let request = McpRequest::new(
             serde_json::json!(11),
@@ -756,7 +947,7 @@ mod tests {
             Some(serde_json::json!({"protocolVersion": "2099-01-01"})),
         );
 
-        let error = registry.dispatch(&request).error.unwrap();
+        let error = registry.dispatch(&request).await.error.unwrap();
 
         assert_eq!(error.code, -32602);
         assert_eq!(error.message, "Unsupported protocol version");
@@ -766,24 +957,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn dispatch_rejects_invalid_json_rpc_version() {
+    #[tokio::test]
+    async fn dispatch_rejects_invalid_json_rpc_version() {
         let registry = ToolRegistry::new();
         let mut request = McpRequest::new(serde_json::json!(12), "tools/list", None);
         request.jsonrpc = "1.0".into();
 
-        let error = registry.dispatch(&request).error.unwrap();
+        let error = registry.dispatch(&request).await.error.unwrap();
 
         assert_eq!(error.code, -32600);
         assert_eq!(error.message, "Invalid Request");
         assert_eq!(error.data.unwrap()["expected"], "2.0");
     }
 
-    #[test]
-    fn test_dispatch_tools_list() {
+    #[tokio::test]
+    async fn test_dispatch_tools_list() {
         let registry = ToolRegistry::new();
         let req = McpRequest::new(serde_json::json!(2), "tools/list", None);
-        let resp = registry.dispatch(&req);
+        let resp = registry.dispatch(&req).await;
         assert!(resp.error.is_none());
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().len();
         assert_eq!(tools, 2);
@@ -825,8 +1016,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_dispatch_tool_call() {
+    #[tokio::test]
+    async fn test_dispatch_tool_call() {
         let engine = Arc::new(copperdb_engine::CopperDb::open_temporary().unwrap());
         let registry = ToolRegistry::with_engine(engine);
         let req = McpRequest::new(
@@ -836,7 +1027,7 @@ mod tests {
                 serde_json::json!({ "name": "run_cypher", "arguments": { "query": "RETURN 1 AS n" } }),
             ),
         );
-        let resp = registry.dispatch(&req);
+        let resp = registry.dispatch(&req).await;
         assert!(
             resp.error.is_none(),
             "expected success, got: {:?}",
@@ -844,8 +1035,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn run_cypher_forwards_declared_parameters() {
+    #[tokio::test]
+    async fn run_cypher_forwards_declared_parameters() {
         let engine = Arc::new(copperdb_engine::CopperDb::open_temporary().unwrap());
         let registry = ToolRegistry::with_engine_and_roles(engine, vec!["reader".into()]);
         let request = McpRequest::new(
@@ -860,7 +1051,7 @@ mod tests {
             })),
         );
 
-        let response = registry.dispatch(&request);
+        let response = registry.dispatch(&request).await;
 
         assert!(response.error.is_none(), "{:?}", response.error);
         let result = response.result.unwrap();
@@ -871,8 +1062,8 @@ mod tests {
             .contains("Rows: 1"));
     }
 
-    #[test]
-    fn tool_call_rejects_arguments_that_do_not_match_advertised_schema() {
+    #[tokio::test]
+    async fn tool_call_rejects_arguments_that_do_not_match_advertised_schema() {
         let registry = ToolRegistry::new();
         let request = McpRequest::new(
             serde_json::json!(13),
@@ -883,7 +1074,7 @@ mod tests {
             })),
         );
 
-        let error = registry.dispatch(&request).error.unwrap();
+        let error = registry.dispatch(&request).await.error.unwrap();
 
         assert_eq!(error.code, -32602);
         assert_eq!(error.message, "Invalid params");
@@ -928,8 +1119,8 @@ mod tests {
         assert!(serde_json::to_vec(&result).unwrap().len() <= 512);
     }
 
-    #[test]
-    fn dispatch_with_context_cancels_cypher_before_execution() {
+    #[tokio::test]
+    async fn dispatch_with_context_cancels_cypher_before_execution() {
         let engine = Arc::new(copperdb_engine::CopperDb::open_temporary().unwrap());
         let registry = ToolRegistry::with_engine(engine);
         let request_context = RequestContext::detached();
@@ -942,7 +1133,9 @@ mod tests {
             ),
         );
 
-        let response = registry.dispatch_with_context(&request_context, &request);
+        let response = registry
+            .dispatch_with_context(&request_context, &request)
+            .await;
 
         assert!(response.error.is_none());
         let result = response.result.expect("tool result");
@@ -950,8 +1143,8 @@ mod tests {
         assert_eq!(result["content"][0]["text"], "Error: request cancelled");
     }
 
-    #[test]
-    fn dispatch_with_context_cancels_fulltext_before_search() {
+    #[tokio::test]
+    async fn dispatch_with_context_cancels_fulltext_before_search() {
         let engine = Arc::new(copperdb_engine::CopperDb::open_temporary().unwrap());
         let registry = ToolRegistry::with_engine(engine);
         let request_context = RequestContext::detached();
@@ -964,7 +1157,9 @@ mod tests {
             ),
         );
 
-        let response = registry.dispatch_with_context(&request_context, &request);
+        let response = registry
+            .dispatch_with_context(&request_context, &request)
+            .await;
 
         assert!(response.error.is_none());
         let result = response.result.expect("tool result");
@@ -975,23 +1170,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_dispatch_unknown_tool() {
+    #[tokio::test]
+    async fn test_dispatch_unknown_tool() {
         let registry = ToolRegistry::new();
         let req = McpRequest::new(
             serde_json::json!(4),
             "tools/call",
             Some(serde_json::json!({ "name": "nonexistent" })),
         );
-        let resp = registry.dispatch(&req);
+        let resp = registry.dispatch(&req).await;
         assert!(resp.error.is_some());
     }
 
-    #[test]
-    fn test_dispatch_unknown_method() {
+    #[tokio::test]
+    async fn test_dispatch_unknown_method() {
         let registry = ToolRegistry::new();
         let req = McpRequest::new(serde_json::json!(5), "unknown/method", None);
-        let resp = registry.dispatch(&req);
+        let resp = registry.dispatch(&req).await;
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, -32601);
     }

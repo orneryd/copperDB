@@ -5212,7 +5212,9 @@ async fn execute_mcp_request(
                 return Ok(None);
             }
             return Ok(Some(
-                registry.dispatch_with_context(&request_context, &request),
+                registry
+                    .dispatch_with_context(&request_context, &request)
+                    .await,
             ));
         }
     };
@@ -5253,19 +5255,13 @@ async fn execute_mcp_request(
     } else {
         registry
     };
-    match tokio::task::spawn_blocking(move || {
-        registry.dispatch_with_context(&request_context, &request)
-    })
-    .await
-    {
-        Ok(_) if is_notification => Ok(None),
-        Ok(response) => Ok(Some(response)),
-        Err(_) if is_notification => Ok(None),
-        Err(error) => Ok(Some(copperdb_mcp::McpResponse::error(
-            serde_json::Value::Null,
-            -32000,
-            error.to_string(),
-        ))),
+    let response = registry
+        .dispatch_with_context(&request_context, &request)
+        .await;
+    if is_notification {
+        Ok(None)
+    } else {
+        Ok(Some(response))
     }
 }
 

@@ -8,7 +8,7 @@ Implement secure, cancellable MCP transport and durable database-scoped `store`,
 
 ## Current Defects
 
-Tool handlers remain ad hoc rather than typed and async, and `find_similar` is a misleading fulltext call. The six durable production tools and stdio transport are not implemented.
+`find_similar` remains a misleading fulltext call. The six durable production tools and stdio transport are not implemented.
 
 ## Phases
 
@@ -25,7 +25,7 @@ Tool handlers remain ad hoc rather than typed and async, and `find_similar` is a
 - Tool listing advertises the upstream-compatible immutable registry capability with `tools.listChanged: false`.
 - Every serialized tool result is bounded to 1 MiB. Oversized output is replaced rather than truncated with a valid MCP `isError` result containing deterministic size metadata.
 - Tool access metadata now drives HTTP database authorization. Read tools require read access, future write tools require write access, and the unrestricted compatibility-only `run_cypher` tool requires admin access.
-- HTTP execution preserves authenticated caller roles, forwards declared Cypher parameters, avoids opening databases for protocol-only methods, and moves synchronous dispatch off the async runtime.
+- HTTP execution preserves authenticated caller roles, forwards declared Cypher parameters, avoids opening databases for protocol-only methods, and awaits native async dispatch. Blocking graph operations are isolated inside their owning handlers.
 - The HTTP route enforces the upstream-compatible 10 MiB request ceiling, accepts JSON and `+json` media types, rejects unsupported media with `415`, rejects oversized bodies with `413`, and maps malformed JSON and request shapes to JSON-RPC `-32700` and `-32600` errors.
 - HTTP response negotiation accepts JSON-compatible media ranges with quality and specificity precedence, rejects incompatible `Accept` headers with `406`, and applies the upstream-compatible 30-second MCP request deadline through request-context cancellation.
 - Tool calls accept the upstream-compatible `arguments.database` selector and unadvertised `arguments.db` alias, remove both before strict schema validation, fall back to the configured default, and authorize the selected database before opening its engine.
@@ -33,7 +33,8 @@ Tool handlers remain ad hoc rather than typed and async, and `find_similar` is a
 - JSON-RPC batches are capped at 32 entries, execute sequentially, preserve response order, isolate malformed and unauthorized entries, omit notification entries, reject invalid cardinality with `-32600`, and return an empty `202` response when every entry is a notification.
 - Successful single initialization responses issue cryptographically random `Mcp-Session-Id` values from a 4,096-entry, sliding 30-minute store. Presented sessions are validated and refreshed, malformed or unknown IDs are rejected, `DELETE /mcp` terminates sessions, and sessionless protocol `2024-11-05` clients remain compatible.
 - MCP requests without an `Origin` header remain compatible with non-browser clients. Browser-originated POST and DELETE requests require exactly one HTTP(S) Origin matching exactly one direct Host authority; malformed, cross-host, and ambiguous headers fail with `403` before session or protocol processing.
-- Typed async handlers, stdio transport, and production tools remain pending.
+- Tool registration atomically binds each immutable descriptor to its compiled schema, access requirement, and typed async handler. Discovery, authorization, validation, and execution therefore resolve through one entry, while execution contexts expose cancellation, the selected graph engine, and authenticated roles.
+- Stdio transport and production tools remain pending.
 
 ## Tests And Security
 
