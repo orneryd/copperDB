@@ -895,18 +895,21 @@ fn store_labels(labels: Vec<String>, node_type: Option<String>) -> Result<Vec<St
         labels
     };
     for label in &labels {
-        let mut characters = label.chars();
-        if !characters
-            .next()
-            .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
-            || !characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
-        {
+        if !is_valid_identifier(label) {
             return Err(format!(
                 "invalid label: {label:?} (must be a valid identifier)"
             ));
         }
     }
     Ok(labels)
+}
+
+fn is_valid_identifier(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
 fn generate_title(content: &str, max_characters: usize) -> String {
@@ -1227,6 +1230,141 @@ impl ToolHandler for DiscoverHandler {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkArgs {
+    from: String,
+    to: String,
+    relation: String,
+    #[serde(default = "default_link_strength")]
+    strength: f64,
+    #[serde(default)]
+    metadata: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, rename = "database")]
+    _database: Option<String>,
+}
+
+fn default_link_strength() -> f64 {
+    1.0
+}
+
+struct LinkHandler;
+
+#[async_trait]
+impl ToolHandler for LinkHandler {
+    async fn call(
+        &self,
+        context: ToolExecutionContext,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let arguments: LinkArgs =
+            serde_json::from_value(arguments).map_err(|error| error.to_string())?;
+        let from = arguments.from.trim();
+        let to = arguments.to.trim();
+        let relation = arguments.relation.as_str();
+        if from.is_empty() {
+            return Err("from is required".into());
+        }
+        if to.is_empty() {
+            return Err("to is required".into());
+        }
+        if relation.is_empty() {
+            return Err("relation is required".into());
+        }
+        if !is_valid_identifier(relation) {
+            return Err(format!(
+                "invalid relation: {relation:?} (must be a non-empty valid identifier, e.g. relates_to, depends_on)"
+            ));
+        }
+
+        let engine = context.engine.ok_or("no graph engine configured")?;
+        let from = from.to_string();
+        let to = to.to_string();
+        let relation = relation.to_ascii_uppercase();
+        let mut properties = serde_json::Map::from_iter([
+            ("strength".into(), serde_json::json!(arguments.strength)),
+            (
+                "created_at".into(),
+                serde_json::json!(
+                    OffsetDateTime::now_utc()
+                        .format(&Rfc3339)
+                        .map_err(|error| error.to_string())?
+                ),
+            ),
+        ]);
+        properties.extend(arguments.metadata);
+
+        tokio::task::spawn_blocking(move || {
+            let source = engine
+                .resolve_readable_node_identifier_with_context(
+                    &context.request_context,
+                    &from,
+                    &context.roles,
+                )?
+                .ok_or_else(|| format!("source node not found: {from}"))?;
+            let target = engine
+                .resolve_readable_node_identifier_with_context(
+                    &context.request_context,
+                    &to,
+                    &context.roles,
+                )?
+                .ok_or_else(|| format!("target node not found: {to}"))?;
+            let query = format!(
+                "MATCH (a), (b) WHERE elementId(a) = $from AND elementId(b) = $to CREATE (a)-[r:{relation}]->(b) SET r += $props RETURN elementId(r) AS id"
+            );
+            let mut transaction = engine.begin_storage_transaction()?;
+            let result = engine.execute_in_storage_transaction_as_with_context(
+                &context.request_context,
+                &mut transaction,
+                &query,
+                HashMap::from([
+                    ("from".into(), serde_json::json!(source.id)),
+                    ("to".into(), serde_json::json!(target.id)),
+                    ("props".into(), serde_json::Value::Object(properties)),
+                ]),
+                &context.roles,
+            )?;
+            let edge_id = result
+                .rows
+                .first()
+                .and_then(|row| row.get("id"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or("link returned invalid edge id")?
+                .to_string();
+            transaction.commit()?;
+            let endpoint_json = |node: copperdb_storage::NodeRecord| {
+                let mut endpoint = serde_json::Map::from_iter([
+                    ("id".into(), serde_json::json!(node.id)),
+                    (
+                        "type".into(),
+                        serde_json::json!(
+                            node.labels.first().map(String::as_str).unwrap_or("Node")
+                        ),
+                    ),
+                ]);
+                if let Some(title) = node
+                    .properties
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|title| !title.is_empty())
+                {
+                    endpoint.insert("title".into(), serde_json::json!(title));
+                }
+                serde_json::Value::Object(endpoint)
+            };
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(serde_json::json!({
+                "edge_id": edge_id,
+                "from": endpoint_json(source),
+                "to": endpoint_json(target)
+            }))
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+    }
+}
+
 /// Built-in copperdb MCP tools.
 pub fn copperdb_tools() -> Vec<Tool> {
     copperdb_tools_with_access()
@@ -1299,6 +1437,27 @@ fn copperdb_tools_with_access() -> Vec<(Tool, ToolAccess, Arc<dyn ToolHandler>)>
             },
             ToolAccess::Read,
             Arc::new(DiscoverHandler),
+        ),
+        (
+            Tool {
+                name: "link".into(),
+                description: "Create a typed relationship between two nodes using their exact identifiers.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "from": {"type": "string", "minLength": 1, "description": "Source node identifier returned by store or Cypher."},
+                        "to": {"type": "string", "minLength": 1, "description": "Target node identifier returned by store or Cypher."},
+                        "relation": {"type": "string", "minLength": 1, "description": "Valid relationship type identifier."},
+                        "strength": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 1.0, "description": "Relationship strength."},
+                        "metadata": {"type": "object", "description": "Additional relationship properties.", "additionalProperties": true},
+                        "database": {"type": "string", "description": "Database name to use. If omitted, uses the server's configured default database."}
+                    },
+                    "required": ["from", "to", "relation"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolAccess::Write,
+            Arc::new(LinkHandler),
         ),
         (
             Tool {
@@ -1417,7 +1576,7 @@ mod tests {
 
         assert_eq!(responses.len(), 5);
         assert_eq!(responses[0]["id"], 1);
-        assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 5);
+        assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 6);
         assert_eq!(responses[1].as_array().unwrap().len(), 1);
         assert_eq!(responses[1][0]["id"], 2);
         assert_eq!(responses[2]["error"]["code"], -32600);
@@ -1446,8 +1605,15 @@ mod tests {
     #[test]
     fn test_tool_registry_default_tools() {
         let registry = ToolRegistry::new();
-        assert_eq!(registry.len(), 5);
-        for name in ["store", "recall", "discover", "run_cypher", "find_similar"] {
+        assert_eq!(registry.len(), 6);
+        for name in [
+            "store",
+            "recall",
+            "discover",
+            "link",
+            "run_cypher",
+            "find_similar",
+        ] {
             let tool = registry.get(name).expect("built-in tool");
             assert_eq!(
                 tool.input_schema["properties"]["database"]["type"],
@@ -1474,7 +1640,7 @@ mod tests {
                 Arc::new(EchoHandler),
             )
             .unwrap();
-        assert_eq!(registry.len(), 6);
+        assert_eq!(registry.len(), 7);
     }
 
     #[tokio::test]
@@ -1771,6 +1937,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn link_persists_upstream_relationship_contract_and_is_atomic() {
+        let engine = Arc::new(copperdb_engine::CopperDb::open_temporary().unwrap());
+        let source = engine
+            .execute(
+                "CREATE (n:Memory {id: 'source-ext', title: 'Source Node'}) RETURN elementId(n) AS id",
+                HashMap::new(),
+            )
+            .unwrap();
+        let source_id = source.rows[0]["id"].as_str().unwrap().to_string();
+        let target = engine
+            .execute(
+                "CREATE (n:Memory {_nodeId: 'target-ext', title: 'Target Node'}) RETURN elementId(n) AS id",
+                HashMap::new(),
+            )
+            .unwrap();
+        let target_id = target.rows[0]["id"].as_str().unwrap().to_string();
+        let registry = ToolRegistry::with_engine_and_roles(engine.clone(), vec!["admin".into()]);
+        let request = McpRequest::new(
+            30,
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "link",
+                "arguments": {
+                    "from": "source-ext",
+                    "to": "target-ext",
+                    "relation": "relates_to",
+                    "strength": 0.75,
+                    "metadata": {"reason": "parity test", "created_at": "caller-value"}
+                }
+            })),
+        );
+
+        assert_eq!(
+            registry.required_access(&request).unwrap(),
+            Some(ToolAccess::Write)
+        );
+        let response = registry.dispatch(&request).await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let result = response.result.unwrap();
+        assert!(result["edge_id"].as_str().is_some_and(|id| !id.is_empty()));
+        assert_eq!(result["from"]["id"], source_id);
+        assert_eq!(result["from"]["type"], "Memory");
+        assert_eq!(result["from"]["title"], "Source Node");
+        assert_eq!(result["to"]["id"], target_id);
+        assert_eq!(result["to"]["title"], "Target Node");
+        let edges = engine.storage().get_edges_by_type("RELATES_TO").unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].start_node, source_id);
+        assert_eq!(edges[0].end_node, target_id);
+        assert_eq!(edges[0].properties["strength"], serde_json::json!(0.75));
+        assert_eq!(edges[0].properties["reason"], "parity test");
+        assert_eq!(edges[0].properties["created_at"], "caller-value");
+        let events = engine.audit_log().events().unwrap();
+        assert_eq!(events.last().unwrap().event_type.as_str(), "DATA_CREATE");
+        assert_eq!(events.last().unwrap().action.as_deref(), Some("CREATE"));
+
+        let missing = registry
+            .dispatch(&McpRequest::new(
+                31,
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": "link",
+                    "arguments": {
+                        "from": "source-ext",
+                        "to": "missing",
+                        "relation": "relates_to"
+                    }
+                })),
+            ))
+            .await;
+        assert_eq!(
+            missing.error.unwrap().message,
+            "target node not found: missing"
+        );
+        assert_eq!(
+            engine.storage().get_edges_by_type("RELATES_TO").unwrap().len(),
+            1
+        );
+
+        let invalid = registry
+            .dispatch(&McpRequest::new(
+                32,
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": "link",
+                    "arguments": {"from": source_id, "to": target_id, "relation": "has-hyphen"}
+                })),
+            ))
+            .await;
+        assert!(invalid
+            .error
+            .unwrap()
+            .message
+            .contains("invalid relation"));
+        let whitespace_relation = registry
+            .dispatch(&McpRequest::new(
+                33,
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": "link",
+                    "arguments": {"from": source_id, "to": target_id, "relation": " relates_to "}
+                })),
+            ))
+            .await;
+        assert!(whitespace_relation
+            .error
+            .unwrap()
+            .message
+            .contains("invalid relation"));
+        let events = engine.audit_log().events().unwrap();
+        assert_eq!(events.last().unwrap().event_type.as_str(), "DATA_READ");
+        assert_eq!(events.last().unwrap().action.as_deref(), Some("MATCH"));
+        assert!(engine.audit_log().verify_chain().unwrap().valid);
+    }
+
+    #[tokio::test]
     async fn registered_async_handler_shares_descriptor_access_and_execution_entry() {
         let mut registry = ToolRegistry::new();
         registry
@@ -2005,7 +2287,7 @@ mod tests {
         let resp = registry.dispatch(&req).await;
         assert!(resp.error.is_none());
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().len();
-        assert_eq!(tools, 5);
+        assert_eq!(tools, 6);
     }
 
     #[test]

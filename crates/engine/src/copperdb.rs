@@ -133,6 +133,41 @@ impl CopperDb {
         result
     }
 
+    pub fn resolve_readable_node_identifier_with_context(
+        &self,
+        request_context: &RequestContext,
+        id: &str,
+        roles: &[String],
+    ) -> Result<Option<copperdb_storage::NodeRecord>, CopperDbError> {
+        request_context.check_active()?;
+        let id = id.trim();
+        if id.is_empty() {
+            return Ok(None);
+        }
+        let candidate_id = if self.storage.get_node_record(id)?.is_some() {
+            Some(id.to_string())
+        } else {
+            self.storage
+                .all_node_records()?
+                .into_iter()
+                .find(|node| {
+                    ["id", "_nodeId"].iter().any(|property| {
+                        node.properties
+                            .get(*property)
+                            .and_then(serde_json::Value::as_str)
+                            == Some(id)
+                    })
+                })
+                .map(|node| node.id)
+        };
+        match candidate_id {
+            Some(candidate_id) => {
+                self.get_readable_node_with_context(request_context, &candidate_id, roles)
+            }
+            None => Ok(None),
+        }
+    }
+
     pub fn filter_readable_node_properties(
         &self,
         labels: &[String],

@@ -1112,7 +1112,7 @@ async fn mcp_http_batches_preserve_order_and_omit_notifications() {
     let responses = payload.as_array().unwrap();
     assert_eq!(responses.len(), 3);
     assert_eq!(responses[0]["id"], "first");
-    assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 6);
     assert_eq!(responses[1]["id"], serde_json::Value::Null);
     assert_eq!(responses[1]["error"]["code"], -32600);
     assert_eq!(responses[2]["id"], "last");
@@ -1464,6 +1464,9 @@ async fn apoc_import_json_uses_explicit_file_and_graph_write_grants() {
     )
     .unwrap();
     let mut state = AppState::default();
+    state.db_manager = Arc::new(
+        DatabaseManager::open(root.path().join("multidb").to_string_lossy().into_owned()).unwrap(),
+    );
     let mut config = RuntimeConfig::default();
     config.packages.enabled = vec![copperdb_apoc::PACKAGE_ID.into()];
     config.packages.grants.insert(
