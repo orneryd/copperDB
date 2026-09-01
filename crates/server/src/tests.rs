@@ -73,6 +73,149 @@ async fn apoc_load_json_uses_explicit_rooted_file_import_grant() {
 }
 
 #[tokio::test]
+async fn http_transaction_executes_loaded_apoc_function() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let mut state = AppState::default();
+    let mut config = RuntimeConfig::default();
+    config.packages.enabled = vec![copperdb_apoc::PACKAGE_ID.into()];
+    config.packages.required = vec![copperdb_apoc::PACKAGE_ID.into()];
+    config.packages.grants.insert(
+        copperdb_apoc::PACKAGE_ID.into(),
+        vec![copperdb_plugin::PackageCapability::QueryRead],
+    );
+    state.configure_runtime(Arc::new(config)).await.unwrap();
+    state.auth.security_enabled = false;
+
+    let response = build_router(Arc::new(state))
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/db/copperdb/tx/commit")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "statements": [{
+                            "statement": "RETURN apoc.text.join(['alpha', 'beta'], '/') AS value"
+                        }]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["errors"], serde_json::json!([]));
+    assert_eq!(
+        payload["results"][0]["columns"],
+        serde_json::json!(["value"])
+    );
+    assert_eq!(
+        payload["results"][0]["data"][0]["row"],
+        serde_json::json!(["alpha/beta"])
+    );
+}
+
+#[tokio::test]
+async fn bolt_tcp_executes_loaded_apoc_function() {
+    use copperdb_bolt::packstream::Value;
+    use copperdb_bolt::server::{BoltServer, QueryExecutor};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut state = AppState::default();
+    let mut config = RuntimeConfig::default();
+    config.packages.enabled = vec![copperdb_apoc::PACKAGE_ID.into()];
+    config.packages.required = vec![copperdb_apoc::PACKAGE_ID.into()];
+    config.packages.grants.insert(
+        copperdb_apoc::PACKAGE_ID.into(),
+        vec![copperdb_plugin::PackageCapability::QueryRead],
+    );
+    state.configure_runtime(Arc::new(config)).await.unwrap();
+    state.auth.security_enabled = false;
+    let state = Arc::new(state);
+    let executor = Arc::new(AppStateBoltExecutor::new(Arc::clone(&state)));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = BoltServer::new(
+        address.to_string(),
+        Arc::clone(&state.telemetry),
+        Arc::clone(&executor) as Arc<dyn QueryExecutor>,
+    )
+    .with_auth_enabled(false);
+    let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    client
+        .write_all(&[
+            0x60, 0x60, 0xB0, 0x17, 0x00, 0x00, 0x04, 0x04, 0x00, 0x00, 0x04, 0x03, 0x00, 0x00,
+            0x04, 0x02, 0x00, 0x00, 0x04, 0x01,
+        ])
+        .await
+        .unwrap();
+    let mut version = [0u8; 4];
+    client.read_exact(&mut version).await.unwrap();
+    assert_eq!(version, [0x00, 0x00, 0x04, 0x04]);
+
+    for (signature, fields) in [
+        (
+            0x01,
+            vec![Value::Map(vec![(
+                "user_agent".into(),
+                Value::String("copperdb-apoc-protocol-test".into()),
+            )])],
+        ),
+        (
+            0x10,
+            vec![
+                Value::String("RETURN apoc.text.join(['alpha', 'beta'], '/') AS value".into()),
+                Value::Map(vec![]),
+                Value::Map(vec![]),
+            ],
+        ),
+    ] {
+        client
+            .write_all(&encode_bolt_chunks(&encode_bolt_message(
+                signature, &fields,
+            )))
+            .await
+            .unwrap();
+        let Value::Struct { signature, fields } = read_bolt_message(&mut client).await else {
+            panic!("expected Bolt SUCCESS response");
+        };
+        assert_eq!(signature, 0x70, "unexpected Bolt response: {fields:?}");
+    }
+
+    client
+        .write_all(&encode_bolt_chunks(&encode_bolt_message(
+            0x3F,
+            &[Value::Map(vec![("n".into(), Value::Integer(-1))])],
+        )))
+        .await
+        .unwrap();
+    let Value::Struct { signature, fields } = read_bolt_message(&mut client).await else {
+        panic!("expected Bolt RECORD response");
+    };
+    assert_eq!(signature, 0x71);
+    assert_eq!(
+        fields,
+        vec![Value::List(vec![Value::String("alpha/beta".into())])]
+    );
+    let Value::Struct { signature, .. } = read_bolt_message(&mut client).await else {
+        panic!("expected terminal Bolt SUCCESS response");
+    };
+    assert_eq!(signature, 0x70);
+
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn runtime_configuration_loads_heimdall_only_when_enabled() {
     let mut state = AppState::default();
     assert!(state

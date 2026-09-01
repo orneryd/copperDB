@@ -21,3 +21,10 @@ thiserror.workspace = true
 time = { workspace = true, features = ["formatting"] }
 tokio.workspace = true
 tokio-util.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "package_startup"
+harness = false

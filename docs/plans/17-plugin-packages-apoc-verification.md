@@ -11,7 +11,9 @@ Status: in progress. Priority: P2. Owners: `eval`, `engine`, `server`, `copperdb
 - Complete: separate Heimdall watcher package loaded through the production catalog with exact lifecycle, MCP-compatible `heimdall_watcher_query`, database-scoped read authorization, cancellation, bounded timestamped FIFO event hooks, newest-event drop, panic/timeout isolation, and package metrics.
 - Complete: local `apoc.load.json` through a default-denied rooted import-file host service with explicit `FileImport` grants, canonical symlink containment, file-URI validation, cancellation, byte/row bounds, ordered root-array expansion, and strict trailing-data rejection.
 - Complete: offline package configuration-schema compilation and instance validation before factory creation, closed-by-default package settings, stable package-attributed errors, and APOC's declared `file_access_root` contract.
-- Remaining: restricted transactional write and allowlisted network host services, representative `apoc.import.json`, remote `apoc.load.json`, protocol tests, and benchmarks.
+- Complete: loaded APOC dispatch through embedded execution, the HTTP transaction endpoint, and a real Bolt 4.4 TCP `HELLO`/`RUN`/`PULL` exchange with deterministic result assertions.
+- Complete: Criterion coverage for cold package lifecycle, canonical/mixed-case registry dispatch, representative APOC scalar execution, bounded traversal, rooted JSON loading, and event enqueue/saturation. Initial quick-mode baselines measured approximately `152 us` cold startup, `33 us` scalar query execution, `184 us` per 1,000-row JSON load, `47 us` per bounded 65-node traversal, `1.11 us` enqueue plus dispatcher turn, and `50 ns` saturated ingress rejection.
+- Remaining: restricted transactional write and allowlisted network host services, representative `apoc.import.json`, and remote `apoc.load.json`.
 
 ## Objective
 
