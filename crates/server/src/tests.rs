@@ -138,6 +138,111 @@ async fn mcp_protocol_methods_do_not_require_database_access() {
 }
 
 #[tokio::test]
+async fn mcp_http_enforces_request_size_and_json_media_types() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let mut state = AppState::default();
+    state.auth.security_enabled = false;
+    let app = build_router(Arc::new(state));
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "initialize",
+        "params": {"protocolVersion": copperdb_mcp::MCP_PROTOCOL_VERSION}
+    })
+    .to_string();
+    let exact_limit = format!(
+        "{initialize}{}",
+        " ".repeat(copperdb_mcp::DEFAULT_MAX_REQUEST_BYTES - initialize.len())
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(exact_limit.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(format!("{exact_limit} ")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/vnd.copperdb.mcp+json")
+                .body(Body::from(initialize.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "text/plain")
+                .body(Body::from(initialize))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+#[tokio::test]
+async fn mcp_http_maps_json_and_request_shape_errors() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let mut state = AppState::default();
+    state.auth.security_enabled = false;
+    let app = build_router(Arc::new(state));
+    for (body, expected_code, expected_message) in [
+        ("{".to_string(), -32700, "Parse error"),
+        ("null".to_string(), -32600, "Invalid Request"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["id"], serde_json::Value::Null);
+        assert_eq!(payload["error"]["code"], expected_code);
+        assert_eq!(payload["error"]["message"], expected_message);
+        assert!(payload["error"]["data"]["detail"].is_string());
+    }
+}
+
+#[tokio::test]
 async fn runtime_configuration_loads_apoc_only_when_enabled() {
     let mut state = AppState::default();
     assert!(state.packages.packages().is_empty());

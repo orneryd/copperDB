@@ -7,7 +7,7 @@
 use async_graphql_axum::GraphQLRequest;
 use axum::{
     body::Body,
-    extract::{MatchedPath, Path, Query, State},
+    extract::{rejection::JsonRejection, DefaultBodyLimit, MatchedPath, Path, Query, State},
     http::{header, HeaderMap, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -1224,7 +1224,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/graphql", post(graphql_handler))
         .route("/graphql", get(graphql_playground_handler))
         // ── MCP (Model Context Protocol) ──────────────────────────────────
-        .route("/mcp", post(mcp_handler))
+        .route(
+            "/mcp",
+            post(mcp_handler).layer(DefaultBodyLimit::max(
+                copperdb_mcp::DEFAULT_MAX_REQUEST_BYTES,
+            )),
+        )
         // ── SPA fallback: any unmatched route serves index.html when UI is available ──
         .fallback(ui_fallback);
 
@@ -4896,16 +4901,37 @@ async fn mcp_handler(
     State(state): State<Arc<AppState>>,
     Extension(request_context): Extension<RequestContext>,
     headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
+    body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Response {
+    let Json(body) = match body {
+        Ok(body) => body,
+        Err(rejection)
+            if matches!(
+                rejection.status(),
+                StatusCode::PAYLOAD_TOO_LARGE | StatusCode::UNSUPPORTED_MEDIA_TYPE
+            ) =>
+        {
+            return rejection.into_response()
+        }
+        Err(rejection) => {
+            return Json(copperdb_mcp::McpResponse::error_with_data(
+                serde_json::Value::Null,
+                -32700,
+                "Parse error",
+                Some(serde_json::json!({"detail": rejection.body_text()})),
+            ))
+            .into_response()
+        }
+    };
     let request: copperdb_mcp::McpRequest = match serde_json::from_value(body) {
         Ok(req) => req,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": null,
-                "error": { "code": -32700, "message": e.to_string() }
-            }))
+        Err(error) => {
+            return Json(copperdb_mcp::McpResponse::error_with_data(
+                serde_json::Value::Null,
+                -32600,
+                "Invalid Request",
+                Some(serde_json::json!({"detail": error.to_string()})),
+            ))
             .into_response()
         }
     };

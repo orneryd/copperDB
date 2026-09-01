@@ -16,6 +16,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+pub const DEFAULT_MAX_REQUEST_BYTES: usize = 10 * 1024 * 1024;
 pub const DEFAULT_MAX_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Error)]
