@@ -8,8 +8,10 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 use thiserror::Error;
 use url::Url;
 
@@ -19,6 +21,22 @@ pub enum ImportFileError {
     Disabled,
     #[error("remote APOC URL access is disabled")]
     RemoteDisabled,
+    #[error("APOC remote URL host is not allowlisted")]
+    RemoteHostNotAllowed,
+    #[error("APOC remote URL host is required")]
+    RemoteHostRequired,
+    #[error("APOC remote URLs may not contain userinfo")]
+    RemoteUserInfo,
+    #[error("APOC remote URLs may not contain fragments")]
+    RemoteFragment,
+    #[error("APOC remote URL host resolves to a disallowed address")]
+    RemoteAddressDisallowed,
+    #[error("failed to resolve APOC remote host")]
+    RemoteResolveFailed,
+    #[error("failed to request APOC remote URL")]
+    RemoteRequestFailed,
+    #[error("APOC remote URL returned HTTP status {0}")]
+    RemoteHttpStatus(u16),
     #[error("file URL may not contain an authority section (i.e. it should be 'file:///')")]
     FileUrlAuthority,
     #[error("file URL may not contain a query component")]
@@ -165,6 +183,209 @@ impl ImportFileService for RootedImportFileService {
             bytes.extend_from_slice(&chunk[..read]);
         }
         Ok(bytes)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteImportFileService {
+    allowlist: Vec<String>,
+    allow_non_public_addresses: bool,
+}
+
+impl RemoteImportFileService {
+    pub fn new(host_allowlist: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let mut allowlist: Vec<String> = host_allowlist
+            .into_iter()
+            .map(Into::into)
+            .map(|host: String| host.trim().to_ascii_lowercase())
+            .filter(|host| !host.is_empty())
+            .collect();
+        allowlist.sort();
+        allowlist.dedup();
+        Self {
+            allowlist,
+            allow_non_public_addresses: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn allowing_non_public_addresses_for_tests(mut self) -> Self {
+        self.allow_non_public_addresses = true;
+        self
+    }
+
+    fn host_allowed(&self, host: &str) -> bool {
+        let host = host.to_ascii_lowercase();
+        self.allowlist.iter().any(|entry| {
+            entry == &host
+                || entry.strip_prefix("*.").is_some_and(|suffix| {
+                    host.len() > suffix.len()
+                        && host.ends_with(suffix)
+                        && host.as_bytes()[host.len() - suffix.len() - 1] == b'.'
+                })
+        })
+    }
+
+    fn validate_url(
+        &self,
+        source: &str,
+    ) -> Result<(Url, String, Vec<SocketAddr>), ImportFileError> {
+        let url = Url::parse(source).map_err(|_| ImportFileError::RemoteHostRequired)?;
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(ImportFileError::UnsupportedScheme(url.scheme().into()));
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(ImportFileError::RemoteUserInfo);
+        }
+        if url.fragment().is_some() {
+            return Err(ImportFileError::RemoteFragment);
+        }
+        let host = url
+            .host_str()
+            .filter(|host| !host.is_empty())
+            .ok_or(ImportFileError::RemoteHostRequired)?
+            .to_ascii_lowercase();
+        if !self.host_allowed(&host) {
+            return Err(ImportFileError::RemoteHostNotAllowed);
+        }
+        let port = url
+            .port_or_known_default()
+            .ok_or(ImportFileError::RemoteHostRequired)?;
+        let addresses: Vec<SocketAddr> = (host.as_str(), port)
+            .to_socket_addrs()
+            .map_err(|_| ImportFileError::RemoteResolveFailed)?
+            .collect();
+        if addresses.is_empty() {
+            return Err(ImportFileError::RemoteResolveFailed);
+        }
+        if !self.allow_non_public_addresses
+            && addresses
+                .iter()
+                .any(|address| is_disallowed_remote_address(address.ip()))
+        {
+            return Err(ImportFileError::RemoteAddressDisallowed);
+        }
+        Ok((url, host, addresses))
+    }
+}
+
+impl ImportFileService for RemoteImportFileService {
+    fn read(
+        &self,
+        request_context: &copperdb_util::RequestContext,
+        source: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ImportFileError> {
+        request_context.check_active()?;
+        let (url, host, addresses) = self.validate_url(source)?;
+        let timeout = match request_context.deadline() {
+            Some(deadline) => deadline
+                .duration_since(std::time::SystemTime::now())
+                .map_err(|_| {
+                    request_context.cancel_due_to_deadline();
+                    copperdb_util::RequestCancelled
+                })?
+                .min(Duration::from_secs(10)),
+            None => Duration::from_secs(10),
+        };
+        let client = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .resolve_to_addrs(&host, &addresses)
+            .build()
+            .map_err(|_| ImportFileError::RemoteRequestFailed)?;
+        let mut response =
+            client
+                .get(url)
+                .send()
+                .map_err(|_| match request_context.check_active() {
+                    Ok(()) => ImportFileError::RemoteRequestFailed,
+                    Err(cancelled) => cancelled.into(),
+                })?;
+        if response.status() != reqwest::StatusCode::OK {
+            return Err(ImportFileError::RemoteHttpStatus(
+                response.status().as_u16(),
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err(ImportFileError::TooLarge { limit: max_bytes });
+        }
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            request_context.check_active()?;
+            let read =
+                response
+                    .read(&mut chunk)
+                    .map_err(|_| match request_context.check_active() {
+                        Ok(()) => ImportFileError::RemoteRequestFailed,
+                        Err(cancelled) => cancelled.into(),
+                    })?;
+            if read == 0 {
+                break;
+            }
+            if bytes.len().saturating_add(read) > max_bytes {
+                return Err(ImportFileError::TooLarge { limit: max_bytes });
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        Ok(bytes)
+    }
+}
+
+pub struct RestrictedImportFileService {
+    local: Arc<dyn ImportFileService>,
+    remote: Option<RemoteImportFileService>,
+}
+
+impl RestrictedImportFileService {
+    pub fn new(local: Arc<dyn ImportFileService>, remote: Option<RemoteImportFileService>) -> Self {
+        Self { local, remote }
+    }
+}
+
+impl ImportFileService for RestrictedImportFileService {
+    fn read(
+        &self,
+        request_context: &copperdb_util::RequestContext,
+        source: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ImportFileError> {
+        if source.starts_with("http://") || source.starts_with("https://") {
+            self.remote
+                .as_ref()
+                .ok_or(ImportFileError::RemoteDisabled)?
+                .read(request_context, source, max_bytes)
+        } else {
+            self.local.read(request_context, source, max_bytes)
+        }
+    }
+}
+
+fn is_disallowed_remote_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            address.is_private()
+                || address.is_loopback()
+                || address.is_link_local()
+                || address.is_multicast()
+                || address.is_unspecified()
+                || address.is_broadcast()
+        }
+        IpAddr::V6(address) => {
+            address
+                .to_ipv4_mapped()
+                .is_some_and(|mapped| is_disallowed_remote_address(IpAddr::V4(mapped)))
+                || address.is_unique_local()
+                || address.is_loopback()
+                || address.is_unicast_link_local()
+                || address.is_multicast()
+                || address.is_unspecified()
+        }
     }
 }
 
@@ -696,7 +917,21 @@ mod import_file_tests {
     use super::*;
     use copperdb_util::RequestContext;
     use std::fs;
+    use std::io::Write as _;
+    use std::net::TcpListener;
     use tempfile::tempdir;
+
+    fn one_shot_http_server(response: &'static [u8]) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            stream.write_all(response).unwrap();
+        });
+        format!("http://{address}/payload.json")
+    }
 
     #[test]
     fn rooted_service_reads_rebased_file_urls_with_bounds() {
@@ -781,6 +1016,119 @@ mod import_file_tests {
                 .read(&RequestContext::detached(), "escape/secret.json", 1_024)
                 .unwrap_err(),
             ImportFileError::RootEscape
+        );
+    }
+
+    #[test]
+    fn remote_service_enforces_host_and_url_policy_before_request() {
+        let service = RemoteImportFileService::new(["example.com", "*.example.org"]);
+        let request = RequestContext::detached();
+
+        assert!(!service.host_allowed("example.org"));
+        assert!(service.host_allowed("api.example.org"));
+        assert!(service.host_allowed("deep.api.example.org"));
+        assert!(!service.host_allowed("example.org.attacker.test"));
+        assert_eq!(
+            service
+                .read(&request, "https://attacker.test/payload.json", 64)
+                .unwrap_err(),
+            ImportFileError::RemoteHostNotAllowed
+        );
+        assert_eq!(
+            service
+                .read(&request, "https://user@example.com/payload.json", 64)
+                .unwrap_err(),
+            ImportFileError::RemoteUserInfo
+        );
+        assert_eq!(
+            service
+                .read(&request, "https://example.com/payload.json#secret", 64)
+                .unwrap_err(),
+            ImportFileError::RemoteFragment
+        );
+    }
+
+    #[test]
+    fn remote_service_rejects_non_public_resolved_addresses() {
+        let service = RemoteImportFileService::new(["localhost", "127.0.0.1"]);
+        let request = RequestContext::detached();
+
+        assert_eq!(
+            service
+                .read(&request, "http://localhost/payload.json", 64)
+                .unwrap_err(),
+            ImportFileError::RemoteAddressDisallowed
+        );
+        assert_eq!(
+            service
+                .read(&request, "http://127.0.0.1/payload.json", 64)
+                .unwrap_err(),
+            ImportFileError::RemoteAddressDisallowed
+        );
+        assert!(is_disallowed_remote_address(
+            "::ffff:127.0.0.1".parse().unwrap()
+        ));
+        assert!(is_disallowed_remote_address(
+            "::ffff:10.0.0.1".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn remote_service_streams_bounded_success_and_rejects_redirects_and_statuses() {
+        let success_url = one_shot_http_server(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\n{\"id\":1}",
+        );
+        let service =
+            RemoteImportFileService::new(["127.0.0.1"]).allowing_non_public_addresses_for_tests();
+        let request = RequestContext::detached();
+        assert_eq!(
+            service.read(&request, &success_url, 8).unwrap(),
+            br#"{"id":1}"#
+        );
+
+        let oversized_url = one_shot_http_server(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\n{\"id\":1}",
+        );
+        assert_eq!(
+            service.read(&request, &oversized_url, 7).unwrap_err(),
+            ImportFileError::TooLarge { limit: 7 }
+        );
+
+        let redirect_url = one_shot_http_server(
+            b"HTTP/1.1 302 Found\r\nLocation: http://attacker.test/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(
+            service.read(&request, &redirect_url, 64).unwrap_err(),
+            ImportFileError::RemoteHttpStatus(302)
+        );
+
+        let failure_url = one_shot_http_server(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(
+            service.read(&request, &failure_url, 64).unwrap_err(),
+            ImportFileError::RemoteHttpStatus(503)
+        );
+    }
+
+    #[test]
+    fn restricted_service_keeps_local_and_remote_permissions_independent() {
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("payload.json"), br#"{"local":true}"#).unwrap();
+        let local: Arc<dyn ImportFileService> =
+            Arc::new(RootedImportFileService::new(root.path()).unwrap());
+        let local_only = RestrictedImportFileService::new(local, None);
+        let request = RequestContext::detached();
+
+        assert_eq!(
+            local_only.read(&request, "payload.json", 64).unwrap(),
+            br#"{"local":true}"#
+        );
+        assert_eq!(
+            local_only
+                .read(&request, "https://example.com/payload.json", 64)
+                .unwrap_err(),
+            ImportFileError::RemoteDisabled
         );
     }
 

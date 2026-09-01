@@ -16,6 +16,7 @@ async fn runtime_configuration_loads_apoc_only_when_enabled() {
             copperdb_plugin::PackageCapability::QueryRead,
             copperdb_plugin::PackageCapability::QueryWrite,
             copperdb_plugin::PackageCapability::FileImport,
+            copperdb_plugin::PackageCapability::Network,
         ],
     );
     state.configure_runtime(Arc::new(config)).await.unwrap();
@@ -55,6 +56,7 @@ async fn apoc_load_json_uses_explicit_rooted_file_import_grant() {
             copperdb_plugin::PackageCapability::QueryRead,
             copperdb_plugin::PackageCapability::QueryWrite,
             copperdb_plugin::PackageCapability::FileImport,
+            copperdb_plugin::PackageCapability::Network,
         ],
     );
     config.packages.configuration.insert(
@@ -78,6 +80,65 @@ async fn apoc_load_json_uses_explicit_rooted_file_import_grant() {
 }
 
 #[tokio::test]
+async fn apoc_remote_load_requires_explicit_network_grant() {
+    let mut state = AppState::default();
+    let mut config = RuntimeConfig::default();
+    config.packages.enabled = vec![copperdb_apoc::PACKAGE_ID.into()];
+    config.packages.grants.insert(
+        copperdb_apoc::PACKAGE_ID.into(),
+        vec![
+            copperdb_plugin::PackageCapability::QueryRead,
+            copperdb_plugin::PackageCapability::QueryWrite,
+            copperdb_plugin::PackageCapability::FileImport,
+        ],
+    );
+    config.packages.configuration.insert(
+        copperdb_apoc::PACKAGE_ID.into(),
+        serde_json::json!({"remote_url_allowlist": ["example.com"]}),
+    );
+
+    let error = state.configure_runtime(Arc::new(config)).await.unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("package copperdb.apoc was not granted capability Network"));
+}
+
+#[tokio::test]
+async fn apoc_remote_load_rejects_allowlisted_non_public_addresses() {
+    let mut state = AppState::default();
+    let mut config = RuntimeConfig::default();
+    config.packages.enabled = vec![copperdb_apoc::PACKAGE_ID.into()];
+    config.packages.grants.insert(
+        copperdb_apoc::PACKAGE_ID.into(),
+        vec![
+            copperdb_plugin::PackageCapability::QueryRead,
+            copperdb_plugin::PackageCapability::QueryWrite,
+            copperdb_plugin::PackageCapability::FileImport,
+            copperdb_plugin::PackageCapability::Network,
+        ],
+    );
+    config.packages.configuration.insert(
+        copperdb_apoc::PACKAGE_ID.into(),
+        serde_json::json!({"remote_url_allowlist": ["localhost"]}),
+    );
+    state.configure_runtime(Arc::new(config)).await.unwrap();
+    let engine = open_engine(&state, "copperdb").unwrap();
+
+    let error = engine
+        .execute(
+            "CALL apoc.load.json('http://localhost/payload.json')",
+            HashMap::new(),
+        )
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("APOC remote URL host resolves to a disallowed address"));
+    state.shutdown_packages().await.unwrap();
+}
+
+#[tokio::test]
 async fn apoc_import_json_requires_explicit_graph_write_grant() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -93,6 +154,7 @@ async fn apoc_import_json_requires_explicit_graph_write_grant() {
         vec![
             copperdb_plugin::PackageCapability::QueryRead,
             copperdb_plugin::PackageCapability::FileImport,
+            copperdb_plugin::PackageCapability::Network,
         ],
     );
     config.packages.configuration.insert(
@@ -131,6 +193,7 @@ async fn apoc_import_json_uses_explicit_file_and_graph_write_grants() {
             copperdb_plugin::PackageCapability::QueryRead,
             copperdb_plugin::PackageCapability::QueryWrite,
             copperdb_plugin::PackageCapability::FileImport,
+            copperdb_plugin::PackageCapability::Network,
         ],
     );
     config.packages.configuration.insert(
@@ -181,6 +244,7 @@ async fn http_transaction_executes_loaded_apoc_function() {
             copperdb_plugin::PackageCapability::QueryRead,
             copperdb_plugin::PackageCapability::QueryWrite,
             copperdb_plugin::PackageCapability::FileImport,
+            copperdb_plugin::PackageCapability::Network,
         ],
     );
     state.configure_runtime(Arc::new(config)).await.unwrap();
@@ -237,6 +301,7 @@ async fn bolt_tcp_executes_loaded_apoc_function() {
             copperdb_plugin::PackageCapability::QueryRead,
             copperdb_plugin::PackageCapability::QueryWrite,
             copperdb_plugin::PackageCapability::FileImport,
+            copperdb_plugin::PackageCapability::Network,
         ],
     );
     state.configure_runtime(Arc::new(config)).await.unwrap();
@@ -427,7 +492,12 @@ async fn runtime_configuration_rejects_undeclared_package_settings() {
     config.packages.required = vec![copperdb_apoc::PACKAGE_ID.into()];
     config.packages.grants.insert(
         copperdb_apoc::PACKAGE_ID.into(),
-        vec![copperdb_plugin::PackageCapability::QueryRead],
+        vec![
+            copperdb_plugin::PackageCapability::QueryRead,
+            copperdb_plugin::PackageCapability::QueryWrite,
+            copperdb_plugin::PackageCapability::FileImport,
+            copperdb_plugin::PackageCapability::Network,
+        ],
     );
     config.packages.configuration.insert(
         copperdb_apoc::PACKAGE_ID.into(),

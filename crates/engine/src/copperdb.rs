@@ -927,13 +927,21 @@ impl CopperDb {
         function_registry: Arc<copperdb_filter::FunctionRegistry>,
         procedure_registry: Arc<ProcedureRegistry>,
     ) -> Result<Self, CopperDbError> {
-        let import_files: Arc<dyn ImportFileService> = match &config.package_import_file_root {
+        let local_import_files: Arc<dyn ImportFileService> = match &config.package_import_file_root
+        {
             Some(root) => Arc::new(
                 RootedImportFileService::new(root)
                     .map_err(|error| CopperDbError::Init(error.to_string()))?,
             ),
             None => Arc::new(DeniedImportFileService),
         };
+        let remote_import_files = (!config.package_remote_url_allowlist.is_empty()).then(|| {
+            RemoteImportFileService::new(config.package_remote_url_allowlist.iter().cloned())
+        });
+        let import_files: Arc<dyn ImportFileService> = Arc::new(RestrictedImportFileService::new(
+            local_import_files,
+            remote_import_files,
+        ));
         let vector_indexes = Arc::new(VectorIndexManager::build(storage.as_ref())?);
         let embedding_runtime = Arc::new(EmbeddingRuntime::from_config(
             Arc::clone(&storage),

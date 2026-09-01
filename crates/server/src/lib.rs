@@ -3669,6 +3669,12 @@ fn open_engine(state: &AppState, database: &str) -> Result<Arc<GraphEngine>, Str
         .grants
         .get(copperdb_apoc::PACKAGE_ID)
         .is_some_and(|grants| grants.contains(&copperdb_plugin::PackageCapability::QueryWrite));
+    let apoc_network_granted = state
+        .runtime_config
+        .packages
+        .grants
+        .get(copperdb_apoc::PACKAGE_ID)
+        .is_some_and(|grants| grants.contains(&copperdb_plugin::PackageCapability::Network));
     let package_import_file_root = apoc_import_granted
         .then(|| {
             state
@@ -3682,6 +3688,22 @@ fn open_engine(state: &AppState, database: &str) -> Result<Arc<GraphEngine>, Str
                 .map(str::to_string)
         })
         .flatten();
+    let package_remote_url_allowlist = if apoc_network_granted {
+        state
+            .runtime_config
+            .packages
+            .configuration
+            .get(copperdb_apoc::PACKAGE_ID)
+            .and_then(|config| config.get("remote_url_allowlist"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    } else {
+        Vec::new()
+    };
     let config = EngineConfig {
         data_dir: database_record.storage_path,
         default_database: database.into(),
@@ -3690,6 +3712,7 @@ fn open_engine(state: &AppState, database: &str) -> Result<Arc<GraphEngine>, Str
         sync_writes: state.runtime_config.storage.sync_writes,
         runtime_config,
         package_import_file_root,
+        package_remote_url_allowlist,
         package_graph_write_enabled,
         ..Default::default()
     };

@@ -30,11 +30,17 @@ pub fn package() -> PackageDefinition {
                 PackageCapability::QueryRead,
                 PackageCapability::QueryWrite,
                 PackageCapability::FileImport,
+                PackageCapability::Network,
             ])
             .with_configuration_schema(serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "file_access_root": {"type": "string", "minLength": 1}
+                    "file_access_root": {"type": "string", "minLength": 1},
+                    "remote_url_allowlist": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "uniqueItems": true
+                    }
                 },
                 "additionalProperties": false
             }));
@@ -899,6 +905,53 @@ mod tests {
         assert_eq!(output.rows.len(), 2);
         assert_eq!(output.rows[0]["value"]["id"].as_f64(), Some(1.0));
         assert_eq!(output.rows[1]["value"]["id"].as_f64(), Some(2.5));
+    }
+
+    #[test]
+    fn load_json_forwards_remote_urls_through_the_restricted_host_service() {
+        struct RemoteFixture;
+
+        impl copperdb_eval::ImportFileService for RemoteFixture {
+            fn read(
+                &self,
+                _request_context: &copperdb_util::RequestContext,
+                source: &str,
+                max_bytes: usize,
+            ) -> Result<Vec<u8>, copperdb_eval::ImportFileError> {
+                assert_eq!(source, "https://data.example.test/payload.json?version=1");
+                assert_eq!(max_bytes, MAX_JSON_BYTES);
+                Ok(br#"[{"id":1},{"id":2}]"#.to_vec())
+            }
+        }
+
+        let storage = StorageEngine::open_memory().unwrap();
+        let request_context = copperdb_util::RequestContext::detached();
+        let row = Row::new();
+        let params = HashMap::new();
+        let capabilities = ["query:read".into()];
+        let caller_roles = ["admin".into()];
+        let context = ProcedureCallContext {
+            row: &row,
+            params: &params,
+            capabilities: &capabilities,
+            caller_roles: &caller_roles,
+            database: Some("copperdb"),
+            request_context: &request_context,
+            graph_read: &storage,
+            graph_write: &storage,
+            import_files: &RemoteFixture,
+        };
+
+        let output = load_json(
+            &context,
+            &[json!("https://data.example.test/payload.json?version=1")],
+        )
+        .unwrap();
+
+        assert_eq!(output.columns, ["value"]);
+        assert_eq!(output.rows.len(), 2);
+        assert_eq!(output.rows[0]["value"]["id"].as_f64(), Some(1.0));
+        assert_eq!(output.rows[1]["value"]["id"].as_f64(), Some(2.0));
     }
 
     #[test]

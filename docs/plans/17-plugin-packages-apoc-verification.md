@@ -1,6 +1,6 @@
 # 17: Plugin Packages And APOC Verification
 
-Status: in progress. Priority: P2. Owners: `eval`, `engine`, `server`, `copperdb`, `heimdall`, and new `plugin` and `apoc` crates.
+Status: complete. Priority: P2. Owners: `eval`, `engine`, `server`, `copperdb`, `heimdall`, `plugin`, and `apoc` crates.
 
 ## Implementation Progress
 
@@ -14,7 +14,7 @@ Status: in progress. Priority: P2. Owners: `eval`, `engine`, `server`, `copperdb
 - Complete: loaded APOC dispatch through embedded execution, the HTTP transaction endpoint, and a real Bolt 4.4 TCP `HELLO`/`RUN`/`PULL` exchange with deterministic result assertions.
 - Complete: Criterion coverage for cold package lifecycle, canonical/mixed-case registry dispatch, representative APOC scalar execution, bounded traversal, rooted JSON loading, and event enqueue/saturation. Initial quick-mode baselines measured approximately `152 us` cold startup, `33 us` scalar query execution, `184 us` per 1,000-row JSON load, `47 us` per bounded 65-node traversal, `1.11 us` enqueue plus dispatcher turn, and `50 ns` saturated ingress rejection.
 - Complete: default-denied transactional graph-write host service and bounded representative `apoc.import.json` with explicit `QueryWrite` and `FileImport` grants, atomic implicit batches, caller-owned explicit transaction staging, rollback/commit visibility, pre-write validation, exact result columns, and real mutation statistics.
-- Remaining: allowlisted network host service and remote `apoc.load.json`.
+- Complete: default-denied remote `apoc.load.json` through an explicit `Network` grant and normalized exact/wildcard host allowlist, with URL credential/fragment rejection, DNS resolution pinned to validated public addresses, private/loopback/link-local/multicast rejection, proxies and redirects disabled, caller-bounded deadlines, HTTP status checks, bounded streaming, and deterministic adversarial tests.
 
 ## Objective
 

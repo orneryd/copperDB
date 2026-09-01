@@ -53,7 +53,8 @@ use copperdb_cypher::{
 };
 use copperdb_eval::{
     DeniedImportFileService, EvalEngine, ImportFileService, ProcedureMode, ProcedureRegistrar,
-    ProcedureRegistry, ProcedureRegistryBuilder, QueryStats, RootedImportFileService,
+    ProcedureRegistry, ProcedureRegistryBuilder, QueryStats, RemoteImportFileService,
+    RestrictedImportFileService, RootedImportFileService,
 };
 use copperdb_fabric::{
     merge_fabric_aggregates, merge_fabric_paths, merge_fabric_rows, FabricAggregateOptions,
@@ -294,6 +295,8 @@ pub struct DatabaseConfig {
     pub distributed_repair_queue_dir: Option<String>,
     /// Canonical root exposed through the package import-file host service.
     pub package_import_file_root: Option<String>,
+    /// Explicit host allowlist exposed through the package remote-import service.
+    pub package_remote_url_allowlist: Vec<String>,
     /// Whether packages may stage graph mutations through the restricted host service.
     pub package_graph_write_enabled: bool,
 }
@@ -317,6 +320,7 @@ impl Default for DatabaseConfig {
             storage_encryption_key_uri: "kms://local/storage".into(),
             distributed_repair_queue_dir: None,
             package_import_file_root: None,
+            package_remote_url_allowlist: Vec::new(),
             package_graph_write_enabled: false,
         }
     }

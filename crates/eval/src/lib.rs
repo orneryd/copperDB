@@ -46,7 +46,7 @@ pub use procedure_registry::{
     GraphWriteService, GraphWriteSummary, ImportFileError, ImportFileService, ProcedureCallContext,
     ProcedureDescriptor, ProcedureError, ProcedureHandler, ProcedureMode, ProcedureOutput,
     ProcedureRegistrar, ProcedureRegistry, ProcedureRegistryBuilder, ProcedureRegistryError,
-    RootedImportFileService,
+    RemoteImportFileService, RestrictedImportFileService, RootedImportFileService,
 };
 
 const VAR_LENGTH_UNBOUNDED_MAX_HOPS: u32 = 1 << 16;
