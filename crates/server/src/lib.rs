@@ -59,7 +59,8 @@ use copperdb_search::{
     RrfConfig, RrfSearchPolicy, SearchQuery,
 };
 use copperdb_security::{
-    RequestTarget, RequestViolation, SecurityConfig, SecurityMiddleware, SecurityRequest,
+    validate_http_origin, RequestTarget, RequestViolation, SecurityConfig, SecurityMiddleware,
+    SecurityRequest,
 };
 use copperdb_storage::{StorageEngine, StorageError, StorageTransaction};
 
@@ -4985,6 +4986,9 @@ async fn mcp_handler(
     headers: HeaderMap,
     body: Result<Json<serde_json::Value>, JsonRejection>,
 ) -> Response {
+    if let Err(status) = validate_mcp_origin(&headers) {
+        return status.into_response();
+    }
     if !mcp_accepts_json(&headers) {
         return StatusCode::NOT_ACCEPTABLE.into_response();
     }
@@ -5100,6 +5104,9 @@ async fn mcp_handler(
 }
 
 async fn mcp_delete_handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    if let Err(status) = validate_mcp_origin(&headers) {
+        return status.into_response();
+    }
     let session_id = match mcp_session_id(&headers) {
         Ok(Some(session_id)) => session_id,
         Ok(None) | Err(_) => return StatusCode::BAD_REQUEST.into_response(),
@@ -5109,6 +5116,26 @@ async fn mcp_delete_handler(State(state): State<Arc<AppState>>, headers: HeaderM
     } else {
         StatusCode::NOT_FOUND.into_response()
     }
+}
+
+fn validate_mcp_origin(headers: &HeaderMap) -> Result<(), StatusCode> {
+    let origins = headers.get_all(header::ORIGIN);
+    if origins.iter().next().is_none() {
+        return Ok(());
+    }
+    if origins.iter().count() != 1 || headers.get_all(header::HOST).iter().count() != 1 {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let origin = origins
+        .iter()
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .ok_or(StatusCode::FORBIDDEN)?;
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(StatusCode::FORBIDDEN)?;
+    validate_http_origin(origin, host).map_err(|_| StatusCode::FORBIDDEN)
 }
 
 fn mcp_session_id(headers: &HeaderMap) -> Result<Option<&str>, StatusCode> {

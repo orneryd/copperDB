@@ -8,7 +8,7 @@ Implement secure, cancellable MCP transport and durable database-scoped `store`,
 
 ## Current Defects
 
-Tool handlers remain ad hoc rather than typed and async, and `find_similar` is a misleading fulltext call. HTTP still lacks Streamable HTTP Origin validation. The six durable production tools and stdio transport are not implemented.
+Tool handlers remain ad hoc rather than typed and async, and `find_similar` is a misleading fulltext call. The six durable production tools and stdio transport are not implemented.
 
 ## Phases
 
@@ -32,7 +32,8 @@ Tool handlers remain ad hoc rather than typed and async, and `find_similar` is a
 - JSON-RPC notifications omit `id`, while explicit null IDs remain requests. Notifications execute through the same authorization and tool path, recognize `notifications/initialized`, and return `202 Accepted` with no response body even when dispatch reports a protocol or tool error.
 - JSON-RPC batches are capped at 32 entries, execute sequentially, preserve response order, isolate malformed and unauthorized entries, omit notification entries, reject invalid cardinality with `-32600`, and return an empty `202` response when every entry is a notification.
 - Successful single initialization responses issue cryptographically random `Mcp-Session-Id` values from a 4,096-entry, sliding 30-minute store. Presented sessions are validated and refreshed, malformed or unknown IDs are rejected, `DELETE /mcp` terminates sessions, and sessionless protocol `2024-11-05` clients remain compatible.
-- Typed async handlers, Streamable HTTP Origin hardening, and production tools remain pending.
+- MCP requests without an `Origin` header remain compatible with non-browser clients. Browser-originated POST and DELETE requests require exactly one HTTP(S) Origin matching exactly one direct Host authority; malformed, cross-host, and ambiguous headers fail with `403` before session or protocol processing.
+- Typed async handlers, stdio transport, and production tools remain pending.
 
 ## Tests And Security
 

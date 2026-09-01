@@ -56,6 +56,34 @@ fn mcp_session_header_rejects_empty_non_visible_and_oversized_values() {
     assert_eq!(mcp_session_id(&headers), Err(StatusCode::BAD_REQUEST));
 }
 
+#[test]
+fn mcp_origin_validation_requires_single_origin_and_host_headers() {
+    use axum::http::HeaderValue;
+
+    let mut headers = HeaderMap::new();
+    assert_eq!(validate_mcp_origin(&headers), Ok(()));
+    headers.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("https://example.com"),
+    );
+    assert_eq!(validate_mcp_origin(&headers), Err(StatusCode::FORBIDDEN));
+    headers.insert(header::HOST, HeaderValue::from_static("example.com"));
+    assert_eq!(validate_mcp_origin(&headers), Ok(()));
+
+    headers.append(
+        header::ORIGIN,
+        HeaderValue::from_static("https://example.com"),
+    );
+    assert_eq!(validate_mcp_origin(&headers), Err(StatusCode::FORBIDDEN));
+    headers.remove(header::ORIGIN);
+    headers.insert(
+        header::ORIGIN,
+        HeaderValue::from_static("https://example.com"),
+    );
+    headers.append(header::HOST, HeaderValue::from_static("example.com"));
+    assert_eq!(validate_mcp_origin(&headers), Err(StatusCode::FORBIDDEN));
+}
+
 #[tokio::test]
 async fn mcp_sessions_support_concurrent_clients_without_id_collisions() {
     let sessions = Arc::new(McpSessionStore::new(Duration::from_secs(10), 64));
@@ -481,6 +509,75 @@ async fn mcp_http_sessions_initialize_refresh_terminate_and_preserve_legacy_clie
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn mcp_http_validates_browser_origin_before_session_or_dispatch() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let mut state = AppState::default();
+    state.auth.security_enabled = false;
+    let app = build_router(Arc::new(state));
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "initialize",
+        "params": {"protocolVersion": copperdb_mcp::MCP_PROTOCOL_VERSION}
+    })
+    .to_string();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header("host", "localhost:7474")
+                .header("origin", "http://localhost:7474")
+                .header("content-type", "application/json")
+                .body(Body::from(initialize.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let session_id = response.headers()[MCP_SESSION_ID_HEADER]
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    for request in [
+        Request::post("/mcp")
+            .header("host", "localhost:7474")
+            .header("origin", "https://attacker.example")
+            .header("content-type", "application/json")
+            .body(Body::from(initialize.clone()))
+            .unwrap(),
+        Request::post("/mcp")
+            .header("origin", "http://localhost:7474")
+            .header("content-type", "application/json")
+            .body(Body::from(initialize.clone()))
+            .unwrap(),
+        Request::delete("/mcp")
+            .header("host", "localhost:7474")
+            .header("origin", "https://attacker.example")
+            .header(MCP_SESSION_ID_HEADER, &session_id)
+            .body(Body::empty())
+            .unwrap(),
+    ] {
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    let response = app
+        .oneshot(
+            Request::delete("/mcp")
+                .header(MCP_SESSION_ID_HEADER, &session_id)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]

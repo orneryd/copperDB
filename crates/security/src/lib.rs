@@ -42,6 +42,10 @@ pub enum SecurityError {
     HeaderTooLong(usize),
     #[error("header value contains invalid control characters")]
     HeaderInvalidChars,
+    #[error("invalid HTTP origin")]
+    OriginInvalid,
+    #[error("HTTP origin does not match request host")]
+    OriginMismatch,
     #[error("invalid identifier: {0}")]
     InvalidIdentifier(String),
     #[error("invalid label: {0}")]
@@ -280,6 +284,78 @@ pub fn validate_header_value(value: &str) -> Result<(), SecurityError> {
     Ok(())
 }
 
+pub fn validate_http_origin(origin: &str, request_host: &str) -> Result<(), SecurityError> {
+    if origin.len() > MAX_URL_LENGTH || request_host.len() > MAX_HEADER_LENGTH {
+        return Err(SecurityError::OriginInvalid);
+    }
+    let parsed_origin = Url::parse(origin).map_err(|_| SecurityError::OriginInvalid)?;
+    if !matches!(parsed_origin.scheme(), "http" | "https")
+        || !parsed_origin.username().is_empty()
+        || parsed_origin.password().is_some()
+        || parsed_origin.path() != "/"
+        || parsed_origin.query().is_some()
+        || parsed_origin.fragment().is_some()
+    {
+        return Err(SecurityError::OriginInvalid);
+    }
+    let origin_host = parsed_origin
+        .host_str()
+        .ok_or(SecurityError::OriginInvalid)?;
+    let request_port = explicit_authority_port(request_host)?;
+    let parsed_request_host =
+        Url::parse(&format!("http://{request_host}")).map_err(|_| SecurityError::OriginInvalid)?;
+    if !parsed_request_host.username().is_empty()
+        || parsed_request_host.password().is_some()
+        || parsed_request_host.path() != "/"
+        || parsed_request_host.query().is_some()
+        || parsed_request_host.fragment().is_some()
+    {
+        return Err(SecurityError::OriginInvalid);
+    }
+    let request_hostname = parsed_request_host
+        .host_str()
+        .ok_or(SecurityError::OriginInvalid)?;
+    if !origin_host.eq_ignore_ascii_case(request_hostname) {
+        return Err(SecurityError::OriginMismatch);
+    }
+    match request_port {
+        Some(port) if parsed_origin.port_or_known_default() != Some(port) => {
+            Err(SecurityError::OriginMismatch)
+        }
+        None if parsed_origin.port().is_some() => Err(SecurityError::OriginMismatch),
+        _ => Ok(()),
+    }
+}
+
+fn explicit_authority_port(authority: &str) -> Result<Option<u16>, SecurityError> {
+    if authority.is_empty() || authority.trim() != authority {
+        return Err(SecurityError::OriginInvalid);
+    }
+    let port = if let Some(rest) = authority.strip_prefix('[') {
+        let closing = rest.find(']').ok_or(SecurityError::OriginInvalid)?;
+        match &rest[closing + 1..] {
+            "" => None,
+            suffix => Some(
+                suffix
+                    .strip_prefix(':')
+                    .ok_or(SecurityError::OriginInvalid)?,
+            ),
+        }
+    } else if let Some((host, port)) = authority.rsplit_once(':') {
+        if host.is_empty() || host.contains(':') {
+            return Err(SecurityError::OriginInvalid);
+        }
+        Some(port)
+    } else {
+        None
+    };
+    port.map(|port| {
+        port.parse::<u16>()
+            .map_err(|_| SecurityError::OriginInvalid)
+    })
+    .transpose()
+}
+
 pub fn sanitize_string(input: &str) -> String {
     input
         .chars()
@@ -505,6 +581,75 @@ mod tests {
         );
         assert_eq!(sanitize_string("hello\0\x01\x02world"), "helloworld");
         assert_eq!(sanitize_string("  hello world  "), "hello world");
+    }
+
+    #[test]
+    fn http_origin_validation_matches_hosts_and_effective_ports() {
+        for (origin, host) in [
+            ("http://localhost", "localhost"),
+            ("https://EXAMPLE.com", "example.com"),
+            ("https://example.com", "example.com:443"),
+            ("http://127.0.0.1:7474", "127.0.0.1:7474"),
+            ("http://[::1]:7474", "[::1]:7474"),
+        ] {
+            validate_http_origin(origin, host).unwrap();
+        }
+
+        for (origin, host, expected) in [
+            (
+                "https://attacker.example",
+                "localhost:7474",
+                SecurityError::OriginMismatch,
+            ),
+            (
+                "http://example.com:8080",
+                "example.com",
+                SecurityError::OriginMismatch,
+            ),
+            (
+                "http://example.com",
+                "example.com:443",
+                SecurityError::OriginMismatch,
+            ),
+            ("null", "localhost:7474", SecurityError::OriginInvalid),
+            (
+                "https://user@example.com",
+                "example.com",
+                SecurityError::OriginInvalid,
+            ),
+            (
+                "https://example.com/path",
+                "example.com",
+                SecurityError::OriginInvalid,
+            ),
+            (
+                "https://example.com?query=1",
+                "example.com",
+                SecurityError::OriginInvalid,
+            ),
+            (
+                "https://example.com",
+                "example.com:not-a-port",
+                SecurityError::OriginInvalid,
+            ),
+            (
+                "https://example.com",
+                "user@example.com",
+                SecurityError::OriginInvalid,
+            ),
+            (
+                "https://example.com",
+                "example.com/path",
+                SecurityError::OriginInvalid,
+            ),
+            (
+                "https://example.com",
+                "example.com?query=1",
+                SecurityError::OriginInvalid,
+            ),
+        ] {
+            assert_eq!(validate_http_origin(origin, host), Err(expected));
+        }
     }
 
     #[test]
