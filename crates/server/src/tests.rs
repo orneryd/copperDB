@@ -353,6 +353,231 @@ async fn mcp_http_notifications_execute_without_response_bodies() {
 }
 
 #[tokio::test]
+async fn mcp_http_batches_preserve_order_and_omit_notifications() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let database = "mcp-batches";
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager
+        .create(
+            database,
+            temp_dir
+                .path()
+                .join(database)
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .unwrap();
+    let mut state = AppState {
+        db_name: database.into(),
+        db_manager,
+        ..Default::default()
+    };
+    state.auth.security_enabled = false;
+    let state = Arc::new(state);
+    let app = build_router(Arc::clone(&state));
+    let batch = serde_json::json!([
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        },
+        {"jsonrpc": "2.0", "id": "first", "method": "tools/list"},
+        7,
+        {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": "run_cypher",
+                "arguments": {"query": "CREATE (:BatchNotification {id: 'batch-1'})"}
+            }
+        },
+        {"jsonrpc": "2.0", "id": "last", "method": "unknown"}
+    ]);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(batch.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let responses = payload.as_array().unwrap();
+    assert_eq!(responses.len(), 3);
+    assert_eq!(responses[0]["id"], "first");
+    assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 2);
+    assert_eq!(responses[1]["id"], serde_json::Value::Null);
+    assert_eq!(responses[1]["error"]["code"], -32600);
+    assert_eq!(responses[2]["id"], "last");
+    assert_eq!(responses[2]["error"]["code"], -32601);
+    let result = open_engine(&state, database)
+        .unwrap()
+        .execute(
+            "MATCH (n:BatchNotification {id: 'batch-1'}) RETURN count(n) AS count",
+            HashMap::new(),
+        )
+        .unwrap();
+    assert_eq!(result.rows[0]["count"], serde_json::json!(1));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from("[]"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["id"], serde_json::Value::Null);
+    assert_eq!(payload["error"]["code"], -32600);
+    assert_eq!(payload["error"]["data"]["batchEntries"], 0);
+    assert_eq!(
+        payload["error"]["data"]["maxBatchEntries"],
+        copperdb_mcp::DEFAULT_MAX_BATCH_ENTRIES
+    );
+
+    let oversized_batch = vec![
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list"
+        });
+        copperdb_mcp::DEFAULT_MAX_BATCH_ENTRIES + 1
+    ];
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&oversized_batch).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], -32600);
+    assert_eq!(
+        payload["error"]["data"]["batchEntries"],
+        copperdb_mcp::DEFAULT_MAX_BATCH_ENTRIES + 1
+    );
+
+    let response = app
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!([
+                        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                        {"jsonrpc": "2.0", "method": "unknown"}
+                    ])
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert!(axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn mcp_http_batch_authorizes_each_entry() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let mut state = AppState::default();
+    state.auth = AuthState::from_storage_path(
+        unique_auth_path(),
+        true,
+        true,
+        "admin".into(),
+        "password".into(),
+        "test-secret".into(),
+    )
+    .unwrap();
+    let editor_token = {
+        let auth = state.auth.open_authenticator().unwrap();
+        auth.allowlist
+            .save_role_databases(copperdb_auth::ROLE_EDITOR, vec!["copperdb".into()])
+            .unwrap();
+        auth.privileges
+            .save_privilege(copperdb_auth::ROLE_EDITOR, "copperdb", true, true)
+            .unwrap();
+        auth.create_user(
+            "batch-editor",
+            "password",
+            vec![copperdb_auth::ROLE_EDITOR.into()],
+        )
+        .unwrap();
+        auth.authenticate("batch-editor", "password")
+            .unwrap()
+            .0
+            .access_token
+    };
+
+    let response = build_router(Arc::new(state))
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {editor_token}"))
+                .body(Body::from(
+                    serde_json::json!([
+                        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "method": "tools/call",
+                            "params": {
+                                "name": "run_cypher",
+                                "arguments": {"query": "RETURN 1"}
+                            }
+                        }
+                    ])
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload[0]["id"], 1);
+    assert!(payload[0]["result"]["tools"].is_array());
+    assert_eq!(payload[1]["id"], 2);
+    assert_eq!(payload[1]["error"]["code"], -32003);
+    assert_eq!(payload[1]["error"]["message"], "Forbidden");
+    assert_eq!(payload[1]["error"]["data"]["httpStatus"], 403);
+}
+
+#[tokio::test]
 async fn runtime_configuration_loads_apoc_only_when_enabled() {
     let mut state = AppState::default();
     assert!(state.packages.packages().is_empty());

@@ -17,6 +17,7 @@ use thiserror::Error;
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 10 * 1024 * 1024;
+pub const DEFAULT_MAX_BATCH_ENTRIES: usize = 32;
 pub const DEFAULT_MAX_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Error)]
@@ -48,13 +49,43 @@ pub struct Tool {
 }
 
 /// MCP JSON-RPC 2.0 request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct McpRequest {
     pub jsonrpc: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<serde_json::Value>,
+    pub id: Option<Option<serde_json::Value>>,
     pub method: String,
     pub params: Option<serde_json::Value>,
+}
+
+impl<'de> Deserialize<'de> for McpRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RequestFields {
+            jsonrpc: String,
+            method: String,
+            params: Option<serde_json::Value>,
+        }
+
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| serde::de::Error::custom("MCP request must be an object"))?;
+        let id = object
+            .remove("id")
+            .map(|id| if id.is_null() { None } else { Some(id) });
+        let fields: RequestFields =
+            serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            jsonrpc: fields.jsonrpc,
+            id,
+            method: fields.method,
+            params: fields.params,
+        })
+    }
 }
 
 impl McpRequest {
@@ -65,7 +96,7 @@ impl McpRequest {
     ) -> Self {
         Self {
             jsonrpc: "2.0".into(),
-            id: Some(id.into()),
+            id: Some(Some(id.into())),
             method: method.into(),
             params,
         }
@@ -76,7 +107,7 @@ impl McpRequest {
     }
 
     fn response_id(&self) -> serde_json::Value {
-        self.id.clone().unwrap_or(serde_json::Value::Null)
+        self.id.clone().flatten().unwrap_or(serde_json::Value::Null)
     }
 }
 
@@ -617,6 +648,26 @@ mod tests {
         assert!(response.error.is_none());
         assert_eq!(response.id, serde_json::Value::Null);
         assert_eq!(response.result, Some(serde_json::json!({})));
+    }
+
+    #[test]
+    fn explicit_null_id_is_a_request_not_a_notification() {
+        let request: McpRequest = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": null,
+            "method": "tools/list"
+        }))
+        .unwrap();
+
+        assert!(!request.is_notification());
+        assert_eq!(request.id, Some(None));
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["id"],
+            serde_json::Value::Null
+        );
+        let response = ToolRegistry::new().dispatch(&request);
+        assert_eq!(response.id, serde_json::Value::Null);
+        assert!(response.result.is_some());
     }
 
     #[test]

@@ -4923,8 +4923,58 @@ async fn mcp_handler(
             .into_response()
         }
     };
+    if let serde_json::Value::Array(entries) = body {
+        if entries.is_empty() || entries.len() > copperdb_mcp::DEFAULT_MAX_BATCH_ENTRIES {
+            return Json(copperdb_mcp::McpResponse::error_with_data(
+                serde_json::Value::Null,
+                -32600,
+                "Invalid Request",
+                Some(serde_json::json!({
+                    "batchEntries": entries.len(),
+                    "maxBatchEntries": copperdb_mcp::DEFAULT_MAX_BATCH_ENTRIES
+                })),
+            ))
+            .into_response();
+        }
+        let mut responses = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let request: copperdb_mcp::McpRequest = match serde_json::from_value(entry) {
+                Ok(request) => request,
+                Err(error) => {
+                    responses.push(copperdb_mcp::McpResponse::error_with_data(
+                        serde_json::Value::Null,
+                        -32600,
+                        "Invalid Request",
+                        Some(serde_json::json!({"detail": error.to_string()})),
+                    ));
+                    continue;
+                }
+            };
+            let response_id = request
+                .id
+                .clone()
+                .flatten()
+                .unwrap_or(serde_json::Value::Null);
+            match execute_mcp_request(
+                Arc::clone(&state),
+                request_context.clone(),
+                &headers,
+                request,
+            )
+            .await
+            {
+                Ok(Some(response)) => responses.push(response),
+                Ok(None) => {}
+                Err(status) => responses.push(mcp_authorization_error(response_id, status)),
+            }
+        }
+        if responses.is_empty() {
+            return StatusCode::ACCEPTED.into_response();
+        }
+        return Json(responses).into_response();
+    }
     let request: copperdb_mcp::McpRequest = match serde_json::from_value(body) {
-        Ok(req) => req,
+        Ok(request) => request,
         Err(error) => {
             return Json(copperdb_mcp::McpResponse::error_with_data(
                 serde_json::Value::Null,
@@ -4935,32 +4985,50 @@ async fn mcp_handler(
             .into_response()
         }
     };
+    match execute_mcp_request(state, request_context, &headers, request).await {
+        Ok(Some(response)) => Json(response).into_response(),
+        Ok(None) => StatusCode::ACCEPTED.into_response(),
+        Err(status) => status.into_response(),
+    }
+}
+
+async fn execute_mcp_request(
+    state: Arc<AppState>,
+    request_context: RequestContext,
+    headers: &HeaderMap,
+    request: copperdb_mcp::McpRequest,
+) -> Result<Option<copperdb_mcp::McpResponse>, StatusCode> {
     let is_notification = request.is_notification();
     let registry = copperdb_mcp::ToolRegistry::new();
     let access = match registry.required_access(&request) {
         Ok(access) => access,
         Err(_) => {
             if is_notification {
-                return StatusCode::ACCEPTED.into_response();
+                return Ok(None);
             }
-            return Json(registry.dispatch_with_context(&request_context, &request))
-                .into_response();
+            return Ok(Some(
+                registry.dispatch_with_context(&request_context, &request),
+            ));
         }
     };
     let registry = if let Some(access) = access {
         let claims = match authorize_database_access(
             &state,
-            &headers,
+            headers,
             &state.db_name,
             access.requires_write(),
         ) {
             Ok(claims) => claims,
-            Err(status) => return status.into_response(),
+            Err(_) if is_notification => return Ok(None),
+            Err(status) => return Err(status),
         };
         if access.requires_admin() {
             if let Some(claims) = claims.as_ref() {
                 if let Err(status) = ensure_admin_access(&state, claims) {
-                    return status.into_response();
+                    if is_notification {
+                        return Ok(None);
+                    }
+                    return Err(status);
                 }
             }
         }
@@ -4968,14 +5036,13 @@ async fn mcp_handler(
             Ok(engine) => engine,
             Err(error) => {
                 if is_notification {
-                    return StatusCode::ACCEPTED.into_response();
+                    return Ok(None);
                 }
-                return Json(copperdb_mcp::McpResponse::error(
-                    request.id.unwrap_or(serde_json::Value::Null),
+                return Ok(Some(copperdb_mcp::McpResponse::error(
+                    request.id.flatten().unwrap_or(serde_json::Value::Null),
                     -32000,
                     error,
-                ))
-                .into_response();
+                )));
             }
         };
         copperdb_mcp::ToolRegistry::with_engine_and_roles(engine, roles_for_claims(claims.as_ref()))
@@ -4987,16 +5054,29 @@ async fn mcp_handler(
     })
     .await
     {
-        Ok(_) if is_notification => StatusCode::ACCEPTED.into_response(),
-        Ok(response) => Json(response).into_response(),
-        Err(_) if is_notification => StatusCode::ACCEPTED.into_response(),
-        Err(error) => Json(copperdb_mcp::McpResponse::error(
+        Ok(_) if is_notification => Ok(None),
+        Ok(response) => Ok(Some(response)),
+        Err(_) if is_notification => Ok(None),
+        Err(error) => Ok(Some(copperdb_mcp::McpResponse::error(
             serde_json::Value::Null,
             -32000,
             error.to_string(),
-        ))
-        .into_response(),
+        ))),
     }
+}
+
+fn mcp_authorization_error(id: serde_json::Value, status: StatusCode) -> copperdb_mcp::McpResponse {
+    let (code, message) = match status {
+        StatusCode::UNAUTHORIZED => (-32001, "Unauthorized"),
+        StatusCode::FORBIDDEN => (-32003, "Forbidden"),
+        _ => (-32603, "Internal error"),
+    };
+    copperdb_mcp::McpResponse::error_with_data(
+        id,
+        code,
+        message,
+        Some(serde_json::json!({"httpStatus": status.as_u16()})),
+    )
 }
 
 #[cfg(test)]
