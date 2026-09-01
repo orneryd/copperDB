@@ -8,7 +8,7 @@ Implement secure, cancellable MCP transport and durable database-scoped `store`,
 
 ## Current Defects
 
-Tool handlers remain ad hoc rather than typed and async, and `find_similar` is a misleading fulltext call. HTTP still lacks sessions. The six durable production tools and stdio transport are not implemented.
+Tool handlers remain ad hoc rather than typed and async, and `find_similar` is a misleading fulltext call. HTTP still lacks Streamable HTTP Origin validation. The six durable production tools and stdio transport are not implemented.
 
 ## Phases
 
@@ -31,7 +31,8 @@ Tool handlers remain ad hoc rather than typed and async, and `find_similar` is a
 - Tool calls accept the upstream-compatible `arguments.database` selector and unadvertised `arguments.db` alias, remove both before strict schema validation, fall back to the configured default, and authorize the selected database before opening its engine.
 - JSON-RPC notifications omit `id`, while explicit null IDs remain requests. Notifications execute through the same authorization and tool path, recognize `notifications/initialized`, and return `202 Accepted` with no response body even when dispatch reports a protocol or tool error.
 - JSON-RPC batches are capped at 32 entries, execute sequentially, preserve response order, isolate malformed and unauthorized entries, omit notification entries, reject invalid cardinality with `-32600`, and return an empty `202` response when every entry is a notification.
-- Typed async handlers, session hardening, and production tools remain pending.
+- Successful single initialization responses issue cryptographically random `Mcp-Session-Id` values from a 4,096-entry, sliding 30-minute store. Presented sessions are validated and refreshed, malformed or unknown IDs are rejected, `DELETE /mcp` terminates sessions, and sessionless protocol `2024-11-05` clients remain compatible.
+- Typed async handlers, Streamable HTTP Origin hardening, and production tools remain pending.
 
 ## Tests And Security
 

@@ -2,6 +2,83 @@
 
 use super::*;
 
+#[test]
+fn mcp_session_store_bounds_refreshes_expires_and_terminates_sessions() {
+    let now = Instant::now();
+    let sessions = McpSessionStore::new(Duration::from_secs(10), 2);
+    let first = sessions.create_at(now);
+    let second = sessions.create_at(now + Duration::from_secs(1));
+    let third = sessions.create_at(now + Duration::from_secs(2));
+
+    assert_ne!(first, second);
+    assert_ne!(second, third);
+    assert!(!sessions.validate_at(&first, now + Duration::from_secs(2)));
+    assert!(sessions.validate_at(&second, now + Duration::from_secs(2)));
+    assert!(sessions.validate_at(&second, now + Duration::from_secs(11)));
+    assert!(!sessions.validate_at(&second, now + Duration::from_secs(22)));
+    assert!(sessions.terminate(&third));
+    assert!(!sessions.terminate(&third));
+
+    let defaults = McpSessionStore::new(Duration::ZERO, 0);
+    assert_eq!(defaults.ttl, DEFAULT_MCP_SESSION_TTL);
+    assert_eq!(defaults.max_sessions, 1);
+    let session_id = defaults.create_at(now);
+    assert!(uuid::Uuid::parse_str(&session_id).is_ok());
+    assert!(defaults.validate_at(
+        &session_id,
+        now + DEFAULT_MCP_SESSION_TTL - Duration::from_nanos(1)
+    ));
+}
+
+#[test]
+fn mcp_session_header_rejects_empty_non_visible_and_oversized_values() {
+    use axum::http::HeaderValue;
+
+    let mut headers = HeaderMap::new();
+    assert_eq!(mcp_session_id(&headers), Ok(None));
+
+    headers.insert(MCP_SESSION_ID_HEADER, HeaderValue::from_static("session-1"));
+    assert_eq!(mcp_session_id(&headers), Ok(Some("session-1")));
+
+    for value in [
+        HeaderValue::from_static(" "),
+        HeaderValue::from_static(" session-1"),
+        HeaderValue::from_bytes(b"session\t1").unwrap(),
+        HeaderValue::from_str(&"x".repeat(MAX_MCP_SESSION_ID_BYTES + 1)).unwrap(),
+    ] {
+        headers.insert(MCP_SESSION_ID_HEADER, value);
+        assert_eq!(mcp_session_id(&headers), Err(StatusCode::BAD_REQUEST));
+    }
+
+    headers.clear();
+    headers.append(MCP_SESSION_ID_HEADER, HeaderValue::from_static("first"));
+    headers.append(MCP_SESSION_ID_HEADER, HeaderValue::from_static("second"));
+    assert_eq!(mcp_session_id(&headers), Err(StatusCode::BAD_REQUEST));
+}
+
+#[tokio::test]
+async fn mcp_sessions_support_concurrent_clients_without_id_collisions() {
+    let sessions = Arc::new(McpSessionStore::new(Duration::from_secs(10), 64));
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..64 {
+        let sessions = Arc::clone(&sessions);
+        tasks.spawn(async move {
+            let session_id = sessions.create();
+            assert!(sessions.validate(&session_id));
+            session_id
+        });
+    }
+
+    let mut session_ids = std::collections::BTreeSet::new();
+    while let Some(result) = tasks.join_next().await {
+        assert!(session_ids.insert(result.unwrap()));
+    }
+    assert_eq!(session_ids.len(), 64);
+    for session_id in session_ids {
+        assert!(sessions.terminate(&session_id));
+    }
+}
+
 #[tokio::test]
 async fn mcp_run_cypher_requires_admin_access() {
     use axum::{body::Body, http::Request};
@@ -294,6 +371,116 @@ async fn mcp_protocol_methods_do_not_require_database_access() {
         payload["result"]["protocolVersion"],
         copperdb_mcp::MCP_PROTOCOL_VERSION
     );
+}
+
+#[tokio::test]
+async fn mcp_http_sessions_initialize_refresh_terminate_and_preserve_legacy_clients() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let mut state = AppState::default();
+    state.auth.security_enabled = false;
+    let app = build_router(Arc::new(state));
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "initialize",
+        "params": {"protocolVersion": copperdb_mcp::MCP_PROTOCOL_VERSION}
+    })
+    .to_string();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(initialize.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let session_id = response.headers()[MCP_SESSION_ID_HEADER]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(uuid::Uuid::parse_str(&session_id).is_ok());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .header(MCP_SESSION_ID_HEADER, &session_id)
+                .body(Body::from(
+                    serde_json::json!({"jsonrpc": "2.0", "id": 5, "method": "tools/list"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get(MCP_SESSION_ID_HEADER).is_none());
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .header(MCP_SESSION_ID_HEADER, &session_id)
+                .body(Body::from(initialize.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::delete("/mcp")
+                .header(MCP_SESSION_ID_HEADER, &session_id)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .header(MCP_SESSION_ID_HEADER, &session_id)
+                .body(Body::from(initialize.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let response = app
+        .clone()
+        .oneshot(Request::delete("/mcp").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = app
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"jsonrpc": "2.0", "id": 6, "method": "tools/list"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]

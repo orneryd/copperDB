@@ -8,7 +8,7 @@ use async_graphql_axum::GraphQLRequest;
 use axum::{
     body::Body,
     extract::{rejection::JsonRejection, DefaultBodyLimit, MatchedPath, Path, Query, State},
-    http::{header, HeaderMap, Method, Request, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{any, delete, get, post, post_service},
@@ -216,6 +216,7 @@ pub struct AppState {
     pub telemetry: Arc<Telemetry>,
     /// Owner-maintained HTTP lifecycle counters.
     pub http_counters: Arc<HttpCounters>,
+    mcp_sessions: Arc<McpSessionStore>,
     /// Owner-maintained Bolt protocol counters, populated only when Bolt is enabled.
     pub bolt_counters: Arc<BoltRuntimeCounters>,
     /// Whether this process runs the Bolt protocol listener.
@@ -241,6 +242,79 @@ pub struct HttpCounters {
     requests: AtomicU64,
     errors: AtomicU64,
     active: AtomicU64,
+}
+
+const DEFAULT_MCP_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
+const DEFAULT_MAX_MCP_SESSIONS: usize = 4096;
+const MCP_SESSION_ID_HEADER: &str = "mcp-session-id";
+const MAX_MCP_SESSION_ID_BYTES: usize = 128;
+
+struct McpSessionStore {
+    sessions: Mutex<HashMap<String, Instant>>,
+    ttl: Duration,
+    max_sessions: usize,
+}
+
+impl Default for McpSessionStore {
+    fn default() -> Self {
+        Self::new(DEFAULT_MCP_SESSION_TTL, DEFAULT_MAX_MCP_SESSIONS)
+    }
+}
+
+impl McpSessionStore {
+    fn new(ttl: Duration, max_sessions: usize) -> Self {
+        Self {
+            sessions: Mutex::new(HashMap::new()),
+            ttl: if ttl.is_zero() {
+                DEFAULT_MCP_SESSION_TTL
+            } else {
+                ttl
+            },
+            max_sessions: max_sessions.max(1),
+        }
+    }
+
+    fn create(&self) -> String {
+        self.create_at(Instant::now())
+    }
+
+    fn create_at(&self, now: Instant) -> String {
+        let mut sessions = self.sessions.lock();
+        sessions.retain(|_, expires_at| *expires_at > now);
+        if sessions.len() >= self.max_sessions {
+            if let Some(session_id) = sessions
+                .iter()
+                .min_by_key(|(_, expires_at)| **expires_at)
+                .map(|(session_id, _)| session_id.clone())
+            {
+                sessions.remove(&session_id);
+            }
+        }
+        let session_id = uuid::Uuid::new_v4().to_string();
+        sessions.insert(session_id.clone(), now + self.ttl);
+        session_id
+    }
+
+    fn validate(&self, session_id: &str) -> bool {
+        self.validate_at(session_id, Instant::now())
+    }
+
+    fn validate_at(&self, session_id: &str, now: Instant) -> bool {
+        let mut sessions = self.sessions.lock();
+        let Some(expires_at) = sessions.get_mut(session_id) else {
+            return false;
+        };
+        if *expires_at <= now {
+            sessions.remove(session_id);
+            return false;
+        }
+        *expires_at = now + self.ttl;
+        true
+    }
+
+    fn terminate(&self, session_id: &str) -> bool {
+        self.sessions.lock().remove(session_id).is_some()
+    }
 }
 
 struct ActiveHttpRequest {
@@ -720,6 +794,7 @@ impl AppState {
             auth,
             telemetry: Arc::new(Telemetry::new()),
             http_counters: Arc::new(HttpCounters::default()),
+            mcp_sessions: Arc::new(McpSessionStore::default()),
             bolt_counters: Arc::new(BoltRuntimeCounters::default()),
             bolt_enabled: false,
             security: SecurityMiddleware::with_config(SecurityConfig {
@@ -1227,9 +1302,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // ── MCP (Model Context Protocol) ──────────────────────────────────
         .route(
             "/mcp",
-            post(mcp_handler).layer(DefaultBodyLimit::max(
-                copperdb_mcp::DEFAULT_MAX_REQUEST_BYTES,
-            )),
+            post(mcp_handler)
+                .delete(mcp_delete_handler)
+                .layer(DefaultBodyLimit::max(
+                    copperdb_mcp::DEFAULT_MAX_REQUEST_BYTES,
+                )),
         )
         // ── SPA fallback: any unmatched route serves index.html when UI is available ──
         .fallback(ui_fallback);
@@ -4911,6 +4988,13 @@ async fn mcp_handler(
     if !mcp_accepts_json(&headers) {
         return StatusCode::NOT_ACCEPTABLE.into_response();
     }
+    let session_id = match mcp_session_id(&headers) {
+        Ok(session_id) => session_id,
+        Err(status) => return status.into_response(),
+    };
+    if session_id.is_some_and(|session_id| !state.mcp_sessions.validate(session_id)) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let Json(body) = match body {
         Ok(body) => body,
         Err(rejection)
@@ -4993,11 +5077,55 @@ async fn mcp_handler(
             .into_response()
         }
     };
-    match execute_mcp_request(state, request_context, &headers, request).await {
-        Ok(Some(response)) => Json(response).into_response(),
+    let is_initialize = request.method == "initialize";
+    if is_initialize && session_id.is_some() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    match execute_mcp_request(Arc::clone(&state), request_context, &headers, request).await {
+        Ok(Some(response)) => {
+            let create_session = is_initialize && response.error.is_none();
+            let mut response = Json(response).into_response();
+            if create_session {
+                let session_id = state.mcp_sessions.create();
+                response.headers_mut().insert(
+                    MCP_SESSION_ID_HEADER,
+                    HeaderValue::from_str(&session_id).expect("UUID session ID is a valid header"),
+                );
+            }
+            response
+        }
         Ok(None) => StatusCode::ACCEPTED.into_response(),
         Err(status) => status.into_response(),
     }
+}
+
+async fn mcp_delete_handler(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let session_id = match mcp_session_id(&headers) {
+        Ok(Some(session_id)) => session_id,
+        Ok(None) | Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    if state.mcp_sessions.terminate(session_id) {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+fn mcp_session_id(headers: &HeaderMap) -> Result<Option<&str>, StatusCode> {
+    if headers.get_all(MCP_SESSION_ID_HEADER).iter().count() > 1 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let Some(value) = headers.get(MCP_SESSION_ID_HEADER) else {
+        return Ok(None);
+    };
+    let session_id = value.to_str().map_err(|_| StatusCode::BAD_REQUEST)?;
+    if session_id.is_empty()
+        || session_id.len() > MAX_MCP_SESSION_ID_BYTES
+        || !session_id.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(Some(session_id))
 }
 
 fn mcp_accepts_json(headers: &HeaderMap) -> bool {
