@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use thiserror::Error;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
@@ -790,6 +792,140 @@ impl ToolHandler for FindSimilarHandler {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoreArgs {
+    content: String,
+    #[serde(default)]
+    labels: Vec<String>,
+    #[serde(default, rename = "type")]
+    node_type: Option<String>,
+    title: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    metadata: serde_json::Map<String, serde_json::Value>,
+    #[serde(default, rename = "database")]
+    _database: Option<String>,
+}
+
+struct StoreHandler;
+
+#[async_trait]
+impl ToolHandler for StoreHandler {
+    async fn call(
+        &self,
+        context: ToolExecutionContext,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let arguments: StoreArgs =
+            serde_json::from_value(arguments).map_err(|error| error.to_string())?;
+        if arguments.content.is_empty() {
+            return Err("content is required".into());
+        }
+        let labels = store_labels(arguments.labels, arguments.node_type)?;
+        let title = arguments
+            .title
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| generate_title(&arguments.content, 100));
+        let mut properties = serde_json::Map::from_iter([
+            ("title".into(), serde_json::Value::String(title.clone())),
+            (
+                "content".into(),
+                serde_json::Value::String(arguments.content),
+            ),
+            (
+                "created_at".into(),
+                serde_json::Value::String(
+                    OffsetDateTime::now_utc()
+                        .format(&Rfc3339)
+                        .map_err(|error| error.to_string())?,
+                ),
+            ),
+        ]);
+        if !arguments.tags.is_empty() {
+            properties.insert("tags".into(), serde_json::json!(arguments.tags));
+        }
+        properties.extend(arguments.metadata);
+        for reserved in ["embedding", "embeddings", "vector"] {
+            properties.remove(reserved);
+        }
+
+        let engine = context.engine.ok_or("no graph engine configured")?;
+        let query = format!(
+            "CREATE (n:{}) SET n += $props RETURN elementId(n) AS id",
+            labels.join(":")
+        );
+        let result = tokio::task::spawn_blocking(move || {
+            let mut transaction = engine.begin_storage_transaction()?;
+            let result = engine.execute_in_storage_transaction_as_with_context(
+                &context.request_context,
+                &mut transaction,
+                &query,
+                HashMap::from([("props".into(), serde_json::Value::Object(properties))]),
+                &context.roles,
+            )?;
+            transaction.commit()?;
+            Ok::<_, copperdb_engine::CopperDbError>(result)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("failed to store node: {error}"))?;
+        let id = result
+            .rows
+            .first()
+            .and_then(|row| row.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or("store returned invalid node id")?;
+        Ok(serde_json::json!({
+            "id": id,
+            "title": title,
+            "embedded": true
+        }))
+    }
+}
+
+fn store_labels(labels: Vec<String>, node_type: Option<String>) -> Result<Vec<String>, String> {
+    let labels = if labels.is_empty() {
+        vec![node_type
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| "Memory".into())]
+    } else {
+        labels
+    };
+    for label in &labels {
+        let mut characters = label.chars();
+        if !characters
+            .next()
+            .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
+            || !characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+        {
+            return Err(format!(
+                "invalid label: {label:?} (must be a valid identifier)"
+            ));
+        }
+    }
+    Ok(labels)
+}
+
+fn generate_title(content: &str, max_characters: usize) -> String {
+    let title = content
+        .split_once('\n')
+        .map_or(content, |(first_line, _)| first_line)
+        .trim();
+    if title.chars().count() <= max_characters {
+        return title.into();
+    }
+    if max_characters <= 3 {
+        return title.chars().take(max_characters).collect();
+    }
+    format!(
+        "{}...",
+        title.chars().take(max_characters - 3).collect::<String>()
+    )
+}
+
 /// Built-in copperdb MCP tools.
 pub fn copperdb_tools() -> Vec<Tool> {
     copperdb_tools_with_access()
@@ -800,6 +936,28 @@ pub fn copperdb_tools() -> Vec<Tool> {
 
 fn copperdb_tools_with_access() -> Vec<(Tool, ToolAccess, Arc<dyn ToolHandler>)> {
     vec![
+        (
+            Tool {
+                name: "store".into(),
+                description: "Store a piece of knowledge, decision, or information as a labeled node in the graph. Returns its node ID for future reference.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "minLength": 1, "description": "The main content to store."},
+                        "labels": {"type": "array", "items": {"type": "string"}, "description": "Node labels. Takes precedence over type."},
+                        "type": {"type": "string", "description": "Single node label used when labels is omitted. Defaults to Memory."},
+                        "title": {"type": "string", "description": "Optional title. Generated from content when omitted."},
+                        "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags stored on the node."},
+                        "metadata": {"type": "object", "description": "Additional node properties.", "additionalProperties": true},
+                        "database": {"type": "string", "description": "Database name to use. If omitted, uses the server's configured default database."}
+                    },
+                    "required": ["content"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolAccess::Write,
+            Arc::new(StoreHandler),
+        ),
         (
             Tool {
                 name: "run_cypher".into(),
@@ -917,7 +1075,7 @@ mod tests {
 
         assert_eq!(responses.len(), 5);
         assert_eq!(responses[0]["id"], 1);
-        assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 3);
         assert_eq!(responses[1].as_array().unwrap().len(), 1);
         assert_eq!(responses[1][0]["id"], 2);
         assert_eq!(responses[2]["error"]["code"], -32600);
@@ -946,8 +1104,8 @@ mod tests {
     #[test]
     fn test_tool_registry_default_tools() {
         let registry = ToolRegistry::new();
-        assert_eq!(registry.len(), 2);
-        for name in ["run_cypher", "find_similar"] {
+        assert_eq!(registry.len(), 3);
+        for name in ["store", "run_cypher", "find_similar"] {
             let tool = registry.get(name).expect("built-in tool");
             assert_eq!(
                 tool.input_schema["properties"]["database"]["type"],
@@ -974,7 +1132,109 @@ mod tests {
                 Arc::new(EchoHandler),
             )
             .unwrap();
-        assert_eq!(registry.len(), 3);
+        assert_eq!(registry.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn store_persists_upstream_fields_and_audits_the_transaction() {
+        let engine = Arc::new(copperdb_engine::CopperDb::open_temporary().unwrap());
+        let registry = ToolRegistry::with_engine_and_roles(engine.clone(), vec!["admin".into()]);
+        let request = McpRequest::new(
+            22,
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "store",
+                "arguments": {
+                    "content": "First line\nSecond line should not become title",
+                    "labels": ["Note", "Knowledge"],
+                    "type": "Ignored",
+                    "tags": ["alpha", "beta"],
+                    "metadata": {
+                        "owner": "alice",
+                        "embedding": [1, 2, 3],
+                        "embeddings": {"default": [1, 2, 3]},
+                        "vector": "drop-me"
+                    }
+                }
+            })),
+        );
+
+        assert_eq!(
+            registry.required_access(&request).unwrap(),
+            Some(ToolAccess::Write)
+        );
+        let response = registry.dispatch(&request).await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let result = response.result.unwrap();
+        assert_eq!(result["title"], "First line");
+        assert_eq!(result["embedded"], true);
+        let id = result["id"].as_str().expect("stored node id");
+        let node = engine
+            .storage()
+            .get_node_record(id)
+            .unwrap()
+            .expect("persisted node");
+        assert_eq!(node.labels, vec!["Note", "Knowledge"]);
+        assert_eq!(node.properties["title"], "First line");
+        assert_eq!(
+            node.properties["content"],
+            "First line\nSecond line should not become title"
+        );
+        assert_eq!(node.properties["owner"], "alice");
+        assert_eq!(
+            node.properties["tags"],
+            serde_json::json!(["alpha", "beta"])
+        );
+        assert!(node.properties["created_at"]
+            .as_str()
+            .is_some_and(|created_at| created_at.contains('T') && created_at.ends_with('Z')));
+        for reserved in ["embedding", "embeddings", "vector"] {
+            assert!(!node.properties.contains_key(reserved));
+        }
+        let events = engine.audit_log().events().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type.as_str(), "DATA_CREATE");
+        assert_eq!(events[0].action.as_deref(), Some("CREATE"));
+        assert!(engine.audit_log().verify_chain().unwrap().valid);
+
+        let before = engine.storage().all_node_records().unwrap().len();
+        for (id, invalid_label) in [(23, "123bad"), (24, "Mémoire")] {
+            let invalid = registry
+                .dispatch(&McpRequest::new(
+                    id,
+                    "tools/call",
+                    Some(serde_json::json!({
+                        "name": "store",
+                        "arguments": {"content": "bad", "type": invalid_label}
+                    })),
+                ))
+                .await;
+            assert_eq!(invalid.error.unwrap().code, -32000);
+        }
+        assert_eq!(engine.storage().all_node_records().unwrap().len(), before);
+
+        let long_title = "é".repeat(101);
+        let default_label = registry
+            .dispatch(&McpRequest::new(
+                25,
+                "tools/call",
+                Some(serde_json::json!({
+                    "name": "store",
+                    "arguments": {"content": long_title}
+                })),
+            ))
+            .await;
+        assert!(default_label.error.is_none(), "{:?}", default_label.error);
+        let default_result = default_label.result.unwrap();
+        let generated_title = default_result["title"].as_str().unwrap();
+        assert_eq!(generated_title.chars().count(), 100);
+        assert!(generated_title.ends_with("..."));
+        let default_node = engine
+            .storage()
+            .get_node_record(default_result["id"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(default_node.labels, vec!["Memory"]);
     }
 
     #[tokio::test]
@@ -1212,7 +1472,7 @@ mod tests {
         let resp = registry.dispatch(&req).await;
         assert!(resp.error.is_none());
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().len();
-        assert_eq!(tools, 2);
+        assert_eq!(tools, 3);
     }
 
     #[test]

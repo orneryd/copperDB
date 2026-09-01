@@ -86,7 +86,7 @@ pub(crate) fn is_keyword(s: &str) -> bool {
 
 /// Determine the dominant `QueryType` from all parsed clauses.
 ///
-/// Priority (highest wins): Delete > Remove > Set > Merge > Create > Match > With > Return
+/// Priority (highest wins): Delete > Remove > Create > Set > Merge > Match > With > Return
 pub(crate) fn dominant_query_type(clauses: &[Clause]) -> QueryType {
     fn priority(c: &Clause) -> u8 {
         match c {
@@ -110,9 +110,9 @@ pub(crate) fn dominant_query_type(clauses: &[Clause]) -> QueryType {
             | Clause::ShowPromotionPolicies(_) => 7,
             Clause::Delete(_) => 6,
             Clause::Remove(_) => 5,
-            Clause::Set(_) => 4,
-            Clause::Merge(_) => 3,
-            Clause::Create(_) => 2,
+            Clause::Create(_) => 4,
+            Clause::Set(_) => 3,
+            Clause::Merge(_) => 2,
             Clause::Match(_) | Clause::OptionalMatch(_) => 1,
             Clause::With(_) => 0,
             _ => 0,

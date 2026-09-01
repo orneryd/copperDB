@@ -8,7 +8,7 @@ Implement secure, cancellable MCP transport and durable database-scoped `store`,
 
 ## Current Defects
 
-`find_similar` remains a misleading fulltext call. The six durable production tools are not implemented.
+`find_similar` remains a misleading fulltext call. The durable `recall`, `discover`, `link`, `task`, and `tasks` tools are not implemented.
 
 ## Phases
 
@@ -35,7 +35,8 @@ Implement secure, cancellable MCP transport and durable database-scoped `store`,
 - MCP requests without an `Origin` header remain compatible with non-browser clients. Browser-originated POST and DELETE requests require exactly one HTTP(S) Origin matching exactly one direct Host authority; malformed, cross-host, and ambiguous headers fail with `403` before session or protocol processing.
 - Tool registration atomically binds each immutable descriptor to its compiled schema, access requirement, and typed async handler. Discovery, authorization, validation, and execution therefore resolve through one entry, while execution contexts expose cancellation, the selected graph engine, and authenticated roles.
 - The exclusive `--mcp-stdio` subprocess mode implements the protocol's newline-delimited UTF-8 framing without starting network listeners. It keeps stdout JSON-only, sends no response for notifications, supports bounded batches, enforces the 10 MiB request ceiling without unbounded reads, recovers at the next message after malformed or oversized input, honors per-call database selection, and applies a 30-second cancellation deadline. Local process-launch permission is its admin authority boundary.
-- Production tools remain pending.
+- The production `store` tool persists an upstream-compatible labeled knowledge node in one owned storage transaction, applies label/type/default precedence, generates bounded titles, flattens metadata while removing caller-supplied vector fields, returns the durable element ID, and records a chained `DATA_CREATE` audit event. HTTP authorization requires database write access before opening the selected engine, and stdio retains its local admin boundary.
+- Five production tools remain pending.
 
 ## Tests And Security
 

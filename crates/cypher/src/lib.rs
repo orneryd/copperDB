@@ -1547,6 +1547,15 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_create_with_set_is_create() {
+        let p = Parser::new();
+        let q = p
+            .parse("CREATE (n:Person) SET n.name = 'Alice' RETURN n")
+            .unwrap();
+        assert!(matches!(q.query_type, QueryType::Create));
+    }
+
+    #[test]
     fn test_parse_return_clause() {
         let p = Parser::new();
         let q = p.parse("MATCH (n) RETURN n").unwrap();

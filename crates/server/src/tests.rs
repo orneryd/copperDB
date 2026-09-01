@@ -289,6 +289,132 @@ async fn mcp_tool_calls_select_database_with_default_fallback() {
 }
 
 #[tokio::test]
+async fn mcp_store_requires_write_access_and_routes_to_the_selected_database() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let selected_database = "mcp-store-selected";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut state = AppState::default();
+    state
+        .db_manager
+        .create(
+            selected_database,
+            temp_dir
+                .path()
+                .join(selected_database)
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .unwrap();
+    state.auth = AuthState::from_storage_path(
+        unique_auth_path(),
+        true,
+        true,
+        "admin".into(),
+        "password".into(),
+        "test-secret".into(),
+    )
+    .unwrap();
+    let (viewer_token, editor_token) = {
+        let auth = state.auth.open_authenticator().unwrap();
+        for (role, read, write) in [
+            (copperdb_auth::ROLE_VIEWER, true, false),
+            (copperdb_auth::ROLE_EDITOR, true, true),
+        ] {
+            auth.allowlist
+                .save_role_databases(role, vec![selected_database.into()])
+                .unwrap();
+            auth.privileges
+                .save_privilege(role, selected_database, read, write)
+                .unwrap();
+        }
+        auth.create_user(
+            "store-viewer",
+            "password",
+            vec![copperdb_auth::ROLE_VIEWER.into()],
+        )
+        .unwrap();
+        auth.create_user(
+            "store-editor",
+            "password",
+            vec![copperdb_auth::ROLE_EDITOR.into()],
+        )
+        .unwrap();
+        (
+            auth.authenticate("store-viewer", "password")
+                .unwrap()
+                .0
+                .access_token,
+            auth.authenticate("store-editor", "password")
+                .unwrap()
+                .0
+                .access_token,
+        )
+    };
+    let state = Arc::new(state);
+    let app = build_router(Arc::clone(&state));
+    let request_body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 701,
+        "method": "tools/call",
+        "params": {
+            "name": "store",
+            "arguments": {
+                "database": selected_database,
+                "content": "Selected database knowledge",
+                "type": "Memory"
+            }
+        }
+    })
+    .to_string();
+
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {viewer_token}"))
+                .body(Body::from(request_body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    assert!(!state.engine_cache.read().contains_key(selected_database));
+
+    let allowed = app
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {editor_token}"))
+                .body(Body::from(request_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(allowed.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(payload["error"].is_null(), "{payload}");
+    assert_eq!(payload["result"]["title"], "Selected database knowledge");
+    assert_eq!(payload["result"]["embedded"], true);
+    let nodes = open_engine(&state, selected_database)
+        .unwrap()
+        .storage()
+        .get_nodes_by_label("Memory")
+        .unwrap();
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(
+        nodes[0].properties["content"],
+        "Selected database knowledge"
+    );
+    assert!(!state.engine_cache.read().contains_key(&state.db_name));
+}
+
+#[tokio::test]
 async fn local_mcp_dispatch_selects_the_requested_database() {
     let state = Arc::new(AppState::default());
     let database = "stdio_target";
@@ -949,7 +1075,7 @@ async fn mcp_http_batches_preserve_order_and_omit_notifications() {
     let responses = payload.as_array().unwrap();
     assert_eq!(responses.len(), 3);
     assert_eq!(responses[0]["id"], "first");
-    assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 2);
+    assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 3);
     assert_eq!(responses[1]["id"], serde_json::Value::Null);
     assert_eq!(responses[1]["error"]["code"], -32600);
     assert_eq!(responses[2]["id"], "last");
@@ -1156,6 +1282,14 @@ async fn apoc_load_json_uses_explicit_rooted_file_import_grant() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("payload.json"), br#"[{"id":1},{"id":2}]"#).unwrap();
     let mut state = AppState::default();
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager
+        .create(
+            "copperdb",
+            root.path().join("database").to_string_lossy().into_owned(),
+        )
+        .unwrap();
+    state.db_manager = db_manager;
     let mut config = RuntimeConfig::default();
     config.packages.enabled = vec![copperdb_apoc::PACKAGE_ID.into()];
     config.packages.grants.insert(
