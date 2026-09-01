@@ -160,6 +160,301 @@ impl CopperDb {
         ))
     }
 
+    pub fn discover_with_context(
+        &self,
+        request_context: &RequestContext,
+        request: &DiscoverRequest,
+        roles: &[String],
+    ) -> Result<DiscoverOutcome, CopperDbError> {
+        request_context.check_active()?;
+        let started = Instant::now();
+        let result = (|| {
+            let chunks = copperdb_textchunk::chunk_by_chars(&request.text, 512, 50)
+                .map_err(|error| CopperDbError::Config(error.to_string()))?
+                .into_iter()
+                .take(32)
+                .map(|chunk| chunk.text)
+                .collect::<Vec<_>>();
+            let embeddings = if self.config.runtime_config.vector_enabled {
+                self.embedding_runtime
+                    .embed_queries_with_context(request_context, &chunks)
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+            self.discover_with_query_vectors(
+                request_context,
+                &chunks,
+                &request.labels,
+                request.limit,
+                request.min_similarity,
+                request.depth,
+                roles,
+                embeddings,
+            )
+        })();
+        self.record_query_audit(
+            "MCP discover",
+            "DISCOVER",
+            result.is_ok(),
+            result.as_ref().err().map(ToString::to_string),
+            None,
+            started.elapsed().as_millis() as u64,
+        )?;
+        result
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn discover_with_query_vector(
+        &self,
+        request_context: &RequestContext,
+        text: &str,
+        labels: &[String],
+        limit: usize,
+        min_similarity: f32,
+        depth: usize,
+        roles: &[String],
+        embedding: Option<Vec<f32>>,
+    ) -> Result<DiscoverOutcome, CopperDbError> {
+        self.discover_with_query_vectors(
+            request_context,
+            &[text.to_string()],
+            labels,
+            limit,
+            min_similarity,
+            depth,
+            roles,
+            embedding.map(|vector| vec![vector]),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn discover_with_query_vectors(
+        &self,
+        request_context: &RequestContext,
+        query_chunks: &[String],
+        labels: &[String],
+        limit: usize,
+        min_similarity: f32,
+        depth: usize,
+        roles: &[String],
+        embeddings: Option<Vec<Vec<f32>>>,
+    ) -> Result<DiscoverOutcome, CopperDbError> {
+        request_context.check_active()?;
+        let placement = PlacementKey::default_for_database(&self.config.default_database);
+        let (method, batches) = if let Some(vectors) =
+            embeddings.filter(|vectors| vectors.len() == query_chunks.len() && !vectors.is_empty())
+        {
+            let per_chunk_limit = if query_chunks.len() > 1 {
+                limit.saturating_mul(3).clamp(10, 100)
+            } else {
+                limit.clamp(10, 100)
+            };
+            let mut batches = Vec::new();
+            for (chunk, vector) in query_chunks.iter().zip(vectors) {
+                batches.push(
+                    self.search_fabric_ranked_batch_locally_scoped_with_context_and_roles(
+                        request_context,
+                        &placement,
+                        &SearchQuery::Semantic {
+                            vector,
+                            k: per_chunk_limit,
+                            min_score: 0.0,
+                        },
+                        labels,
+                        &BTreeMap::new(),
+                        roles,
+                    )?,
+                );
+                if self.config.runtime_config.bm25_enabled {
+                    batches.push(
+                        self.search_fabric_ranked_batch_locally_scoped_with_context_and_roles(
+                            request_context,
+                            &placement,
+                            &SearchQuery::FullText {
+                                query: chunk.clone(),
+                                fields: Vec::new(),
+                                limit: per_chunk_limit,
+                            },
+                            labels,
+                            &BTreeMap::new(),
+                            roles,
+                        )?,
+                    );
+                }
+            }
+            ("vector", batches)
+        } else {
+            let text = query_chunks.join(" ");
+            let lexical = self.search_fabric_ranked_batch_locally_scoped_with_context_and_roles(
+                request_context,
+                &placement,
+                &SearchQuery::FullText {
+                    query: text,
+                    fields: Vec::new(),
+                    limit,
+                },
+                labels,
+                &BTreeMap::new(),
+                roles,
+            )?;
+            ("keyword", vec![lexical])
+        };
+        let semantic_scores = batches
+            .iter()
+            .filter(|batch| batch.source == "semantic")
+            .flat_map(|batch| {
+                batch
+                    .hits
+                    .iter()
+                    .map(|hit| (hit.global_id.local_id.clone(), hit.score))
+            })
+            .fold(HashMap::<String, f32>::new(), |mut scores, (id, score)| {
+                scores
+                    .entry(id)
+                    .and_modify(|best| *best = best.max(score))
+                    .or_insert(score);
+                scores
+            });
+        let outcome = merge_rrf_search_batches(batches, RrfConfig::new(60.0, limit));
+        let mut hits = Vec::new();
+        for hit in outcome.results {
+            let Some(node) = self.get_readable_node_with_context(
+                request_context,
+                &hit.global_id.local_id,
+                roles,
+            )?
+            else {
+                continue;
+            };
+            let similarity = semantic_scores
+                .get(&node.id)
+                .copied()
+                .unwrap_or_else(|| hit.best_score / (1.0 + hit.best_score))
+                .clamp(0.0, 1.0);
+            if similarity < min_similarity {
+                continue;
+            }
+            let content_preview = hit.snippet.or_else(|| discover_content_preview(&node));
+            hits.push(DiscoverHit {
+                id: node.id,
+                labels: node.labels,
+                content_preview,
+                properties: serde_json::Map::from_iter(node.properties),
+                similarity,
+                related: Vec::new(),
+            });
+        }
+        hits.sort_by(|left, right| right.similarity.total_cmp(&left.similarity));
+        if depth > 1 {
+            for hit in &mut hits {
+                hit.related = self.discover_related_nodes_with_context(
+                    request_context,
+                    &hit.id,
+                    depth - 1,
+                    roles,
+                )?;
+            }
+        }
+        Ok(DiscoverOutcome { hits, method })
+    }
+
+    fn discover_related_nodes_with_context(
+        &self,
+        request_context: &RequestContext,
+        start_id: &str,
+        max_depth: usize,
+        roles: &[String],
+    ) -> Result<Vec<DiscoverRelatedNode>, CopperDbError> {
+        const MAX_RELATED: usize = 50;
+
+        let mut visited = HashSet::from([start_id.to_string()]);
+        let mut queue =
+            VecDeque::from([(start_id.to_string(), 0usize, vec![start_id.to_string()])]);
+        let mut related = Vec::new();
+        while let Some((current_id, distance, path)) = queue.pop_front() {
+            request_context.check_active()?;
+            if distance >= max_depth || related.len() >= MAX_RELATED {
+                continue;
+            }
+            let mut adjacent = self
+                .storage
+                .get_edges_from_node(&current_id)?
+                .into_iter()
+                .map(|edge| (edge, "outgoing"))
+                .chain(
+                    self.storage
+                        .get_edges_to_node(&current_id)?
+                        .into_iter()
+                        .map(|edge| (edge, "incoming")),
+                )
+                .collect::<Vec<_>>();
+            adjacent.sort_by(
+                |(left_edge, left_direction), (right_edge, right_direction)| {
+                    let left_order = usize::from(*left_direction == "incoming");
+                    let right_order = usize::from(*right_direction == "incoming");
+                    left_order
+                        .cmp(&right_order)
+                        .then(left_edge.id.cmp(&right_edge.id))
+                },
+            );
+            for (edge, direction) in adjacent {
+                request_context.check_active()?;
+                let edge_access = self
+                    .storage
+                    .get_knowledge_policy_access_metadata(&edge.id)?;
+                if !self.eval.edge_visible_with_access_metadata(
+                    &edge,
+                    edge_access,
+                    &HashMap::new(),
+                )? {
+                    continue;
+                }
+                let neighbor_id = if direction == "outgoing" {
+                    &edge.end_node
+                } else {
+                    &edge.start_node
+                };
+                if !visited.insert(neighbor_id.clone()) {
+                    continue;
+                }
+                let Some(node) =
+                    self.get_readable_node_with_context(request_context, neighbor_id, roles)?
+                else {
+                    continue;
+                };
+                let mut next_path = path.clone();
+                next_path.push(neighbor_id.clone());
+                related.push(DiscoverRelatedNode {
+                    id: neighbor_id.clone(),
+                    node_type: node
+                        .labels
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "Node".into()),
+                    title: node
+                        .properties
+                        .get("title")
+                        .or_else(|| node.properties.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    distance: distance + 1,
+                    relationship: edge.edge_type,
+                    direction,
+                    path: next_path.clone(),
+                });
+                queue.push_back((neighbor_id.clone(), distance + 1, next_path));
+                if related.len() >= MAX_RELATED {
+                    break;
+                }
+            }
+        }
+        Ok(related)
+    }
+
     /// Access the underlying storage engine (for subsystems like RetentionManager
     /// that need to share the same storage instance).
     pub fn storage_engine(&self) -> &Arc<copperdb_storage::StorageEngine> {
@@ -1349,6 +1644,21 @@ impl CopperDb {
             .read_fence(transaction_id)
             .map_err(Into::into)
     }
+}
+
+fn discover_content_preview(node: &NodeRecord) -> Option<String> {
+    let content = node
+        .properties
+        .get("content")
+        .or_else(|| node.properties.get("text"))?
+        .as_str()?;
+    if content.chars().count() <= 200 {
+        return Some(content.to_string());
+    }
+    Some(format!(
+        "{}...",
+        content.chars().take(197).collect::<String>()
+    ))
 }
 
 fn matched_fulltext_properties(

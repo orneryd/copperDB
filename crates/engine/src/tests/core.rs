@@ -1710,6 +1710,132 @@ fn engine_plans_distributed_reads_and_writes_from_storage_topology() {
 }
 
 #[test]
+fn discover_falls_back_to_bounded_policy_aware_keyword_results() {
+    use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind, NodeRecord};
+
+    let storage = Arc::new(StorageEngine::open_temporary().unwrap());
+    storage
+        .persist_index_definition(&IndexDefinition {
+            name: "memory_text".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Memory".into(),
+            properties: vec!["title".into(), "content".into()],
+            kind: IndexKind::FullText,
+        })
+        .unwrap();
+    storage
+        .persist_index_definition(&IndexDefinition {
+            name: "task_text".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Task".into(),
+            properties: vec!["title".into(), "content".into()],
+            kind: IndexKind::FullText,
+        })
+        .unwrap();
+    for (id, label, title, content) in [
+        (
+            "memory:graph",
+            "Memory",
+            "Graph Databases",
+            "graph relationships nodes",
+        ),
+        (
+            "task:graph",
+            "Task",
+            "Graph Task",
+            "graph relationships nodes",
+        ),
+        ("note:out", "Note", "Outgoing Context", "supporting context"),
+        ("note:in", "Note", "Incoming Context", "supporting context"),
+        ("note:two", "Note", "Two Hop Context", "supporting context"),
+    ] {
+        storage
+            .put_node_record(&NodeRecord {
+                id: id.into(),
+                labels: vec![label.into()],
+                properties: BTreeMap::from([
+                    ("title".into(), serde_json::json!(title)),
+                    ("content".into(), serde_json::json!(content)),
+                ]),
+                named_embeddings: BTreeMap::new(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+    }
+    for edge in [
+        copperdb_storage::EdgeRecord {
+            id: "edge:out".into(),
+            start_node: "memory:graph".into(),
+            end_node: "note:out".into(),
+            edge_type: "RELATES_TO".into(),
+            properties: BTreeMap::new(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        },
+        copperdb_storage::EdgeRecord {
+            id: "edge:in".into(),
+            start_node: "note:in".into(),
+            end_node: "memory:graph".into(),
+            edge_type: "SUPPORTS".into(),
+            properties: BTreeMap::new(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        },
+        copperdb_storage::EdgeRecord {
+            id: "edge:two".into(),
+            start_node: "note:out".into(),
+            end_node: "note:two".into(),
+            edge_type: "CONTAINS".into(),
+            properties: BTreeMap::new(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        },
+    ] {
+        storage.put_edge_record(&edge).unwrap();
+    }
+    let mut config = DatabaseConfig::default();
+    config.runtime_config.bm25_enabled = true;
+    config.runtime_config.vector_enabled = false;
+    let db = CopperDb::from_storage(storage, config).unwrap();
+
+    let outcome = db
+        .discover_with_context(
+            &copperdb_util::RequestContext::detached(),
+            &DiscoverRequest {
+                text: "graph relationships".into(),
+                labels: vec!["Memory".into()],
+                limit: 5,
+                min_similarity: 0.0,
+                depth: 3,
+            },
+            &["admin".into()],
+        )
+        .unwrap();
+
+    assert_eq!(outcome.method, "keyword");
+    assert_eq!(outcome.hits.len(), 1);
+    assert_eq!(outcome.hits[0].id, "memory:graph");
+    assert_eq!(outcome.hits[0].labels, ["Memory"]);
+    assert_eq!(outcome.hits[0].properties["title"], "Graph Databases");
+    assert!(outcome.hits[0].content_preview.is_some());
+    assert!(outcome.hits[0].similarity > 0.0 && outcome.hits[0].similarity < 1.0);
+    assert_eq!(outcome.hits[0].related.len(), 3);
+    assert_eq!(outcome.hits[0].related[0].id, "note:out");
+    assert_eq!(outcome.hits[0].related[0].direction, "outgoing");
+    assert_eq!(
+        outcome.hits[0].related[0].path,
+        ["memory:graph", "note:out"]
+    );
+    assert_eq!(outcome.hits[0].related[1].id, "note:in");
+    assert_eq!(outcome.hits[0].related[1].direction, "incoming");
+    assert_eq!(outcome.hits[0].related[2].id, "note:two");
+    assert_eq!(outcome.hits[0].related[2].distance, 2);
+}
+
+#[test]
 fn engine_persists_and_plans_fabric_database_shards() {
     use copperdb_fabric::{
         FabricAggregateOptions, FabricAggregateSpec, FabricPath, FabricPathBatch,

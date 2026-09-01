@@ -351,6 +351,42 @@ pub struct SearchOperationalStatus {
     pub lazy_trigger_needed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoverHit {
+    pub id: String,
+    pub labels: Vec<String>,
+    pub properties: serde_json::Map<String, Value>,
+    pub content_preview: Option<String>,
+    pub similarity: f32,
+    pub related: Vec<DiscoverRelatedNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoverRelatedNode {
+    pub id: String,
+    pub node_type: String,
+    pub title: String,
+    pub distance: usize,
+    pub relationship: String,
+    pub direction: &'static str,
+    pub path: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoverOutcome {
+    pub hits: Vec<DiscoverHit>,
+    pub method: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscoverRequest {
+    pub text: String,
+    pub labels: Vec<String>,
+    pub limit: usize,
+    pub min_similarity: f32,
+    pub depth: usize,
+}
+
 #[derive(Debug)]
 pub struct DistributedQueryResult {
     pub result: QueryResult,

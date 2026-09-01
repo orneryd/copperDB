@@ -454,9 +454,9 @@ async fn mcp_store_requires_write_access_and_routes_to_the_selected_database() {
 #[tokio::test]
 async fn local_mcp_dispatch_selects_the_requested_database() {
     let state = Arc::new(AppState::default());
-    let database = "stdio_target";
-    let storage_path = state.db_manager.default_storage_path(database);
-    state.db_manager.create(database, storage_path).unwrap();
+    let database = format!("stdio-target-{}", uuid::Uuid::new_v4());
+    let storage_path = state.db_manager.default_storage_path(&database);
+    state.db_manager.create(&database, storage_path).unwrap();
     let request = copperdb_mcp::McpRequest::new(
         700,
         "tools/call",
@@ -472,7 +472,7 @@ async fn local_mcp_dispatch_selects_the_requested_database() {
     let response = execute_local_mcp_request(Arc::clone(&state), request).await;
 
     assert!(response.error.is_none(), "{:?}", response.error);
-    assert!(state.engine_cache.read().contains_key(database));
+    assert!(state.engine_cache.read().contains_key(&database));
     assert!(!state.engine_cache.read().contains_key(&state.db_name));
 }
 
@@ -481,16 +481,16 @@ async fn mcp_database_selection_authorizes_target_before_opening_engine() {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
 
-    let denied_database = "mcp-denied";
+    let denied_database = format!("mcp-denied-{}", uuid::Uuid::new_v4());
     let temp_dir = tempfile::tempdir().unwrap();
     let mut state = AppState::default();
     state
         .db_manager
         .create(
-            denied_database,
+            &denied_database,
             temp_dir
                 .path()
-                .join(denied_database)
+                .join(&denied_database)
                 .to_string_lossy()
                 .into_owned(),
         )
@@ -536,8 +536,8 @@ async fn mcp_database_selection_authorizes_target_before_opening_engine() {
                         "id": 3,
                         "method": "tools/call",
                         "params": {
-                            "name": "find_similar",
-                            "arguments": {"text": "blocked", "database": denied_database}
+                            "name": "discover",
+                            "arguments": {"query": "blocked", "database": denied_database}
                         }
                     })
                     .to_string(),
@@ -548,7 +548,7 @@ async fn mcp_database_selection_authorizes_target_before_opening_engine() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert!(!state.engine_cache.read().contains_key(denied_database));
+    assert!(!state.engine_cache.read().contains_key(&denied_database));
 }
 
 #[tokio::test]
@@ -1112,7 +1112,7 @@ async fn mcp_http_batches_preserve_order_and_omit_notifications() {
     let responses = payload.as_array().unwrap();
     assert_eq!(responses.len(), 3);
     assert_eq!(responses[0]["id"], "first");
-    assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 4);
+    assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 5);
     assert_eq!(responses[1]["id"], serde_json::Value::Null);
     assert_eq!(responses[1]["error"]["code"], -32600);
     assert_eq!(responses[2]["id"], "last");

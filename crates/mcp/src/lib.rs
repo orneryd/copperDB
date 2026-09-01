@@ -1121,6 +1121,112 @@ fn sanitize_properties_for_llm(
         .collect()
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DiscoverArgs {
+    query: String,
+    #[serde(default, rename = "type")]
+    node_types: Vec<String>,
+    #[serde(default = "default_search_limit")]
+    limit: usize,
+    #[serde(default)]
+    min_similarity: f32,
+    #[serde(default = "default_discover_depth")]
+    depth: usize,
+    #[serde(default, rename = "database")]
+    _database: Option<String>,
+}
+
+fn default_discover_depth() -> usize {
+    1
+}
+
+struct DiscoverHandler;
+
+#[async_trait]
+impl ToolHandler for DiscoverHandler {
+    async fn call(
+        &self,
+        context: ToolExecutionContext,
+        arguments: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let arguments: DiscoverArgs =
+            serde_json::from_value(arguments).map_err(|error| error.to_string())?;
+        if arguments.query.is_empty() {
+            return Err("query is required".into());
+        }
+        let engine = context.engine.ok_or("no graph engine configured")?;
+        let outcome = tokio::task::spawn_blocking(move || {
+            engine.discover_with_context(
+                &context.request_context,
+                &copperdb_engine::DiscoverRequest {
+                    text: arguments.query,
+                    labels: arguments.node_types,
+                    limit: arguments.limit,
+                    min_similarity: arguments.min_similarity,
+                    depth: arguments.depth,
+                },
+                &context.roles,
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| format!("failed to discover nodes: {error}"))?;
+        let results = outcome
+            .hits
+            .into_iter()
+            .map(|hit| {
+                let node_type = hit.labels.first().map(String::as_str).unwrap_or("Node");
+                let title = hit
+                    .properties
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let mut result = serde_json::Map::from_iter([
+                    ("id".into(), serde_json::json!(hit.id)),
+                    ("type".into(), serde_json::json!(node_type)),
+                    ("title".into(), serde_json::json!(title)),
+                    ("similarity".into(), serde_json::json!(hit.similarity)),
+                ]);
+                if let Some(preview) = hit.content_preview {
+                    result.insert("content_preview".into(), serde_json::json!(preview));
+                }
+                let properties = sanitize_properties_for_llm(&hit.properties);
+                if !properties.is_empty() {
+                    result.insert("properties".into(), serde_json::Value::Object(properties));
+                }
+                if !hit.related.is_empty() {
+                    result.insert(
+                        "related".into(),
+                        serde_json::Value::Array(
+                            hit.related
+                                .into_iter()
+                                .map(|related| {
+                                    serde_json::json!({
+                                        "id": related.id,
+                                        "type": related.node_type,
+                                        "title": related.title,
+                                        "distance": related.distance,
+                                        "relationship": related.relationship,
+                                        "direction": related.direction,
+                                        "path": related.path
+                                    })
+                                })
+                                .collect(),
+                        ),
+                    );
+                }
+                serde_json::Value::Object(result)
+            })
+            .collect::<Vec<_>>();
+        Ok(serde_json::json!({
+            "total": results.len(),
+            "results": results,
+            "method": outcome.method
+        }))
+    }
+}
+
 /// Built-in copperdb MCP tools.
 pub fn copperdb_tools() -> Vec<Tool> {
     copperdb_tools_with_access()
@@ -1172,6 +1278,27 @@ fn copperdb_tools_with_access() -> Vec<(Tool, ToolAccess, Arc<dyn ToolHandler>)>
             },
             ToolAccess::Read,
             Arc::new(RecallHandler),
+        ),
+        (
+            Tool {
+                name: "discover".into(),
+                description: "Find knowledge by meaning, using vector embeddings when available and keyword search as a fallback.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "minLength": 1, "description": "Natural language search query. Searches by meaning, not exact keywords."},
+                        "type": {"type": "array", "items": {"type": "string"}, "description": "Filter results by node types."},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 10, "description": "Maximum number of results."},
+                        "min_similarity": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.0, "description": "Minimum normalized relevance threshold from 0 to 1."},
+                        "depth": {"type": "integer", "minimum": 1, "maximum": 3, "default": 1, "description": "Graph traversal depth for related context."},
+                        "database": {"type": "string", "description": "Database name to use. If omitted, uses the server's configured default database."}
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                }),
+            },
+            ToolAccess::Read,
+            Arc::new(DiscoverHandler),
         ),
         (
             Tool {
@@ -1290,7 +1417,7 @@ mod tests {
 
         assert_eq!(responses.len(), 5);
         assert_eq!(responses[0]["id"], 1);
-        assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 4);
+        assert_eq!(responses[0]["result"]["tools"].as_array().unwrap().len(), 5);
         assert_eq!(responses[1].as_array().unwrap().len(), 1);
         assert_eq!(responses[1][0]["id"], 2);
         assert_eq!(responses[2]["error"]["code"], -32600);
@@ -1319,8 +1446,8 @@ mod tests {
     #[test]
     fn test_tool_registry_default_tools() {
         let registry = ToolRegistry::new();
-        assert_eq!(registry.len(), 4);
-        for name in ["store", "recall", "run_cypher", "find_similar"] {
+        assert_eq!(registry.len(), 5);
+        for name in ["store", "recall", "discover", "run_cypher", "find_similar"] {
             let tool = registry.get(name).expect("built-in tool");
             assert_eq!(
                 tool.input_schema["properties"]["database"]["type"],
@@ -1347,7 +1474,7 @@ mod tests {
                 Arc::new(EchoHandler),
             )
             .unwrap();
-        assert_eq!(registry.len(), 5);
+        assert_eq!(registry.len(), 6);
     }
 
     #[tokio::test]
@@ -1564,6 +1691,82 @@ mod tests {
         let events = engine.audit_log().events().unwrap();
         assert_eq!(events.last().unwrap().event_type.as_str(), "DATA_READ");
         assert_eq!(events.last().unwrap().action.as_deref(), Some("MATCH"));
+        assert!(engine.audit_log().verify_chain().unwrap().valid);
+    }
+
+    #[tokio::test]
+    async fn discover_returns_upstream_keyword_contract_with_read_access() {
+        use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind, NodeRecord};
+
+        let storage = Arc::new(copperdb_storage::StorageEngine::open_temporary().unwrap());
+        storage
+            .persist_index_definition(&IndexDefinition {
+                name: "memory_text".into(),
+                entity_type: IndexEntityType::Node,
+                label: "Memory".into(),
+                properties: vec!["title".into(), "content".into()],
+                kind: IndexKind::FullText,
+            })
+            .unwrap();
+        storage
+            .put_node_record(&NodeRecord {
+                id: "memory:graph".into(),
+                labels: vec!["Memory".into()],
+                properties: std::collections::BTreeMap::from([
+                    ("title".into(), serde_json::json!("Graph Databases")),
+                    (
+                        "content".into(),
+                        serde_json::json!("graph relationships nodes"),
+                    ),
+                    ("embedding".into(), serde_json::json!([1, 2, 3])),
+                ]),
+                named_embeddings: Default::default(),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+        let mut config = copperdb_engine::DatabaseConfig::default();
+        config.runtime_config.bm25_enabled = true;
+        config.runtime_config.vector_enabled = false;
+        let engine = Arc::new(copperdb_engine::CopperDb::from_storage(storage, config).unwrap());
+        let registry = ToolRegistry::with_engine_and_roles(engine.clone(), vec!["reader".into()]);
+        let request = McpRequest::new(
+            29,
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "discover",
+                "arguments": {
+                    "query": "graph relationships",
+                    "type": ["Memory"],
+                    "limit": 5,
+                    "min_similarity": 0.0,
+                    "depth": 1
+                }
+            })),
+        );
+
+        assert_eq!(
+            registry.required_access(&request).unwrap(),
+            Some(ToolAccess::Read)
+        );
+        let response = registry.dispatch(&request).await;
+        assert!(response.error.is_none(), "{:?}", response.error);
+        let result = response.result.unwrap();
+        assert_eq!(result["method"], "keyword");
+        assert_eq!(result["total"], 1);
+        assert_eq!(result["results"][0]["id"], "memory:graph");
+        assert_eq!(result["results"][0]["type"], "Memory");
+        assert_eq!(result["results"][0]["title"], "Graph Databases");
+        assert!(result["results"][0]["content_preview"].is_string());
+        assert!(result["results"][0]["similarity"].as_f64().unwrap() > 0.0);
+        assert!(result["results"][0]["properties"]
+            .get("embedding")
+            .is_none());
+        let events = engine.audit_log().events().unwrap();
+        assert_eq!(events.last().unwrap().event_type.as_str(), "DATA_READ");
+        assert_eq!(events.last().unwrap().action.as_deref(), Some("DISCOVER"));
         assert!(engine.audit_log().verify_chain().unwrap().valid);
     }
 
@@ -1802,7 +2005,7 @@ mod tests {
         let resp = registry.dispatch(&req).await;
         assert!(resp.error.is_none());
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().len();
-        assert_eq!(tools, 4);
+        assert_eq!(tools, 5);
     }
 
     #[test]

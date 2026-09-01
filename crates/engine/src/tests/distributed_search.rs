@@ -236,6 +236,88 @@ fn local_semantic_search_returns_request_cancelled_after_deadline() {
 }
 
 #[test]
+fn discover_vector_similarity_is_cosine_not_rrf() {
+    use copperdb_storage::{
+        IndexDefinition, IndexEntityType, IndexKind, NodeRecord, StorageEngine,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("db");
+    let storage = StorageEngine::open(&data_dir).unwrap();
+    storage
+        .persist_index_definition(&IndexDefinition {
+            name: "memory_embedding".into(),
+            entity_type: IndexEntityType::Node,
+            label: "Memory".into(),
+            properties: vec!["embedding".into()],
+            kind: IndexKind::Vector,
+        })
+        .unwrap();
+    storage
+        .persist_index_options(
+            "memory_embedding",
+            &HashMap::from([(
+                "indexConfig".into(),
+                serde_json::json!({
+                    "vector.dimensions": 2,
+                    "vector.similarity_function": "cosine"
+                }),
+            )]),
+        )
+        .unwrap();
+    for (id, title, embedding) in [
+        ("memory:match", "Match", vec![1.0, 0.0]),
+        ("memory:miss", "Miss", vec![0.0, 1.0]),
+    ] {
+        storage
+            .put_node_record(&NodeRecord {
+                id: id.into(),
+                labels: vec!["Memory".into()],
+                properties: BTreeMap::from([
+                    ("title".into(), serde_json::json!(title)),
+                    ("content".into(), serde_json::json!("vector content")),
+                ]),
+                named_embeddings: BTreeMap::from([("embedding".into(), embedding)]),
+                chunk_embeddings: Vec::new(),
+                embed_meta: Default::default(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+    }
+    drop(storage);
+    let mut config = DatabaseConfig {
+        data_dir: data_dir.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    config.runtime_config.vector_enabled = true;
+    let db = CopperDb::open(config).unwrap();
+
+    let outcome = db
+        .discover_with_query_vector(
+            &copperdb_util::RequestContext::detached(),
+            "ignored by explicit vector",
+            &["Memory".into()],
+            5,
+            0.5,
+            1,
+            &["admin".into()],
+            Some(vec![1.0, 0.0]),
+        )
+        .unwrap();
+
+    assert_eq!(outcome.method, "vector");
+    assert_eq!(outcome.hits.len(), 1);
+    assert_eq!(outcome.hits[0].id, "memory:match");
+    assert!(outcome.hits[0].similarity > 0.99);
+    assert!(outcome.hits[0].similarity <= 1.0);
+    assert_eq!(
+        outcome.hits[0].content_preview.as_deref(),
+        Some("vector content")
+    );
+}
+
+#[test]
 fn local_hybrid_search_fuses_duplicate_lexical_and_semantic_hits() {
     use copperdb_storage::{
         IndexDefinition, IndexEntityType, IndexKind, NodeRecord, StorageEngine,

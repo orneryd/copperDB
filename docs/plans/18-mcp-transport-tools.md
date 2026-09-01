@@ -8,7 +8,7 @@ Implement secure, cancellable MCP transport and durable database-scoped `store`,
 
 ## Current Defects
 
-`find_similar` remains a misleading fulltext call. The durable `recall`, `discover`, `link`, `task`, and `tasks` tools are not implemented.
+`find_similar` remains a compatibility-only fulltext call. The durable `link`, `task`, and `tasks` tools are not implemented.
 
 ## Phases
 
@@ -37,7 +37,8 @@ Implement secure, cancellable MCP transport and durable database-scoped `store`,
 - The exclusive `--mcp-stdio` subprocess mode implements the protocol's newline-delimited UTF-8 framing without starting network listeners. It keeps stdout JSON-only, sends no response for notifications, supports bounded batches, enforces the 10 MiB request ceiling without unbounded reads, recovers at the next message after malformed or oversized input, honors per-call database selection, and applies a 30-second cancellation deadline. Local process-launch permission is its admin authority boundary.
 - The production `store` tool persists an upstream-compatible labeled knowledge node in one owned storage transaction, applies label/type/default precedence, generates bounded titles, flattens metadata while removing caller-supplied vector fields, returns the durable element ID, and records a chained `DATA_CREATE` audit event. HTTP authorization requires database write access before opening the selected engine, and stdio retains its local admin boundary.
 - The production `recall` tool retrieves policy-visible nodes by durable ID or upstream-compatible type, all-tags, RFC3339 `since`, and bounded-limit filters. ID lookup takes precedence over filters, large embedding properties are removed from LLM-facing results, and HTTP callers require database read access.
-- Four production tools remain pending.
+- The production `discover` tool performs policy-filtered hybrid semantic search with normalized keyword fallback, preserves cosine similarity separately from RRF ordering, chunks long queries into bounded embedding batches, hydrates sanitized results, and optionally traverses related context with bounded depth and fan-out. Calls require database read access and emit chained `DATA_READ` audit evidence.
+- Three production tools remain pending.
 
 ## Tests And Security
 

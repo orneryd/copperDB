@@ -387,6 +387,50 @@ impl EmbeddingRuntime {
         Ok(Some(embedding.vector))
     }
 
+    pub(crate) fn embed_queries_with_context(
+        &self,
+        request_context: &RequestContext,
+        texts: &[String],
+    ) -> Result<Option<Vec<Vec<f32>>>, CopperDbError> {
+        request_context.check_active()?;
+        if texts.is_empty()
+            || *self.state.lock().expect("embedding runtime state lock")
+                == EmbeddingRuntimeState::Disabled
+        {
+            return Ok(None);
+        }
+        let embedder = self.ensure_embedder()?;
+        let backend = self.backend.lock().expect("embedding backend lock").clone();
+        let mut observation =
+            EmbeddingObservation::new(&self.provider, &self.model, backend.as_deref());
+        let embeddings = embedder
+            .embed_batch_blocking(texts)
+            .map_err(|error| CopperDbError::Init(format!("query embedding failed: {error}")))?;
+        request_context.check_active()?;
+        if embeddings.len() != texts.len() {
+            return Err(CopperDbError::Init(format!(
+                "query embedding provider returned {} embeddings for {} chunks",
+                embeddings.len(),
+                texts.len()
+            )));
+        }
+        let vectors = embeddings
+            .into_iter()
+            .map(|embedding| {
+                if self.dimensions > 0 && embedding.vector.len() != self.dimensions {
+                    return Err(CopperDbError::Config(format!(
+                        "query embedding dimensions mismatch: expected {}, got {}",
+                        self.dimensions,
+                        embedding.vector.len()
+                    )));
+                }
+                Ok(embedding.vector)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        observation.succeed();
+        Ok(Some(vectors))
+    }
+
     pub(crate) fn drain_one(&self) -> Result<bool, CopperDbError> {
         record_embedding_runtime_gauges(
             self.storage.pending_embeddings_count_snapshot(),
@@ -1024,6 +1068,15 @@ mod tests {
                 .embed_query_with_context(&RequestContext::detached(), "   ")
                 .unwrap(),
             None
+        );
+        assert_eq!(
+            runtime
+                .embed_queries_with_context(
+                    &RequestContext::detached(),
+                    &["first chunk".into(), "second chunk".into()],
+                )
+                .unwrap(),
+            Some(vec![vec![0.25, 0.75], vec![0.25, 0.75]])
         );
     }
 
