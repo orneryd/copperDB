@@ -1,17 +1,30 @@
 //! Representative APOC package loaded through `copperdb-plugin`.
 
+use copperdb_eval::{
+    GraphDirection, GraphNode, ProcedureCallContext, ProcedureDescriptor, ProcedureError,
+    ProcedureMode, ProcedureOutput, Row,
+};
 use copperdb_filter::{FunctionDescriptor, FunctionHandler};
-use copperdb_plugin::{PackageDefinition, PackageDescriptor};
+use copperdb_plugin::{
+    PackageCapability, PackageDefinition, PackageDescriptor, StaticPackageFactory,
+};
 use semver::Version;
 use serde_json::{Map, Number, Value};
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 pub const PACKAGE_ID: &str = "copperdb.apoc";
+const MAX_TRAVERSAL_LEVEL: usize = 64;
+const MAX_VISITED_NODES: usize = 100_000;
+
+pub fn factory() -> StaticPackageFactory {
+    StaticPackageFactory::new(package())
+}
 
 pub fn package() -> PackageDefinition {
     let descriptor =
-        PackageDescriptor::new(PACKAGE_ID, Version::new(1, 0, 0), "copperdb contributors");
+        PackageDescriptor::new(PACKAGE_ID, Version::new(1, 0, 0), "copperdb contributors")
+            .requesting([PackageCapability::QueryRead]);
     PackageDefinition::new(descriptor)
         .with_function(function(
             "apoc.create.uuid",
@@ -69,6 +82,17 @@ pub fn package() -> PackageDefinition {
             "meta",
             Arc::new(|_, args| Ok(meta_type(args))),
         ))
+        .with_procedure(
+            ProcedureDescriptor::extension(
+                "apoc.path.subgraphNodes",
+                std::iter::empty::<&str>(),
+                "apoc.path.subgraphNodes(startNode :: NODE, config = {} :: MAP) :: (node :: NODE)",
+                "Returns nodes reachable from a start node",
+                ProcedureMode::Read,
+                Arc::new(subgraph_nodes),
+            )
+            .requiring_capabilities(["query:read"]),
+        )
 }
 
 fn function(
@@ -269,14 +293,196 @@ fn meta_type(args: &[Value]) -> Value {
     Value::String(kind.into())
 }
 
+#[derive(Debug)]
+struct TraversalConfig {
+    min_level: usize,
+    max_level: usize,
+    direction: GraphDirection,
+    relationship_types: Vec<String>,
+    include_labels: Vec<String>,
+    exclude_labels: Vec<String>,
+    termination_labels: Vec<String>,
+    limit: Option<usize>,
+}
+
+fn subgraph_nodes(
+    context: &ProcedureCallContext<'_>,
+    args: &[Value],
+) -> Result<ProcedureOutput, ProcedureError> {
+    if !(1..=2).contains(&args.len()) {
+        return Err(ProcedureError::Message(
+            "apoc.path.subgraphNodes expects one or two arguments".into(),
+        ));
+    }
+    let Some(start_id) = args[0]
+        .as_object()
+        .and_then(|node| node.get("_id"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(ProcedureOutput::new(vec!["node".into()], Vec::new()));
+    };
+    let config = traversal_config(args.get(1));
+    let mut queue = VecDeque::from([(start_id.to_string(), 0usize)]);
+    let mut visited = HashSet::from([start_id.to_string()]);
+    let mut rows = Vec::new();
+
+    while let Some((node_id, level)) = queue.pop_front() {
+        context.request_context.check_active()?;
+        let Some(node) = context
+            .graph_read
+            .node(&node_id)
+            .map_err(|error| ProcedureError::Message(error.code))?
+        else {
+            continue;
+        };
+        if level >= config.min_level && label_included(&node, &config) {
+            let mut row = Row::new();
+            row.insert("node".into(), node.to_value());
+            rows.push(row);
+            if config.limit.is_some_and(|limit| rows.len() >= limit) {
+                break;
+            }
+        }
+        if level >= config.max_level || has_any_label(&node, &config.termination_labels) {
+            continue;
+        }
+        let relationships = context
+            .graph_read
+            .relationships(&node_id, config.direction, &config.relationship_types)
+            .map_err(|error| ProcedureError::Message(error.code))?;
+        for relationship in relationships {
+            let next_id = match config.direction {
+                GraphDirection::Outgoing if relationship.start_node == node_id => {
+                    Some(relationship.end_node)
+                }
+                GraphDirection::Incoming if relationship.end_node == node_id => {
+                    Some(relationship.start_node)
+                }
+                GraphDirection::Both if relationship.start_node == node_id => {
+                    Some(relationship.end_node)
+                }
+                GraphDirection::Both if relationship.end_node == node_id => {
+                    Some(relationship.start_node)
+                }
+                _ => None,
+            };
+            if let Some(next_id) = next_id {
+                if visited.len() >= MAX_VISITED_NODES {
+                    return Err(ProcedureError::Message("traversal_limit_exceeded".into()));
+                }
+                if visited.insert(next_id.clone()) {
+                    queue.push_back((next_id, level + 1));
+                }
+            }
+        }
+    }
+
+    Ok(ProcedureOutput::new(vec!["node".into()], rows))
+}
+
+fn traversal_config(config: Option<&Value>) -> TraversalConfig {
+    let config = config.and_then(Value::as_object);
+    let min_level = config
+        .and_then(|config| config.get("minLevel"))
+        .and_then(nonnegative_usize)
+        .unwrap_or(0)
+        .min(MAX_TRAVERSAL_LEVEL);
+    let max_level = config
+        .and_then(|config| config.get("maxLevel"))
+        .and_then(positive_usize)
+        .unwrap_or(3)
+        .min(MAX_TRAVERSAL_LEVEL);
+    let relationship_filter = config
+        .and_then(|config| config.get("relationshipFilter"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let (direction, relationship_types) = relationship_filter_config(relationship_filter);
+    let label_filter = config
+        .and_then(|config| config.get("labelFilter"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let (include_labels, exclude_labels, termination_labels) = label_filter_config(label_filter);
+    let limit = config
+        .and_then(|config| config.get("limit"))
+        .and_then(positive_usize);
+    TraversalConfig {
+        min_level,
+        max_level,
+        direction,
+        relationship_types,
+        include_labels,
+        exclude_labels,
+        termination_labels,
+        limit,
+    }
+}
+
+fn nonnegative_usize(value: &Value) -> Option<usize> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str()?.parse().ok())
+        .and_then(|value| value.try_into().ok())
+}
+
+fn positive_usize(value: &Value) -> Option<usize> {
+    nonnegative_usize(value).filter(|value| *value > 0)
+}
+
+fn relationship_filter_config(filter: &str) -> (GraphDirection, Vec<String>) {
+    let (direction, filter) = match filter.as_bytes().first() {
+        Some(b'>') => (GraphDirection::Outgoing, &filter[1..]),
+        Some(b'<') => (GraphDirection::Incoming, &filter[1..]),
+        _ => (GraphDirection::Both, filter),
+    };
+    let relationship_types = filter
+        .split('|')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    (direction, relationship_types)
+}
+
+fn label_filter_config(filter: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut include = Vec::new();
+    let mut exclude = Vec::new();
+    let mut terminate = Vec::new();
+    for item in filter.split('|').map(str::trim) {
+        let Some((marker, label)) = item.split_at_checked(1) else {
+            continue;
+        };
+        if label.is_empty() {
+            continue;
+        }
+        match marker {
+            "+" => include.push(label.to_string()),
+            "-" => exclude.push(label.to_string()),
+            "/" => terminate.push(label.to_string()),
+            _ => {}
+        }
+    }
+    (include, exclude, terminate)
+}
+
+fn label_included(node: &GraphNode, config: &TraversalConfig) -> bool {
+    !has_any_label(node, &config.exclude_labels)
+        && (config.include_labels.is_empty() || has_any_label(node, &config.include_labels))
+}
+
+fn has_any_label(node: &GraphNode, labels: &[String]) -> bool {
+    labels
+        .iter()
+        .any(|label| node.labels.iter().any(|actual| actual == label))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use copperdb_engine::{CopperDb, DatabaseConfig};
     use copperdb_plugin::resolve_packages;
-    use copperdb_storage::StorageEngine;
+    use copperdb_storage::{EdgeRecord, NodeRecord, StorageEngine};
     use serde_json::json;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     fn database() -> CopperDb {
         let packages = resolve_packages([package()]).unwrap();
@@ -298,6 +504,65 @@ mod tests {
             .unwrap()
     }
 
+    fn seed_traversal(database: &CopperDb) {
+        for (id, labels) in [
+            ("a", vec!["Root"]),
+            ("b", vec!["Hidden"]),
+            ("c", vec!["Visible"]),
+            ("d", vec!["Stop"]),
+            ("e", vec!["Beyond"]),
+        ] {
+            database
+                .storage()
+                .put_node_record(&NodeRecord {
+                    id: id.into(),
+                    labels: labels.into_iter().map(str::to_string).collect(),
+                    properties: BTreeMap::from([("name".into(), json!(id))]),
+                    named_embeddings: BTreeMap::new(),
+                    chunk_embeddings: Vec::new(),
+                    embed_meta: Default::default(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+        for (id, start_node, end_node, edge_type) in [
+            ("01", "a", "b", "KNOWS"),
+            ("02", "a", "c", "LIKES"),
+            ("03", "b", "d", "KNOWS"),
+            ("04", "d", "e", "KNOWS"),
+        ] {
+            database
+                .storage()
+                .put_edge_record(&EdgeRecord {
+                    id: id.into(),
+                    start_node: start_node.into(),
+                    end_node: end_node.into(),
+                    edge_type: edge_type.into(),
+                    properties: BTreeMap::new(),
+                    created_at_unix_ms: 0,
+                    updated_at_unix_ms: 0,
+                })
+                .unwrap();
+        }
+    }
+
+    fn traverse(database: &CopperDb, start_id: &str, config: &str) -> Vec<String> {
+        let result = database
+            .execute(
+                &format!(
+                    "CALL apoc.path.subgraphNodes($start, {config}) YIELD node RETURN node._id AS id"
+                ),
+                HashMap::from([("start".into(), json!({"_id": start_id}))]),
+            )
+            .unwrap();
+        result
+            .rows
+            .into_iter()
+            .map(|row| row["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
     #[test]
     fn package_resolves_all_representative_functions() {
         let packages = resolve_packages([package()]).unwrap();
@@ -316,6 +581,11 @@ mod tests {
             let descriptor = registry.get(name).unwrap_or_else(|| panic!("{name}"));
             assert_eq!(descriptor.package_id(), Some(PACKAGE_ID));
         }
+        let procedures = packages.procedure_registry();
+        let descriptor = procedures.get("apoc.path.subgraphNodes").unwrap();
+        assert_eq!(descriptor.mode(), ProcedureMode::Read);
+        assert_eq!(descriptor.package_id(), Some(PACKAGE_ID));
+        assert_eq!(descriptor.required_capabilities(), ["query:read"]);
     }
 
     #[test]
@@ -389,5 +659,72 @@ mod tests {
             evaluate(&database, "apoc.convert.fromJsonMap('[1, 2]')"),
             Value::Null
         );
+    }
+
+    #[test]
+    fn subgraph_nodes_matches_bounded_nornicdb_bfs_filters() {
+        let database = database();
+        seed_traversal(&database);
+
+        assert_eq!(
+            traverse(
+                &database,
+                "a",
+                "{relationshipFilter: '>KNOWS', maxLevel: 2}"
+            ),
+            ["a", "b", "d"]
+        );
+        assert_eq!(
+            traverse(
+                &database,
+                "d",
+                "{relationshipFilter: '<KNOWS', maxLevel: 2}"
+            ),
+            ["d", "b", "a"]
+        );
+        assert_eq!(
+            traverse(
+                &database,
+                "a",
+                "{relationshipFilter: '>KNOWS', maxLevel: 4, labelFilter: '-Hidden|/Stop'}"
+            ),
+            ["a", "d"]
+        );
+        assert_eq!(
+            traverse(
+                &database,
+                "a",
+                "{relationshipFilter: '>KNOWS', maxLevel: 4, limit: 2}"
+            ),
+            ["a", "b"]
+        );
+    }
+
+    #[test]
+    fn subgraph_nodes_handles_optional_config_and_invalid_start() {
+        let database = database();
+        seed_traversal(&database);
+        let default_result = database
+            .execute(
+                "CALL apoc.path.subgraphNodes($start) YIELD node RETURN node._id AS id",
+                HashMap::from([("start".into(), json!({"_id": "a"}))]),
+            )
+            .unwrap();
+        assert_eq!(default_result.rows.len(), 5);
+
+        let null_result = database
+            .execute(
+                "CALL apoc.path.subgraphNodes(null, {}) YIELD node RETURN node",
+                HashMap::new(),
+            )
+            .unwrap();
+        assert!(null_result.rows.is_empty());
+
+        let arity_error = database
+            .execute("CALL apoc.path.subgraphNodes()", HashMap::new())
+            .unwrap_err();
+        assert!(arity_error
+            .to_string()
+            .contains("expects one or two arguments"));
     }
 }

@@ -41,6 +41,7 @@ use uuid::Uuid;
 
 pub use copperdb_filter::Row;
 pub use procedure_registry::{
+    GraphDirection, GraphNode, GraphReadError, GraphReadService, GraphRelationship,
     ProcedureCallContext, ProcedureDescriptor, ProcedureError, ProcedureHandler, ProcedureMode,
     ProcedureOutput, ProcedureRegistrar, ProcedureRegistry, ProcedureRegistryBuilder,
     ProcedureRegistryError,

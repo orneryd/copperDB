@@ -4,10 +4,12 @@ Status: in progress. Priority: P2. Owners: `eval`, `engine`, `server`, `copperdb
 
 ## Implementation Progress
 
-- Complete: versioned package descriptors, typed requested capabilities, host compatibility, deterministic dependency sorting, transactional collisions, immutable registries, and package-attributed function/procedure discovery.
-- Complete: disabled-by-default static package allowlist, required-package validation, process-wide startup resolution, and package-aware engine construction for every logical database.
+- Complete: versioned package descriptors and factories, typed requested/granted capabilities, host compatibility, deterministic dependency sorting, transactional collisions, immutable registries, and package-attributed function/procedure discovery.
+- Complete: disabled-by-default static package allowlist, required/optional failure policy, package configuration, bounded panic-safe initialize/start/stop/shutdown hooks, health/status, reverse drain, process-wide startup resolution, and package-aware engine construction for every logical database.
 - Complete: separate `copperdb-apoc` package with the eight representative scalar functions and mirrored NornicDB query-contract tests.
-- Remaining: package factories and supervised lifecycle, optional failure isolation, granted host services/configuration validation, representative graph/I/O procedures, Heimdall package adaptation, protocol tests, and benchmarks.
+- Complete: database-scoped read-only graph host service and bounded `apoc.path.subgraphNodes` with direction/type filters, label filters, deterministic BFS order, authorization, cancellation, and mirrored NornicDB semantics.
+- Complete: separate Heimdall watcher package loaded through the production catalog with exact lifecycle, MCP-compatible `heimdall_watcher_query`, database-scoped read authorization, cancellation, bounded timestamped FIFO event hooks, newest-event drop, panic/timeout isolation, and package metrics.
+- Remaining: restricted transactional write/file/network host services and configuration-schema validation, representative import/load procedures, protocol tests, and benchmarks.
 
 ## Objective
 

@@ -530,7 +530,8 @@ fn bench_semantic_hybrid(criterion: &mut Criterion) {
         .map(|batch| batch.hits)
         .collect::<Vec<_>>();
     let nornicdb_rrf_config = RrfConfig::new(60.0, usize::MAX).with_min_score(0.01);
-    let nornicdb_rrf_results = merge_rrf_search_hits(nornicdb_rrf_hits.clone(), nornicdb_rrf_config);
+    let nornicdb_rrf_results =
+        merge_rrf_search_hits(nornicdb_rrf_hits.clone(), nornicdb_rrf_config);
     assert_eq!(nornicdb_rrf_results.len(), 80);
     group.bench_function("rrf_fusion_nornicdb_50x2", |bench| {
         bench.iter_batched(

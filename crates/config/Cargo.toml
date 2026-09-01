@@ -17,6 +17,7 @@ toml.workspace = true
 config.workspace = true
 clap.workspace = true
 copperdb-envutil = { workspace = true }
+copperdb-plugin = { workspace = true }
 rustls = { workspace = true, features = ["ring"] }
 x509-parser.workspace = true
 

@@ -42,7 +42,11 @@ use copperdb_nornicgrpc::{
 use copperdb_otel::{
     classify_cypher_op_type, CancellationProtocol, CancellationStage, Health, Telemetry,
 };
-use copperdb_plugin::{resolve_packages, PackageDefinition, ResolvedPackageSet};
+use copperdb_plugin::{
+    resolve_packages, ActionCallContext, ActionError, ActionQueryResult, ActionQueryService,
+    DatabaseEvent, DatabaseEventType, PackageFactory, PackageRuntime, PackageSpec,
+    ResolvedPackageSet,
+};
 use copperdb_replication::{Command, ReplicaTransport, ReplicationStorage, StorageEngineAdapter};
 use copperdb_retention::{
     ErasureRequest, LegalHold, Manager as RetentionManager, Policy, RetentionError,
@@ -69,6 +73,7 @@ use opentelemetry::global;
 use opentelemetry::propagation::Extractor;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -227,6 +232,8 @@ pub struct AppState {
     pub engine_cache: Arc<RwLock<HashMap<String, Arc<GraphEngine>>>>,
     /// Process-wide package registries resolved before any database is opened.
     pub packages: Arc<ResolvedPackageSet>,
+    /// Started package instances retained for health and reverse shutdown.
+    pub package_runtime: Option<Arc<PackageRuntime>>,
 }
 
 #[derive(Default)]
@@ -723,23 +730,60 @@ impl AppState {
             graphql_schema: copperdb_graphql::build_default_schema(),
             engine_cache: Arc::new(RwLock::new(HashMap::new())),
             packages: Arc::new(resolve_packages([]).expect("empty package set is valid")),
+            package_runtime: None,
         }
     }
 
-    pub fn configure_runtime(
+    pub async fn configure_runtime(
         &mut self,
         runtime_config: Arc<RuntimeConfig>,
     ) -> Result<(), ServerError> {
-        let mut packages = Vec::<PackageDefinition>::new();
+        for package_id in runtime_config
+            .packages
+            .configuration
+            .keys()
+            .chain(runtime_config.packages.grants.keys())
+        {
+            if !runtime_config.packages.enabled.contains(package_id) {
+                return Err(ServerError::Engine(format!(
+                    "package settings target a disabled package: {package_id}"
+                )));
+            }
+        }
+        let mut factories = Vec::<Arc<dyn PackageFactory>>::new();
+        let mut specs = Vec::new();
         for package_id in &runtime_config.packages.enabled {
             match package_id.as_str() {
-                copperdb_apoc::PACKAGE_ID => packages.push(copperdb_apoc::package()),
+                copperdb_apoc::PACKAGE_ID => factories.push(Arc::new(copperdb_apoc::factory())),
+                copperdb_heimdall::PACKAGE_ID => {
+                    factories.push(Arc::new(copperdb_heimdall::factory()))
+                }
                 _ => {
                     return Err(ServerError::Engine(format!(
                         "unknown configured package: {package_id}"
                     )))
                 }
             }
+            specs.push(
+                PackageSpec::new(package_id)
+                    .required(runtime_config.packages.required.contains(package_id))
+                    .with_configuration(
+                        runtime_config
+                            .packages
+                            .configuration
+                            .get(package_id)
+                            .cloned()
+                            .unwrap_or_else(|| Value::Object(Default::default())),
+                    )
+                    .granting(
+                        runtime_config
+                            .packages
+                            .grants
+                            .get(package_id)
+                            .cloned()
+                            .unwrap_or_default(),
+                    ),
+            );
         }
         for package_id in &runtime_config.packages.required {
             if !runtime_config.packages.enabled.contains(package_id) {
@@ -748,11 +792,142 @@ impl AppState {
                 )));
             }
         }
-        self.packages = Arc::new(
-            resolve_packages(packages).map_err(|error| ServerError::Engine(error.to_string()))?,
+        let package_runtime = Arc::new(
+            PackageRuntime::start(
+                factories,
+                specs,
+                Duration::from_millis(runtime_config.packages.lifecycle_timeout_ms.max(1)),
+            )
+            .await
+            .map_err(|error| ServerError::Engine(error.to_string()))?,
         );
+        self.packages = package_runtime.packages();
+        self.package_runtime = Some(package_runtime);
         self.runtime_config = runtime_config;
         Ok(())
+    }
+
+    pub async fn shutdown_packages(&self) -> Result<(), ServerError> {
+        match &self.package_runtime {
+            Some(runtime) => runtime
+                .shutdown()
+                .await
+                .map_err(|error| ServerError::Engine(error.to_string())),
+            None => Ok(()),
+        }
+    }
+
+    pub fn execute_package_action(
+        &self,
+        request_context: &RequestContext,
+        name: &str,
+        input: &Value,
+        default_database: &str,
+        caller_roles: &[String],
+    ) -> Result<Value, ActionError> {
+        self.packages.action_registry().execute(
+            name,
+            &ActionCallContext {
+                request_context,
+                default_database,
+                caller_roles,
+                query_service: self,
+            },
+            input,
+        )
+    }
+}
+
+impl ActionQueryService for AppState {
+    fn query_read(
+        &self,
+        request_context: &RequestContext,
+        database: &str,
+        cypher: &str,
+        params: &BTreeMap<String, Value>,
+        caller_roles: &[String],
+    ) -> Result<ActionQueryResult, ActionError> {
+        request_context
+            .check_active()
+            .map_err(|_| ActionError::new("request_cancelled"))?;
+        if statement_requires_write(cypher) {
+            return Err(ActionError::new("query_write_forbidden"));
+        }
+        if self.auth.security_enabled {
+            ensure_roles_database_access(self, caller_roles, database, false)
+                .map_err(|_| ActionError::new("database_read_forbidden"))?;
+        }
+        let engine = open_engine(self, database).map_err(ActionError::new)?;
+        let started = Instant::now();
+        let result = match engine.execute_as_with_context(
+            request_context,
+            cypher,
+            params
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            caller_roles,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                self.emit_query_event(QueryEventDetails {
+                    event_type: DatabaseEventType::QueryFailed,
+                    database,
+                    query: cypher,
+                    params,
+                    duration: started.elapsed(),
+                    rows_affected: 0,
+                    error: Some(error.to_string()),
+                });
+                return Err(ActionError::new(error.to_string()));
+            }
+        };
+        self.emit_query_event(QueryEventDetails {
+            event_type: DatabaseEventType::QueryExecuted,
+            database,
+            query: cypher,
+            params,
+            duration: started.elapsed(),
+            rows_affected: result.rows.len(),
+            error: None,
+        });
+        Ok(ActionQueryResult {
+            rows: result
+                .rows
+                .into_iter()
+                .map(|row| row.into_iter().collect())
+                .collect(),
+        })
+    }
+}
+
+struct QueryEventDetails<'a> {
+    event_type: DatabaseEventType,
+    database: &'a str,
+    query: &'a str,
+    params: &'a BTreeMap<String, Value>,
+    duration: Duration,
+    rows_affected: usize,
+    error: Option<String>,
+}
+
+impl AppState {
+    fn emit_query_event(&self, details: QueryEventDetails<'_>) {
+        let Some(runtime) = &self.package_runtime else {
+            return;
+        };
+        let mut event = DatabaseEvent::new(details.event_type);
+        event.query = details.query.into();
+        event.query_params = details.params.clone();
+        event.duration = details.duration.as_nanos().min(u128::from(u64::MAX)) as u64;
+        event.rows_affected = details.rows_affected.try_into().unwrap_or(i64::MAX);
+        event
+            .metadata
+            .insert("database".into(), Value::String(details.database.into()));
+        if let Some(error) = details.error {
+            event.error = error;
+        }
+        let _ = runtime.emit_event(event);
     }
 }
 

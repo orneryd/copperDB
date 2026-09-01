@@ -120,12 +120,8 @@ fn from_storage_accepts_transactionally_resolved_packages() {
     ));
     let packages = resolve_packages([definition]).unwrap();
     let storage = Arc::new(StorageEngine::open_temporary().unwrap());
-    let db = CopperDb::from_storage_with_packages(
-        storage,
-        DatabaseConfig::default(),
-        &packages,
-    )
-    .unwrap();
+    let db = CopperDb::from_storage_with_packages(storage, DatabaseConfig::default(), &packages)
+        .unwrap();
 
     let scalar = db
         .execute("RETURN example.packageScalar() AS value", HashMap::new())
@@ -158,9 +154,10 @@ fn from_storage_accepts_transactionally_resolved_packages() {
             HashMap::new(),
         )
         .unwrap();
-    assert!(procedures.rows.iter().any(
-        |row| row["name"] == Value::String("example.packageProcedure".into())
-    ));
+    assert!(procedures
+        .rows
+        .iter()
+        .any(|row| row["name"] == Value::String("example.packageProcedure".into())));
 }
 
 #[test]

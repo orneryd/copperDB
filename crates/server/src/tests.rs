@@ -2,15 +2,19 @@
 
 use super::*;
 
-#[test]
-fn runtime_configuration_loads_apoc_only_when_enabled() {
+#[tokio::test]
+async fn runtime_configuration_loads_apoc_only_when_enabled() {
     let mut state = AppState::default();
     assert!(state.packages.packages().is_empty());
 
     let mut config = RuntimeConfig::default();
     config.packages.enabled = vec![copperdb_apoc::PACKAGE_ID.into()];
     config.packages.required = vec![copperdb_apoc::PACKAGE_ID.into()];
-    state.configure_runtime(Arc::new(config)).unwrap();
+    config.packages.grants.insert(
+        copperdb_apoc::PACKAGE_ID.into(),
+        vec![copperdb_plugin::PackageCapability::QueryRead],
+    );
+    state.configure_runtime(Arc::new(config)).await.unwrap();
 
     assert_eq!(state.packages.packages().len(), 1);
     assert_eq!(state.packages.packages()[0].id, copperdb_apoc::PACKAGE_ID);
@@ -19,6 +23,121 @@ fn runtime_configuration_loads_apoc_only_when_enabled() {
         .function_registry()
         .get("apoc.create.uuid")
         .is_some());
+    assert_eq!(
+        state
+            .package_runtime
+            .as_ref()
+            .unwrap()
+            .health()
+            .await
+            .get(copperdb_apoc::PACKAGE_ID)
+            .unwrap()
+            .status,
+        copperdb_plugin::PackageStatus::Running
+    );
+    state.shutdown_packages().await.unwrap();
+}
+
+#[tokio::test]
+async fn runtime_configuration_loads_heimdall_only_when_enabled() {
+    let mut state = AppState::default();
+    assert!(state
+        .packages
+        .action_registry()
+        .get(copperdb_heimdall::QUERY_ACTION)
+        .is_none());
+
+    let mut config = RuntimeConfig::default();
+    config.packages.enabled = vec![copperdb_heimdall::PACKAGE_ID.into()];
+    config.packages.required = vec![copperdb_heimdall::PACKAGE_ID.into()];
+    config.packages.grants.insert(
+        copperdb_heimdall::PACKAGE_ID.into(),
+        vec![
+            copperdb_plugin::PackageCapability::QueryRead,
+            copperdb_plugin::PackageCapability::Events,
+        ],
+    );
+    state.configure_runtime(Arc::new(config)).await.unwrap();
+
+    assert_eq!(state.packages.packages().len(), 1);
+    assert_eq!(
+        state.packages.packages()[0].id,
+        copperdb_heimdall::PACKAGE_ID
+    );
+    let action_registry = state.packages.action_registry();
+    let action = action_registry
+        .get(copperdb_heimdall::QUERY_ACTION)
+        .unwrap();
+    assert_eq!(action.package_id(), Some(copperdb_heimdall::PACKAGE_ID));
+    assert_eq!(
+        state.package_runtime.as_ref().unwrap().health().await[copperdb_heimdall::PACKAGE_ID]
+            .status,
+        copperdb_plugin::PackageStatus::Running
+    );
+
+    state.shutdown_packages().await.unwrap();
+}
+
+#[tokio::test]
+async fn heimdall_action_executes_through_database_scoped_host_service() {
+    let mut state = AppState::default();
+    let mut config = RuntimeConfig::default();
+    config.packages.enabled = vec![copperdb_heimdall::PACKAGE_ID.into()];
+    config.packages.grants.insert(
+        copperdb_heimdall::PACKAGE_ID.into(),
+        vec![
+            copperdb_plugin::PackageCapability::QueryRead,
+            copperdb_plugin::PackageCapability::Events,
+        ],
+    );
+    state.configure_runtime(Arc::new(config)).await.unwrap();
+    let request = copperdb_util::RequestContext::detached();
+
+    let result = state
+        .execute_package_action(
+            &request,
+            copperdb_heimdall::QUERY_ACTION,
+            &serde_json::json!({"cypher": "RETURN 1 AS one"}),
+            "copperdb",
+            &["admin".into()],
+        )
+        .unwrap();
+
+    assert_eq!(result["success"], true);
+    assert_eq!(result["message"], "Query returned 1 row(s)");
+    assert_eq!(result["data"]["rows"][0]["one"], 1);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let metrics = state.package_runtime.as_ref().unwrap().event_metrics()
+                [copperdb_heimdall::PACKAGE_ID];
+            if metrics.delivered == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    state.shutdown_packages().await.unwrap();
+}
+
+#[tokio::test]
+async fn runtime_configuration_rejects_settings_for_disabled_packages() {
+    let mut state = AppState::default();
+    let mut config = RuntimeConfig::default();
+    config
+        .packages
+        .configuration
+        .insert(copperdb_apoc::PACKAGE_ID.into(), serde_json::json!({}));
+
+    let error = state.configure_runtime(Arc::new(config)).await.unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "engine error: package settings target a disabled package: copperdb.apoc"
+    );
+    assert!(state.packages.packages().is_empty());
+    assert!(state.package_runtime.is_none());
 }
 
 #[test]

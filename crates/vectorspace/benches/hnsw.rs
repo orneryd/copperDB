@@ -106,7 +106,10 @@ impl Workload {
         recall_sum += matches as f64 / K as f64;
         let (candidates, _) = self
             .hnsw
-            .knn(&self.query, K.saturating_mul(PIPELINE_RERANK_CANDIDATE_MULTIPLIER))
+            .knn(
+                &self.query,
+                K.saturating_mul(PIPELINE_RERANK_CANDIDATE_MULTIPLIER),
+            )
             .expect("benchmark query dimensions must match");
         let reranked = self
             .exact_store

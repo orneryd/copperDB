@@ -127,6 +127,32 @@ struct HttpComponent {
     app: Router,
 }
 
+struct PackageComponent {
+    state: Arc<AppState>,
+}
+
+impl std::fmt::Debug for PackageComponent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("PackageComponent").finish()
+    }
+}
+
+#[async_trait]
+impl Component for PackageComponent {
+    fn name(&self) -> &str {
+        "packages"
+    }
+
+    async fn start(&self, token: CancellationToken) -> Result<(), BoxError> {
+        token.cancelled().await;
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), BoxError> {
+        self.state.shutdown_packages().await.map_err(Into::into)
+    }
+}
+
 #[derive(Debug)]
 struct TelemetryComponent {
     listen_addr: String,
@@ -369,6 +395,7 @@ async fn main() -> Result<()> {
     state.db_name = startup.db_name.clone();
     state
         .configure_runtime(Arc::clone(&startup.runtime_config))
+        .await
         .context("failed to resolve configured packages")?;
     state.static_dir = startup.static_dir.clone();
     state.base_path = startup.base_path.clone();
@@ -386,6 +413,9 @@ async fn main() -> Result<()> {
 
     let app = build_router(Arc::clone(&state));
     let mut supervisor = Supervisor::new();
+    supervisor.register(PackageComponent {
+        state: Arc::clone(&state),
+    });
 
     let readiness = Arc::new(Health::new());
     let storage_state = Arc::clone(&state);

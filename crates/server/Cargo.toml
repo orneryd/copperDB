@@ -35,6 +35,7 @@ copperdb-engine = { workspace = true }
 copperdb-envutil = { workspace = true }
 copperdb-fabric = { workspace = true }
 copperdb-graphql = { workspace = true }
+copperdb-heimdall = { workspace = true }
 copperdb-mcp = { workspace = true }
 async-graphql.workspace = true
 async-graphql-axum.workspace = true

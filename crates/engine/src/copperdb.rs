@@ -1113,8 +1113,12 @@ impl CopperDb {
         let t3 = std::time::Instant::now();
         let execute_span = tracing::info_span!("nornicdb.cypher.eval");
         let execute_span_guard = execute_span.enter();
+        let mut capabilities = vec!["query:read".to_string()];
+        if is_mutating_query(&parsed.query_type) {
+            capabilities.push("query:write".to_string());
+        }
         let function_context = FunctionExecutionContext {
-            capabilities: Vec::new(),
+            capabilities,
             caller_roles: normalized_roles,
             database: Some(self.config.default_database.clone()),
             request_context: None,

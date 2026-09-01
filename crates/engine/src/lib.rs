@@ -64,8 +64,8 @@ use copperdb_filter::{
     eval_expression, eval_predicate, FunctionExecutionContext, FunctionRegistrar,
     FunctionRegistryBuilder,
 };
-use copperdb_plugin::ResolvedPackageSet;
 use copperdb_kms::{new_provider, ProviderFactoryConfig};
+use copperdb_plugin::ResolvedPackageSet;
 use copperdb_replication::{
     CassandraCoordinator, Command, DistributedReadOutcome, DistributedWriteOutcome,
     DurableRepairQueue, RepairReplayReport, RepairWorkerConfig, ReplicaTransport, ReplicationError,

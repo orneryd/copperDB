@@ -15,8 +15,7 @@ const EDGE_COUNT: usize = NODE_COUNT - 1;
 const COUNT_ALL_RELATIONSHIPS: &str = "MATCH ()-[r]->() RETURN count(r) as count";
 const OPTIONAL_MATCH_COUNT: &str =
     "MATCH (n) OPTIONAL MATCH (n)-[:KNOWS]->(m) RETURN count(m) as count";
-const TWO_HOP_MATCH_COUNT: &str =
-    "MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN count(c) as count";
+const TWO_HOP_MATCH_COUNT: &str = "MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN count(c) as count";
 const SHORTEST_PATH_HOPS: &str = "MATCH (start:Star {starId: 's0'}), (end:Star {starId: 's999'}) MATCH p = shortestPath((start)-[:HYPERLANE*]->(end)) RETURN length(p) AS hops";
 
 fn seed_traversal_fixture(storage: &StorageEngine) {
@@ -224,10 +223,7 @@ fn bench_memory_storage_executor_optional_match_count(criterion: &mut Criterion)
     let mut group = criterion.benchmark_group("traversal_memory_storage_executor");
     group.throughput(Throughput::Elements(NODE_COUNT as u64));
     group.bench_function(
-        BenchmarkId::new(
-            "optional_match_count",
-            format!("{NODE_COUNT}-nodes-memory"),
-        ),
+        BenchmarkId::new("optional_match_count", format!("{NODE_COUNT}-nodes-memory")),
         |bench| {
             bench.iter(|| {
                 black_box(
@@ -254,10 +250,7 @@ fn bench_memory_storage_executor_two_hop_match_count(criterion: &mut Criterion) 
     let mut group = criterion.benchmark_group("traversal_memory_storage_executor");
     group.throughput(Throughput::Elements((EDGE_COUNT - 1) as u64));
     group.bench_function(
-        BenchmarkId::new(
-            "two_hop_match_count",
-            format!("{NODE_COUNT}-nodes-memory"),
-        ),
+        BenchmarkId::new("two_hop_match_count", format!("{NODE_COUNT}-nodes-memory")),
         |bench| {
             bench.iter(|| {
                 black_box(

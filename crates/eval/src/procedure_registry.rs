@@ -1,5 +1,7 @@
 use crate::{EvalError, QueryStats, Row};
+use copperdb_storage::{EdgeAdjacencyDirection, StorageEngine};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, OnceLock};
@@ -10,6 +12,148 @@ pub enum ProcedureMode {
     Read,
     Write,
     Dbms,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphDirection {
+    Outgoing,
+    Incoming,
+    Both,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphNode {
+    pub id: String,
+    pub labels: Vec<String>,
+    pub properties: BTreeMap<String, Value>,
+    pub created_at_unix_ms: i64,
+    pub updated_at_unix_ms: i64,
+}
+
+impl GraphNode {
+    pub fn to_value(&self) -> Value {
+        Value::Object(
+            self.properties
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .chain([
+                    ("_id".to_string(), Value::String(self.id.clone())),
+                    (
+                        "_labels".to_string(),
+                        Value::Array(self.labels.iter().cloned().map(Value::String).collect()),
+                    ),
+                    (
+                        "_created_at_unix_ms".to_string(),
+                        Value::from(self.created_at_unix_ms),
+                    ),
+                    (
+                        "_updated_at_unix_ms".to_string(),
+                        Value::from(self.updated_at_unix_ms),
+                    ),
+                ])
+                .collect(),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphRelationship {
+    pub id: String,
+    pub start_node: String,
+    pub end_node: String,
+    pub relationship_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{code}")]
+pub struct GraphReadError {
+    pub code: String,
+}
+
+pub trait GraphReadService: Send + Sync {
+    fn node(&self, id: &str) -> Result<Option<GraphNode>, GraphReadError>;
+
+    fn nodes(&self) -> Result<Vec<GraphNode>, GraphReadError>;
+
+    fn relationships(
+        &self,
+        node_id: &str,
+        direction: GraphDirection,
+        relationship_types: &[String],
+    ) -> Result<Vec<GraphRelationship>, GraphReadError>;
+}
+
+impl GraphReadService for StorageEngine {
+    fn node(&self, id: &str) -> Result<Option<GraphNode>, GraphReadError> {
+        self.get_node_record(id)
+            .map(|node| node.map(graph_node))
+            .map_err(|_| graph_read_error())
+    }
+
+    fn nodes(&self) -> Result<Vec<GraphNode>, GraphReadError> {
+        let mut nodes = self
+            .all_node_records()
+            .map_err(|_| graph_read_error())?
+            .into_iter()
+            .map(graph_node)
+            .collect::<Vec<_>>();
+        nodes.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(nodes)
+    }
+
+    fn relationships(
+        &self,
+        node_id: &str,
+        direction: GraphDirection,
+        relationship_types: &[String],
+    ) -> Result<Vec<GraphRelationship>, GraphReadError> {
+        let storage_direction = match direction {
+            GraphDirection::Outgoing => EdgeAdjacencyDirection::Outgoing,
+            GraphDirection::Incoming => EdgeAdjacencyDirection::Incoming,
+            GraphDirection::Both => EdgeAdjacencyDirection::Both,
+        };
+        let mut relationships = Vec::new();
+        if relationship_types.is_empty() {
+            relationships.extend(
+                self.get_adjacent_edges(node_id, storage_direction, None)
+                    .map_err(|_| graph_read_error())?,
+            );
+        } else {
+            for relationship_type in relationship_types {
+                relationships.extend(
+                    self.get_adjacent_edges(node_id, storage_direction, Some(relationship_type))
+                        .map_err(|_| graph_read_error())?,
+                );
+            }
+        }
+        relationships.sort_by(|left, right| left.id.cmp(&right.id));
+        relationships.dedup_by(|left, right| left.id == right.id);
+        Ok(relationships
+            .into_iter()
+            .map(|relationship| GraphRelationship {
+                id: relationship.id,
+                start_node: relationship.start_node,
+                end_node: relationship.end_node,
+                relationship_type: relationship.edge_type,
+            })
+            .collect())
+    }
+}
+
+fn graph_node(node: copperdb_storage::NodeRecord) -> GraphNode {
+    GraphNode {
+        id: node.id,
+        labels: node.labels,
+        properties: node.properties,
+        created_at_unix_ms: node.created_at_unix_ms,
+        updated_at_unix_ms: node.updated_at_unix_ms,
+    }
+}
+
+fn graph_read_error() -> GraphReadError {
+    GraphReadError {
+        code: "graph_read_failed".into(),
+    }
 }
 
 impl ProcedureMode {
@@ -29,6 +173,7 @@ pub struct ProcedureCallContext<'a> {
     pub caller_roles: &'a [String],
     pub database: Option<&'a str>,
     pub request_context: &'a copperdb_util::RequestContext,
+    pub graph_read: &'a dyn GraphReadService,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

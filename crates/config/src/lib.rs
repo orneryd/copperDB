@@ -4,6 +4,7 @@
 //! Supports YAML/TOML configuration files, environment variable overrides,
 //! and a strongly-typed configuration struct for the database engine.
 
+use copperdb_plugin::PackageCapability;
 use rustls::pki_types::{
     CertificateDer, PrivateKeyDer, PrivatePkcs1KeyDer, PrivatePkcs8KeyDer, PrivateSec1KeyDer,
 };
@@ -637,7 +638,7 @@ impl Default for SearchConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PackageConfig {
     /// Statically linked package IDs to load.
@@ -646,6 +647,22 @@ pub struct PackageConfig {
     pub required: Vec<String>,
     /// Secret-free package configuration keyed by package ID.
     pub configuration: BTreeMap<String, serde_json::Value>,
+    /// Explicit typed capability grants keyed by package ID.
+    pub grants: BTreeMap<String, Vec<PackageCapability>>,
+    /// Bound applied independently to every package lifecycle hook.
+    pub lifecycle_timeout_ms: u64,
+}
+
+impl Default for PackageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Vec::new(),
+            required: Vec::new(),
+            configuration: BTreeMap::new(),
+            grants: BTreeMap::new(),
+            lifecycle_timeout_ms: 30_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

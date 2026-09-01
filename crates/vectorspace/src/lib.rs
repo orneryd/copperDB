@@ -319,7 +319,9 @@ impl VectorFileStore {
             file.seek(SeekFrom::Start(offset))
                 .map_err(VectorSpaceError::VectorFileStoreIo)?;
             let id_bytes = id.as_bytes();
-            let record_length = 1 + std::mem::size_of::<u32>() + id_bytes.len()
+            let record_length = 1
+                + std::mem::size_of::<u32>()
+                + id_bytes.len()
                 + self.dimensions * std::mem::size_of::<f32>();
             record.resize(record_length, 0);
             file.read_exact(&mut record)
@@ -329,17 +331,19 @@ impl VectorFileStore {
                     "live offset does not reference an upsert record",
                 ));
             }
-            let stored_id_length = u32::from_le_bytes(record[1..5].try_into().expect("u32 bytes"))
-                as usize;
+            let stored_id_length =
+                u32::from_le_bytes(record[1..5].try_into().expect("u32 bytes")) as usize;
             let values_offset = 1 + std::mem::size_of::<u32>() + stored_id_length;
-            if stored_id_length != id_bytes.len()
-                || record.get(5..values_offset) != Some(id_bytes)
+            if stored_id_length != id_bytes.len() || record.get(5..values_offset) != Some(id_bytes)
             {
                 return Err(VectorSpaceError::CorruptVectorFileStore(
                     "live offset points to another vector ID",
                 ));
             }
-            for (value, bytes) in vector.iter_mut().zip(record[values_offset..].chunks_exact(4)) {
+            for (value, bytes) in vector
+                .iter_mut()
+                .zip(record[values_offset..].chunks_exact(4))
+            {
                 *value = f32::from_le_bytes(bytes.try_into().expect("f32 bytes"));
             }
             let score = copperdb_simd::dot_f32(&query, &vector)

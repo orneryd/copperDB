@@ -8,9 +8,15 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 copperdb-eval = { workspace = true }
 copperdb-filter = { workspace = true }
+copperdb-util = { workspace = true }
+futures.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+time = { workspace = true, features = ["formatting"] }
+tokio.workspace = true
+tokio-util.workspace = true
