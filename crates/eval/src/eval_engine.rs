@@ -187,6 +187,7 @@ impl EvalEngine {
             storage,
             function_registry,
             procedure_registry,
+            import_files: Arc::new(DeniedImportFileService),
             vector_indexes,
             vector_index_query,
             vector_index_artifact_refresh,
@@ -198,6 +199,11 @@ impl EvalEngine {
             access_flusher: Arc::new(AccessFlusher::new()),
             hot_path_trace: HotPathTraceState::new(),
         }
+    }
+
+    pub fn with_import_file_service(mut self, service: Arc<dyn ImportFileService>) -> Self {
+        self.import_files = service;
+        self
     }
 
     pub fn hot_path_trace_snapshot(&self) -> HotPathTrace {

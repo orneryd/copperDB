@@ -4,8 +4,167 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use thiserror::Error;
+use url::Url;
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ImportFileError {
+    #[error("local APOC import file access is disabled")]
+    Disabled,
+    #[error("remote APOC URL access is disabled")]
+    RemoteDisabled,
+    #[error("file URL may not contain an authority section (i.e. it should be 'file:///')")]
+    FileUrlAuthority,
+    #[error("file URL may not contain a query component")]
+    FileUrlQuery,
+    #[error("file URL may not contain a fragment component")]
+    FileUrlFragment,
+    #[error("unsupported APOC file URL scheme {0:?}")]
+    UnsupportedScheme(String),
+    #[error("APOC import source is not a regular file")]
+    NotRegularFile,
+    #[error("APOC import source escapes the configured root")]
+    RootEscape,
+    #[error("APOC import source exceeds the {limit} byte limit")]
+    TooLarge { limit: usize },
+    #[error("failed to read APOC import source")]
+    ReadFailed,
+    #[error(transparent)]
+    RequestCancelled(#[from] copperdb_util::RequestCancelled),
+}
+
+pub trait ImportFileService: Send + Sync {
+    fn read(
+        &self,
+        request_context: &copperdb_util::RequestContext,
+        source: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ImportFileError>;
+}
+
+#[derive(Debug, Default)]
+pub struct DeniedImportFileService;
+
+impl ImportFileService for DeniedImportFileService {
+    fn read(
+        &self,
+        _request_context: &copperdb_util::RequestContext,
+        source: &str,
+        _max_bytes: usize,
+    ) -> Result<Vec<u8>, ImportFileError> {
+        if source.starts_with("http://") || source.starts_with("https://") {
+            Err(ImportFileError::RemoteDisabled)
+        } else {
+            Err(ImportFileError::Disabled)
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RootedImportFileService {
+    root: PathBuf,
+}
+
+impl RootedImportFileService {
+    pub fn new(root: impl AsRef<Path>) -> Result<Self, ImportFileError> {
+        let root = root
+            .as_ref()
+            .canonicalize()
+            .map_err(|_| ImportFileError::ReadFailed)?;
+        if !root.is_dir() {
+            return Err(ImportFileError::ReadFailed);
+        }
+        Ok(Self { root })
+    }
+
+    fn resolve(&self, source: &str) -> Result<PathBuf, ImportFileError> {
+        if source.starts_with("http://") || source.starts_with("https://") {
+            return Err(ImportFileError::RemoteDisabled);
+        }
+        if source.starts_with("file://") && !source.starts_with("file:///") {
+            return Err(ImportFileError::FileUrlAuthority);
+        }
+        let path = if source.contains("://") {
+            let url = Url::parse(source)
+                .map_err(|_| ImportFileError::UnsupportedScheme(String::new()))?;
+            if url.scheme() != "file" {
+                return Err(ImportFileError::UnsupportedScheme(url.scheme().into()));
+            }
+            if url.host_str().is_some() {
+                return Err(ImportFileError::FileUrlAuthority);
+            }
+            if url.query().is_some() {
+                return Err(ImportFileError::FileUrlQuery);
+            }
+            if url.fragment().is_some() {
+                return Err(ImportFileError::FileUrlFragment);
+            }
+            url.to_file_path()
+                .map_err(|_| ImportFileError::ReadFailed)?
+        } else {
+            PathBuf::from(source)
+        };
+        let mut relative = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::Normal(component) => relative.push(component),
+                Component::ParentDir => {
+                    relative.pop();
+                }
+                Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            }
+        }
+        let resolved = self
+            .root
+            .join(relative)
+            .canonicalize()
+            .map_err(|_| ImportFileError::ReadFailed)?;
+        if !resolved.starts_with(&self.root) {
+            return Err(ImportFileError::RootEscape);
+        }
+        Ok(resolved)
+    }
+}
+
+impl ImportFileService for RootedImportFileService {
+    fn read(
+        &self,
+        request_context: &copperdb_util::RequestContext,
+        source: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ImportFileError> {
+        request_context.check_active()?;
+        let path = self.resolve(source)?;
+        let metadata = path.metadata().map_err(|_| ImportFileError::ReadFailed)?;
+        if !metadata.is_file() {
+            return Err(ImportFileError::NotRegularFile);
+        }
+        if metadata.len() > max_bytes as u64 {
+            return Err(ImportFileError::TooLarge { limit: max_bytes });
+        }
+        let mut file = File::open(path).map_err(|_| ImportFileError::ReadFailed)?;
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            request_context.check_active()?;
+            let read = file
+                .read(&mut chunk)
+                .map_err(|_| ImportFileError::ReadFailed)?;
+            if read == 0 {
+                break;
+            }
+            if bytes.len().saturating_add(read) > max_bytes {
+                return Err(ImportFileError::TooLarge { limit: max_bytes });
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        Ok(bytes)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcedureMode {
@@ -174,6 +333,7 @@ pub struct ProcedureCallContext<'a> {
     pub database: Option<&'a str>,
     pub request_context: &'a copperdb_util::RequestContext,
     pub graph_read: &'a dyn GraphReadService,
+    pub import_files: &'a dyn ImportFileService,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -228,6 +388,100 @@ pub type ProcedureRegistrar = Arc<
         + Sync
         + 'static,
 >;
+
+#[cfg(test)]
+mod import_file_tests {
+    use super::*;
+    use copperdb_util::RequestContext;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn rooted_service_reads_rebased_file_urls_with_bounds() {
+        let root = tempdir().unwrap();
+        fs::create_dir(root.path().join("safe")).unwrap();
+        fs::write(root.path().join("safe/payload.json"), br#"{"id":1}"#).unwrap();
+        let service = RootedImportFileService::new(root.path()).unwrap();
+        let request = RequestContext::detached();
+
+        let bytes = service
+            .read(&request, "file:///../safe/payload.json", 64)
+            .unwrap();
+
+        assert_eq!(bytes, br#"{"id":1}"#);
+        assert_eq!(
+            service.read(&request, "safe/payload.json", 4).unwrap_err(),
+            ImportFileError::TooLarge { limit: 4 }
+        );
+    }
+
+    #[test]
+    fn denied_service_distinguishes_local_and_remote_sources() {
+        let service = DeniedImportFileService;
+        let request = RequestContext::detached();
+
+        assert_eq!(
+            service.read(&request, "payload.json", 64).unwrap_err(),
+            ImportFileError::Disabled
+        );
+        assert_eq!(
+            service
+                .read(&request, "https://example.com/payload.json", 64)
+                .unwrap_err(),
+            ImportFileError::RemoteDisabled
+        );
+    }
+
+    #[test]
+    fn rooted_service_rejects_unsafe_file_url_components_and_cancellation() {
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("payload.json"), br#"{"id":1}"#).unwrap();
+        let service = RootedImportFileService::new(root.path()).unwrap();
+        let request = RequestContext::detached();
+
+        for (source, expected) in [
+            (
+                "file://localhost/payload.json",
+                ImportFileError::FileUrlAuthority,
+            ),
+            (
+                "file:///payload.json?token=secret",
+                ImportFileError::FileUrlQuery,
+            ),
+            (
+                "file:///payload.json#fragment",
+                ImportFileError::FileUrlFragment,
+            ),
+        ] {
+            assert_eq!(service.read(&request, source, 64).unwrap_err(), expected);
+        }
+
+        request.cancel();
+        assert_eq!(
+            service.read(&request, "payload.json", 64).unwrap_err(),
+            ImportFileError::RequestCancelled(copperdb_util::RequestCancelled)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rooted_service_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::write(outside.path().join("secret.json"), br#"{"secret":true}"#).unwrap();
+        symlink(outside.path(), root.path().join("escape")).unwrap();
+        let service = RootedImportFileService::new(root.path()).unwrap();
+
+        assert_eq!(
+            service
+                .read(&RequestContext::detached(), "escape/secret.json", 1_024)
+                .unwrap_err(),
+            ImportFileError::RootEscape
+        );
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum BuiltinProcedure {

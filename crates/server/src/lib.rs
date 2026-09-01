@@ -3657,6 +3657,25 @@ fn open_engine(state: &AppState, database: &str) -> Result<Arc<GraphEngine>, Str
         .db_manager
         .effective_config(database, state.runtime_config.as_ref())
         .map_err(|error| error.to_string())?;
+    let apoc_import_granted = state
+        .runtime_config
+        .packages
+        .grants
+        .get(copperdb_apoc::PACKAGE_ID)
+        .is_some_and(|grants| grants.contains(&copperdb_plugin::PackageCapability::FileImport));
+    let package_import_file_root = apoc_import_granted
+        .then(|| {
+            state
+                .runtime_config
+                .packages
+                .configuration
+                .get(copperdb_apoc::PACKAGE_ID)
+                .and_then(|config| config.get("file_access_root"))
+                .and_then(Value::as_str)
+                .filter(|root| !root.is_empty())
+                .map(str::to_string)
+        })
+        .flatten();
     let config = EngineConfig {
         data_dir: database_record.storage_path,
         default_database: database.into(),
@@ -3664,6 +3683,7 @@ fn open_engine(state: &AppState, database: &str) -> Result<Arc<GraphEngine>, Str
         log_queries: false,
         sync_writes: state.runtime_config.storage.sync_writes,
         runtime_config,
+        package_import_file_root,
         ..Default::default()
     };
     let engine = Arc::new(

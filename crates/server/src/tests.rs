@@ -39,6 +39,40 @@ async fn runtime_configuration_loads_apoc_only_when_enabled() {
 }
 
 #[tokio::test]
+async fn apoc_load_json_uses_explicit_rooted_file_import_grant() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("payload.json"), br#"[{"id":1},{"id":2}]"#).unwrap();
+    let mut state = AppState::default();
+    let mut config = RuntimeConfig::default();
+    config.packages.enabled = vec![copperdb_apoc::PACKAGE_ID.into()];
+    config.packages.grants.insert(
+        copperdb_apoc::PACKAGE_ID.into(),
+        vec![
+            copperdb_plugin::PackageCapability::QueryRead,
+            copperdb_plugin::PackageCapability::FileImport,
+        ],
+    );
+    config.packages.configuration.insert(
+        copperdb_apoc::PACKAGE_ID.into(),
+        serde_json::json!({"file_access_root": root.path()}),
+    );
+    state.configure_runtime(Arc::new(config)).await.unwrap();
+
+    let result = open_engine(&state, "copperdb")
+        .unwrap()
+        .execute(
+            "CALL apoc.load.json('payload.json') YIELD value RETURN value",
+            HashMap::new(),
+        )
+        .unwrap();
+
+    assert_eq!(result.rows.len(), 2);
+    assert_eq!(result.rows[0]["value"]["id"].as_f64(), Some(1.0));
+    assert_eq!(result.rows[1]["value"]["id"].as_f64(), Some(2.0));
+    state.shutdown_packages().await.unwrap();
+}
+
+#[tokio::test]
 async fn runtime_configuration_loads_heimdall_only_when_enabled() {
     let mut state = AppState::default();
     assert!(state

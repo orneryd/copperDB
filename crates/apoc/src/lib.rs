@@ -16,6 +16,8 @@ use std::sync::Arc;
 pub const PACKAGE_ID: &str = "copperdb.apoc";
 const MAX_TRAVERSAL_LEVEL: usize = 64;
 const MAX_VISITED_NODES: usize = 100_000;
+const MAX_JSON_BYTES: usize = 16 * 1024 * 1024;
+const MAX_JSON_ROWS: usize = 100_000;
 
 pub fn factory() -> StaticPackageFactory {
     StaticPackageFactory::new(package())
@@ -93,6 +95,69 @@ pub fn package() -> PackageDefinition {
             )
             .requiring_capabilities(["query:read"]),
         )
+        .with_procedure(
+            ProcedureDescriptor::extension(
+                "apoc.load.json",
+                std::iter::empty::<&str>(),
+                "apoc.load.json(urlOrKeyOrBinary :: STRING, path :: STRING = '', config :: MAP = {}) :: (value :: MAP)",
+                "Loads JSON",
+                ProcedureMode::Read,
+                Arc::new(load_json),
+            )
+            .requiring_capabilities(["query:read"]),
+        )
+}
+
+fn load_json(
+    context: &ProcedureCallContext<'_>,
+    args: &[Value],
+) -> Result<ProcedureOutput, ProcedureError> {
+    if args.is_empty() {
+        return Err(ProcedureError::Message(
+            "procedure apoc.load.json requires at least 1 arguments, got 0".into(),
+        ));
+    }
+    if args.len() > 3 {
+        return Err(ProcedureError::Message(format!(
+            "procedure apoc.load.json accepts at most 3 arguments, got {}",
+            args.len()
+        )));
+    }
+    let source = match &args[0] {
+        Value::String(source) => source.clone(),
+        Value::Null => "null".into(),
+        source => source.to_string(),
+    };
+    if source.is_empty() {
+        return Err(ProcedureError::Message(
+            "apoc.load.json requires a URL or file path".into(),
+        ));
+    }
+    let bytes = context
+        .import_files
+        .read(context.request_context, &source, MAX_JSON_BYTES)
+        .map_err(|error| ProcedureError::Message(format!("failed to load JSON: {error}")))?;
+    context.request_context.check_active()?;
+    let value = serde_json::from_slice::<Value>(&bytes)
+        .map(json_numbers_to_float)
+        .map_err(|error| ProcedureError::Message(format!("failed to load JSON: {error}")))?;
+    let values = match value {
+        Value::Array(values) => values,
+        value => vec![value],
+    };
+    if values.len() > MAX_JSON_ROWS {
+        return Err(ProcedureError::Message(format!(
+            "failed to load JSON: result exceeds the {MAX_JSON_ROWS} row limit"
+        )));
+    }
+    let mut rows = Vec::with_capacity(values.len());
+    for value in values {
+        context.request_context.check_active()?;
+        let mut row = Row::new();
+        row.insert("value".into(), value);
+        rows.push(row);
+    }
+    Ok(ProcedureOutput::new(vec!["value".into()], rows))
 }
 
 fn function(
@@ -479,10 +544,13 @@ fn has_any_label(node: &GraphNode, labels: &[String]) -> bool {
 mod tests {
     use super::*;
     use copperdb_engine::{CopperDb, DatabaseConfig};
+    use copperdb_eval::{DeniedImportFileService, RootedImportFileService};
     use copperdb_plugin::resolve_packages;
     use copperdb_storage::{EdgeRecord, NodeRecord, StorageEngine};
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap};
+    use std::fs;
+    use tempfile::tempdir;
 
     fn database() -> CopperDb {
         let packages = resolve_packages([package()]).unwrap();
@@ -586,6 +654,86 @@ mod tests {
         assert_eq!(descriptor.mode(), ProcedureMode::Read);
         assert_eq!(descriptor.package_id(), Some(PACKAGE_ID));
         assert_eq!(descriptor.required_capabilities(), ["query:read"]);
+        let descriptor = procedures.get("apoc.load.json").unwrap();
+        assert_eq!(descriptor.mode(), ProcedureMode::Read);
+        assert_eq!(descriptor.package_id(), Some(PACKAGE_ID));
+        assert_eq!(
+            descriptor.signature(),
+            "apoc.load.json(urlOrKeyOrBinary :: STRING, path :: STRING = '', config :: MAP = {}) :: (value :: MAP)"
+        );
+    }
+
+    #[test]
+    fn load_json_expands_root_arrays_and_preserves_upstream_number_shape() {
+        let root = tempdir().unwrap();
+        fs::write(
+            root.path().join("payload.json"),
+            br#"[{"id":1},{"id":2.5}]"#,
+        )
+        .unwrap();
+        let storage = StorageEngine::open_temporary().unwrap();
+        let import_files = RootedImportFileService::new(root.path()).unwrap();
+        let request_context = copperdb_util::RequestContext::detached();
+        let row = Row::new();
+        let params = HashMap::new();
+        let capabilities = ["query:read".into()];
+        let caller_roles = ["admin".into()];
+        let context = ProcedureCallContext {
+            row: &row,
+            params: &params,
+            capabilities: &capabilities,
+            caller_roles: &caller_roles,
+            database: Some("copperdb"),
+            request_context: &request_context,
+            graph_read: &storage,
+            import_files: &import_files,
+        };
+
+        let output = load_json(&context, &[json!("payload.json")]).unwrap();
+
+        assert_eq!(output.columns, ["value"]);
+        assert_eq!(output.rows.len(), 2);
+        assert_eq!(output.rows[0]["value"]["id"].as_f64(), Some(1.0));
+        assert_eq!(output.rows[1]["value"]["id"].as_f64(), Some(2.5));
+    }
+
+    #[test]
+    fn load_json_is_default_denied_and_rejects_trailing_json() {
+        let storage = StorageEngine::open_temporary().unwrap();
+        let request_context = copperdb_util::RequestContext::detached();
+        let row = Row::new();
+        let params = HashMap::new();
+        let capabilities = ["query:read".into()];
+        let caller_roles = ["admin".into()];
+        let denied = DeniedImportFileService;
+        let denied_context = ProcedureCallContext {
+            row: &row,
+            params: &params,
+            capabilities: &capabilities,
+            caller_roles: &caller_roles,
+            database: Some("copperdb"),
+            request_context: &request_context,
+            graph_read: &storage,
+            import_files: &denied,
+        };
+        assert_eq!(
+            load_json(&denied_context, &[json!("payload.json")])
+                .unwrap_err()
+                .to_string(),
+            "failed to load JSON: local APOC import file access is disabled"
+        );
+
+        let root = tempdir().unwrap();
+        fs::write(root.path().join("records.json"), b"{\"id\":1}\n{\"id\":2}").unwrap();
+        let import_files = RootedImportFileService::new(root.path()).unwrap();
+        let trailing_context = ProcedureCallContext {
+            import_files: &import_files,
+            ..denied_context
+        };
+        assert!(load_json(&trailing_context, &[json!("records.json")])
+            .unwrap_err()
+            .to_string()
+            .starts_with("failed to load JSON:"));
     }
 
     #[test]

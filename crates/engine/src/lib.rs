@@ -52,8 +52,8 @@ use copperdb_cypher::{
     WhereClause, WithClause,
 };
 use copperdb_eval::{
-    EvalEngine, ProcedureMode, ProcedureRegistrar, ProcedureRegistry, ProcedureRegistryBuilder,
-    QueryStats,
+    DeniedImportFileService, EvalEngine, ImportFileService, ProcedureMode, ProcedureRegistrar,
+    ProcedureRegistry, ProcedureRegistryBuilder, QueryStats, RootedImportFileService,
 };
 use copperdb_fabric::{
     merge_fabric_aggregates, merge_fabric_paths, merge_fabric_rows, FabricAggregateOptions,
@@ -292,6 +292,8 @@ pub struct DatabaseConfig {
     pub storage_encryption_master_key: Option<Vec<u8>>,
     pub storage_encryption_key_uri: String,
     pub distributed_repair_queue_dir: Option<String>,
+    /// Canonical root exposed through the package import-file host service.
+    pub package_import_file_root: Option<String>,
 }
 
 impl Default for DatabaseConfig {
@@ -312,6 +314,7 @@ impl Default for DatabaseConfig {
             storage_encryption_master_key: None,
             storage_encryption_key_uri: "kms://local/storage".into(),
             distributed_repair_queue_dir: None,
+            package_import_file_root: None,
         }
     }
 }

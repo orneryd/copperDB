@@ -41,10 +41,11 @@ use uuid::Uuid;
 
 pub use copperdb_filter::Row;
 pub use procedure_registry::{
-    GraphDirection, GraphNode, GraphReadError, GraphReadService, GraphRelationship,
-    ProcedureCallContext, ProcedureDescriptor, ProcedureError, ProcedureHandler, ProcedureMode,
-    ProcedureOutput, ProcedureRegistrar, ProcedureRegistry, ProcedureRegistryBuilder,
-    ProcedureRegistryError,
+    DeniedImportFileService, GraphDirection, GraphNode, GraphReadError, GraphReadService,
+    GraphRelationship, ImportFileError, ImportFileService, ProcedureCallContext,
+    ProcedureDescriptor, ProcedureError, ProcedureHandler, ProcedureMode, ProcedureOutput,
+    ProcedureRegistrar, ProcedureRegistry, ProcedureRegistryBuilder, ProcedureRegistryError,
+    RootedImportFileService,
 };
 
 const VAR_LENGTH_UNBOUNDED_MAX_HOPS: u32 = 1 << 16;
@@ -264,6 +265,7 @@ pub struct EvalEngine {
     storage: Arc<StorageEngine>,
     function_registry: Arc<FunctionRegistry>,
     procedure_registry: Arc<ProcedureRegistry>,
+    import_files: Arc<dyn ImportFileService>,
     vector_indexes: Arc<HnswRegistry>,
     vector_index_query: VectorIndexQuery,
     vector_index_artifact_refresh: Option<Arc<dyn Fn() + Send + Sync>>,

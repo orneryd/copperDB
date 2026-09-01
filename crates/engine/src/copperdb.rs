@@ -927,6 +927,13 @@ impl CopperDb {
         function_registry: Arc<copperdb_filter::FunctionRegistry>,
         procedure_registry: Arc<ProcedureRegistry>,
     ) -> Result<Self, CopperDbError> {
+        let import_files: Arc<dyn ImportFileService> = match &config.package_import_file_root {
+            Some(root) => Arc::new(
+                RootedImportFileService::new(root)
+                    .map_err(|error| CopperDbError::Init(error.to_string()))?,
+            ),
+            None => Arc::new(DeniedImportFileService),
+        };
         let vector_indexes = Arc::new(VectorIndexManager::build(storage.as_ref())?);
         let embedding_runtime = Arc::new(EmbeddingRuntime::from_config(
             Arc::clone(&storage),
@@ -940,7 +947,8 @@ impl CopperDb {
             vector_indexes.query_callback(),
             function_registry,
             procedure_registry,
-        );
+        )
+        .with_import_file_service(import_files);
         let cypher_result_cache = Arc::new(QueryResultCache::new(
             1024,
             Some(std::time::Duration::from_secs(300)),

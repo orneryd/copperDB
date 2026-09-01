@@ -155,6 +155,7 @@ impl EvalEngine {
                 database: execution_context.database.as_deref(),
                 request_context,
                 graph_read: self.storage.as_ref(),
+                import_files: self.import_files.as_ref(),
             };
             let output =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&context, &args)))

@@ -9,7 +9,8 @@ Status: in progress. Priority: P2. Owners: `eval`, `engine`, `server`, `copperdb
 - Complete: separate `copperdb-apoc` package with the eight representative scalar functions and mirrored NornicDB query-contract tests.
 - Complete: database-scoped read-only graph host service and bounded `apoc.path.subgraphNodes` with direction/type filters, label filters, deterministic BFS order, authorization, cancellation, and mirrored NornicDB semantics.
 - Complete: separate Heimdall watcher package loaded through the production catalog with exact lifecycle, MCP-compatible `heimdall_watcher_query`, database-scoped read authorization, cancellation, bounded timestamped FIFO event hooks, newest-event drop, panic/timeout isolation, and package metrics.
-- Remaining: restricted transactional write/file/network host services and configuration-schema validation, representative import/load procedures, protocol tests, and benchmarks.
+- Complete: local `apoc.load.json` through a default-denied rooted import-file host service with explicit `FileImport` grants, canonical symlink containment, file-URI validation, cancellation, byte/row bounds, ordered root-array expansion, and strict trailing-data rejection.
+- Remaining: restricted transactional write and allowlisted network host services, configuration-schema validation, representative `apoc.import.json`, remote `apoc.load.json`, protocol tests, and benchmarks.
 
 ## Objective
 

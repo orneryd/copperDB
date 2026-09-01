@@ -18,3 +18,5 @@ serde_json.workspace = true
 [dev-dependencies]
 copperdb-engine = { workspace = true }
 copperdb-storage = { workspace = true }
+copperdb-util = { workspace = true }
+tempfile.workspace = true
