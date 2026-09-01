@@ -100,6 +100,165 @@ async fn mcp_run_cypher_requires_admin_access() {
 }
 
 #[tokio::test]
+async fn mcp_tool_calls_select_database_with_default_fallback() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let default_database = "mcp-default";
+    let selected_database = "mcp-selected";
+    let db_manager = Arc::new(DatabaseManager::new());
+    for database in [default_database, selected_database] {
+        db_manager
+            .create(
+                database,
+                temp_dir
+                    .path()
+                    .join(database)
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+            .unwrap();
+    }
+    let mut state = AppState {
+        db_name: default_database.into(),
+        db_manager,
+        ..Default::default()
+    };
+    state.auth.security_enabled = false;
+    let state = Arc::new(state);
+    let app = build_router(Arc::clone(&state));
+
+    for (id, database, marker) in [
+        (1, Some(selected_database), "selected"),
+        (2, None, "default"),
+    ] {
+        let mut arguments = serde_json::json!({
+            "query": "CREATE (:McpRoute {marker: $marker})",
+            "params": {"marker": marker}
+        });
+        if let Some(database) = database {
+            arguments["database"] = serde_json::json!(database);
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "method": "tools/call",
+                            "params": {"name": "run_cypher", "arguments": arguments}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(payload["error"].is_null(), "{payload}");
+        assert!(payload["result"]["isError"].is_null(), "{payload}");
+    }
+
+    let default_nodes = open_engine(&state, default_database)
+        .unwrap()
+        .storage()
+        .get_nodes_by_label("McpRoute")
+        .unwrap();
+    let selected_nodes = open_engine(&state, selected_database)
+        .unwrap()
+        .storage()
+        .get_nodes_by_label("McpRoute")
+        .unwrap();
+    assert_eq!(default_nodes.len(), 1);
+    assert_eq!(default_nodes[0].properties["marker"], "default");
+    assert_eq!(selected_nodes.len(), 1);
+    assert_eq!(selected_nodes[0].properties["marker"], "selected");
+}
+
+#[tokio::test]
+async fn mcp_database_selection_authorizes_target_before_opening_engine() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let denied_database = "mcp-denied";
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut state = AppState::default();
+    state
+        .db_manager
+        .create(
+            denied_database,
+            temp_dir
+                .path()
+                .join(denied_database)
+                .to_string_lossy()
+                .into_owned(),
+        )
+        .unwrap();
+    state.auth = AuthState::from_storage_path(
+        unique_auth_path(),
+        true,
+        true,
+        "admin".into(),
+        "password".into(),
+        "test-secret".into(),
+    )
+    .unwrap();
+    let editor_token = {
+        let auth = state.auth.open_authenticator().unwrap();
+        auth.allowlist
+            .save_role_databases(copperdb_auth::ROLE_EDITOR, vec![state.db_name.clone()])
+            .unwrap();
+        auth.privileges
+            .save_privilege(copperdb_auth::ROLE_EDITOR, &state.db_name, true, true)
+            .unwrap();
+        auth.create_user(
+            "database-editor",
+            "password",
+            vec![copperdb_auth::ROLE_EDITOR.into()],
+        )
+        .unwrap();
+        auth.authenticate("database-editor", "password")
+            .unwrap()
+            .0
+            .access_token
+    };
+    let state = Arc::new(state);
+
+    let response = build_router(Arc::clone(&state))
+        .oneshot(
+            Request::post("/mcp")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {editor_token}"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 3,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "find_similar",
+                            "arguments": {"text": "blocked", "database": denied_database}
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(!state.engine_cache.read().contains_key(denied_database));
+}
+
+#[tokio::test]
 async fn mcp_protocol_methods_do_not_require_database_access() {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;

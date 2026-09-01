@@ -8,7 +8,7 @@ Implement secure, cancellable MCP transport and durable database-scoped `store`,
 
 ## Current Defects
 
-Tool handlers remain ad hoc rather than typed and async, and `find_similar` is a misleading fulltext call. HTTP still lacks sessions and database selection. The six durable production tools and stdio transport are not implemented.
+Tool handlers remain ad hoc rather than typed and async, and `find_similar` is a misleading fulltext call. HTTP still lacks sessions. The six durable production tools and stdio transport are not implemented.
 
 ## Phases
 
@@ -28,9 +28,10 @@ Tool handlers remain ad hoc rather than typed and async, and `find_similar` is a
 - HTTP execution preserves authenticated caller roles, forwards declared Cypher parameters, avoids opening databases for protocol-only methods, and moves synchronous dispatch off the async runtime.
 - The HTTP route enforces the upstream-compatible 10 MiB request ceiling, accepts JSON and `+json` media types, rejects unsupported media with `415`, rejects oversized bodies with `413`, and maps malformed JSON and request shapes to JSON-RPC `-32700` and `-32600` errors.
 - HTTP response negotiation accepts JSON-compatible media ranges with quality and specificity precedence, rejects incompatible `Accept` headers with `406`, and applies the upstream-compatible 30-second MCP request deadline through request-context cancellation.
+- Tool calls accept the upstream-compatible `arguments.database` selector and unadvertised `arguments.db` alias, remove both before strict schema validation, fall back to the configured default, and authorize the selected database before opening its engine.
 - JSON-RPC notifications omit `id`, while explicit null IDs remain requests. Notifications execute through the same authorization and tool path, recognize `notifications/initialized`, and return `202 Accepted` with no response body even when dispatch reports a protocol or tool error.
 - JSON-RPC batches are capped at 32 entries, execute sequentially, preserve response order, isolate malformed and unauthorized entries, omit notification entries, reject invalid cardinality with `-32600`, and return an empty `202` response when every entry is a notification.
-- Typed async handlers, remaining transport hardening, database selection, and production tools remain pending.
+- Typed async handlers, session hardening, and production tools remain pending.
 
 ## Tests And Security
 

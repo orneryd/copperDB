@@ -106,6 +106,29 @@ impl McpRequest {
         self.id.is_none()
     }
 
+    pub fn take_database(&mut self) -> Option<String> {
+        if self.method != "tools/call" {
+            return None;
+        }
+        let arguments = self
+            .params
+            .as_mut()?
+            .as_object_mut()?
+            .get_mut("arguments")?
+            .as_object_mut()?;
+        let database = arguments
+            .remove("database")
+            .and_then(|value| value.as_str().map(str::to_owned));
+        let alias = arguments
+            .remove("db")
+            .and_then(|value| value.as_str().map(str::to_owned));
+        database
+            .filter(|database| !database.is_empty())
+            .or(alias)
+            .map(|database| database.trim().to_owned())
+            .filter(|database| !database.is_empty())
+    }
+
     fn response_id(&self) -> serde_json::Value {
         self.id.clone().flatten().unwrap_or(serde_json::Value::Null)
     }
@@ -543,7 +566,8 @@ fn copperdb_tools_with_access() -> Vec<(Tool, ToolAccess)> {
                     "type": "object",
                     "properties": {
                         "query": { "type": "string", "description": "The Cypher query to execute" },
-                        "params": { "type": "object", "description": "Query parameters" }
+                        "params": { "type": "object", "description": "Query parameters" },
+                        "database": { "type": "string", "description": "Database name to use. If omitted, uses the server's configured default database." }
                     },
                     "required": ["query"]
                     ,"additionalProperties": false
@@ -560,7 +584,8 @@ fn copperdb_tools_with_access() -> Vec<(Tool, ToolAccess)> {
                     "properties": {
                         "text": { "type": "string", "description": "Text to find similar nodes for" },
                         "k": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Number of results", "default": 10 },
-                        "label": { "type": "string", "description": "Filter by node label" }
+                        "label": { "type": "string", "description": "Filter by node label" },
+                        "database": { "type": "string", "description": "Database name to use. If omitted, uses the server's configured default database." }
                     },
                     "required": ["text"],
                     "additionalProperties": false
@@ -579,8 +604,17 @@ mod tests {
     fn test_tool_registry_default_tools() {
         let registry = ToolRegistry::new();
         assert_eq!(registry.len(), 2);
-        assert!(registry.get("run_cypher").is_some());
-        assert!(registry.get("find_similar").is_some());
+        for name in ["run_cypher", "find_similar"] {
+            let tool = registry.get(name).expect("built-in tool");
+            assert_eq!(
+                tool.input_schema["properties"]["database"]["type"],
+                "string"
+            );
+            assert!(tool.input_schema["properties"]["database"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("configured default database"));
+        }
     }
 
     #[test]
@@ -668,6 +702,49 @@ mod tests {
         let response = ToolRegistry::new().dispatch(&request);
         assert_eq!(response.id, serde_json::Value::Null);
         assert!(response.result.is_some());
+    }
+
+    #[test]
+    fn tool_call_database_selection_matches_upstream_precedence_and_cleanup() {
+        let mut request = McpRequest::new(
+            1,
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "run_cypher",
+                "arguments": {
+                    "database": " tenant_a ",
+                    "db": "tenant_b",
+                    "query": "RETURN 1"
+                }
+            })),
+        );
+
+        assert_eq!(request.take_database().as_deref(), Some("tenant_a"));
+        assert_eq!(
+            request.params.as_ref().unwrap()["arguments"],
+            serde_json::json!({"query": "RETURN 1"})
+        );
+
+        let mut alias = McpRequest::new(
+            2,
+            "tools/call",
+            Some(serde_json::json!({
+                "name": "run_cypher",
+                "arguments": {"database": 42, "db": " tenant_b "}
+            })),
+        );
+        assert_eq!(alias.take_database().as_deref(), Some("tenant_b"));
+
+        let mut protocol_request = McpRequest::new(
+            3,
+            "initialize",
+            Some(serde_json::json!({"database": "tenant_a"})),
+        );
+        assert_eq!(protocol_request.take_database(), None);
+        assert_eq!(
+            protocol_request.params.unwrap(),
+            serde_json::json!({"database": "tenant_a"})
+        );
     }
 
     #[test]

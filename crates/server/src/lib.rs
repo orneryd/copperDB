@@ -5046,7 +5046,7 @@ async fn execute_mcp_request(
     state: Arc<AppState>,
     request_context: RequestContext,
     headers: &HeaderMap,
-    request: copperdb_mcp::McpRequest,
+    mut request: copperdb_mcp::McpRequest,
 ) -> Result<Option<copperdb_mcp::McpResponse>, StatusCode> {
     let is_notification = request.is_notification();
     let registry = copperdb_mcp::ToolRegistry::new();
@@ -5062,16 +5062,15 @@ async fn execute_mcp_request(
         }
     };
     let registry = if let Some(access) = access {
-        let claims = match authorize_database_access(
-            &state,
-            headers,
-            &state.db_name,
-            access.requires_write(),
-        ) {
-            Ok(claims) => claims,
-            Err(_) if is_notification => return Ok(None),
-            Err(status) => return Err(status),
-        };
+        let database = request
+            .take_database()
+            .unwrap_or_else(|| state.db_name.clone());
+        let claims =
+            match authorize_database_access(&state, headers, &database, access.requires_write()) {
+                Ok(claims) => claims,
+                Err(_) if is_notification => return Ok(None),
+                Err(status) => return Err(status),
+            };
         if access.requires_admin() {
             if let Some(claims) = claims.as_ref() {
                 if let Err(status) = ensure_admin_access(&state, claims) {
@@ -5082,7 +5081,7 @@ async fn execute_mcp_request(
                 }
             }
         }
-        let engine = match open_engine(&state, &state.db_name) {
+        let engine = match open_engine(&state, &database) {
             Ok(engine) => engine,
             Err(error) => {
                 if is_notification {
