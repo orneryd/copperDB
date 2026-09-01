@@ -97,6 +97,7 @@ pub struct FunctionDescriptor {
     signature: String,
     description: String,
     category: String,
+    package_id: Option<String>,
     alias_descriptions: HashMap<String, String>,
     hidden: bool,
     implementation: FunctionImplementation,
@@ -112,6 +113,7 @@ impl fmt::Debug for FunctionDescriptor {
             .field("signature", &self.signature)
             .field("description", &self.description)
             .field("category", &self.category)
+            .field("package_id", &self.package_id)
             .field("hidden", &self.hidden)
             .finish_non_exhaustive()
     }
@@ -134,6 +136,7 @@ impl FunctionDescriptor {
             signature: signature.into(),
             description: description.into(),
             category: category.into(),
+            package_id: None,
             alias_descriptions: HashMap::new(),
             hidden: false,
             implementation: FunctionImplementation::Extension(handler),
@@ -157,6 +160,7 @@ impl FunctionDescriptor {
             signature,
             description,
             category,
+            package_id: None,
             alias_descriptions,
             hidden: false,
             implementation: FunctionImplementation::Builtin,
@@ -165,6 +169,11 @@ impl FunctionDescriptor {
 
     pub fn hidden(mut self) -> Self {
         self.hidden = true;
+        self
+    }
+
+    pub fn attributed_to(mut self, package_id: impl Into<String>) -> Self {
+        self.package_id = Some(package_id.into());
         self
     }
 
@@ -196,6 +205,10 @@ impl FunctionDescriptor {
 
     pub fn category(&self) -> &str {
         &self.category
+    }
+
+    pub fn package_id(&self) -> Option<&str> {
+        self.package_id.as_deref()
     }
 
     pub fn is_hidden(&self) -> bool {

@@ -51,7 +51,10 @@ use copperdb_cypher::{
     EdgeDirection, Expression, LiteralValue, Parser, Pattern, QueryType, ReturnItem, SetItem,
     WhereClause, WithClause,
 };
-use copperdb_eval::{EvalEngine, ProcedureMode, ProcedureRegistrar, ProcedureRegistry, QueryStats};
+use copperdb_eval::{
+    EvalEngine, ProcedureMode, ProcedureRegistrar, ProcedureRegistry, ProcedureRegistryBuilder,
+    QueryStats,
+};
 use copperdb_fabric::{
     merge_fabric_aggregates, merge_fabric_paths, merge_fabric_rows, FabricAggregateOptions,
     FabricMergedPaths, FabricMergedRows, FabricPathBatch, FabricPathMergeOptions, FabricReadPlan,
@@ -59,7 +62,9 @@ use copperdb_fabric::{
 };
 use copperdb_filter::{
     eval_expression, eval_predicate, FunctionExecutionContext, FunctionRegistrar,
+    FunctionRegistryBuilder,
 };
+use copperdb_plugin::ResolvedPackageSet;
 use copperdb_kms::{new_provider, ProviderFactoryConfig};
 use copperdb_replication::{
     CassandraCoordinator, Command, DistributedReadOutcome, DistributedWriteOutcome,

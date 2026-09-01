@@ -35,6 +35,7 @@ copperdb-embed = { workspace = true }
 copperdb-indexing = { workspace = true }
 copperdb-graphql = { workspace = true }
 copperdb-pool = { workspace = true }
+copperdb-plugin = { workspace = true }
 copperdb-txsession = { workspace = true }
 copperdb-audit = { workspace = true }
 copperdb-compliance = { workspace = true }
@@ -54,6 +55,7 @@ axum.workspace = true
 rmp-serde.workspace = true
 criterion.workspace = true
 copperdb-server = { workspace = true }
+semver.workspace = true
 
 [[bench]]
 name = "semantic_hybrid"

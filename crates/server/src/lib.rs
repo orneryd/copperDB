@@ -42,6 +42,7 @@ use copperdb_nornicgrpc::{
 use copperdb_otel::{
     classify_cypher_op_type, CancellationProtocol, CancellationStage, Health, Telemetry,
 };
+use copperdb_plugin::{resolve_packages, PackageDefinition, ResolvedPackageSet};
 use copperdb_replication::{Command, ReplicaTransport, ReplicationStorage, StorageEngineAdapter};
 use copperdb_retention::{
     ErasureRequest, LegalHold, Manager as RetentionManager, Policy, RetentionError,
@@ -224,6 +225,8 @@ pub struct AppState {
     /// from disk triggers LSM-tree recovery (WAL replay, manifest rebuild)
     /// which can take 400–600 ms.  Caching avoids this cost per query.
     pub engine_cache: Arc<RwLock<HashMap<String, Arc<GraphEngine>>>>,
+    /// Process-wide package registries resolved before any database is opened.
+    pub packages: Arc<ResolvedPackageSet>,
 }
 
 #[derive(Default)]
@@ -719,7 +722,37 @@ impl AppState {
             distributed_cypher_enabled: get_bool_loose("COPPERDB_DISTRIBUTED_CYPHER", false),
             graphql_schema: copperdb_graphql::build_default_schema(),
             engine_cache: Arc::new(RwLock::new(HashMap::new())),
+            packages: Arc::new(resolve_packages([]).expect("empty package set is valid")),
         }
+    }
+
+    pub fn configure_runtime(
+        &mut self,
+        runtime_config: Arc<RuntimeConfig>,
+    ) -> Result<(), ServerError> {
+        let mut packages = Vec::<PackageDefinition>::new();
+        for package_id in &runtime_config.packages.enabled {
+            match package_id.as_str() {
+                copperdb_apoc::PACKAGE_ID => packages.push(copperdb_apoc::package()),
+                _ => {
+                    return Err(ServerError::Engine(format!(
+                        "unknown configured package: {package_id}"
+                    )))
+                }
+            }
+        }
+        for package_id in &runtime_config.packages.required {
+            if !runtime_config.packages.enabled.contains(package_id) {
+                return Err(ServerError::Engine(format!(
+                    "required package is not enabled: {package_id}"
+                )));
+            }
+        }
+        self.packages = Arc::new(
+            resolve_packages(packages).map_err(|error| ServerError::Engine(error.to_string()))?,
+        );
+        self.runtime_config = runtime_config;
+        Ok(())
     }
 }
 
@@ -3458,7 +3491,10 @@ fn open_engine(state: &AppState, database: &str) -> Result<Arc<GraphEngine>, Str
         runtime_config,
         ..Default::default()
     };
-    let engine = Arc::new(GraphEngine::open(config).map_err(|error| error.to_string())?);
+    let engine = Arc::new(
+        GraphEngine::open_with_packages(config, state.packages.as_ref())
+            .map_err(|error| error.to_string())?,
+    );
     // Lazy-load retention data from the shared storage (avoids a second StorageEngine::open).
     if database == "copperdb" {
         let storage = Arc::clone(engine.storage_engine());

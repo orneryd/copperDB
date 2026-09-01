@@ -104,6 +104,7 @@ pub struct Config {
     pub encryption: EncryptionConfig,
     pub embedding: EmbeddingConfig,
     pub search: SearchConfig,
+    pub packages: PackageConfig,
     pub features: FeatureConfig,
     pub vectorspace: VectorSpaceConfig,
     pub gpu: GpuConfig,
@@ -351,6 +352,7 @@ impl Default for Config {
             encryption: EncryptionConfig::default(),
             embedding: EmbeddingConfig::default(),
             search: SearchConfig::default(),
+            packages: PackageConfig::default(),
             features: FeatureConfig::default(),
             vectorspace: VectorSpaceConfig::default(),
             gpu: GpuConfig::default(),
@@ -633,6 +635,17 @@ impl Default for SearchConfig {
             rerank_enabled: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PackageConfig {
+    /// Statically linked package IDs to load.
+    pub enabled: Vec<String>,
+    /// Enabled package IDs whose startup failure must fail the process.
+    pub required: Vec<String>,
+    /// Secret-free package configuration keyed by package ID.
+    pub configuration: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1135,6 +1148,12 @@ pub fn apply_env_overrides_from(config: &mut Config, env: &BTreeMap<String, Stri
         parse_env_bool(env, "COPPERDB_SEARCH_RERANK_ENABLED"),
         |value| config.search.rerank_enabled = value,
     );
+    set_if_present(env_nonempty(env, "COPPERDB_PACKAGES_ENABLED"), |value| {
+        config.packages.enabled = split_package_ids(&value)
+    });
+    set_if_present(env_nonempty(env, "COPPERDB_PACKAGES_REQUIRED"), |value| {
+        config.packages.required = split_package_ids(&value)
+    });
     set_if_present(
         parse_env_bool(env, "COPPERDB_AUTO_LINKS_ENABLED"),
         |value| config.features.auto_links_enabled = value,
@@ -1142,6 +1161,15 @@ pub fn apply_env_overrides_from(config: &mut Config, env: &BTreeMap<String, Stri
     set_if_present(parse_env_bool(env, "COPPERDB_AUTO_TLP_ENABLED"), |value| {
         config.features.auto_tlp_enabled = value
     });
+}
+
+fn split_package_ids(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 pub fn apply_overrides(config: &mut Config, overrides: &ConfigOverrides) {
@@ -1522,6 +1550,8 @@ mod tests {
         assert!(cfg.auth.enabled);
         assert!(!cfg.search.bm25_enabled);
         assert!(!cfg.search.vector_enabled);
+        assert!(cfg.packages.enabled.is_empty());
+        assert!(cfg.packages.required.is_empty());
         assert!(!cfg.features.auto_links_enabled);
     }
 
@@ -1775,6 +1805,11 @@ auth:
         );
         env.insert("COPPERDB_SEARCH_BM25_ENABLED".into(), "true".into());
         env.insert("COPPERDB_SEARCH_VECTOR_ENABLED".into(), "true".into());
+        env.insert(
+            "COPPERDB_PACKAGES_ENABLED".into(),
+            "copperdb.apoc, copperdb.heimdall".into(),
+        );
+        env.insert("COPPERDB_PACKAGES_REQUIRED".into(), "copperdb.apoc".into());
         env.insert("COPPERDB_AUTO_LINKS_ENABLED".into(), "true".into());
 
         apply_env_overrides_from(&mut cfg, &env);
@@ -1791,6 +1826,8 @@ auth:
         assert_eq!(cfg.vectorspace.dimensions, 1024);
         assert!(cfg.search.bm25_enabled);
         assert!(cfg.search.vector_enabled);
+        assert_eq!(cfg.packages.enabled, ["copperdb.apoc", "copperdb.heimdall"]);
+        assert_eq!(cfg.packages.required, ["copperdb.apoc"]);
         assert!(cfg.features.auto_links_enabled);
     }
 

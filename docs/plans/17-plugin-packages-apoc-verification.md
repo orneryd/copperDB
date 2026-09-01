@@ -1,6 +1,13 @@
 # 17: Plugin Packages And APOC Verification
 
-Status: planned. Priority: P2. Owners: `eval`, `engine`, `server`, `copperdb`, `heimdall`, and new `plugin` and `apoc` crates.
+Status: in progress. Priority: P2. Owners: `eval`, `engine`, `server`, `copperdb`, `heimdall`, and new `plugin` and `apoc` crates.
+
+## Implementation Progress
+
+- Complete: versioned package descriptors, typed requested capabilities, host compatibility, deterministic dependency sorting, transactional collisions, immutable registries, and package-attributed function/procedure discovery.
+- Complete: disabled-by-default static package allowlist, required-package validation, process-wide startup resolution, and package-aware engine construction for every logical database.
+- Complete: separate `copperdb-apoc` package with the eight representative scalar functions and mirrored NornicDB query-contract tests.
+- Remaining: package factories and supervised lifecycle, optional failure isolation, granted host services/configuration validation, representative graph/I/O procedures, Heimdall package adaptation, protocol tests, and benchmarks.
 
 ## Objective
 

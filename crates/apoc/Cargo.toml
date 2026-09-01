@@ -1,0 +1,19 @@
+[package]
+name = "copperdb-apoc"
+description = "APOC-compatible CopperDB plugin package"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+copperdb-filter = { workspace = true }
+copperdb-plugin = { workspace = true }
+getrandom.workspace = true
+semver.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+copperdb-engine = { workspace = true }
+copperdb-storage = { workspace = true }

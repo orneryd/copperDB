@@ -86,6 +86,84 @@ fn from_storage_accepts_function_and_procedure_registrars() {
 }
 
 #[test]
+fn from_storage_accepts_transactionally_resolved_packages() {
+    use copperdb_plugin::{resolve_packages, PackageDefinition, PackageDescriptor};
+    use semver::Version;
+
+    let definition = PackageDefinition::new(PackageDescriptor::new(
+        "example.engine",
+        Version::new(1, 0, 0),
+        "copperdb-tests",
+    ))
+    .with_function(copperdb_filter::FunctionDescriptor::extension(
+        "example.packageScalar",
+        std::iter::empty::<&str>(),
+        "example.packageScalar() :: STRING",
+        "Package scalar",
+        "Testing",
+        Arc::new(|_, _| Ok(Value::String("scalar".into()))),
+    ))
+    .with_procedure(copperdb_eval::ProcedureDescriptor::extension(
+        "example.packageProcedure",
+        std::iter::empty::<&str>(),
+        "example.packageProcedure() :: (value :: STRING)",
+        "Package procedure",
+        copperdb_eval::ProcedureMode::Read,
+        Arc::new(|_, _| {
+            let mut row = copperdb_eval::Row::new();
+            row.insert("value".into(), Value::String("procedure".into()));
+            Ok(copperdb_eval::ProcedureOutput::new(
+                vec!["value".into()],
+                vec![row],
+            ))
+        }),
+    ));
+    let packages = resolve_packages([definition]).unwrap();
+    let storage = Arc::new(StorageEngine::open_temporary().unwrap());
+    let db = CopperDb::from_storage_with_packages(
+        storage,
+        DatabaseConfig::default(),
+        &packages,
+    )
+    .unwrap();
+
+    let scalar = db
+        .execute("RETURN example.packageScalar() AS value", HashMap::new())
+        .unwrap();
+    assert_eq!(scalar.rows[0]["value"], Value::String("scalar".into()));
+    let procedure = db
+        .execute(
+            "CALL example.packageProcedure() YIELD value RETURN value",
+            HashMap::new(),
+        )
+        .unwrap();
+    assert_eq!(
+        procedure.rows[0]["value"],
+        Value::String("procedure".into())
+    );
+
+    let functions = db
+        .execute(
+            "CALL dbms.functions() YIELD name RETURN name",
+            HashMap::new(),
+        )
+        .unwrap();
+    assert!(functions
+        .rows
+        .iter()
+        .any(|row| row["name"] == Value::String("example.packageScalar".into())));
+    let procedures = db
+        .execute(
+            "CALL dbms.procedures() YIELD name RETURN name",
+            HashMap::new(),
+        )
+        .unwrap();
+    assert!(procedures.rows.iter().any(
+        |row| row["name"] == Value::String("example.packageProcedure".into())
+    ));
+}
+
+#[test]
 fn lower_layer_error_conversion_preserves_request_cancellation() {
     let storage_error = CopperDbError::from(StorageError::RequestCancelled(RequestCancelled));
     assert!(matches!(storage_error, CopperDbError::RequestCancelled(_)));

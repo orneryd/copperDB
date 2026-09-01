@@ -858,6 +858,16 @@ impl CopperDb {
         Self::from_storage(storage, config)
     }
 
+    /// Create a persistent database with a transactionally resolved package set.
+    #[allow(clippy::arc_with_non_send_sync)]
+    pub fn open_with_packages(
+        config: DatabaseConfig,
+        packages: &ResolvedPackageSet,
+    ) -> Result<Self, CopperDbError> {
+        let storage = Arc::new(open_storage(&config)?);
+        Self::from_storage_with_packages(storage, config, packages)
+    }
+
     #[allow(clippy::arc_with_non_send_sync)]
     /// Construct a database over an injected storage instance.
     ///
@@ -878,21 +888,59 @@ impl CopperDb {
         function_registrars: &[FunctionRegistrar],
         procedure_registrars: &[ProcedureRegistrar],
     ) -> Result<Self, CopperDbError> {
+        let mut function_builder = FunctionRegistryBuilder::with_builtins();
+        for registrar in function_registrars {
+            registrar(&mut function_builder)
+                .map_err(|error| CopperDbError::Init(error.to_string()))?;
+        }
+        let mut procedure_builder = ProcedureRegistryBuilder::with_builtins();
+        for registrar in procedure_registrars {
+            registrar(&mut procedure_builder)
+                .map_err(|error| CopperDbError::Init(error.to_string()))?;
+        }
+        Self::from_storage_with_registries(
+            storage,
+            config,
+            Arc::new(function_builder.build()),
+            Arc::new(procedure_builder.build()),
+        )
+    }
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    /// Construct a database with a transactionally resolved package set.
+    pub fn from_storage_with_packages(
+        storage: Arc<StorageEngine>,
+        config: DatabaseConfig,
+        packages: &ResolvedPackageSet,
+    ) -> Result<Self, CopperDbError> {
+        Self::from_storage_with_registries(
+            storage,
+            config,
+            packages.function_registry(),
+            packages.procedure_registry(),
+        )
+    }
+
+    fn from_storage_with_registries(
+        storage: Arc<StorageEngine>,
+        config: DatabaseConfig,
+        function_registry: Arc<copperdb_filter::FunctionRegistry>,
+        procedure_registry: Arc<ProcedureRegistry>,
+    ) -> Result<Self, CopperDbError> {
         let vector_indexes = Arc::new(VectorIndexManager::build(storage.as_ref())?);
         let embedding_runtime = Arc::new(EmbeddingRuntime::from_config(
             Arc::clone(&storage),
             &config.runtime_config,
         ));
         embedding_runtime.start_workers(config.runtime_config.embedding_workers);
-        let eval = EvalEngine::try_new_with_vector_index_service_and_registrars(
+        let eval = EvalEngine::new_with_vector_index_service_and_registries(
             Arc::clone(&storage),
             vector_indexes.registry(),
             Some(vector_indexes.artifact_refresh_callback(&storage)),
             vector_indexes.query_callback(),
-            function_registrars,
-            procedure_registrars,
-        )
-        .map_err(|error| CopperDbError::Init(error.to_string()))?;
+            function_registry,
+            procedure_registry,
+        );
         let cypher_result_cache = Arc::new(QueryResultCache::new(
             1024,
             Some(std::time::Duration::from_secs(300)),

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/admin",
     "crates/adminimport",
+    "crates/apoc",
     "crates/audit",
     "crates/auth",
     "crates/bolt",
@@ -39,6 +40,7 @@ members = [
     "crates/nornicgrpc",
     "crates/otel",
     "crates/pool",
+    "crates/plugin",
     "crates/qdrantgrpc",
     "crates/replication",
     "crates/retention",
@@ -76,6 +78,7 @@ futures = "0.3.31"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serde_yaml = "0.9.34"
+semver = { version = "1.0.27", features = ["serde"] }
 rmp-serde = "1.3.1"          # MessagePack (replaces vmihailenco/msgpack)
 toml = "1.1.2"
 
@@ -187,6 +190,7 @@ rcgen = "0.14.5"
 
 # Inter-crate dependencies within this workspace
 copperdb-util = { path = "crates/util" }
+copperdb-apoc = { path = "crates/apoc" }
 copperdb-storage = { path = "crates/storage" }
 copperdb-cypher = { path = "crates/cypher" }
 copperdb-auth = { path = "crates/auth" }
@@ -209,6 +213,7 @@ copperdb-config = { path = "crates/config" }
 copperdb-server = { path = "crates/server" }
 copperdb-graphql = { path = "crates/graphql" }
 copperdb-pool = { path = "crates/pool" }
+copperdb-plugin = { path = "crates/plugin" }
 copperdb-txsession = { path = "crates/txsession" }
 copperdb-eval = { path = "crates/eval" }
 copperdb-filter = { path = "crates/filter" }

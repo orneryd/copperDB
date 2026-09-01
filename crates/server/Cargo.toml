@@ -27,6 +27,7 @@ opentelemetry.workspace = true
 parking_lot.workspace = true
 uuid.workspace = true
 copperdb-auth = { workspace = true }
+copperdb-apoc = { workspace = true }
 copperdb-bolt = { workspace = true }
 copperdb-buildinfo = { workspace = true }
 copperdb-config = { workspace = true }
@@ -46,6 +47,7 @@ copperdb-txsession = { workspace = true }
 copperdb-util = { workspace = true }
 copperdb-retention = { workspace = true }
 copperdb-otel = { workspace = true }
+copperdb-plugin = { workspace = true }
 copperdb-security = { workspace = true }
 copperdb-storage = { workspace = true }
 rust-embed = "8"

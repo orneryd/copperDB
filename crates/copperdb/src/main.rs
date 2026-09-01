@@ -367,7 +367,9 @@ async fn main() -> Result<()> {
         .context("failed to initialize configured authentication")?;
     let mut state = AppState::with_auth(auth);
     state.db_name = startup.db_name.clone();
-    state.runtime_config = Arc::clone(&startup.runtime_config);
+    state
+        .configure_runtime(Arc::clone(&startup.runtime_config))
+        .context("failed to resolve configured packages")?;
     state.static_dir = startup.static_dir.clone();
     state.base_path = startup.base_path.clone();
     state.headless = startup.headless;

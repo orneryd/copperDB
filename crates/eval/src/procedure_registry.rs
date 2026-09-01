@@ -133,6 +133,7 @@ pub struct ProcedureDescriptor {
     signature: String,
     description: String,
     mode: ProcedureMode,
+    package_id: Option<String>,
     required_capabilities: Vec<String>,
     required_roles: Vec<String>,
     hidden: bool,
@@ -149,6 +150,7 @@ impl fmt::Debug for ProcedureDescriptor {
             .field("signature", &self.signature)
             .field("description", &self.description)
             .field("mode", &self.mode)
+            .field("package_id", &self.package_id)
             .field("required_capabilities", &self.required_capabilities)
             .field("required_roles", &self.required_roles)
             .field("hidden", &self.hidden)
@@ -173,6 +175,7 @@ impl ProcedureDescriptor {
             signature: signature.into(),
             description: description.into(),
             mode,
+            package_id: None,
             required_capabilities: Vec::new(),
             required_roles: Vec::new(),
             hidden: false,
@@ -194,6 +197,7 @@ impl ProcedureDescriptor {
             signature: signature.to_string(),
             description: description.to_string(),
             mode,
+            package_id: None,
             required_capabilities: Vec::new(),
             required_roles: Vec::new(),
             hidden: false,
@@ -219,6 +223,11 @@ impl ProcedureDescriptor {
         self
     }
 
+    pub fn attributed_to(mut self, package_id: impl Into<String>) -> Self {
+        self.package_id = Some(package_id.into());
+        self
+    }
+
     pub fn canonical_name(&self) -> &str {
         &self.canonical_name
     }
@@ -241,6 +250,10 @@ impl ProcedureDescriptor {
 
     pub fn mode(&self) -> ProcedureMode {
         self.mode
+    }
+
+    pub fn package_id(&self) -> Option<&str> {
+        self.package_id.as_deref()
     }
 
     pub fn required_capabilities(&self) -> &[String] {
@@ -377,8 +390,8 @@ fn build_builtin_registry() -> ProcedureRegistry {
         ("db.schema.visualization", "db.schema.visualization() :: (nodes :: LIST<MAP>, relationships :: LIST<MAP>)", "Visualizes schema", Read, B::DbSchemaVisualization),
         ("dbms.clientConfig", "dbms.clientConfig() :: (name :: STRING, value :: ANY)", "Returns client configuration", Dbms, B::DbmsClientConfig),
         ("dbms.components", "dbms.components() :: (name :: STRING, versions :: LIST<STRING>, edition :: STRING)", "Lists DBMS components", Dbms, B::DbmsComponents),
-        ("dbms.functions", "dbms.functions() :: (name :: STRING, signature :: STRING, description :: STRING, category :: STRING)", "Lists functions", Dbms, B::DbmsFunctions),
-        ("dbms.procedures", "dbms.procedures() :: (name :: STRING, signature :: STRING, description :: STRING, mode :: STRING)", "Lists procedures", Dbms, B::DbmsProcedures),
+        ("dbms.functions", "dbms.functions() :: (name :: STRING, signature :: STRING, description :: STRING, category :: STRING, package :: STRING)", "Lists functions", Dbms, B::DbmsFunctions),
+        ("dbms.procedures", "dbms.procedures() :: (name :: STRING, signature :: STRING, description :: STRING, mode :: STRING, package :: STRING)", "Lists procedures", Dbms, B::DbmsProcedures),
         ("dbms.info", "dbms.info() :: (id :: STRING, name :: STRING, creationDate :: STRING)", "Returns DBMS information", Dbms, B::DbmsInfo),
         ("dbms.listConfig", "dbms.listConfig() :: (name :: STRING, description :: STRING, value :: ANY, dynamic :: BOOLEAN)", "Lists DBMS configuration", Dbms, B::DbmsListConfig),
         ("dbms.listConnections", "dbms.listConnections() :: (connectionId :: STRING, connectTime :: STRING, connector :: STRING, username :: STRING, userAgent :: STRING, clientAddress :: STRING)", "Lists active DBMS connections", Dbms, B::DbmsListConnections),

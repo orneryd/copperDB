@@ -3,6 +3,25 @@
 use super::*;
 
 #[test]
+fn runtime_configuration_loads_apoc_only_when_enabled() {
+    let mut state = AppState::default();
+    assert!(state.packages.packages().is_empty());
+
+    let mut config = RuntimeConfig::default();
+    config.packages.enabled = vec![copperdb_apoc::PACKAGE_ID.into()];
+    config.packages.required = vec![copperdb_apoc::PACKAGE_ID.into()];
+    state.configure_runtime(Arc::new(config)).unwrap();
+
+    assert_eq!(state.packages.packages().len(), 1);
+    assert_eq!(state.packages.packages()[0].id, copperdb_apoc::PACKAGE_ID);
+    assert!(state
+        .packages
+        .function_registry()
+        .get("apoc.create.uuid")
+        .is_some());
+}
+
+#[test]
 fn http_trace_context_excludes_baggage_and_credentials() {
     use axum::http::{header, HeaderValue};
 
@@ -30,6 +49,7 @@ async fn http_request_span_preserves_remote_parent_trace_identity() {
     use opentelemetry_sdk::propagation::TraceContextPropagator;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
     use tower::ServiceExt as _;
+    use tracing::instrument::WithSubscriber as _;
     use tracing_subscriber::layer::SubscriberExt as _;
 
     let exporter = InMemorySpanExporter::default();
@@ -39,7 +59,6 @@ async fn http_request_span_preserves_remote_parent_trace_identity() {
     let tracer = provider.tracer("http-parent-test");
     let subscriber =
         tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
-    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
     let state = Arc::new(AppState::default());
 
@@ -53,6 +72,7 @@ async fn http_request_span_preserves_remote_parent_trace_identity() {
                 .body(Body::empty())
                 .unwrap(),
         )
+        .with_subscriber(subscriber)
         .await
         .unwrap();
 

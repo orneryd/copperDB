@@ -295,6 +295,9 @@ impl EvalEngine {
                     "mode".to_string(),
                     Value::String(descriptor.mode().as_str().to_string()),
                 );
+                if let Some(package_id) = descriptor.package_id() {
+                    row.insert("package".to_string(), Value::String(package_id.to_string()));
+                }
                 row
             })
             .collect::<Vec<_>>();
@@ -305,6 +308,7 @@ impl EvalEngine {
                 "signature".to_string(),
                 "description".to_string(),
                 "mode".to_string(),
+                "package".to_string(),
             ],
             rows,
             stats: QueryStats::default(),
@@ -342,6 +346,12 @@ impl EvalEngine {
                             "category".to_string(),
                             Value::String(descriptor.category().to_string()),
                         );
+                        if let Some(package_id) = descriptor.package_id() {
+                            row.insert(
+                                "package".to_string(),
+                                Value::String(package_id.to_string()),
+                            );
+                        }
                         row
                     })
             })
@@ -357,6 +367,7 @@ impl EvalEngine {
                 "signature".to_string(),
                 "description".to_string(),
                 "category".to_string(),
+                "package".to_string(),
             ],
             rows: functions,
             stats: QueryStats::default(),
@@ -1392,7 +1403,11 @@ impl EvalEngine {
             .rows
             .iter()
             .map(|row| {
-                let mut projected = project_row(row, &call.yield_items, params)?;
+                let mut normalized = row.clone();
+                for column in procedure_columns {
+                    normalized.entry(column.clone()).or_insert(Value::Null);
+                }
+                let mut projected = project_row(&normalized, &call.yield_items, params)?;
                 for (key, value) in row {
                     if !procedure_columns.contains(key) {
                         projected.insert(key.clone(), value.clone());
@@ -2506,13 +2521,13 @@ pub(crate) fn legacy_builtin_procedure_rows() -> Vec<Row> {
         ),
         (
             "dbms.functions",
-            "dbms.functions() :: (name :: STRING, signature :: STRING, description :: STRING, category :: STRING)",
+            "dbms.functions() :: (name :: STRING, signature :: STRING, description :: STRING, category :: STRING, package :: STRING)",
             "Lists functions",
             "DBMS",
         ),
         (
             "dbms.procedures",
-            "dbms.procedures() :: (name :: STRING, signature :: STRING, description :: STRING, mode :: STRING)",
+            "dbms.procedures() :: (name :: STRING, signature :: STRING, description :: STRING, mode :: STRING, package :: STRING)",
             "Lists procedures",
             "DBMS",
         ),
