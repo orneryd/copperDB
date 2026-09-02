@@ -251,7 +251,9 @@ fn storage_batch_wal_sync_coalesces_durability_barriers() {
         WALConfig {
             enabled: true,
             max_entries_per_segment: 1024,
-            sync_mode: WALSyncMode::Batch { interval_ms: 25 },
+            sync_mode: WALSyncMode::Batch {
+                interval_ms: 60_000,
+            },
         },
     )
     .unwrap();
@@ -280,7 +282,9 @@ fn storage_batch_wal_sync_can_complete_without_a_follow_up_write() {
         WALConfig {
             enabled: true,
             max_entries_per_segment: 1024,
-            sync_mode: WALSyncMode::Batch { interval_ms: 25 },
+            sync_mode: WALSyncMode::Batch {
+                interval_ms: 60_000,
+            },
         },
     )
     .unwrap();

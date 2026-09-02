@@ -92,10 +92,11 @@ The first work must close verified audit findings. New feature expansion should 
    - Ensure structured storage mutations participate in one atomic transaction/WAL boundary.
    - Complete snapshot anomaly, namespace pinning, WAL repair, corruption reporting, snapshot install, and lifecycle orchestration tests.
 
-9. **Implement the offline administrative import/export subsystem.**
+9. **Complete: implement the offline administrative import/export subsystem.**
    - Upstream: `pkg/adminimport/importer.go`, `neo4j_csv.go`, and tests.
    - Copper targets: [crates/convert/src/lib.rs](../crates/convert/src/lib.rs), storage batching, indexing, and executable commands.
-   - Use bounded `BufRead` pipelines, chunked fjall batches, cancellation, compressed/zip input, Neo4j typed headers, duplicate/bad-row policy, namespace targeting, schema application, index build, deterministic reports, and Neo4j-compatible CSV export.
+   - Delivered behavior: bounded `BufRead` pipelines, chunked fjall staging batches, cancellation, constrained compressed/zip input, Neo4j typed headers and ID spaces, duplicate/bad-row policy, schema/index application, deterministic reports, atomic promotion, and Neo4j-compatible CSV export.
+   - Validated: deterministic import/export round trips, schema rollback, cancellation cleanup, relationship tolerance, archive safety, chunk/compression workloads, index-build timing, and cancellation-latency benchmarks.
 
 10. **Complete: replace vector full scans with a real maintained HNSW path.**
    - Delivered behavior: engine-owned CPU HNSW uses dense normalized vectors, maintained mutation hooks, tombstones/compaction, cancellable ANN traversal, lifecycle status, checksummed greenfield persistence, direct topology restoration, and file-backed exact reranking. Exact cosine fallback normalizes once, uses SIMD scoring, and retains only bounded top-k results.
@@ -158,7 +159,7 @@ Status meanings:
 | Vector/embedding/local LLM | Partial | Typed embedding fields, pending queue, GGUF/llama.cpp loading and cache components | Cache fix, worker composition, true HNSW, durable vector store, readiness/fallback correctness |
 | Cache and pool | Operational baseline | Bounded reusable structures and query/result caching | Verify hot-path complexity and broader eval adoption |
 | Temporal/decay/knowledge policy | Operational baseline | Policy persistence, scoring, ON ACCESS buffering, access metadata | Adaptive/Kalman behavior, computed mutations, search-time integration |
-| Convert/admin import | Partial | Scalar and serialization conversion helpers | Full bounded offline import/export pipeline |
+| Convert/admin import | Operational baseline | Typed Neo4j conversion, bounded staged import, schema/index rebuild, deterministic streaming export, CLI, and performance workloads | Broader Neo4j administrative format coverage outside the audited full-import/CSV-export contract |
 | Observability | Partial | Metric catalog, validation, redaction/readiness foundations | Exporters, live ownership, protocol/search/storage instrumentation |
 | GraphQL | Deferred to item 21 | Storage-backed baseline operations | Resume full schema/resolver/auth/pagination behavior after plugin package verification |
 | MCP, Heimdall, inference, linkpredict | Partial/deferred | Contracts or narrow local algorithms exist | Production runtime intentionally after single-node core |

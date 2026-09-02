@@ -7,6 +7,9 @@ use std::{
 };
 
 use copperdb_adminimport::{import_offline, ImportOptions};
+use copperdb_storage::{
+    IndexDefinition, IndexEntityType, IndexKind, NodeEmbeddingMetadata, NodeRecord, StorageEngine,
+};
 use copperdb_util::RequestCancellation;
 use criterion::{
     black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
@@ -226,6 +229,95 @@ fn directory_size(path: &Path) -> u64 {
         .sum()
 }
 
+fn prepare_index_workload(node_count: usize) -> StorageEngine {
+    let engine = StorageEngine::open_temporary().expect("benchmark storage must open");
+    let records = (0..node_count)
+        .map(|node_id| NodeRecord {
+            id: format!("node-{node_id}"),
+            labels: vec!["Document".into()],
+            properties: std::collections::BTreeMap::from([(
+                "score".into(),
+                serde_json::json!(node_id % 100),
+            )]),
+            named_embeddings: std::collections::BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: NodeEmbeddingMetadata::default(),
+            created_at_unix_ms: 0,
+            updated_at_unix_ms: 0,
+        })
+        .collect::<Vec<_>>();
+    engine
+        .put_node_records_batch(&records)
+        .expect("benchmark nodes must be stored");
+    engine
+}
+
+fn bench_schema_index_build(criterion: &mut Criterion) {
+    let node_count = configured_count("COPPERDB_ADMINIMPORT_BENCH_NODES", DEFAULT_NODE_COUNT);
+    let index = IndexDefinition {
+        name: "document_score".into(),
+        entity_type: IndexEntityType::Node,
+        label: "Document".into(),
+        properties: vec!["score".into()],
+        kind: IndexKind::Range,
+    };
+    let mut group = criterion.benchmark_group("offline_import_index_build");
+    group.sample_size(10);
+    group.throughput(Throughput::Elements(node_count as u64));
+    group.bench_function("range", |bench| {
+        bench.iter_batched(
+            || prepare_index_workload(node_count),
+            |engine| {
+                engine
+                    .persist_index_definition_with_cancellation(
+                        black_box(&index),
+                        &RequestCancellation::new(),
+                    )
+                    .expect("benchmark index must build");
+                black_box(engine);
+            },
+            BatchSize::LargeInput,
+        );
+    });
+    group.finish();
+}
+
+fn bench_cancellation_latency(criterion: &mut Criterion) {
+    let workload = ImportWorkload::new(CompressionFormat::Plain, DEFAULT_NODE_COUNT, 0);
+    let sequence = AtomicUsize::new(0);
+    let mut group = criterion.benchmark_group("offline_import_cancellation_latency");
+    group.sample_size(10);
+    group.bench_function("pre_cancelled", |bench| {
+        bench.iter_batched(
+            || {
+                let target = workload.directory.path().join(format!(
+                    "cancelled-target-{}",
+                    sequence.fetch_add(1, Ordering::Relaxed)
+                ));
+                let cancellation = RequestCancellation::new();
+                cancellation.cancel();
+                (target, cancellation)
+            },
+            |(target, cancellation)| {
+                let error = import_offline(
+                    &target,
+                    black_box(&workload.options(DEFAULT_NODE_COUNT)),
+                    &cancellation,
+                )
+                .expect_err("pre-cancelled benchmark import must fail");
+                assert!(matches!(
+                    error,
+                    copperdb_adminimport::AdminImportError::Cancelled
+                ));
+                assert!(!target.exists());
+                black_box(error);
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
 fn bench_offline_import(criterion: &mut Criterion) {
     let node_count = configured_count("COPPERDB_ADMINIMPORT_BENCH_NODES", DEFAULT_NODE_COUNT);
     let relationship_count = configured_count(
@@ -301,5 +393,10 @@ fn bench_offline_import(criterion: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_offline_import);
+criterion_group!(
+    benches,
+    bench_offline_import,
+    bench_schema_index_build,
+    bench_cancellation_latency
+);
 criterion_main!(benches);
