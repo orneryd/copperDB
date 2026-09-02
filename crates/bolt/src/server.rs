@@ -3353,6 +3353,13 @@ mod tests {
             Some(0x70),
             "unexpected RESET response: {decoded_response:?}"
         );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !cancelled.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("executor observed RESET cancellation");
         assert!(cancelled.load(Ordering::Acquire));
         drop(client);
         assert!(handler.await.unwrap().is_ok());

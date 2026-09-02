@@ -132,7 +132,9 @@ The first work must close verified audit findings. New feature expansion should 
 16. Expand OpenTelemetry/OpenMetrics exporters, runtime tracing, redaction, and live metric producers.
 17. Implement versioned plugin packages and startup loading; verify the architecture with separate representative APOC and Heimdall packages before mechanically expanding either suite.
 18. Implement MCP transport and production tools only after search/vector and auth are stable.
-19. Expand Heimdall inference, link prediction, and reranking behavior after item 17 proves the package/action lifecycle and the benchmark-ready single-node core is stable.
+19. **In progress:** expand Heimdall inference, link prediction, and reranking behavior after item 17 proves the package/action lifecycle and the benchmark-ready single-node core is stable.
+   - Delivered Phase 1: upstream-compatible read-only reranker contracts, identity pass-through, deterministic MMR, bounded optional local scoring, timeout/error fallback, preserved provenance, and strict post-policy membership enforcement with 10/50/100-candidate benchmarks.
+   - Remaining: graph snapshot candidate scoring, bounded inference signals, durable governed suggestions/review, provider scheduling, and last-stage opt-in materialization.
 20. Add GPU/SIMD acceleration only behind behaviorally identical CPU contracts and measured crossover thresholds.
 21. Complete GraphQL traversal, pagination, mutation, error, database-selection, and auth behavior after item 17.
 

@@ -19,6 +19,7 @@ tantivy.workspace = true
 regex.workspace = true
 copperdb-storage = { workspace = true }
 copperdb-indexing = { workspace = true }
+copperdb-math = { workspace = true }
 copperdb-topology = { workspace = true }
 copperdb-util = { workspace = true }
 

@@ -5,6 +5,13 @@
 //! vector similarity search via copperdb-vectorspace.
 
 pub mod lucene;
+mod rerank;
+
+pub use rerank::{
+    apply_reranker_to_hydrated_outcome, CandidateEmbeddingSource, IdentityReranker, LocalReranker,
+    LocalRerankerConfig, MmrReranker, RerankApplication, RerankCandidate, RerankResult,
+    RerankScorer, Reranker,
+};
 
 use async_trait::async_trait;
 use copperdb_util::{RequestCancelled, RequestContext};
@@ -423,6 +430,31 @@ pub fn execute_planned_fabric_ranked_search(
         merged,
         hydrated,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn execute_planned_fabric_ranked_search_with_reranker(
+    request_context: &RequestContext,
+    query: &str,
+    plans: Vec<DistributedSearchPlan>,
+    batches: Vec<RrfSearchBatch>,
+    hydration: Vec<RrfHydrationRecord>,
+    config: RrfConfig,
+    policy: RrfSearchPolicy,
+    reranker: Option<&dyn Reranker>,
+    rerank_top_k: usize,
+) -> (FabricRankedSearchExecution, RerankApplication) {
+    let mut execution =
+        execute_planned_fabric_ranked_search(plans, batches, hydration, config, policy);
+    let (hydrated, application) = apply_reranker_to_hydrated_outcome(
+        request_context,
+        query,
+        execution.hydrated,
+        reranker,
+        rerank_top_k,
+    );
+    execution.hydrated = hydrated;
+    (execution, application)
 }
 
 fn labels_denied(labels: &[String], policy: &RrfSearchPolicy) -> bool {
