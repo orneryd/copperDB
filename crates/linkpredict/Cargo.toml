@@ -10,8 +10,12 @@ repository.workspace = true
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
-tracing.workspace = true
-petgraph.workspace = true
-nalgebra.workspace = true
-copperdb-indexing = { workspace = true }
+copperdb-storage = { workspace = true }
 copperdb-util = { workspace = true }
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "link_prediction"
+harness = false
