@@ -110,6 +110,7 @@ pub struct RequestContext {
     request_id: String,
     deadline: Option<SystemTime>,
     cancellation: RequestCancellation,
+    parent_cancellation: Option<RequestCancellation>,
 }
 
 #[derive(Debug)]
@@ -131,6 +132,7 @@ impl RequestContext {
                 request_id: new_id(),
                 deadline,
                 cancellation: cancellation.clone(),
+                parent_cancellation: None,
             },
             RequestContextGuard { cancellation },
         )
@@ -141,6 +143,7 @@ impl RequestContext {
             request_id: new_id(),
             deadline: None,
             cancellation: RequestCancellation::new(),
+            parent_cancellation: None,
         }
     }
 
@@ -153,6 +156,24 @@ impl RequestContext {
                     .deadline_unix_ms
                     .map(|millis| UNIX_EPOCH + Duration::from_millis(millis)),
                 cancellation: cancellation.clone(),
+                parent_cancellation: None,
+            },
+            RequestContextGuard { cancellation },
+        )
+    }
+
+    pub fn child(&self, deadline: Option<SystemTime>) -> (Self, RequestContextGuard) {
+        let cancellation = RequestCancellation::new();
+        let deadline = match (self.deadline, deadline) {
+            (Some(parent), Some(child)) => Some(parent.min(child)),
+            (parent, child) => parent.or(child),
+        };
+        (
+            Self {
+                request_id: self.request_id.clone(),
+                deadline,
+                cancellation: cancellation.clone(),
+                parent_cancellation: Some(self.cancellation.clone()),
             },
             RequestContextGuard { cancellation },
         )
@@ -188,6 +209,10 @@ impl RequestContext {
 
     pub fn is_cancelled(&self) -> bool {
         self.cancellation.is_cancelled()
+            || self
+                .parent_cancellation
+                .as_ref()
+                .is_some_and(RequestCancellation::is_cancelled)
     }
 
     pub fn cancellation_reason(&self) -> Option<RequestCancellationReason> {
@@ -195,6 +220,9 @@ impl RequestContext {
     }
 
     pub fn check_active(&self) -> Result<(), RequestCancelled> {
+        if let Some(parent) = &self.parent_cancellation {
+            parent.check_cancelled()?;
+        }
         self.cancellation.check_cancelled()?;
         if self
             .deadline

@@ -1254,6 +1254,22 @@ impl CopperDb {
         Self::from_storage(storage, config)
     }
 
+    /// Create a persistent database with an explicitly configured Heimdall review provider.
+    #[allow(clippy::arc_with_non_send_sync)]
+    pub fn open_with_inference_provider(
+        config: DatabaseConfig,
+        provider: Arc<dyn copperdb_inference::ReviewProvider>,
+    ) -> Result<Self, CopperDbError> {
+        let storage = Arc::new(open_storage(&config)?);
+        Self::from_storage_with_registries(
+            storage,
+            config,
+            Arc::new(copperdb_filter::FunctionRegistryBuilder::with_builtins().build()),
+            Arc::new(ProcedureRegistryBuilder::with_builtins().build()),
+            Some(provider),
+        )
+    }
+
     /// Create a persistent database with a transactionally resolved package set.
     #[allow(clippy::arc_with_non_send_sync)]
     pub fn open_with_packages(
@@ -1299,6 +1315,7 @@ impl CopperDb {
             config,
             Arc::new(function_builder.build()),
             Arc::new(procedure_builder.build()),
+            None,
         )
     }
 
@@ -1314,6 +1331,7 @@ impl CopperDb {
             config,
             packages.function_registry(),
             packages.procedure_registry(),
+            None,
         )
     }
 
@@ -1322,6 +1340,7 @@ impl CopperDb {
         config: DatabaseConfig,
         function_registry: Arc<copperdb_filter::FunctionRegistry>,
         procedure_registry: Arc<ProcedureRegistry>,
+        inference_review_provider: Option<Arc<dyn copperdb_inference::ReviewProvider>>,
     ) -> Result<Self, CopperDbError> {
         let local_import_files: Arc<dyn ImportFileService> = match &config.package_import_file_root
         {
@@ -1339,6 +1358,33 @@ impl CopperDb {
             remote_import_files,
         ));
         let vector_indexes = Arc::new(VectorIndexManager::build(storage.as_ref())?);
+        let audit_log = Arc::new(AuditLog::new(Arc::clone(&storage), AuditConfig::default())?);
+        let suggestion_repository = Arc::new(copperdb_inference::SuggestionRepository::new(
+            Arc::clone(&storage),
+            Arc::clone(&audit_log),
+        ));
+        let inference_runtime = config
+            .runtime_config
+            .auto_links_enabled
+            .then(|| {
+                inference_runtime::InferenceRuntime::new(
+                    config.default_database.clone(),
+                    format!(
+                        "{}:{}",
+                        config.runtime_config.embedding_provider,
+                        config.runtime_config.embedding_model
+                    ),
+                    Arc::clone(&vector_indexes),
+                    Arc::clone(&suggestion_repository),
+                    inference_review_provider,
+                )
+            })
+            .transpose()
+            .map_err(CopperDbError::from)?
+            .map(Arc::new);
+        let inference_dispatcher = inference_runtime
+            .as_ref()
+            .map(|runtime| inference_runtime::InferenceDispatcher::new(Arc::clone(runtime), 1_000));
         let embedding_runtime = Arc::new(EmbeddingRuntime::from_config(
             Arc::clone(&storage),
             &config.runtime_config,
@@ -1363,7 +1409,9 @@ impl CopperDb {
             invalidated_cypher_result_cache.invalidate();
         }));
         vector_indexes.enable_persistence(&storage);
-        let audit_log = Arc::new(AuditLog::new(Arc::clone(&storage), AuditConfig::default())?);
+        if let Some(dispatcher) = &inference_dispatcher {
+            storage.on_node_updated(dispatcher.callback());
+        }
         let compliance = Arc::new(ComplianceManager::new(Arc::clone(&storage)));
         Ok(Self {
             config,
@@ -1382,6 +1430,9 @@ impl CopperDb {
                 Some(std::time::Duration::from_secs(300)),
             )),
             audit_log,
+            suggestion_repository,
+            inference_runtime,
+            _inference_dispatcher: inference_dispatcher,
             compliance,
         })
     }
@@ -1803,6 +1854,49 @@ impl CopperDb {
     /// Access the durable audit log.
     pub fn audit_log(&self) -> &Arc<AuditLog> {
         &self.audit_log
+    }
+
+    /// Access the durable governed inference suggestion repository.
+    pub fn suggestion_repository(&self) -> &Arc<copperdb_inference::SuggestionRepository> {
+        &self.suggestion_repository
+    }
+
+    /// Record a graph access for bounded co-access and temporal inference signals.
+    pub fn record_inference_access(
+        &self,
+        request_context: &RequestContext,
+        node_id: &str,
+        observed_at_unix_ms: u64,
+    ) -> Result<(), CopperDbError> {
+        if let Some(runtime) = &self.inference_runtime {
+            runtime.on_access(request_context, node_id, observed_at_unix_ms)?;
+        }
+        Ok(())
+    }
+
+    pub fn drain_inference_notifications(&self) -> Vec<copperdb_inference::InferenceNotification> {
+        self.inference_runtime
+            .as_ref()
+            .map_or_else(Vec::new, |runtime| runtime.drain_notifications())
+    }
+
+    /// Materialize an approved suggestion using this database's resolved kill switches.
+    pub fn materialize_suggestion(
+        &self,
+        suggestion_id: &str,
+        user: &copperdb_auth::User,
+        request_id: Option<String>,
+    ) -> Result<copperdb_inference::Suggestion, CopperDbError> {
+        let actor = copperdb_inference::ReviewActor::from_authenticated_user(user, request_id);
+        self.suggestion_repository
+            .materialize(
+                suggestion_id,
+                copperdb_inference::MaterializationPolicy::from_effective_config(
+                    &self.config.runtime_config,
+                ),
+                &actor,
+            )
+            .map_err(Into::into)
     }
 
     /// Access the durable compliance policy manager.

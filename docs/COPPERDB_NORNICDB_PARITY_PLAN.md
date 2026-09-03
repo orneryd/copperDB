@@ -132,9 +132,9 @@ The first work must close verified audit findings. New feature expansion should 
 16. Expand OpenTelemetry/OpenMetrics exporters, runtime tracing, redaction, and live metric producers.
 17. Implement versioned plugin packages and startup loading; verify the architecture with separate representative APOC and Heimdall packages before mechanically expanding either suite.
 18. Implement MCP transport and production tools only after search/vector and auth are stable.
-19. **In progress:** expand Heimdall inference, link prediction, and reranking behavior after item 17 proves the package/action lifecycle and the benchmark-ready single-node core is stable.
-   - Delivered Phases 1-2: upstream-compatible read-only reranking; bounded storage-backed graph snapshots; normalized topology, Resource Allocation, semantic, and ensemble candidate scoring; strict post-policy/no-self/no-existing-edge membership; deterministic ties; and reranking/graph/degree benchmarks.
-   - Remaining: bounded inference signals, durable governed suggestions/review, provider scheduling, and last-stage opt-in materialization.
+19. **Complete:** expand Heimdall inference, link prediction, and reranking behavior after item 17 proves the package/action lifecycle and the benchmark-ready single-node core is stable.
+   - Delivered: upstream-compatible read-only reranking; bounded storage-backed graph snapshots; normalized topology, semantic, and ensemble scoring; bounded similarity/co-access/temporal/transitive signals; canonical embedding identity; durable aggregate evidence and provenance; authenticated, audited model/human review; bounded provider scheduling and restart recovery; maintained-vector-index production wiring; and last-stage atomic materialization behind overriding global and per-database switches.
+   - Safety: default operation never mutates graph state, configured providers cannot broaden submitted membership, stale evidence fails policy, duplicate concurrent decisions/materializations converge, and audit plus graph mutation commit atomically.
 20. Add GPU/SIMD acceleration only behind behaviorally identical CPU contracts and measured crossover thresholds.
 21. Complete GraphQL traversal, pagination, mutation, error, database-selection, and auth behavior after item 17.
 
@@ -164,7 +164,7 @@ Status meanings:
 | Convert/admin import | Operational baseline | Typed Neo4j conversion, bounded staged import, schema/index rebuild, deterministic streaming export, CLI, and performance workloads | Broader Neo4j administrative format coverage outside the audited full-import/CSV-export contract |
 | Observability | Partial | Metric catalog, validation, redaction/readiness foundations | Exporters, live ownership, protocol/search/storage instrumentation |
 | GraphQL | Deferred to item 21 | Storage-backed baseline operations | Resume full schema/resolver/auth/pagination behavior after plugin package verification |
-| MCP, Heimdall, inference, linkpredict | Partial/deferred | Contracts or narrow local algorithms exist | Production runtime intentionally after single-node core |
+| MCP, Heimdall, inference, linkpredict | Operational baseline | Governed inference runtime, durable suggestions/review, maintained-index signals, deterministic link prediction, and MCP contracts | Broader provider/model catalog and protocol presentation outside item 19 |
 | GPU and SIMD | Deferred | Configuration and utility foundations | Measured vector/graph acceleration with CPU parity |
 | Replication, fabric, topology, nornicgrpc, qdrantgrpc | Deferred | Placement, merge, transport, and topology contracts are substantial | No supported distributed runtime until deferred completion gates pass |
 

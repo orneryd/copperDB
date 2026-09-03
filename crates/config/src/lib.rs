@@ -587,6 +587,12 @@ pub struct EmbeddingConfig {
     pub retry_backoff_ms: u64,
     /// Maximum time to wait for embedding workers during shutdown.
     pub shutdown_timeout_ms: u64,
+    /// Property allowlist used to build canonical embedding text; empty includes all.
+    pub properties_include: Vec<String>,
+    /// Property denylist used to build canonical embedding text.
+    pub properties_exclude: Vec<String>,
+    /// Whether canonical embedding text includes node labels.
+    pub include_labels: bool,
 }
 
 impl Default for EmbeddingConfig {
@@ -604,6 +610,9 @@ impl Default for EmbeddingConfig {
             max_attempts: 3,
             retry_backoff_ms: 250,
             shutdown_timeout_ms: 1_000,
+            properties_include: Vec::new(),
+            properties_exclude: Vec::new(),
+            include_labels: true,
         }
     }
 }
@@ -696,6 +705,9 @@ pub struct EffectiveDatabaseConfig {
     pub embedding_max_attempts: u32,
     pub embedding_retry_backoff_ms: u64,
     pub embedding_shutdown_timeout_ms: u64,
+    pub embedding_properties_include: Vec<String>,
+    pub embedding_properties_exclude: Vec<String>,
+    pub embedding_include_labels: bool,
     pub search_min_similarity: f64,
     pub bm25_enabled: bool,
     pub bm25_warming: String,
@@ -707,7 +719,7 @@ pub struct EffectiveDatabaseConfig {
     pub effective: BTreeMap<String, String>,
 }
 
-pub const PER_DATABASE_CONFIG_KEYS: [PerDatabaseConfigKey; 20] = [
+pub const PER_DATABASE_CONFIG_KEYS: [PerDatabaseConfigKey; 23] = [
     PerDatabaseConfigKey {
         key: "COPPERDB_EMBEDDING_ENABLED",
         value_type: "boolean",
@@ -779,6 +791,24 @@ pub const PER_DATABASE_CONFIG_KEYS: [PerDatabaseConfigKey; 20] = [
         value_type: "number",
         category: "Embeddings",
         description: "Maximum wait for embedding workers during shutdown. Default: 1000.",
+    },
+    PerDatabaseConfigKey {
+        key: "COPPERDB_EMBEDDING_PROPERTIES_INCLUDE",
+        value_type: "string",
+        category: "Embeddings",
+        description: "Comma-separated property allowlist for canonical embedding text.",
+    },
+    PerDatabaseConfigKey {
+        key: "COPPERDB_EMBEDDING_PROPERTIES_EXCLUDE",
+        value_type: "string",
+        category: "Embeddings",
+        description: "Comma-separated property denylist for canonical embedding text.",
+    },
+    PerDatabaseConfigKey {
+        key: "COPPERDB_EMBEDDING_INCLUDE_LABELS",
+        value_type: "boolean",
+        category: "Embeddings",
+        description: "Include node labels in canonical embedding text. Default: true.",
     },
     PerDatabaseConfigKey {
         key: "COPPERDB_SEARCH_MIN_SIMILARITY",
@@ -879,6 +909,9 @@ pub fn resolve_per_database_config(
         embedding_max_attempts: global.embedding.max_attempts.max(1),
         embedding_retry_backoff_ms: global.embedding.retry_backoff_ms,
         embedding_shutdown_timeout_ms: global.embedding.shutdown_timeout_ms,
+        embedding_properties_include: global.embedding.properties_include.clone(),
+        embedding_properties_exclude: global.embedding.properties_exclude.clone(),
+        embedding_include_labels: global.embedding.include_labels,
         search_min_similarity: global.search.min_similarity,
         bm25_enabled: global.search.bm25_enabled,
         bm25_warming: normalize_warming(&global.search.bm25_warming),
@@ -898,6 +931,16 @@ pub fn resolve_per_database_config(
             apply_per_database_override(&mut resolved, key, value);
         }
     }
+    resolved.auto_links_enabled &= global.features.auto_links_enabled;
+    resolved.auto_tlp_enabled &= global.features.auto_tlp_enabled;
+    resolved.effective.insert(
+        "COPPERDB_AUTO_LINKS_ENABLED".into(),
+        resolved.auto_links_enabled.to_string(),
+    );
+    resolved.effective.insert(
+        "COPPERDB_AUTO_TLP_ENABLED".into(),
+        resolved.auto_tlp_enabled.to_string(),
+    );
     Ok(resolved)
 }
 
@@ -1141,6 +1184,20 @@ pub fn apply_env_overrides_from(config: &mut Config, env: &BTreeMap<String, Stri
     set_if_present(
         parse_env_u64(env, "COPPERDB_EMBEDDING_SHUTDOWN_TIMEOUT_MS"),
         |value| config.embedding.shutdown_timeout_ms = value,
+    );
+    set_if_present(
+        env.get("COPPERDB_EMBEDDING_PROPERTIES_INCLUDE")
+            .map(|value| parse_csv(value)),
+        |value| config.embedding.properties_include = value,
+    );
+    set_if_present(
+        env.get("COPPERDB_EMBEDDING_PROPERTIES_EXCLUDE")
+            .map(|value| parse_csv(value)),
+        |value| config.embedding.properties_exclude = value,
+    );
+    set_if_present(
+        parse_env_bool(env, "COPPERDB_EMBEDDING_INCLUDE_LABELS"),
+        |value| config.embedding.include_labels = value,
     );
     set_if_present(
         parse_env_f64(env, "COPPERDB_SEARCH_MIN_SIMILARITY"),
@@ -1391,6 +1448,18 @@ fn effective_values_from_global(global: &Config) -> BTreeMap<String, String> {
         global.embedding.shutdown_timeout_ms.to_string(),
     );
     effective.insert(
+        "COPPERDB_EMBEDDING_PROPERTIES_INCLUDE".into(),
+        global.embedding.properties_include.join(","),
+    );
+    effective.insert(
+        "COPPERDB_EMBEDDING_PROPERTIES_EXCLUDE".into(),
+        global.embedding.properties_exclude.join(","),
+    );
+    effective.insert(
+        "COPPERDB_EMBEDDING_INCLUDE_LABELS".into(),
+        global.embedding.include_labels.to_string(),
+    );
+    effective.insert(
         "COPPERDB_SEARCH_MIN_SIMILARITY".into(),
         global.search.min_similarity.to_string(),
     );
@@ -1475,6 +1544,16 @@ fn apply_per_database_override(resolved: &mut EffectiveDatabaseConfig, key: &str
                 resolved.embedding_shutdown_timeout_ms = parsed;
             }
         }
+        "COPPERDB_EMBEDDING_PROPERTIES_INCLUDE" => {
+            resolved.embedding_properties_include = parse_csv(value)
+        }
+        "COPPERDB_EMBEDDING_PROPERTIES_EXCLUDE" => {
+            resolved.embedding_properties_exclude = parse_csv(value)
+        }
+        "COPPERDB_EMBEDDING_INCLUDE_LABELS" => {
+            resolved.embedding_include_labels =
+                parse_bool_override(value, resolved.embedding_include_labels)
+        }
         "COPPERDB_SEARCH_MIN_SIMILARITY" => {
             if let Ok(parsed) = value.parse::<f64>() {
                 resolved.search_min_similarity = parsed;
@@ -1502,6 +1581,15 @@ fn apply_per_database_override(resolved: &mut EffectiveDatabaseConfig, key: &str
     resolved
         .effective
         .insert(key.to_ascii_uppercase(), value.to_owned());
+}
+
+fn parse_csv(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Load configuration from environment variables using the `config` crate.
@@ -1820,6 +1908,15 @@ auth:
             "COPPERDB_EMBEDDING_SHUTDOWN_TIMEOUT_MS".into(),
             "1500".into(),
         );
+        env.insert(
+            "COPPERDB_EMBEDDING_PROPERTIES_INCLUDE".into(),
+            "title, content".into(),
+        );
+        env.insert(
+            "COPPERDB_EMBEDDING_PROPERTIES_EXCLUDE".into(),
+            "secret".into(),
+        );
+        env.insert("COPPERDB_EMBEDDING_INCLUDE_LABELS".into(), "false".into());
         env.insert("COPPERDB_SEARCH_BM25_ENABLED".into(), "true".into());
         env.insert("COPPERDB_SEARCH_VECTOR_ENABLED".into(), "true".into());
         env.insert(
@@ -1840,6 +1937,9 @@ auth:
         assert_eq!(cfg.embedding.max_attempts, 5);
         assert_eq!(cfg.embedding.retry_backoff_ms, 750);
         assert_eq!(cfg.embedding.shutdown_timeout_ms, 1500);
+        assert_eq!(cfg.embedding.properties_include, ["title", "content"]);
+        assert_eq!(cfg.embedding.properties_exclude, ["secret"]);
+        assert!(!cfg.embedding.include_labels);
         assert_eq!(cfg.vectorspace.dimensions, 1024);
         assert!(cfg.search.bm25_enabled);
         assert!(cfg.search.vector_enabled);
@@ -1889,6 +1989,28 @@ auth:
                 .unwrap(),
             "false"
         );
+    }
+
+    #[test]
+    fn global_inference_switches_override_database_and_cli_opt_in() {
+        let mut config = Config::default();
+        config
+            .cli_overrides
+            .insert("COPPERDB_AUTO_LINKS_ENABLED".into(), "true".into());
+        config
+            .cli_overrides
+            .insert("COPPERDB_AUTO_TLP_ENABLED".into(), "true".into());
+        let overrides = BTreeMap::from([
+            ("COPPERDB_AUTO_LINKS_ENABLED".into(), "true".into()),
+            ("COPPERDB_AUTO_TLP_ENABLED".into(), "true".into()),
+        ]);
+
+        let resolved = resolve_per_database_config(&config, &overrides).unwrap();
+
+        assert!(!resolved.auto_links_enabled);
+        assert!(!resolved.auto_tlp_enabled);
+        assert_eq!(resolved.effective["COPPERDB_AUTO_LINKS_ENABLED"], "false");
+        assert_eq!(resolved.effective["COPPERDB_AUTO_TLP_ENABLED"], "false");
     }
 
     #[test]

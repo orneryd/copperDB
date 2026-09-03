@@ -1628,6 +1628,13 @@ impl NodeRecord {
         self.named_embeddings
             .get(DEFAULT_NAMED_EMBEDDING)
             .map(Vec::as_slice)
+            .filter(|embedding| !embedding.is_empty())
+            .or_else(|| {
+                self.chunk_embeddings
+                    .iter()
+                    .find(|embedding| !embedding.is_empty())
+                    .map(Vec::as_slice)
+            })
     }
 
     pub fn set_default_embedding(&mut self, embedding: Vec<f32>) {
@@ -2881,13 +2888,16 @@ impl StorageEngine {
         E: From<StorageError>,
     {
         let _observation = StorageOperationObservation::new("put");
-        let _commit_guard = self.batch_commit_lock.lock();
-        let mut writer = BatchWriter {
-            engine: self,
-            ops: Vec::new(),
+        let notifications = {
+            let _commit_guard = self.batch_commit_lock.lock();
+            let mut writer = BatchWriter {
+                engine: self,
+                ops: Vec::new(),
+            };
+            f(&mut writer)?;
+            writer.commit_locked(None)?
         };
-        f(&mut writer)?;
-        writer.commit_locked(None)?;
+        notifications.dispatch(self);
         Ok(())
     }
 
@@ -3080,6 +3090,36 @@ impl StorageEngine {
 
         out.sort_by(|a, b| a.id.cmp(&b.id));
         out.dedup_by(|a, b| a.id == b.id);
+        Ok(out)
+    }
+
+    pub fn get_nodes_by_label_bounded(
+        &self,
+        label: &str,
+        limit: usize,
+    ) -> Result<Vec<NodeRecord>, StorageError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let prefix = label_index_prefix(label);
+        let mut out = Vec::with_capacity(limit);
+        for entry in self.indexes.scan_prefix(prefix.as_bytes()) {
+            let (key, _) = entry?;
+            let key_str =
+                std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
+            if self.has_index_tombstone(key_str) {
+                continue;
+            }
+            if let Some(node_id) = key_str.rsplit('/').next() {
+                if let Some(node) = self.get_node_record(node_id)? {
+                    out.push(node);
+                    if out.len() == limit {
+                        break;
+                    }
+                }
+            }
+        }
+        out.sort_by(|left, right| left.id.cmp(&right.id));
         Ok(out)
     }
 
@@ -7365,6 +7405,46 @@ pub struct BatchWriter<'a> {
     ops: Vec<BatchOp>,
 }
 
+type NodeRecordChange = (String, (Option<NodeRecord>, Option<NodeRecord>));
+type EdgeRecordChange = (String, (Option<EdgeRecord>, Option<EdgeRecord>));
+
+struct CommitNotifications {
+    node_changes: Vec<NodeRecordChange>,
+    edge_changes: Vec<EdgeRecordChange>,
+    notify_completed: bool,
+}
+
+impl CommitNotifications {
+    fn dispatch(self, engine: &StorageEngine) {
+        for (id, (old, new)) in self.node_changes {
+            if old
+                .as_ref()
+                .or(new.as_ref())
+                .is_some_and(StorageEngine::is_system_audit_node)
+            {
+                continue;
+            }
+            match (old, new) {
+                (None, Some(node)) => engine.notify_node_created(&node),
+                (Some(_), Some(node)) => engine.notify_node_updated(&node),
+                (Some(_), None) => engine.notify_node_deleted(&id),
+                (None, None) => {}
+            }
+        }
+        for (id, (old, new)) in self.edge_changes {
+            match (old, new) {
+                (None, Some(edge)) => engine.notify_edge_created(&edge),
+                (Some(_), Some(edge)) => engine.notify_edge_updated(&edge),
+                (Some(_), None) => engine.notify_edge_deleted(&id),
+                (None, None) => {}
+            }
+        }
+        if self.notify_completed {
+            engine.notify_commit_completed();
+        }
+    }
+}
+
 impl<'a> StorageTransaction<'a> {
     fn engine(&self) -> &StorageEngine {
         self.engine.as_ref()
@@ -8065,16 +8145,27 @@ impl<'a> BatchWriter<'a> {
     }
 
     fn commit(&self) -> Result<(), StorageError> {
-        let _commit_guard = self.engine.batch_commit_lock.lock();
-        self.commit_locked(None)
+        let notifications = {
+            let _commit_guard = self.engine.batch_commit_lock.lock();
+            self.commit_locked(None)?
+        };
+        notifications.dispatch(self.engine);
+        Ok(())
     }
 
     fn commit_with_wal_sequence(&self, replay_sequence: Option<u64>) -> Result<(), StorageError> {
-        let _commit_guard = self.engine.batch_commit_lock.lock();
-        self.commit_locked(replay_sequence)
+        let notifications = {
+            let _commit_guard = self.engine.batch_commit_lock.lock();
+            self.commit_locked(replay_sequence)?
+        };
+        notifications.dispatch(self.engine);
+        Ok(())
     }
 
-    fn commit_locked(&self, replay_sequence: Option<u64>) -> Result<(), StorageError> {
+    fn commit_locked(
+        &self,
+        replay_sequence: Option<u64>,
+    ) -> Result<CommitNotifications, StorageError> {
         let mut nodes = HashMap::<String, (Option<NodeRecord>, Option<NodeRecord>)>::new();
         let mut edges = HashMap::<String, (Option<EdgeRecord>, Option<EdgeRecord>)>::new();
         let mut constraints = BTreeMap::<String, Option<Constraint>>::new();
@@ -8603,33 +8694,13 @@ impl<'a> BatchWriter<'a> {
         let edge_changes = edges.into_iter().collect::<Vec<_>>();
         self.engine.mvcc.publish_persisted_state(staged_mvcc_state);
 
-        for (id, (old, new)) in node_changes {
-            if old
-                .as_ref()
-                .or(new.as_ref())
-                .is_some_and(StorageEngine::is_system_audit_node)
-            {
-                continue;
-            }
-            match (old, new) {
-                (None, Some(node)) => self.engine.notify_node_created(&node),
-                (Some(_), Some(node)) => self.engine.notify_node_updated(&node),
-                (Some(_), None) => self.engine.notify_node_deleted(&id),
-                (None, None) => {}
-            }
-        }
-        for (id, (old, new)) in edge_changes {
-            match (old, new) {
-                (None, Some(edge)) => self.engine.notify_edge_created(&edge),
-                (Some(_), Some(edge)) => self.engine.notify_edge_updated(&edge),
-                (Some(_), None) => self.engine.notify_edge_deleted(&id),
-                (None, None) => {}
-            }
-        }
-        if has_graph_mutation || !indexes.is_empty() || has_knowledge_policy_change {
-            self.engine.notify_commit_completed();
-        }
-        Ok(())
+        Ok(CommitNotifications {
+            node_changes,
+            edge_changes,
+            notify_completed: has_graph_mutation
+                || !indexes.is_empty()
+                || has_knowledge_policy_change,
+        })
     }
 
     pub fn len(&self) -> usize {

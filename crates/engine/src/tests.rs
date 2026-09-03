@@ -9,6 +9,9 @@ mod distributed_search;
 #[path = "tests/hybrid_quality.rs"]
 mod hybrid_quality;
 
+#[path = "tests/inference.rs"]
+mod inference;
+
 #[path = "tests/distributed_paths.rs"]
 mod distributed_paths;
 

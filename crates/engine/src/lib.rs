@@ -65,6 +65,7 @@ use copperdb_filter::{
     eval_expression, eval_predicate, FunctionExecutionContext, FunctionRegistrar,
     FunctionRegistryBuilder,
 };
+use copperdb_inference::SuggestionRepository;
 use copperdb_kms::{new_provider, ProviderFactoryConfig};
 use copperdb_plugin::ResolvedPackageSet;
 use copperdb_replication::{
@@ -170,6 +171,12 @@ impl From<copperdb_eval::EvalError> for CopperDbError {
             }
             error => CopperDbError::Eval(error.to_string()),
         }
+    }
+}
+
+impl From<copperdb_inference::InferenceError> for CopperDbError {
+    fn from(error: copperdb_inference::InferenceError) -> Self {
+        CopperDbError::Eval(error.to_string())
     }
 }
 
@@ -447,11 +454,15 @@ pub struct CopperDb {
     cypher_result_cache: Arc<QueryResultCache<QueryResult>>,
     ranked_search_cache: Arc<QueryCache<RrfSearchBatch>>,
     audit_log: Arc<AuditLog>,
+    suggestion_repository: Arc<SuggestionRepository>,
+    inference_runtime: Option<Arc<inference_runtime::InferenceRuntime>>,
+    _inference_dispatcher: Option<inference_runtime::InferenceDispatcher>,
     compliance: Arc<ComplianceManager>,
 }
 
 mod copperdb;
 mod embedding_runtime;
+mod inference_runtime;
 mod vector_indexes;
 
 // ─── Legacy copperdb (full-server async variant) ──────────────────────────────

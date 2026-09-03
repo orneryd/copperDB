@@ -3,6 +3,7 @@ use copperdb_config::EffectiveDatabaseConfig;
 use copperdb_embed::{CachedEmbedder, Embedder, LocalGgufEmbedder};
 use copperdb_storage::{NodeRecord, StorageEngine};
 use copperdb_util::RequestContext;
+#[cfg(test)]
 use serde_json::json;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -111,6 +112,7 @@ struct EmbeddingProviderContext<'a> {
 
 struct EmbeddingDrainContext<'a> {
     storage: &'a StorageEngine,
+    config: &'a EffectiveDatabaseConfig,
     dimensions: usize,
     max_attempts: u32,
     configured_generation: &'a str,
@@ -449,6 +451,7 @@ impl EmbeddingRuntime {
         )?;
         let context = EmbeddingDrainContext {
             storage: &self.storage,
+            config: &self.provider_config,
             dimensions: self.dimensions,
             max_attempts: self.max_attempts,
             configured_generation: &self.provider_config.embedding_model,
@@ -512,6 +515,7 @@ impl EmbeddingRuntime {
                 };
                 let drain_context = EmbeddingDrainContext {
                     storage: &storage,
+                    config: &provider_config,
                     dimensions,
                     max_attempts,
                     configured_generation: &provider_config.embedding_model,
@@ -719,7 +723,7 @@ fn embed_claimed_node(
     let mut observation =
         EmbeddingObservation::new(context.provider, context.model, backend.as_deref());
     let batch_started_at = Instant::now();
-    let embeddings = embedder.embed_batch_blocking(&[canonical_input(&node)]);
+    let embeddings = embedder.embed_batch_blocking(&[canonical_input(&node, context.config)]);
     let batch_latency_ms = batch_started_at.elapsed().as_millis() as u64;
     context.batch_count.fetch_add(1, Ordering::Relaxed);
     context
@@ -859,8 +863,24 @@ fn record_failure(
     }
 }
 
-fn canonical_input(node: &NodeRecord) -> String {
-    json!({ "labels": node.labels, "properties": node.properties }).to_string()
+fn canonical_input(node: &NodeRecord, config: &EffectiveDatabaseConfig) -> String {
+    copperdb_embeddingutil::build_text(
+        &node.labels,
+        &node.properties,
+        &copperdb_embeddingutil::EmbedTextOptions {
+            include_labels: config.embedding_include_labels,
+            include_properties: config
+                .embedding_properties_include
+                .iter()
+                .cloned()
+                .collect(),
+            exclude_properties: config
+                .embedding_properties_exclude
+                .iter()
+                .cloned()
+                .collect(),
+        },
+    )
 }
 
 fn current_unix_seconds() -> u64 {

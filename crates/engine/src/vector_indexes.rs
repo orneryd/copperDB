@@ -258,6 +258,33 @@ impl VectorIndexManager {
         })
     }
 
+    pub(crate) fn inference_query(
+        &self,
+        cancellation: &copperdb_util::RequestCancellation,
+        query: &[f32],
+        limit: usize,
+    ) -> Result<Vec<(String, f32)>, VectorSpaceError> {
+        let bindings = self
+            .file_store_bindings
+            .lock()
+            .map_err(|_| VectorSpaceError::IndexNotFound("inference".into()))?
+            .clone();
+        let mut best = BTreeMap::<String, f32>::new();
+        for binding in bindings.into_iter().filter(|binding| {
+            binding.entity_type == IndexEntityType::Node && binding.dimensions == query.len()
+        }) {
+            for (id, score) in self.query(cancellation, &binding.name, query, limit)?.0 {
+                best.entry(id)
+                    .and_modify(|current| *current = current.max(score))
+                    .or_insert(score);
+            }
+        }
+        let mut results = best.into_iter().collect::<Vec<_>>();
+        results.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+        results.truncate(limit);
+        Ok(results)
+    }
+
     fn query(
         &self,
         cancellation: &copperdb_util::RequestCancellation,

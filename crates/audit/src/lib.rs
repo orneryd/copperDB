@@ -4,7 +4,7 @@
 //! `copperdb-storage`. In-memory collections in this crate are test helpers or
 //! transient hash-chain cursors only; the audit trail itself is durable.
 
-use copperdb_storage::{NodeRecord, StorageEngine, StorageError};
+use copperdb_storage::{NodeRecord, StorageEngine, StorageError, StorageTransaction};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -56,6 +56,9 @@ pub enum EventType {
     SecurityAlert,
     BreachDetected,
     SnapshotExpired,
+    SuggestionApproved,
+    SuggestionRejected,
+    SuggestionMaterialized,
 }
 
 impl EventType {
@@ -83,6 +86,9 @@ impl EventType {
             EventType::SecurityAlert => "SECURITY_ALERT",
             EventType::BreachDetected => "BREACH_DETECTED",
             EventType::SnapshotExpired => "SNAPSHOT_EXPIRED",
+            EventType::SuggestionApproved => "SUGGESTION_APPROVED",
+            EventType::SuggestionRejected => "SUGGESTION_REJECTED",
+            EventType::SuggestionMaterialized => "SUGGESTION_MATERIALIZED",
         }
     }
 
@@ -232,6 +238,39 @@ impl AuditLog {
 
         self.storage
             .put_system_audit_record(&event_to_node(&event)?)?;
+        chain.next_sequence += 1;
+        chain.previous_hash = event.hash.clone();
+        drop(chain);
+
+        if self.config.alert_on_events.contains(&event.event_type) {
+            self.alerts.lock().push(event.clone());
+        }
+        Ok(event)
+    }
+
+    /// Atomically commits records already staged in `transaction` with one audit event.
+    pub fn commit_transaction_with_event(
+        &self,
+        transaction: &mut StorageTransaction<'_>,
+        mut event: Event,
+    ) -> Result<Event, AuditError> {
+        if !self.config.enabled {
+            transaction.commit()?;
+            return Ok(event);
+        }
+        if event.id.is_empty() {
+            event.id = Uuid::new_v4().to_string();
+        }
+        if event.timestamp_unix_ms == 0 {
+            event.timestamp_unix_ms = now_unix_ms();
+        }
+
+        let mut chain = self.chain.lock();
+        event.sequence = chain.next_sequence;
+        event.previous_hash = chain.previous_hash.clone();
+        event.hash = Some(hash_event(&event)?);
+        transaction.put_node_record(event_to_node(&event)?);
+        transaction.commit()?;
         chain.next_sequence += 1;
         chain.previous_hash = event.hash.clone();
         drop(chain);
@@ -556,5 +595,49 @@ mod tests {
         let events = log.events_for_user("user-1").unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].username.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn failed_transactional_commit_does_not_advance_chain() {
+        let (storage, log) = audit_log();
+        let node = NodeRecord {
+            id: "conflict-node".into(),
+            labels: vec!["Entity".into()],
+            properties: BTreeMap::from([("version".into(), serde_json::json!(1))]),
+            named_embeddings: BTreeMap::new(),
+            chunk_embeddings: Vec::new(),
+            embed_meta: Default::default(),
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+        };
+        storage.put_node_record(&node).unwrap();
+        let mut transaction = storage.begin_transaction().unwrap();
+        let mut staged = transaction
+            .get_node_record("conflict-node")
+            .unwrap()
+            .unwrap();
+        staged
+            .properties
+            .insert("version".into(), serde_json::json!(2));
+        transaction.put_node_record(staged);
+        let mut concurrent = node;
+        concurrent
+            .properties
+            .insert("version".into(), serde_json::json!(3));
+        storage.put_node_record(&concurrent).unwrap();
+
+        assert!(matches!(
+            log.commit_transaction_with_event(
+                &mut transaction,
+                Event::new(EventType::SuggestionApproved),
+            ),
+            Err(AuditError::Storage(
+                StorageError::TransactionConflict { .. }
+            ))
+        ));
+        assert!(log.events().unwrap().is_empty());
+        let recorded = log.record(Event::new(EventType::DataRead)).unwrap();
+        assert_eq!(recorded.sequence, 1);
+        assert!(log.verify_chain().unwrap().valid);
     }
 }

@@ -3538,6 +3538,16 @@ fn node_record_needs_embedding_ignores_has_embedding_without_vector_and_skips_un
 }
 
 #[test]
+fn node_record_default_embedding_falls_back_to_first_non_empty_chunk() {
+    let mut node = sample_node("chunk-fallback", &["Document"]);
+    node.chunk_embeddings = vec![Vec::new(), vec![0.1, 0.2], vec![0.3, 0.4]];
+    assert_eq!(node.default_embedding(), Some([0.1, 0.2].as_slice()));
+
+    node.set_default_embedding(vec![0.9, 0.8]);
+    assert_eq!(node.default_embedding(), Some([0.9, 0.8].as_slice()));
+}
+
+#[test]
 fn storage_engine_pending_embeddings_index_tracks_create_mark_refresh_and_delete() {
     let engine = StorageEngine::open_temporary().unwrap();
 

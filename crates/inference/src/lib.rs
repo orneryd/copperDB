@@ -6,6 +6,25 @@
 //! 2. Embed chunks (copperdb-embed)
 //! 3. Run optional classification or generation (copperdb-localllm)
 
+mod runtime;
+mod signals;
+mod suggestion;
+
+pub use runtime::{
+    InferenceNotification, NotificationKind, ProviderRegistry, ProviderRegistryBuilder,
+    ProviderReview, ReviewProvider, SchedulerConfig, SuggestionScheduler,
+};
+
+pub use signals::{
+    EdgeSuggestion, ExistingEdge, InferenceBounds, SignalConfig, SignalEngine, SimilarityResult,
+    SimilaritySearch, SuggestionMethod,
+};
+pub use suggestion::{
+    Decision, Evidence, EvidenceThreshold, HeimdallReview, HeimdallReviewState,
+    MaterializationPolicy, Provenance, ReviewActor, Suggestion, SuggestionRepository,
+    SuggestionStatus,
+};
+
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -20,6 +39,34 @@ pub enum InferenceError {
     UnsupportedModelType,
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("request cancelled")]
+    RequestCancelled,
+    #[error("inference bound exceeded: {0}")]
+    BoundExceeded(String),
+    #[error("storage error: {0}")]
+    Storage(String),
+    #[error("audit error: {0}")]
+    Audit(String),
+    #[error("suggestion not found: {0}")]
+    SuggestionNotFound(String),
+    #[error("suggestion decision requires administrator role")]
+    UnauthorizedDecision,
+    #[error("conflicting suggestion decision")]
+    DecisionConflict,
+    #[error("duplicate inference provider: {0}")]
+    DuplicateProvider(String),
+    #[error("unknown inference provider: {0}")]
+    UnknownProvider(String),
+    #[error("inference scheduler queue is full")]
+    QueueFull,
+    #[error("inference provider timed out")]
+    ProviderTimeout,
+    #[error("inference provider failed: {0}")]
+    ProviderFailure(String),
+    #[error("automatic link materialization is disabled")]
+    MaterializationDisabled,
+    #[error("suggestion did not pass all review and policy gates")]
+    PolicyDenied,
 }
 
 /// Supported model backends.

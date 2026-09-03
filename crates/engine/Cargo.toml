@@ -18,6 +18,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
 uuid.workspace = true
+sha2.workspace = true
+hex.workspace = true
 copperdb-storage = { workspace = true }
 copperdb-cypher = { workspace = true }
 copperdb-eval = { workspace = true }
@@ -32,6 +34,8 @@ copperdb-temporal = { workspace = true }
 copperdb-decay = { workspace = true }
 copperdb-vectorspace = { workspace = true }
 copperdb-embed = { workspace = true }
+copperdb-embeddingutil = { workspace = true }
+copperdb-inference = { workspace = true }
 copperdb-indexing = { workspace = true }
 copperdb-graphql = { workspace = true }
 copperdb-pool = { workspace = true }
