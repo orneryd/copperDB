@@ -18,6 +18,7 @@ tokio.workspace = true
 tracing.workspace = true
 copperdb-storage = { workspace = true }
 copperdb-topology = { workspace = true }
+copperdb-localization = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

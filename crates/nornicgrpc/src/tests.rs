@@ -582,6 +582,73 @@ async fn generated_replica_service_handles_graph_node_rpc_and_forwards_caller_to
 }
 
 #[tokio::test]
+async fn graph_rpc_localizes_auth_status_and_preserves_code() {
+    let service = NornicReplicaService::new(Arc::new(RecordingRemoteReplicaClient::default()));
+    let mut request = Request::new(proto::RemoteGraphNodeRequest {
+        target_node: "node-4".into(),
+        target_addr: "node-4.mesh.local:50051".into(),
+        database: "copper".into(),
+        node_id: "person-1".into(),
+        read_fence: String::new(),
+    });
+    request.metadata_mut().insert(
+        GRPC_CALLER_AUTH_HEADER,
+        MetadataValue::try_from("Basic viewer-token").unwrap(),
+    );
+    request.metadata_mut().insert(
+        GRPC_LANGUAGE_HEADER,
+        MetadataValue::try_from("es-ES").unwrap(),
+    );
+
+    let error = service.graph_node(request).await.unwrap_err();
+
+    assert_eq!(error.code(), tonic::Code::Unauthenticated);
+    assert_eq!(error.message(), "Sin autenticar");
+    assert_eq!(error.metadata().get("content-language").unwrap(), "es-ES");
+}
+
+#[test]
+fn grpc_language_metadata_preserves_ordered_preferences_across_hops() {
+    let mut incoming = Request::new(());
+    incoming.metadata_mut().insert(
+        GRPC_LANGUAGE_HEADER,
+        MetadataValue::try_from("fr-FR;q=0.2, es-ES, en;q=0.5").unwrap(),
+    );
+    let preferences = language_preferences_from_metadata(&incoming);
+    assert_eq!(
+        preferences
+            .iter()
+            .map(LanguageTag::as_str)
+            .collect::<Vec<_>>(),
+        vec!["es-ES", "en", "fr-FR"]
+    );
+
+    let mut forwarded = Request::new(());
+    attach_language_preferences(&mut forwarded, &preferences).unwrap();
+    assert_eq!(
+        forwarded
+            .metadata()
+            .get(GRPC_LANGUAGE_HEADER)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "es-ES, en, fr-FR"
+    );
+    assert_eq!(language_preferences_from_metadata(&forwarded), preferences);
+
+    let mut malformed = Request::new(());
+    malformed.metadata_mut().append(
+        GRPC_LANGUAGE_HEADER,
+        MetadataValue::try_from("es-ES").unwrap(),
+    );
+    malformed.metadata_mut().append(
+        GRPC_LANGUAGE_HEADER,
+        MetadataValue::try_from("en-US;q=2").unwrap(),
+    );
+    assert!(language_preferences_from_metadata(&malformed).is_empty());
+}
+
+#[tokio::test]
 async fn generated_replica_service_handles_graph_edges_and_metadata_rpcs() {
     let client = Arc::new(RecordingRemoteReplicaClient::default());
     *client.graph_edges_response.lock().unwrap() = vec![EdgeRecord {

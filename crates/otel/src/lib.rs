@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use copperdb_localization::{DiagnosticEvent, LanguageTag, Manager, RenderError, RenderedMessage};
 use copperdb_util::RequestCancellationReason;
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider as _;
@@ -475,6 +476,24 @@ impl CancellationStage {
 impl Telemetry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn emit_localized_event(
+        &self,
+        manager: &Manager,
+        preferences: &[LanguageTag],
+        event: &DiagnosticEvent,
+    ) -> Result<RenderedMessage, RenderError> {
+        let rendered = manager.render(preferences, &event.message)?;
+        tracing::event!(
+            tracing::Level::INFO,
+            event_id = event.id,
+            message_id = event.message.id,
+            language = rendered.language.as_str(),
+            fields = ?event.fields,
+            message = rendered.text,
+        );
+        Ok(rendered)
     }
 
     pub fn metric_spec(name: &str) -> Option<&'static MetricSpec> {
@@ -1094,6 +1113,7 @@ pub fn classify_cypher_op_type(query: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use copperdb_localization::{messages, DiagnosticEvent, LanguageTag, Manager, Value};
     use opentelemetry::trace::{
         Span as _, SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
         Tracer as _,
@@ -1121,6 +1141,24 @@ mod tests {
         assert!(ENUM_CATALOG
             .iter()
             .any(|e| e.name == "AllowedStorageIndexes"));
+    }
+
+    #[test]
+    fn localized_events_keep_stable_identity_and_fields() {
+        let spanish = LanguageTag::parse("es-ES").unwrap().unwrap();
+        let event = DiagnosticEvent {
+            id: "server.request.invalid_body",
+            message: messages::invalid_request_body(),
+            fields: BTreeMap::from([("status", Value::Number(400))]),
+        };
+
+        let rendered = Telemetry::new()
+            .emit_localized_event(&Manager::new(&[]), &[spanish], &event)
+            .unwrap();
+
+        assert_eq!(rendered.text, "cuerpo de solicitud no válido");
+        assert_eq!(event.id, "server.request.invalid_body");
+        assert_eq!(event.fields["status"], Value::Number(400));
     }
 
     #[test]

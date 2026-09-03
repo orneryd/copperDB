@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 copperdb-util = { path = "../util" }
+copperdb-localization = { workspace = true }
 thiserror.workspace = true
 serde = { workspace = true }
 tokio.workspace = true

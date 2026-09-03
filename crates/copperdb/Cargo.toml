@@ -22,11 +22,13 @@ tracing-subscriber.workspace = true
 tracing-opentelemetry.workspace = true
 rustls.workspace = true
 serde_json.workspace = true
+sys-locale.workspace = true
 copperdb-kms = { workspace = true }
 copperdb-bolt = { workspace = true }
 copperdb-buildinfo = { workspace = true }
 copperdb-config = { workspace = true }
 copperdb-lifecycle = { workspace = true }
+copperdb-localization = { workspace = true }
 copperdb-mcp = { workspace = true }
 copperdb-multidb = { workspace = true }
 copperdb-server = { workspace = true }

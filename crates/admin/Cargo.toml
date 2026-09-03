@@ -14,5 +14,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 copperdb-adminimport.workspace = true
+copperdb-localization.workspace = true
 copperdb-storage.workspace = true
 copperdb-util.workspace = true
+sys-locale.workspace = true

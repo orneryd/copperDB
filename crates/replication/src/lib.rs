@@ -7,6 +7,7 @@
 //! - a transport abstraction with an in-memory implementation for tests
 
 use async_trait::async_trait;
+use copperdb_localization::{Message, StableLocalizedDiagnostic};
 use copperdb_storage::{
     EdgeAdjacencyDirection, EdgeRecord, KnowledgePolicyAccessMetadata, StorageEngine, StorageError,
 };
@@ -45,6 +46,30 @@ pub enum ReplicationError {
 impl From<StorageError> for ReplicationError {
     fn from(error: StorageError) -> Self {
         Self::Storage(error.to_string())
+    }
+}
+
+impl StableLocalizedDiagnostic for ReplicationError {
+    fn diagnostic_id(&self) -> &'static str {
+        match self {
+            Self::NotLeader(_) => "replication.not_leader",
+            Self::Timeout(_) => "replication.operation_timed_out",
+            Self::Shutdown => "replication.transport.closed",
+            Self::NoQuorum { .. } | Self::Transport(_) | Self::Storage(_) => {
+                "replication.rpc.remote_apply_failed"
+            }
+        }
+    }
+
+    fn localized_message(&self) -> Message {
+        let message = Message::from_catalog(self.diagnostic_id())
+            .expect("generated replication catalog entry");
+        match self {
+            Self::NoQuorum { .. } | Self::Transport(_) | Self::Storage(_) => {
+                message.with("Cause", self.to_string())
+            }
+            _ => message,
+        }
     }
 }
 
@@ -1963,6 +1988,36 @@ impl Replicator for QuorumReplicator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use copperdb_localization::{LanguageTag, Manager, StableLocalizedDiagnostic};
+
+    #[test]
+    fn replication_errors_expose_stable_localized_diagnostics() {
+        let spanish = LanguageTag::parse("es-ES").unwrap().unwrap();
+        let manager = Manager::new(std::slice::from_ref(&spanish));
+
+        let not_leader = ReplicationError::NotLeader("node-1".into());
+        assert_eq!(not_leader.diagnostic_id(), "replication.not_leader");
+        assert_eq!(
+            manager
+                .render(std::slice::from_ref(&spanish), &not_leader.localized_message())
+                .unwrap()
+                .text,
+            "el nodo no es líder"
+        );
+
+        let transport = ReplicationError::Transport("peer reset".into());
+        assert_eq!(
+            transport.diagnostic_id(),
+            "replication.rpc.remote_apply_failed"
+        );
+        assert_eq!(
+            manager
+                .render(&[spanish], &transport.localized_message())
+                .unwrap()
+                .text,
+            "transport error: peer reset"
+        );
+    }
 
     fn cluster_config(node_id: &str, peers: &[&str]) -> ReplicationConfig {
         ReplicationConfig {

@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use thiserror::Error;
 
+use copperdb_localization::{Message, StableLocalizedDiagnostic};
 use copperdb_topology::DistributedSearchPlan;
 
 #[derive(Debug, Error)]
@@ -18,6 +19,28 @@ pub enum QdrantError {
     OperationFailed(String),
     #[error("invalid search plan: {0}")]
     InvalidPlan(String),
+}
+
+impl StableLocalizedDiagnostic for QdrantError {
+    fn diagnostic_id(&self) -> &'static str {
+        match self {
+            Self::Connection(_) | Self::OperationFailed(_) => "qdrant.get_points_failed",
+            Self::InvalidPlan(_) => "qdrant.points_selector_invalid",
+        }
+    }
+
+    fn localized_message(&self) -> Message {
+        match self {
+            Self::Connection(cause) | Self::OperationFailed(cause) => {
+                Message::from_catalog(self.diagnostic_id())
+                    .expect("generated Qdrant catalog entry")
+                    .with("Cause", cause)
+            }
+            Self::InvalidPlan(_) => {
+                Message::from_catalog(self.diagnostic_id()).expect("generated Qdrant catalog entry")
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -262,6 +285,21 @@ impl QdrantSearchRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use copperdb_localization::{LanguageTag, Manager, StableLocalizedDiagnostic};
+
+    #[test]
+    fn qdrant_errors_expose_stable_localized_diagnostics() {
+        let error = QdrantError::Connection("node-2 unavailable".into());
+        assert_eq!(error.diagnostic_id(), "qdrant.get_points_failed");
+        let spanish = LanguageTag::parse("es-ES").unwrap().unwrap();
+        let rendered = Manager::new(std::slice::from_ref(&spanish))
+            .render(&[spanish], &error.localized_message())
+            .unwrap();
+        assert_eq!(
+            rendered.text,
+            "no se pudieron obtener los puntos: node-2 unavailable"
+        );
+    }
     use copperdb_topology::{
         MeshPeer, NodeCapability, PlacementKey, PlacementRecord, TopologyRegistry,
     };

@@ -103,6 +103,7 @@ impl RequestCancellation {
 pub struct RequestContextMetadata {
     pub request_id: String,
     pub deadline_unix_ms: Option<u64>,
+    pub language_preferences: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +112,7 @@ pub struct RequestContext {
     deadline: Option<SystemTime>,
     cancellation: RequestCancellation,
     parent_cancellation: Option<RequestCancellation>,
+    language_preferences: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -133,6 +135,7 @@ impl RequestContext {
                 deadline,
                 cancellation: cancellation.clone(),
                 parent_cancellation: None,
+                language_preferences: Vec::new(),
             },
             RequestContextGuard { cancellation },
         )
@@ -144,6 +147,7 @@ impl RequestContext {
             deadline: None,
             cancellation: RequestCancellation::new(),
             parent_cancellation: None,
+            language_preferences: Vec::new(),
         }
     }
 
@@ -157,6 +161,7 @@ impl RequestContext {
                     .map(|millis| UNIX_EPOCH + Duration::from_millis(millis)),
                 cancellation: cancellation.clone(),
                 parent_cancellation: None,
+                language_preferences: metadata.language_preferences,
             },
             RequestContextGuard { cancellation },
         )
@@ -174,6 +179,7 @@ impl RequestContext {
                 deadline,
                 cancellation: cancellation.clone(),
                 parent_cancellation: Some(self.cancellation.clone()),
+                language_preferences: self.language_preferences.clone(),
             },
             RequestContextGuard { cancellation },
         )
@@ -181,6 +187,18 @@ impl RequestContext {
 
     pub fn request_id(&self) -> &str {
         &self.request_id
+    }
+
+    pub fn with_language_preferences(
+        mut self,
+        preferences: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.language_preferences = preferences.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn language_preferences(&self) -> &[String] {
+        &self.language_preferences
     }
 
     pub fn deadline(&self) -> Option<SystemTime> {
@@ -191,6 +209,7 @@ impl RequestContext {
         RequestContextMetadata {
             request_id: self.request_id.clone(),
             deadline_unix_ms: self.deadline.and_then(system_time_to_unix_ms),
+            language_preferences: self.language_preferences.clone(),
         }
     }
 

@@ -31,6 +31,9 @@ use copperdb_engine::{
 use copperdb_envutil::{get as env_get, get_bool_loose, parse_duration};
 use copperdb_fabric::{FabricReadRequest, FabricReadScope};
 use copperdb_graphql::GraphQlSchema;
+use copperdb_localization::{
+    messages as localized_messages, parse_accept_language, LanguageTag, Manager,
+};
 use copperdb_multidb::{DatabaseManager, DatabaseStatus, MultiDbError};
 use copperdb_nornicgrpc::{
     GrpcAuthValidator, GrpcError, NornicGrpcHydrationTransport, NornicGrpcRankedSearchTransport,
@@ -201,6 +204,10 @@ pub struct AppState {
     pub started_at: Instant,
     pub db_name: String,
     pub runtime_config: Arc<RuntimeConfig>,
+    /// Ordered process language preferences used when a protocol request has no override.
+    pub language_preferences: Vec<LanguageTag>,
+    /// Shared localization catalog and fallback accounting.
+    pub localizer: Arc<Manager>,
     /// Shared retention manager for policy/hold/erasure CRUD.
     pub retention: Arc<RwLock<RetentionManager>>,
     /// Optional path to a directory of static UI files to serve at `/`.
@@ -767,7 +774,9 @@ pub fn build_engine_backed_nornic_replica_service(
 pub fn build_local_nornic_replica_service(state: Arc<AppState>) -> NornicReplicaService {
     let replica_handler: Arc<dyn RemoteReplicaClient> =
         Arc::new(LocalEngineReplicaHandler::new(Arc::clone(&state)));
+    let preferences = state.language_preferences.clone();
     build_engine_backed_nornic_replica_service(state, replica_handler)
+        .with_language_preferences(preferences)
 }
 
 impl Default for AppState {
@@ -787,6 +796,8 @@ impl AppState {
             started_at: Instant::now(),
             db_name: "copperdb".into(),
             runtime_config: Arc::new(RuntimeConfig::default()),
+            language_preferences: Vec::new(),
+            localizer: Arc::new(Manager::new(&[])),
             retention: Arc::new(RwLock::new(RetentionManager::default())),
             static_dir: None,
             base_path: "/".into(),
@@ -1385,7 +1396,15 @@ async fn request_context_middleware(
     next: Next,
 ) -> Response {
     let timeout = http_request_timeout(request.uri().path());
-    run_with_request_context(request, next, timeout, state.telemetry.as_ref()).await
+    run_with_request_context(
+        request,
+        next,
+        timeout,
+        state.telemetry.as_ref(),
+        state.localizer.as_ref(),
+        &state.language_preferences,
+    )
+    .await
 }
 
 async fn run_with_request_context(
@@ -1393,6 +1412,8 @@ async fn run_with_request_context(
     next: Next,
     timeout: Option<HttpRequestTimeout>,
     telemetry: &Telemetry,
+    localizer: &Manager,
+    process_preferences: &[LanguageTag],
 ) -> Response {
     let protocol = match request.uri().path() {
         "/graphql" => CancellationProtocol::Graphql,
@@ -1401,6 +1422,16 @@ async fn run_with_request_context(
     };
     let deadline = timeout.and_then(|policy| SystemTime::now().checked_add(policy.duration));
     let (request_context, request_guard) = RequestContext::root(deadline);
+    let preferences = request
+        .headers()
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|value| value.to_str().ok())
+        .map(parse_accept_language)
+        .filter(|preferences| !preferences.is_empty())
+        .unwrap_or_else(|| process_preferences.to_vec());
+    let resolved_language = localizer.resolve("http", &preferences).resolved;
+    let request_context =
+        request_context.with_language_preferences([resolved_language.as_str().to_string()]);
     let mut cancellation_guard = HttpCancellationGuard {
         request_guard: Some(request_guard),
         request_context: request_context.clone(),
@@ -1409,7 +1440,7 @@ async fn run_with_request_context(
         finished: false,
     };
     request.extensions_mut().insert(request_context.clone());
-    let response = match timeout {
+    let (mut response, completed) = match timeout {
         Some(policy) => match tokio::time::timeout(policy.duration, next.run(request)).await {
             Ok(response) => {
                 record_request_context_cancellation(
@@ -1418,7 +1449,7 @@ async fn run_with_request_context(
                     CancellationStage::Execution,
                     &request_context,
                 );
-                response
+                (response, true)
             }
             Err(_) => {
                 request_context.cancel_due_to_deadline();
@@ -1428,7 +1459,10 @@ async fn run_with_request_context(
                     CancellationStage::Ingress,
                     &request_context,
                 );
-                (StatusCode::SERVICE_UNAVAILABLE, policy.message).into_response()
+                (
+                    (StatusCode::SERVICE_UNAVAILABLE, policy.message).into_response(),
+                    false,
+                )
             }
         },
         None => {
@@ -1439,10 +1473,20 @@ async fn run_with_request_context(
                 CancellationStage::Execution,
                 &request_context,
             );
-            response
+            (response, true)
         }
     };
     cancellation_guard.finished = true;
+    if completed {
+        if let Ok(value) = HeaderValue::from_str(resolved_language.as_str()) {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_LANGUAGE, value);
+        }
+        response
+            .headers_mut()
+            .append(header::VARY, HeaderValue::from_static("Accept-Language"));
+    }
     response
 }
 
@@ -2020,6 +2064,24 @@ struct OAuthProvider {
     display_name: String,
 }
 
+fn localized_display(
+    state: &AppState,
+    headers: &HeaderMap,
+    display: &dyn std::fmt::Display,
+) -> String {
+    let preferences = headers
+        .get(header::ACCEPT_LANGUAGE)
+        .and_then(|value| value.to_str().ok())
+        .map(parse_accept_language)
+        .filter(|preferences| !preferences.is_empty())
+        .unwrap_or_else(|| state.language_preferences.clone());
+    state
+        .localizer
+        .render_display(&preferences, display)
+        .map(|rendered| rendered.text)
+        .unwrap_or_else(|| display.to_string())
+}
+
 async fn auth_config_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(AuthConfigResponse {
         dev_login_enabled: state.auth.dev_login_enabled,
@@ -2037,6 +2099,7 @@ struct AuthTokenRequest {
 
 async fn auth_token_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(request): Json<AuthTokenRequest>,
 ) -> impl IntoResponse {
     let started = std::time::Instant::now();
@@ -2048,7 +2111,11 @@ async fn auth_token_handler(
             );
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"message": "unsupported grant_type"})),
+                Json(serde_json::json!({"message": localized_display(
+                    &state,
+                    &headers,
+                    &"unsupported grant_type",
+                )})),
             )
                 .into_response();
         }
@@ -2063,7 +2130,11 @@ async fn auth_token_handler(
             );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"message": error.to_string()})),
+                Json(serde_json::json!({"message": localized_display(
+                    &state,
+                    &headers,
+                    &error,
+                )})),
             )
                 .into_response();
         }
@@ -2085,7 +2156,11 @@ async fn auth_token_handler(
                 };
                 return (
                     status,
-                    Json(serde_json::json!({"message": error.to_string()})),
+                    Json(serde_json::json!({"message": localized_display(
+                        &state,
+                        &headers,
+                        &error,
+                    )})),
                 )
                     .into_response();
             }
@@ -2376,9 +2451,10 @@ async fn search_handler(
     };
     let roles = roles_for_claims(claims.as_ref());
     if state.db_manager.get(&database).is_none() {
+        let error = format!("database not found: {database}");
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("database not found: {database}")})),
+            Json(serde_json::json!({"error": localized_display(&state, &headers, &error)})),
         )
             .into_response();
     }
@@ -2390,9 +2466,10 @@ async fn search_handler(
     let candidate_limit = limit.saturating_add(request.offset);
     let min_score = match request.min_score {
         Some(min_score) if !min_score.is_finite() => {
+            let error = "min_score must be finite";
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "min_score must be finite"})),
+                Json(serde_json::json!({"error": localized_display(&state, &headers, &error)})),
             )
                 .into_response();
         }
@@ -2433,7 +2510,7 @@ async fn search_handler(
         Err(err) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": err})),
+                Json(serde_json::json!({"error": localized_display(&state, &headers, &err)})),
             )
                 .into_response();
         }
@@ -2442,9 +2519,10 @@ async fn search_handler(
     let index_defs = match engine.list_index_definitions() {
         Ok(defs) => defs,
         Err(_) => {
+            let error = "failed to load indexes";
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "failed to load indexes"})),
+                Json(serde_json::json!({"error": localized_display(&state, &headers, &error)})),
             )
                 .into_response();
         }
@@ -2536,7 +2614,13 @@ async fn search_handler(
                     .into_response();
             }
             Err(error) if !bm25_indexes.is_empty() => {
-                tracing::warn!(database, %error, "query embedding failed; falling back to BM25");
+                tracing::warn!(
+                    event_id = "server-runtime.log.search_query_embedding_failed",
+                    database,
+                    error = %error,
+                    fallback = "bm25",
+                    "query embedding failed; falling back to BM25"
+                );
                 None
             }
             Err(error) => {
@@ -2932,11 +3016,12 @@ async fn neo4j_tx_commit_handler(
         match derive_distributed_read_fence(&state, &database, &request.bookmarks) {
             Ok(read_fence) => read_fence,
             Err(error) => {
+                let message = localized_display(&state, &headers, &error);
                 return Json(Neo4jCommitResponse {
                     results: Vec::new(),
                     errors: vec![Neo4jError {
                         code: "Neo.ClientError.Statement.ExecutionFailed".into(),
-                        message: error,
+                        message,
                     }],
                 })
                 .into_response();
@@ -2950,7 +3035,7 @@ async fn neo4j_tx_commit_handler(
     let mut errors = Vec::new();
 
     for statement in request.statements {
-        let state = Arc::clone(&state);
+        let execution_state = Arc::clone(&state);
         let database = database.clone();
         let roles = roles.clone();
         let caller_auth_token = caller_auth_token.clone();
@@ -2960,7 +3045,7 @@ async fn neo4j_tx_commit_handler(
         let result = tokio::task::spawn_blocking(move || {
             parent_span.in_scope(|| {
                 execute_statement(
-                    Arc::clone(&state),
+                    execution_state,
                     database,
                     request_context,
                     statement.statement,
@@ -2987,7 +3072,7 @@ async fn neo4j_tx_commit_handler(
             }
             Err(error) => errors.push(Neo4jError {
                 code: "Neo.ClientError.Statement.ExecutionFailed".into(),
-                message: error.to_string(),
+                message: localized_display(&state, &headers, &error),
             }),
         }
     }
@@ -3649,7 +3734,8 @@ fn build_local_replica_transport(
     caller_auth_token: Option<&str>,
     write: bool,
 ) -> Result<Arc<dyn ReplicaTransport>, String> {
-    let mut client = TonicRemoteReplicaClient::new();
+    let mut client = TonicRemoteReplicaClient::new()
+        .with_language_preferences(state.language_preferences.clone());
     if state.auth.security_enabled {
         let token = TokenManager::new(state.auth.jwt_secret.clone())
             .issue("copperdb-cluster", vec!["admin".into()], 300)
@@ -4342,7 +4428,8 @@ fn build_fabric_ranked_search_context(
         }
     }
 
-    let mut ranked_client = TonicRemoteRankedSearchClient::new();
+    let mut ranked_client = TonicRemoteRankedSearchClient::new()
+        .with_language_preferences(state.language_preferences.clone());
     if let Some(token) = caller_auth_token {
         ranked_client = ranked_client.with_caller_auth_token(token.to_owned());
     }
@@ -4370,7 +4457,8 @@ fn build_fabric_ranked_search_context(
         })?;
         ranked_client = ranked_client.with_tls_identity_pem(client_cert, client_key);
     }
-    let mut hydration_client = TonicRemoteHydrationClient::new();
+    let mut hydration_client = TonicRemoteHydrationClient::new()
+        .with_language_preferences(state.language_preferences.clone());
     if let Some(token) = caller_auth_token {
         hydration_client = hydration_client.with_caller_auth_token(token.to_owned());
     }
@@ -5010,13 +5098,37 @@ async fn mcp_handler(
             return rejection.into_response()
         }
         Err(rejection) => {
-            return Json(copperdb_mcp::McpResponse::error_with_data(
+            let preferences = headers
+                .get(header::ACCEPT_LANGUAGE)
+                .and_then(|value| value.to_str().ok())
+                .map(parse_accept_language)
+                .filter(|preferences| !preferences.is_empty())
+                .unwrap_or_else(|| state.language_preferences.clone());
+            let rendered = state
+                .localizer
+                .render(&preferences, &localized_messages::mcp_parse_error())
+                .unwrap_or_else(|_| copperdb_localization::RenderedMessage {
+                    text: "Parse error".into(),
+                    language: copperdb_localization::LanguageTag::parse("en-US")
+                        .expect("source language is valid")
+                        .expect("source language is concrete"),
+                });
+            let mut response = Json(copperdb_mcp::McpResponse::error_with_data(
                 serde_json::Value::Null,
                 -32700,
-                "Parse error",
+                rendered.text,
                 Some(serde_json::json!({"detail": rejection.body_text()})),
             ))
-            .into_response()
+            .into_response();
+            response.headers_mut().insert(
+                header::CONTENT_LANGUAGE,
+                HeaderValue::from_str(rendered.language.as_str())
+                    .expect("normalized language is a valid header"),
+            );
+            response
+                .headers_mut()
+                .append(header::VARY, HeaderValue::from_static("Accept-Language"));
+            return response;
         }
     };
     if let serde_json::Value::Array(entries) = body {

@@ -1,0 +1,18 @@
+[package]
+name = "copperdb-localization"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+fluent-langneg.workspace = true
+icu_locid.workspace = true
+icu_plurals.workspace = true
+rust-i18n.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_yaml.workspace = true

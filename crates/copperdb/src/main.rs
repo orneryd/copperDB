@@ -10,6 +10,7 @@ use copperdb_bolt::server::BoltServer;
 use copperdb_buildinfo::display_version;
 use copperdb_config::{load_with_precedence, ConfigOverrides};
 use copperdb_lifecycle::{BoxError, Component, Supervisor};
+use copperdb_localization::{resolve_process_preferences, ProcessPreferences};
 use copperdb_multidb::DatabaseStatus;
 use copperdb_otel::{
     install_global_telemetry, resolve_instance_id, Health, ObservabilityConfig, ServiceInfo,
@@ -384,6 +385,7 @@ async fn main() -> Result<()> {
         .init();
 
     let startup = resolve_startup_config(&cli).await?;
+    let process_preferences = resolve_startup_preferences(&startup)?;
     if let Some(error) = telemetry_provider.tracing_error() {
         warn!(
             error,
@@ -404,6 +406,10 @@ async fn main() -> Result<()> {
     let auth = copperdb_server::AuthState::from_runtime_config(startup.runtime_config.as_ref())
         .context("failed to initialize configured authentication")?;
     let mut state = AppState::with_auth(auth);
+    state.language_preferences = process_preferences.preferences.clone();
+    state.localizer = Arc::new(copperdb_localization::Manager::new(
+        &process_preferences.preferences,
+    ));
     state.db_name = startup.db_name.clone();
     state
         .configure_runtime(Arc::clone(&startup.runtime_config))
@@ -485,7 +491,8 @@ async fn main() -> Result<()> {
             server: BoltServer::new(startup.bolt_address.clone(), telemetry, executor)
                 .with_auth_enabled(state.auth.security_enabled)
                 .with_auth_provider(auth_provider)
-                .with_runtime_counters(Arc::clone(&state.bolt_counters)),
+                .with_runtime_counters(Arc::clone(&state.bolt_counters))
+                .with_language_preferences(state.language_preferences.clone()),
         });
     }
 
@@ -536,6 +543,15 @@ async fn resolve_startup_config(cli: &Cli) -> Result<StartupConfig> {
             .or(listeners.static_dir)
             .or_else(find_default_ui_dist),
     })
+}
+
+fn resolve_startup_preferences(startup: &StartupConfig) -> Result<ProcessPreferences> {
+    resolve_process_preferences(&startup.runtime_config.localization.language, || {
+        sys_locale::get_locale()
+            .map(|locale| vec![locale])
+            .ok_or_else(|| "operating system language was not detected".to_string())
+    })
+    .context("failed to resolve process language")
 }
 
 fn find_default_ui_dist() -> Option<String> {
@@ -622,6 +638,14 @@ mod tests {
         let startup = resolve_startup_config(&cli).await.unwrap();
 
         assert!(startup.runtime_config.auth.enabled);
+    }
+
+    #[tokio::test]
+    async fn startup_config_defaults_localization_to_os_detection() {
+        let cli = Cli::parse_from(["copperdb"]);
+        let startup = resolve_startup_config(&cli).await.unwrap();
+
+        assert_eq!(startup.runtime_config.localization.language, "auto");
     }
 
     #[test]

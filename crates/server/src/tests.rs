@@ -965,6 +965,45 @@ async fn mcp_http_maps_json_and_request_shape_errors() {
 }
 
 #[tokio::test]
+async fn mcp_parse_error_uses_accept_language_and_response_locale_headers() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let mut state = AppState::default();
+    state.auth.security_enabled = false;
+    let app = build_router(Arc::new(state));
+
+    for (locale, expected) in [
+        ("es-ES, en;q=0.5", "Error de análisis"),
+        ("en-XA", "[!! Parse error !!]"),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/mcp")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::ACCEPT_LANGUAGE, locale)
+                    .body(Body::from("{"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.headers()[header::CONTENT_LANGUAGE],
+            locale.split(',').next().unwrap()
+        );
+        assert_eq!(response.headers()[header::VARY], "Accept-Language");
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["error"]["code"], -32700);
+        assert_eq!(payload["error"]["message"], expected);
+    }
+}
+
+#[tokio::test]
 async fn mcp_http_notifications_execute_without_response_bodies() {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
@@ -2107,6 +2146,7 @@ async fn request_context_middleware_returns_timeout_and_cancels_context() {
                 async move {
                     assert!(context.deadline().is_some());
                     assert!(context.check_active().is_ok());
+                    assert_eq!(context.language_preferences(), &["es-ES"]);
                     handler_tx
                         .lock()
                         .take()
@@ -2120,12 +2160,27 @@ async fn request_context_middleware_returns_timeout_and_cancels_context() {
         .layer(middleware::from_fn(move |request, next| {
             let telemetry = Arc::clone(&middleware_telemetry);
             async move {
-                run_with_request_context(request, next, Some(timeout), telemetry.as_ref()).await
+                run_with_request_context(
+                    request,
+                    next,
+                    Some(timeout),
+                    telemetry.as_ref(),
+                    &Manager::new(&[]),
+                    &[],
+                )
+                .await
             }
         }));
 
-    let request_task =
-        tokio::spawn(app.oneshot(Request::builder().uri("/").body(Body::empty()).unwrap()));
+    let request_task = tokio::spawn(
+        app.oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::ACCEPT_LANGUAGE, "es-MX")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
     let context = context_rx.await.expect("handler started");
     let response = tokio::time::timeout(Duration::from_secs(1), request_task)
         .await
@@ -2134,6 +2189,8 @@ async fn request_context_middleware_returns_timeout_and_cancels_context() {
         .expect("router returned response");
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!response.headers().contains_key(header::CONTENT_LANGUAGE));
+    assert!(!response.headers().contains_key(header::VARY));
     let body = axum::body::to_bytes(response.into_body(), 1024)
         .await
         .unwrap();

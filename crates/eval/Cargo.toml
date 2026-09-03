@@ -21,6 +21,7 @@ reqwest.workspace = true
 copperdb-cypher = { workspace = true }
 copperdb-indexing = { workspace = true }
 copperdb-knowledgepolicy = { workspace = true }
+copperdb-localization = { workspace = true }
 copperdb-storage = { workspace = true }
 copperdb-cache = { workspace = true }
 copperdb-filter = { workspace = true }

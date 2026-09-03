@@ -59,6 +59,7 @@ pub use syntax_ir::{
 };
 use thiserror::Error;
 pub use tokenizer::tokenize;
+use copperdb_localization::{Message, StableLocalizedDiagnostic};
 
 #[derive(Debug, Error)]
 pub enum CypherError {
@@ -68,6 +69,31 @@ pub enum CypherError {
     EmptyQuery,
     #[error("unterminated string")]
     UnterminatedString,
+}
+
+impl StableLocalizedDiagnostic for CypherError {
+    fn diagnostic_id(&self) -> &'static str {
+        match self {
+            Self::ParseError(_) => "cypherantlr.parse_syntax_error",
+            Self::EmptyQuery => "cyphercore.empty_query",
+            Self::UnterminatedString => "cyphercore.unterminated_string_literal",
+        }
+    }
+
+    fn localized_message(&self) -> Message {
+        match self {
+            Self::ParseError(detail) => Message::new(
+                "cypherantlr.parse_syntax_error",
+                "syntax error: {{.Detail}}",
+            )
+            .with("Detail", detail),
+            Self::EmptyQuery => Message::new("cyphercore.empty_query", "empty query"),
+            Self::UnterminatedString => Message::new(
+                "cyphercore.unterminated_string_literal",
+                "unterminated string literal",
+            ),
+        }
+    }
 }
 
 fn is_simple_expression_identifier(value: &str) -> bool {
@@ -1485,6 +1511,45 @@ impl<'a> ParseContext<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use copperdb_localization::{LanguageTag, Manager};
+
+    #[test]
+    fn cypher_errors_expose_upstream_stable_localized_diagnostics() {
+        let spanish = LanguageTag::parse("es-ES").unwrap().unwrap();
+        let localizer = Manager::new(std::slice::from_ref(&spanish));
+        let cases = [
+            (
+                CypherError::EmptyQuery,
+                "cyphercore.empty_query",
+                "empty query",
+                "consulta vacía",
+            ),
+            (
+                CypherError::UnterminatedString,
+                "cyphercore.unterminated_string_literal",
+                "unterminated string",
+                "literal de cadena sin terminar",
+            ),
+            (
+                CypherError::ParseError("unexpected RETURN".into()),
+                "cypherantlr.parse_syntax_error",
+                "parse error: unexpected RETURN",
+                "error de sintaxis: unexpected RETURN",
+            ),
+        ];
+
+        for (error, id, display, localized) in cases {
+            assert_eq!(error.diagnostic_id(), id);
+            assert_eq!(error.to_string(), display);
+            assert_eq!(
+                localizer
+                    .render(std::slice::from_ref(&spanish), &error.localized_message())
+                    .unwrap()
+                    .text,
+                localized
+            );
+        }
+    }
 
     #[test]
     fn test_new_parser() {

@@ -81,7 +81,9 @@ impl EvalEngine {
             BuiltinProcedure::NornicDbKnowledgePolicyInfo => {
                 self.execute_nornicdb_knowledgepolicy_info_call(call)
             }
-            BuiltinProcedure::DbmsProcedures => self.execute_dbms_procedures_call(call),
+            BuiltinProcedure::DbmsProcedures => {
+                self.execute_dbms_procedures_call(request_context, call)
+            }
             BuiltinProcedure::DbmsFunctions => self.execute_dbms_functions_call(call),
             BuiltinProcedure::DbmsComponents => self.execute_dbms_components_call(call),
             BuiltinProcedure::DbmsInfo => self.execute_dbms_info_call(call),
@@ -299,6 +301,7 @@ impl EvalEngine {
 
     fn execute_dbms_procedures_call(
         &self,
+        request_context: &copperdb_util::RequestContext,
         call: &copperdb_cypher::CallClause,
     ) -> Result<EvalResult, EvalError> {
         if !call.args.is_empty() {
@@ -307,6 +310,18 @@ impl EvalEngine {
             ));
         }
 
+        let language = request_context
+            .language_preferences()
+            .iter()
+            .find_map(|preference| {
+                copperdb_localization::LanguageTag::parse(preference)
+                    .ok()
+                    .flatten()
+            })
+            .or_else(|| {
+                copperdb_localization::LanguageTag::parse("en-US").expect("source locale is valid")
+            })
+            .expect("source locale is defined");
         let mut rows = self
             .procedure_registry
             .descriptors()
@@ -324,7 +339,7 @@ impl EvalEngine {
                 );
                 row.insert(
                     "description".to_string(),
-                    Value::String(descriptor.description().to_string()),
+                    Value::String(descriptor.localized_description(&language).to_string()),
                 );
                 row.insert(
                     "mode".to_string(),

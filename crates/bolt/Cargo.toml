@@ -26,6 +26,7 @@ copperdb-auth = { workspace = true }
 copperdb-eval = { workspace = true }
 copperdb-errors = { workspace = true }
 copperdb-envutil = { workspace = true }
+copperdb-localization = { workspace = true }
 copperdb-util = { workspace = true }
 copperdb-otel = { workspace = true }
 

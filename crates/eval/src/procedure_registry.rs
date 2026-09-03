@@ -1323,6 +1323,14 @@ impl ProcedureDescriptor {
         &self.description
     }
 
+    pub fn localized_description(&self, language: &copperdb_localization::LanguageTag) -> &str {
+        copperdb_localization::matching_procedure_description(
+            &self.display_name,
+            &self.description,
+            language,
+        )
+    }
+
     pub fn mode(&self) -> ProcedureMode {
         self.mode
     }
@@ -1566,5 +1574,28 @@ mod tests {
             assert!(registry.get("DBMS.PROCEDURES").is_some());
             assert!(registry.get("missing.procedure").is_none());
         }
+    }
+
+    #[test]
+    fn builtin_procedure_metadata_matches_generated_upstream_inventory() {
+        let spanish = copperdb_localization::LanguageTag::parse("es-ES")
+            .unwrap()
+            .unwrap();
+        let registry = ProcedureRegistry::builtins();
+
+        for descriptor in registry.descriptors() {
+            assert!(
+                copperdb_localization::procedure_description(descriptor.name(), &spanish).is_some(),
+                "missing generated metadata for {}",
+                descriptor.name()
+            );
+        }
+        assert_eq!(
+            registry
+                .get("db.info")
+                .unwrap()
+                .localized_description(&spanish),
+            "Devuelve información de la base de datos"
+        );
     }
 }

@@ -22,6 +22,7 @@ rustls.workspace = true
 copperdb-auth = { workspace = true }
 copperdb-replication = { workspace = true }
 copperdb-search = { workspace = true }
+copperdb-localization = { workspace = true }
 copperdb-storage = { workspace = true }
 copperdb-topology = { workspace = true }
 copperdb-util = { workspace = true }

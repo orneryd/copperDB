@@ -222,6 +222,7 @@ fn injected_procedure_dispatch_preserves_row_order_and_restricted_context() {
         RequestContext::from_metadata(copperdb_util::RequestContextMetadata {
             request_id: "procedure-test".into(),
             deadline_unix_ms: None,
+            language_preferences: Vec::new(),
         });
     let execution_context = FunctionExecutionContext {
         capabilities: vec!["procedure:execute".into()],
@@ -303,6 +304,31 @@ fn procedure_discovery_uses_public_canonical_descriptors_only() {
             assert!(names.contains(&descriptor.name()));
             assert!(engine.procedure_registry.get(descriptor.name()).is_some());
         }
+    }
+}
+
+#[test]
+fn dbms_procedures_localizes_builtin_metadata_from_request_context() {
+    let engine = make_engine();
+    for (language, expected) in [
+        ("es-ES", "Enumera todas las etiquetas de la base de datos"),
+        ("en-XA", "[!! Lists all labels in the database !!]"),
+    ] {
+        let request_context =
+            RequestContext::detached().with_language_preferences([language.to_string()]);
+        let result = engine
+            .execute_cypher_with_context(
+                &request_context,
+                "CALL dbms.procedures()",
+                &HashMap::new(),
+            )
+            .unwrap();
+        let row = result
+            .rows
+            .iter()
+            .find(|row| row["name"] == "db.labels")
+            .expect("db.labels procedure metadata");
+        assert_eq!(row["description"], expected, "{language}");
     }
 }
 
@@ -512,6 +538,7 @@ fn injected_scalar_nested_alias_receives_execution_context() {
         RequestContext::from_metadata(copperdb_util::RequestContextMetadata {
             request_id: "registry-test".into(),
             deadline_unix_ms: None,
+            language_preferences: Vec::new(),
         });
     let function_context = FunctionExecutionContext {
         capabilities: vec!["function:execute".into()],

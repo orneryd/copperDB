@@ -20,6 +20,7 @@ prost-types.workspace = true
 tracing.workspace = true
 copperdb-topology = { workspace = true }
 copperdb-util = { workspace = true }
+copperdb-localization = { workspace = true }
 
 [build-dependencies]
 tonic-build.workspace = true

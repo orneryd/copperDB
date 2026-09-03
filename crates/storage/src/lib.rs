@@ -4868,6 +4868,7 @@ impl StorageEngine {
         let sort_started = std::time::Instant::now();
         edges.sort_by(|left, right| left.id.cmp(&right.id));
         tracing::info!(
+            event_id = "storage.log.bfs_edge_snapshot",
             edge_type,
             full_scan = use_full_scan,
             edge_count = edges.len(),
@@ -4934,6 +4935,7 @@ impl StorageEngine {
             edges.sort_by(|left, right| left.id.cmp(&right.id));
         }
         tracing::info!(
+            event_id = "storage.log.bfs_adjacency_build",
             edge_type,
             direction = direction_key,
             node_count = adjacency.len(),
@@ -6424,7 +6426,11 @@ impl Drop for FlushGuard {
         // Flush the configured backend. Failures are logged but do not panic — a flush
         // failure should not crash the server.
         if let Err(e) = self.storage.backend.flush() {
-            tracing::warn!(error = %e, "storage flush failed during FlushGuard drop");
+            tracing::warn!(
+                event_id = "storage.log.flush_guard_failed",
+                error = %e,
+                "storage flush failed during FlushGuard drop"
+            );
         }
     }
 }

@@ -99,6 +99,7 @@ pub struct ListenerConfig {
 pub struct Config {
     pub storage: StorageConfig,
     pub server: ServerConfig,
+    pub localization: LocalizationConfig,
     pub bolt: BoltConfig,
     pub auth: AuthConfig,
     pub replication: ReplicationConfig,
@@ -347,6 +348,7 @@ impl Default for Config {
         Self {
             storage: StorageConfig::default(),
             server: ServerConfig::default(),
+            localization: LocalizationConfig::default(),
             bolt: BoltConfig::default(),
             auth: AuthConfig::default(),
             replication: ReplicationConfig::default(),
@@ -359,6 +361,21 @@ impl Default for Config {
             gpu: GpuConfig::default(),
             cli_overrides: BTreeMap::new(),
             log_level: "info".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LocalizationConfig {
+    /// Process language or `auto` to use the operating-system locale.
+    pub language: String,
+}
+
+impl Default for LocalizationConfig {
+    fn default() -> Self {
+        Self {
+            language: "auto".into(),
         }
     }
 }

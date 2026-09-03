@@ -1,0 +1,1863 @@
+_version: 1
+admincli.completion.command_long: |
+  Generar el script de autocompletado para {{.Command}} para el shell especificado.
+  Consulte la ayuda de cada subcomando para obtener detalles sobre cómo usar el script generado.
+admincli.completion.command_short: Generar el script de autocompletado para el shell especificado
+admincli.database_info_not_implemented: la información de la base de datos aún no está implementada
+admincli.database_short: Comandos de administración de bases de datos
+admincli.error_prefix: 'Error:'
+admincli.exact_args: acepta {{.Expected}} argumento(s), se recibieron {{.Received}}
+admincli.export_short: Exportar datos de la base de datos para una migración sin conexión
+admincli.flag.array_delimiter: Delimitador de matrices
+admincli.flag.bad_tolerance: Número de filas no válidas toleradas antes de cancelar
+admincli.flag.build_indexes: Crear índices de búsqueda después de la importación
+admincli.flag.chunk_size: Filas por bloque de escritura masiva
+admincli.flag.constraints_file: Alias obsoleto de --schema
+admincli.flag.data_directory: Directorio de datos de destino
+admincli.flag.delimiter: Delimitador de campos
+admincli.flag.from_path: Directorio que contiene archivos CSV compatibles con Neo4j
+admincli.flag.id_type: 'Tipo de ID: cadena o entero'
+admincli.flag.ignore_empty_strings: Tratar las cadenas vacías como nulas
+admincli.flag.ignore_extra_columns: Ignorar columnas CSV adicionales
+admincli.flag.nodes: Fuente CSV de nodos (se puede repetir)
+admincli.flag.normalize_types: Normalizar los valores de propiedades importados
+admincli.flag.quote: Carácter de comillas
+admincli.flag.relationships: Fuente CSV de relaciones (se puede repetir)
+admincli.flag.report_file: Escribir un informe JSON
+admincli.flag.schema: Archivo de esquema Cypher que se aplicará después de la carga
+admincli.flag.skip_bad_relationships: Omitir relaciones que hagan referencia a nodos ausentes
+admincli.flag.skip_duplicate_nodes: Omitir ID de nodos duplicados
+admincli.flag.to_path: Directorio de salida para archivos CSV compatibles con Neo4j
+admincli.flag.vector_delimiter: Delimitador de vectores
+admincli.flag.verbose: Registro detallado
+admincli.full_import_short: Ejecutar una importación completa sin conexión
+admincli.help.additional_commands_heading: 'Comandos adicionales:'
+admincli.help.additional_topics_heading: 'Temas de ayuda adicionales:'
+admincli.help.aliases_heading: 'Alias:'
+admincli.help.available_commands_heading: 'Comandos disponibles:'
+admincli.help.command_long: |-
+  La ayuda proporciona información sobre cualquier comando de la aplicación.
+  Escriba {{.Command}} help [ruta al comando] para obtener todos los detalles.
+admincli.help.command_short: Ayuda sobre cualquier comando
+admincli.help.examples_heading: 'Ejemplos:'
+admincli.help.flag: ayuda para {{.Command}}
+admincli.help.flags_heading: 'Opciones:'
+admincli.help.global_flags_heading: 'Opciones globales:'
+admincli.help.more_information: Use "{{.CommandPath}} [command] --help" para obtener más información sobre un comando.
+admincli.help.usage_heading: 'Uso:'
+admincli.import_short: Importar datos CSV en una base de datos sin conexión
+admincli.incremental_import_short: Comando reservado para la importación incremental
+admincli.incremental_not_implemented: la importación incremental de bases de datos aún no está implementada
+admincli.neo4j_csv_export_short: Exportar una base de datos como archivos CSV compatibles con Neo4j
+admincli.root_short: Herramientas administrativas para NornicDB
+admincli.server_short: Comandos del servidor
+admincli.server_status_not_implemented: el estado del servidor aún no está implementado
+admincli.server_status_short: Mostrar el estado del servidor
+admincli.to_path_required: se requiere --to-path
+admincli.unknown_command: comando desconocido {{.Argument}} para {{.Command}}
+admincli.version_short: Mostrar la versión
+adminimport.actual_id_unsupported: --id-type=actual no es compatible
+adminimport.bad_end_relationship: 'relación no válida en la fila {{.Row}}: falta el nodo final'
+adminimport.bad_end_tolerance_exceeded: 'se superó la tolerancia de relaciones no válidas en la fila {{.Row}} ({{.BadCount}} > {{.Tolerance}}): falta el nodo final'
+adminimport.bad_start_relationship: 'relación no válida en la fila {{.Row}}: falta el nodo inicial'
+adminimport.bad_start_tolerance_exceeded: 'se superó la tolerancia de relaciones no válidas en la fila {{.Row}} ({{.BadCount}} > {{.Tolerance}}): falta el nodo inicial'
+adminimport.csv_parse_error: error de análisis CSV en {{.Where}}
+adminimport.custom_quote_unsupported: el lector CSV de Go todavía no admite --quote personalizado
+adminimport.database_name_required: se requiere el nombre de la base de datos
+adminimport.duplicate_node_id: ID de nodo duplicado en la fila {{.Row}}
+adminimport.duplicate_relationship_id: ID de relación duplicado
+adminimport.duplicate_relationship_id_at_row: ID de relación duplicado en la fila {{.Row}}
+adminimport.empty_source: fuente de importación vacía
+adminimport.export_custom_quote_unsupported: los caracteres de comillas personalizados no son compatibles con la exportación CSV de Neo4j
+adminimport.export_output_directory_required: se requiere el directorio de salida
+adminimport.invalid_vector_dimensions: 'dimensiones vectoriales no válidas en el encabezado: {{.Header}}'
+adminimport.no_csv_files: no se encontraron archivos CSV compatibles con Neo4j en el directorio de origen
+adminimport.no_node_csv_files: el directorio de origen no contiene archivos CSV de nodos
+adminimport.node_source_required: se requiere al menos una fuente --nodes
+adminimport.open_csv_failed: no se pudo abrir el archivo CSV
+adminimport.open_gzip_csv_failed: no se pudo abrir el archivo CSV gzip
+adminimport.open_zip_csv_failed: no se pudo abrir el archivo CSV ZIP
+adminimport.open_zip_member_failed: no se pudo abrir el miembro CSV comprimido
+adminimport.read_header_failed: no se pudo leer el encabezado CSV
+adminimport.relationship_ids_required: la fuente de relaciones requiere las columnas :START_ID y :END_ID
+adminimport.relationship_prefix_limit: la fuente de relaciones acepta como máximo un prefijo de tipo
+adminimport.relationship_type_required: la fuente de relaciones requiere una columna :TYPE o el prefijo --relationships=TYPE=
+adminimport.scan_directory_failed: no se pudo examinar el directorio CSV de Neo4j
+adminimport.schema_application_failed: no se pudo aplicar el esquema
+adminimport.storage_engine_required: se requiere un motor de almacenamiento
+adminimport.target_not_empty: la importación completa de la base de datos requiere una base de datos de destino vacía
+adminimport.unsupported_csv_header: 'encabezado CSV no compatible en el directorio de origen de Neo4j: {{.Path}}'
+adminimport.unsupported_header_token: 'token de encabezado no compatible: {{.Token}}'
+adminimport.unsupported_property_type: 'tipo de propiedad no compatible: {{.Type}}'
+adminimport.zip_single_file_required: las fuentes CSV en ZIP deben contener exactamente un archivo
+auth.api_token_admin_required: se requiere el rol de administrador para generar tokens de API
+auth.api_token_generation_failed: no se pudo generar el token
+auth.authorization_code_missing: falta el código de autorización
+auth.invalid_expires_in: formato de expires_in no válido
+auth.invalid_expires_in_help: 'formato de expires_in no válido (use: 1h, 24h, 7d, 365d, 0 para nunca)'
+auth.logout_complete: sesión cerrada
+auth.oauth_callback_error: 'Error de OAuth: {{.Error}} - {{.Description}}'
+auth.old_password_incorrect: la contraseña anterior es incorrecta
+auth.password_changed: contraseña cambiada
+auth.profile_updated: perfil actualizado
+auth.state_parameter_missing: falta el parámetro state
+auth.unsupported_grant_type: grant_type no compatible
+auth.user_context_missing: falta el contexto del usuario
+bolt.authentication_not_configured: Se requiere autenticación, pero no está configurada
+bolt.authentication_required: Se requiere autenticación
+bolt.bookmark_validation_failed: 'Error de validación del marcador: {{.Cause}}'
+bolt.database_not_found_with_cause: 'No se encontró la base de datos ''{{.Name}}'': {{.Cause}}'
+bolt.database_switch_during_transaction: no se puede cambiar de base de datos durante una transacción activa
+bolt.invalid_credentials: Credenciales no válidas
+bolt.invalid_or_expired_token: Token no válido o caducado
+bolt.log.authentication_failed: error de autenticación
+bolt.log.connection_handler_panic: pánico en el controlador de conexión
+bolt.log.discovery_refresh_failed: error al actualizar el descubrimiento
+bolt.log.handshake_failed: error en la negociación
+bolt.log.hello: saludo
+bolt.log.hello_scheme_none: saludo con esquema=none
+bolt.log.message_handling_error: error al procesar el mensaje
+bolt.log.query: consulta
+bolt.log.query_error: error de consulta
+bolt.log.run: ejecución
+bolt.log.server_listening: El servidor Bolt está escuchando
+bolt.log.transaction_cleanup_failed: error al limpiar la transacción explícita
+bolt.log.transaction_commit_failed: error al confirmar la transacción explícita
+bolt.log.transaction_terminated: transacción explícita terminada
+bolt.log.transaction_timeout_cleanup_completed: completada la limpieza por tiempo de espera de la transacción explícita
+bolt.log.transaction_timeout_cleanup_requested: solicitada la limpieza por tiempo de espera de la transacción explícita
+bolt.log.transport_sniff_failed: error al detectar el transporte
+bolt.log.unencrypted_connection_rejected: rechazando conexión sin cifrar
+bolt.log.websocket_upgrade_credentials: credenciales de actualización WebSocket
+bolt.log.websocket_upgrade_failed: error en la actualización WebSocket
+bolt.log.websocket_upgrade_read_request_failed: error al leer la solicitud de actualización WebSocket
+bolt.log.ws_cookie_bearer_rejected: token bearer de cookie WebSocket rechazado
+bolt.no_active_cursor: no hay ningún cursor de resultados Bolt activo
+bolt.no_transaction_to_commit: No hay ninguna transacción que confirmar
+bolt.run_message_parse_failed: 'No se pudo analizar el mensaje RUN: {{.Cause}}'
+bolt.transaction_already_active: ya hay una transacción activa
+bolt.unknown_cursor: cursor de resultados Bolt desconocido
+bolt.unsupported_auth_scheme: 'Esquema de autenticación no compatible: {{.Scheme}}'
+cypher.log.create_database_failed: CreateDatabase falló
+cypher.log.create_database_invoked: se invocó executeCreateDatabase
+cypher.log.create_database_succeeded: CreateDatabase se completó correctamente
+cypher.log.decay_subsystem_disabled: se llamó a la función de decaimiento, pero el subsistema de decaimiento está deshabilitado; se devuelven puntuaciones neutras
+cypher.log.orphaned_embedding_detected: se detectó una incrustación huérfana; se elimina de los índices
+cypher.log.orphaned_embedding_removal_failed: no se pudo eliminar la incrustación huérfana
+cypher.log.slow_query: consulta lenta
+cypher.log.vector_search_disabled: se llamó a db.index.vector.queryNodes en una base de datos con vectores deshabilitados; se devuelve un resultado vacío
+cypheradmin.alias_does_not_exist: el alias '{{.Alias}}' no existe
+cypheradmin.alias_name_empty: 'sintaxis de {{.Command}} no válida: el nombre del alias no puede estar vacío'
+cypheradmin.alias_name_expected: 'sintaxis de {{.Command}} no válida: se esperaba el nombre del alias'
+cypheradmin.clause_expected: 'sintaxis de {{.Command}} no válida: se esperaba la cláusula {{.Clause}}'
+cypheradmin.create_alias_failed: 'no se pudo crear el alias ''{{.Alias}}'' para la base de datos ''{{.Database}}'': {{.Cause}}'
+cypheradmin.create_database_failed: 'no se pudo crear la base de datos ''{{.Database}}'': {{.Cause}}'
+cypheradmin.database_already_exists: la base de datos '{{.Database}}' ya existe
+cypheradmin.database_does_not_exist: la base de datos '{{.Database}}' no existe
+cypheradmin.database_manager_unavailable: el administrador de bases de datos no está disponible; {{.Command}} requiere compatibilidad con varias bases de datos
+cypheradmin.database_name_empty: 'sintaxis de {{.Command}} no válida: el nombre de la base de datos no puede estar vacío'
+cypheradmin.database_name_expected: 'sintaxis de {{.Command}} no válida: se esperaba el nombre de la base de datos'
+cypheradmin.database_not_found: 'no se encontró la base de datos ''{{.Database}}'': {{.Cause}}'
+cypheradmin.drop_alias_failed: 'no se pudo eliminar el alias ''{{.Alias}}'': {{.Cause}}'
+cypheradmin.drop_database_failed: 'no se pudo eliminar la base de datos ''{{.Database}}'': {{.Cause}}'
+cypheradmin.invalid_alias_name: 'nombre de alias no válido: ''{{.Alias}}'' (no puede contener espacios en blanco)'
+cypheradmin.invalid_database_name: 'nombre de base de datos no válido: ''{{.Database}}'' (no puede contener espacios en blanco)'
+cypheradmin.invalid_duration_limit_value: 'valor de {{.Limit}} no válido (se esperaba una duración como ''60s'' o ''5m''): {{.Cause}}'
+cypheradmin.invalid_identifier: 'identificador {{.Identifier}} no válido: no se admiten acentos graves anidados'
+cypheradmin.invalid_limit_assignment: 'sintaxis de asignación de límite no válida: se esperaba ''limit_name = value'', se obtuvo ''{{.Assignment}}'''
+cypheradmin.invalid_limit_value: 'valor de {{.Limit}} no válido: {{.Cause}}'
+cypheradmin.invalid_limits_type: el administrador de bases de datos devolvió un tipo de límites no válido
+cypheradmin.invalid_syntax: sintaxis de {{.Command}} no válida
+cypheradmin.keyword_expected: 'sintaxis de {{.Command}} no válida: se esperaba la palabra clave {{.Keyword}}'
+cypheradmin.limit_assignment_expected: 'sintaxis de ALTER DATABASE no válida: se esperaba una asignación de límite'
+cypheradmin.set_database_limits_failed: 'no se pudieron establecer los límites de la base de datos ''{{.Database}}'': {{.Cause}}'
+cypheradmin.term_expected: 'sintaxis de {{.Command}} no válida: se esperaba {{.Term}}'
+cypheradmin.unknown_limit_name: 'nombre de límite desconocido: ''{{.Limit}}'' (admitidos: {{.Supported}})'
+cypherantlr.parse_empty_query: consulta vacía
+cypherantlr.parse_syntax_error: 'error de sintaxis: {{.Detail}}'
+cypherantlr.validate_empty_query: consulta vacía
+cypherantlr.validate_syntax_error: 'error de sintaxis: {{.Detail}}'
+cyphercommandrouting.backtick_identifier_unterminated: identificador entre acentos graves sin terminar
+cyphercommandrouting.call_tail_limit_invalid: 'LIMIT no válido en la cola de CALL: {{.Token}}'
+cyphercommandrouting.call_tail_seed_required: la ejecución de la cola de CALL requiere un resultado inicial
+cyphercommandrouting.call_tail_skip_invalid: 'SKIP no válido en la cola de CALL: {{.Token}}'
+cyphercommandrouting.empty_command: comando vacío
+cyphercommandrouting.fabric_constituents_failed: 'no se pudieron obtener los componentes de ''{{.Database}}'': {{.Cause}}'
+cyphercommandrouting.fabric_not_prepared: la ejecución de Fabric no estaba preparada
+cyphercommandrouting.fabric_prepared_context_invalid: la ejecución preparada de Fabric en el contexto no es válida
+cyphercommandrouting.fabric_shard_transaction_failed: 'no se pudo abrir la transacción del fragmento local para ''{{.Database}}'': {{.Cause}}'
+cyphercommandrouting.fabric_storage_type_invalid: el motor de almacenamiento tiene un tipo inesperado para '{{.Database}}'
+cyphercommandrouting.graph_reference_argument_empty: argumento de referencia de grafo vacío
+cyphercommandrouting.graph_reference_argument_required: la referencia de grafo requiere un argumento
+cyphercommandrouting.graph_reference_invalid: referencia de grafo no válida
+cyphercommandrouting.graph_reference_open_paren_expected: se esperaba '(' en la posición {{.Position}}
+cyphercommandrouting.graph_reference_string_unterminated: cadena de referencia de grafo sin terminar
+cyphercommandrouting.graph_reference_unterminated: referencia de grafo sin terminar
+cyphercommandrouting.parameter_argument_required: :param requiere un argumento
+cyphercommandrouting.parameter_evaluation_failed: 'cypher: no se pudo evaluar la expresión: parámetro {{.Parameter}}: {{.Cause}}'
+cyphercommandrouting.parameter_expression_unresolved: 'cypher: no se pudo evaluar la expresión: el parámetro {{.Parameter}} contiene una expresión sin resolver {{printf "%q" .Expression}}'
+cyphercommandrouting.parameter_map_entry_empty: entrada de mapa vacía
+cyphercommandrouting.parameter_map_entry_invalid: entrada de mapa no válida {{printf "%q" .Entry}}
+cyphercommandrouting.parameter_map_keys_strings: las claves del mapa de parámetros deben ser cadenas
+cyphercommandrouting.parameter_map_required: la expresión de parámetros debe evaluarse como un mapa
+cyphercommandrouting.parameter_produced_no_value: 'cypher: no se pudo evaluar la expresión: el parámetro {{.Parameter}} no produjo ningún valor'
+cyphercommandrouting.parameter_usage: 'uso incorrecto: se esperaba :param clear, :param list, :param {a: 1} o :param key => value'
+cyphercommandrouting.parameter_value_required: el valor de :param no puede estar vacío
+cyphercommandrouting.procedure_max_arguments: el procedimiento {{.Procedure}} acepta como máximo {{.Maximum}} argumentos; se recibieron {{.Actual}}
+cyphercommandrouting.procedure_min_arguments: el procedimiento {{.Procedure}} requiere al menos {{.Minimum}} argumentos; se recibieron {{.Actual}}
+cyphercommandrouting.shell_use_database_required: :use requiere un nombre de base de datos
+cyphercommandrouting.unknown_command: 'comando desconocido: {{.Command}}'
+cyphercommandrouting.unknown_procedure: 'procedimiento desconocido: {{.Procedure}} (pruebe SHOW PROCEDURES para ver los procedimientos disponibles)'
+cyphercommandrouting.unknown_yield_column: 'columna YIELD desconocida: {{.Column}}'
+cyphercommandrouting.use_backend_unsupported: este backend de almacenamiento no admite USE {{.Target}}
+cyphercommandrouting.use_backtick_unterminated: 'cláusula USE no válida: identificador entre acentos graves sin terminar'
+cyphercommandrouting.use_constituent_outside_composite: 'USE {{.Target}} falló: el componente ''{{.Constituent}}'' no forma parte de la base de datos compuesta actual ''{{.Composite}}'''
+cyphercommandrouting.use_database_manager_unavailable: 'USE {{.Target}} falló: el administrador de bases de datos no está disponible'
+cyphercommandrouting.use_database_not_composite: 'USE {{.Target}} falló: ''{{.Database}}'' no es una base de datos compuesta'
+cyphercommandrouting.use_database_required: la cláusula USE requiere un nombre de base de datos
+cyphercommandrouting.use_failed: 'USE {{.Target}} falló: {{.Cause}}'
+cyphercommandrouting.use_invalid: 'cláusula USE no válida: {{.Cause}}'
+cyphercommandrouting.use_storage_type_invalid: 'USE {{.Target}} falló: el motor de almacenamiento tiene un tipo inesperado'
+cyphercommandrouting.where_boolean_required: 'la expresión WHERE no se evaluó como un valor booleano: {{.Value}}'
+cyphercomposite.add_alias_unexpected_token: 'sintaxis de ADD ALIAS no válida: token inesperado ''{{.Token}}'''
+cyphercomposite.add_constituent_failed: 'no se pudo añadir el componente a la base de datos compuesta ''{{.Database}}'': {{.Cause}}'
+cyphercomposite.alter_action_expected: 'sintaxis de ALTER COMPOSITE DATABASE no válida: se esperaba ADD ALIAS o DROP ALIAS'
+cyphercomposite.alter_add_alias_expected: 'sintaxis de ALTER COMPOSITE DATABASE no válida: se esperaba ADD ALIAS'
+cyphercomposite.alter_database_keyword_expected: 'sintaxis de ALTER COMPOSITE DATABASE no válida: se esperaba DATABASE después de COMPOSITE'
+cyphercomposite.alter_database_name_empty: 'sintaxis de ALTER COMPOSITE DATABASE no válida: el nombre de la base de datos no puede estar vacío'
+cyphercomposite.alter_database_name_expected: 'sintaxis de ALTER COMPOSITE DATABASE no válida: se esperaba el nombre de la base de datos'
+cyphercomposite.alter_drop_alias_expected: 'sintaxis de ALTER COMPOSITE DATABASE no válida: se esperaba DROP ALIAS'
+cyphercomposite.alter_invalid_syntax: sintaxis de ALTER COMPOSITE DATABASE no válida
+cyphercomposite.alter_tokenize_failed: 'sintaxis de ALTER COMPOSITE DATABASE no válida: {{.Cause}}'
+cyphercomposite.constituent_access_mode_empty: 'sintaxis de componente no válida: el modo de acceso no puede estar vacío'
+cyphercomposite.constituent_access_mode_invalid: 'sintaxis de componente no válida: modo de acceso: {{.Cause}}'
+cyphercomposite.constituent_access_mode_unsupported: 'sintaxis de componente no válida: el modo de acceso debe ser read, write o read_write'
+cyphercomposite.constituent_alias_expected: 'sintaxis de componente no válida: se esperaba ALIAS'
+cyphercomposite.constituent_alias_name_empty: 'sintaxis de componente no válida: el nombre del alias no puede estar vacío'
+cyphercomposite.constituent_alias_name_invalid: 'sintaxis de componente no válida: nombre del alias: {{.Cause}}'
+cyphercomposite.constituent_auth_modes_conflict: 'sintaxis de componente no válida: no se puede combinar OIDC CREDENTIAL FORWARDING con USER/PASSWORD'
+cyphercomposite.constituent_database_name_empty: 'sintaxis de componente no válida: el nombre de la base de datos no puede estar vacío'
+cyphercomposite.constituent_database_name_invalid: 'sintaxis de componente no válida: nombre de la base de datos: {{.Cause}}'
+cyphercomposite.constituent_for_database_expected: 'sintaxis de componente no válida: se esperaba FOR DATABASE'
+cyphercomposite.constituent_oidc_credential_forwarding_expected: 'sintaxis de componente no válida: se esperaba OIDC CREDENTIAL FORWARDING'
+cyphercomposite.constituent_password_empty: 'sintaxis de componente no válida: la contraseña no puede estar vacía'
+cyphercomposite.constituent_password_invalid: 'sintaxis de componente no válida: contraseña: {{.Cause}}'
+cyphercomposite.constituent_remote_required: 'sintaxis de componente no válida: USER/PASSWORD y OIDC CREDENTIAL FORWARDING requieren un componente remoto (AT ''<url>'' o TYPE remote)'
+cyphercomposite.constituent_remote_uri_empty: 'sintaxis de componente no válida: el URI remoto no puede estar vacío'
+cyphercomposite.constituent_remote_uri_expected: 'sintaxis de componente no válida: se esperaba un URI remoto después de AT'
+cyphercomposite.constituent_remote_uri_invalid: 'sintaxis de componente no válida: URI remoto: {{.Cause}}'
+cyphercomposite.constituent_secret_ref_empty: 'sintaxis de componente no válida: la referencia secreta no puede estar vacía'
+cyphercomposite.constituent_secret_ref_expected: 'sintaxis de componente no válida: se esperaba SECRET REF'
+cyphercomposite.constituent_secret_ref_invalid: 'sintaxis de componente no válida: referencia secreta: {{.Cause}}'
+cyphercomposite.constituent_type_contradicts_at: 'sintaxis de componente no válida: TYPE local contradice AT (ya se especificó un URI remoto)'
+cyphercomposite.constituent_type_empty: 'sintaxis de componente no válida: el tipo no puede estar vacío'
+cyphercomposite.constituent_type_invalid: 'sintaxis de componente no válida: tipo: {{.Cause}}'
+cyphercomposite.constituent_type_unsupported: 'sintaxis de componente no válida: el tipo debe ser local o remote'
+cyphercomposite.constituent_unexpected_token: 'sintaxis de componente no válida: token inesperado ''{{.Token}}'''
+cyphercomposite.constituent_user_empty: 'sintaxis de componente no válida: el usuario no puede estar vacío'
+cyphercomposite.constituent_user_invalid: 'sintaxis de componente no válida: usuario: {{.Cause}}'
+cyphercomposite.constituent_user_password_required: 'sintaxis de componente no válida: se deben proporcionar USER y PASSWORD'
+cyphercomposite.create_constituent_required: 'sintaxis de CREATE COMPOSITE DATABASE no válida: se requiere al menos un componente'
+cyphercomposite.create_database_failed: 'no se pudo crear la base de datos compuesta ''{{.Database}}'': {{.Cause}}'
+cyphercomposite.create_database_name_empty: 'sintaxis de CREATE COMPOSITE DATABASE no válida: el nombre de la base de datos no puede estar vacío'
+cyphercomposite.create_database_name_expected: 'sintaxis de CREATE COMPOSITE DATABASE no válida: se esperaba el nombre de la base de datos'
+cyphercomposite.create_invalid_syntax: sintaxis de CREATE COMPOSITE DATABASE no válida
+cyphercomposite.create_tokenize_failed: 'sintaxis de CREATE COMPOSITE DATABASE no válida: {{.Cause}}'
+cyphercomposite.database_manager_unavailable: el administrador de bases de datos no está disponible; {{.Command}} requiere compatibilidad con varias bases de datos
+cyphercomposite.drop_alias_name_empty: 'sintaxis de DROP ALIAS no válida: el nombre del alias no puede estar vacío'
+cyphercomposite.drop_database_failed: 'no se pudo eliminar la base de datos compuesta ''{{.Database}}'': {{.Cause}}'
+cyphercomposite.drop_database_name_empty: 'sintaxis de DROP COMPOSITE DATABASE no válida: el nombre de la base de datos no puede estar vacío'
+cyphercomposite.drop_database_name_expected: 'sintaxis de DROP COMPOSITE DATABASE no válida: se esperaba el nombre de la base de datos'
+cyphercomposite.drop_invalid_syntax: sintaxis de DROP COMPOSITE DATABASE no válida
+cyphercomposite.get_constituents_failed: 'no se pudieron obtener los componentes: {{.Cause}}'
+cyphercomposite.remove_constituent_failed: 'no se pudo eliminar el componente de la base de datos compuesta ''{{.Database}}'': {{.Cause}}'
+cyphercomposite.show_constituents_invalid_syntax: sintaxis de SHOW CONSTITUENTS no válida
+cyphercomposite.show_constituents_name_expected: 'sintaxis de SHOW CONSTITUENTS no válida: se esperaba el nombre después de FOR COMPOSITE DATABASE'
+cyphercore.case_envelope_invalid: 'expresión CASE no válida: debe comenzar con CASE y terminar con END'
+cyphercore.case_then_required: 'la cláusula WHEN debe tener THEN: {{.Section}}'
+cyphercore.case_when_required: la expresión CASE debe tener al menos una cláusula WHEN
+cyphercore.composite_target_required: '{{.Code}}: Las consultas en bases de datos compuestas requieren un grafo de destino explícito. Use USE <composite>.<alias> para seleccionar un componente específico'
+cyphercore.embedder_not_configured: no hay un generador de incrustaciones configurado
+cyphercore.embedding_chunk_failed: 'WITH EMBEDDING no pudo fragmentar el nodo {{.NodeID}}: {{.Cause}}'
+cyphercore.embedding_configured_required: WITH EMBEDDING requiere un generador de incrustaciones configurado
+cyphercore.embedding_empty_vector: WITH EMBEDDING devolvió un vector vacío para el nodo {{.NodeID}}
+cyphercore.embedding_no_output: no se pudo generar la incrustación de la consulta (no se produjeron incrustaciones)
+cyphercore.embedding_node_failed: 'WITH EMBEDDING no pudo generar la incrustación del nodo {{.NodeID}}: {{.Cause}}'
+cyphercore.embedding_transaction_storage_required: WITH EMBEDDING requiere almacenamiento compatible con transacciones
+cyphercore.empty_query: consulta vacía
+cyphercore.execution_plan_build_failed: 'no se pudo crear el plan de ejecución: {{.Cause}}'
+cyphercore.fulltext_bad_boost: 'no se puede analizar la consulta: refuerzo no válido {{.Boost}}'
+cyphercore.fulltext_bad_regex: 'no se puede analizar la consulta: expresión regular no válida /{{.Pattern}}/: {{.Cause}}'
+cyphercore.fulltext_bad_wildcard: 'no se puede analizar la consulta: comodín no válido: {{.Cause}}'
+cyphercore.fulltext_closing_parenthesis_required: 'no se puede analizar la consulta: falta '')'''
+cyphercore.fulltext_number_after_boost_expected: 'no se puede analizar la consulta: se esperaba un número después de ^'
+cyphercore.fulltext_range_close_required: 'no se puede analizar la consulta: se esperaba ] o } para cerrar el rango'
+cyphercore.fulltext_range_endpoint_required: 'no se puede analizar la consulta: se esperaba un extremo del rango'
+cyphercore.fulltext_range_to_required: 'no se puede analizar la consulta: se esperaba TO en el rango'
+cyphercore.fulltext_unexpected_token: 'no se puede analizar la consulta: token inesperado {{.Token}}'
+cyphercore.implicit_transaction_commit_failed: 'error al confirmar la transacción: {{.Cause}}'
+cyphercore.implicit_transaction_configure_failed: 'no se pudo configurar la transacción implícita: {{.Cause}}'
+cyphercore.implicit_transaction_pin_failed: 'no se pudo fijar el espacio de nombres de la transacción implícita: {{.Cause}}'
+cyphercore.implicit_transaction_prime_failed: 'no se pudo inicializar el espacio de nombres de la transacción implícita: {{.Cause}}'
+cyphercore.implicit_transaction_start_failed: 'no se pudo iniciar la transacción implícita: {{.Cause}}'
+cyphercore.implicit_transaction_wal_begin_failed: 'no se pudo escribir el inicio de la transacción en WAL: {{.Cause}}'
+cyphercore.index_hint_not_found: 'no se encontró ningún índice para la sugerencia: {{.Hint}} (el índice en :{{.Label}}({{.Property}}) no existe)'
+cyphercore.invalid_label_name: 'nombre de etiqueta no válido: {{.Label}} (debe ser alfanumérico y comenzar con una letra o un guion bajo)'
+cyphercore.invalid_label_reserved: 'nombre de etiqueta no válido: {{.Label}} (contiene una palabra clave reservada)'
+cyphercore.invalid_property_key: 'clave de propiedad no válida: {{.Key}} (debe ser alfanumérica y comenzar con una letra o un guion bajo)'
+cyphercore.invalid_property_value: 'valor de propiedad no válido para la clave {{.Key}}: sintaxis mal formada'
+cyphercore.optional_match_required: OPTIONAL debe estar seguido de MATCH
+cyphercore.parse_failed: 'error de análisis: {{.Cause}}'
+cyphercore.typed_assignment_failed: no se puede asignar {{.ValueType}} a {{.DestinationType}}
+cyphercore.typed_decode_row_failed: 'no se pudo decodificar la fila: {{.Cause}}'
+cyphercore.typed_destination_pointer_required: el destino debe ser un puntero no nulo
+cyphercore.typed_destination_unsupported: 'tipo de destino no admitido: {{.Kind}}'
+cyphercore.typed_field_failed: 'campo {{.Field}}: {{.Cause}}'
+cyphercore.typed_time_parse_failed: 'no se puede analizar la hora: {{.Value}}'
+cyphercore.unterminated_string_literal: literal de cadena sin terminar
+cyphergraphprocedures.build_graph_failed: 'no se pudo construir el grafo: {{.Cause}}'
+cyphergraphprocedures.graph_does_not_exist: el grafo '{{.Graph}}' no existe
+cyphergraphprocedures.graph_does_not_exist_project_first: el grafo '{{.Graph}}' no existe. Créelo primero con gds.graph.project
+cyphergraphprocedures.graph_name_required: se requiere el nombre del grafo para {{.Procedure}}
+cyphergraphprocedures.invalid_procedure_call_syntax: sintaxis de llamada a procedimiento no válida
+cyphergraphprocedures.source_node_required: se requiere el parámetro sourceNode
+cyphergraphprocedures.stream_edges_failed: 'no se pudieron transmitir las aristas: {{.Cause}}'
+cyphergraphprocedures.stream_nodes_failed: 'no se pudieron transmitir los nodos: {{.Cause}}'
+cyphergraphprocedures.variable_not_found: no se encontró la variable {{.QuotedVariable}} en el contexto de la consulta (id({{.Variable}}) no se puede resolver)
+cypherinvariants.delete_by_prefix_transaction_unsupported: DeleteByPrefix no se admite dentro del contexto de una transacción
+cypherinvariants.pipeline_create_failed: 'CREATE en la canalización produjo un error: {{.Cause}}'
+cypherknowledgepolicy.argument_string_required: el argumento {{.Position}} debe ser una cadena
+cypherknowledgepolicy.binding_table_unavailable: la tabla de enlaces de directivas de conocimiento no está disponible
+cypherknowledgepolicy.decay_options_map_required: las opciones de decayScore/decay deben ser un mapa; se obtuvo {{.ValueType}}
+cypherknowledgepolicy.deindex_badger_required: el estado de desindexación requiere el backend de almacenamiento BadgerDB
+cypherknowledgepolicy.edge_pattern_expected_for: se esperaba {{.Expected}} para el patrón de arista
+cypherknowledgepolicy.edge_pattern_expected_in: se esperaba {{.Expected}} en el patrón de arista
+cypherknowledgepolicy.edge_type_expected_after_colon: se esperaba un tipo de arista después de ':'
+cypherknowledgepolicy.entity_not_found: 'no se encontró la entidad: {{.EntityID}}'
+cypherknowledgepolicy.expected_after: se esperaba {{.Expected}} después de {{.After}}
+cypherknowledgepolicy.expected_after_profile_name: se esperaba {{.Expected}} después del nombre del perfil {{.DisplayName}}
+cypherknowledgepolicy.expression_expected_after_set: se esperaba una expresión después de SET
+cypherknowledgepolicy.invalid_value: 'valor de {{.Field}} no válido: {{.DisplayValue}}'
+cypherknowledgepolicy.kalman_closing_brace_expected: se esperaba } en el bloque de configuración KALMAN
+cypherknowledgepolicy.label_expected_after_colon: se esperaba una etiqueta después de ':'
+cypherknowledgepolicy.number_expected_after: se esperaba un número después de {{.After}}
+cypherknowledgepolicy.operation_failed: '{{.Cause}}'
+cypherknowledgepolicy.policy_name_expected_after: se esperaba el nombre de la directiva después de {{.After}}
+cypherknowledgepolicy.profile_name_expected_after: se esperaba el nombre del perfil después de {{.After}}
+cypherknowledgepolicy.reason_decay_disabled: el subsistema de decaimiento está deshabilitado
+cypherknowledgepolicy.reason_entity_not_found: no se encontró la entidad
+cypherknowledgepolicy.reason_no_badger_engine: no hay ningún BadgerEngine
+cypherknowledgepolicy.reason_no_decay: sin decaimiento
+cypherknowledgepolicy.reason_no_decay_profile: no hay ningún perfil de decaimiento
+cypherknowledgepolicy.reason_no_entity_argument: no hay ningún argumento de entidad
+cypherknowledgepolicy.resolve_target_required: nornicdb.knowledgepolicy.resolve requiere entityId, labels o edgeType
+cypherknowledgepolicy.schema_manager_unavailable: el administrador de esquemas no está disponible
+cypherknowledgepolicy.seconds_expected_after: se esperaban segundos después de {{.After}}
+cypherknowledgepolicy.unknown_decay_option: 'clave de opción de decaimiento desconocida: {{.DisplayOption}}'
+cypherknowledgepolicy.unknown_kalman_config_key: 'clave de configuración de Kalman desconocida: {{.DisplayKey}}'
+cypherknowledgepolicy.unknown_option: 'opción desconocida: {{.DisplayOption}}'
+cypherknowledgepolicy.unsupported_command: 'comando de directiva de conocimiento no compatible: {{.Command}}'
+cypherknowledgepolicy.unsupported_command_type: 'tipo de comando de directiva de conocimiento no compatible: {{.CommandType}}'
+cyphermatching.aggregate_call_expected: 'no es una llamada de agregado completa: {{.Expression}}'
+cyphermatching.collect_subquery_failed: 'error de subconsulta COLLECT: {{.Cause}}'
+cyphermatching.function_parameters_insufficient: parámetros insuficientes para la función '{{.Function}}'
+cyphermatching.initial_traversal_match_failed: 'no se pudo ejecutar el MATCH de recorrido inicial: {{.Cause}}'
+cyphermatching.limit_parse_failed: no se pudo analizar la cláusula LIMIT
+cyphermatching.match_node_pattern_required: la cláusula MATCH requiere un patrón de nodo, no solo un patrón de relación
+cyphermatching.match_pattern_required: la cláusula MATCH requiere un patrón
+cyphermatching.match_pattern_variable_missing: 'patrón MATCH no válido: falta una variable en {{.Clause}}'
+cyphermatching.match_unwind_clauses_required: se requieren las cláusulas MATCH y UNWIND (p. ej., MATCH (n) UNWIND n.items AS item RETURN item)
+cyphermatching.optional_match_node_endpoint_missing: el patrón de coincidencia opcional {{.Pattern}} no tiene un nodo inicial
+cyphermatching.optional_match_node_endpoint_unterminated: el patrón de coincidencia opcional {{.Pattern}} tiene un nodo inicial sin terminar
+cyphermatching.optional_match_target_endpoint_missing: el patrón de coincidencia opcional {{.Pattern}} no tiene un nodo de destino
+cyphermatching.optional_match_target_endpoint_unterminated: el patrón de coincidencia opcional {{.Pattern}} tiene un nodo de destino sin terminar
+cyphermatching.order_by_parse_failed: no se pudo analizar la cláusula ORDER BY
+cyphermatching.path_pattern_invalid: 'patrón de ruta no válido: {{.Pattern}}'
+cyphermatching.return_after_with_required: se requiere una cláusula RETURN después de WITH
+cyphermatching.return_expression_empty: la cláusula RETURN contiene una expresión vacía
+cyphermatching.return_expression_required: la cláusula RETURN requiere al menos una expresión
+cyphermatching.shortest_path_end_variable_unresolved: 'shortestPath: no se pudo resolver la variable final {{.Variable}} de la cláusula MATCH anterior'
+cyphermatching.shortest_path_query_expected: no es una consulta de ruta más corta
+cyphermatching.shortest_path_start_variable_unresolved: 'shortestPath: no se pudo resolver la variable inicial {{.Variable}} de la cláusula MATCH anterior'
+cyphermatching.shortest_path_syntax_invalid: sintaxis de shortestPath no válida
+cyphermatching.skip_parse_failed: no se pudo analizar la cláusula SKIP
+cyphermatching.storage_failed: 'error de almacenamiento: {{.Cause}}'
+cyphermatching.traversal_pattern_invalid: 'patrón de recorrido no válido: {{.Pattern}}'
+cyphermatching.unwind_as_required: UNWIND requiere una cláusula AS (p. ej., UNWIND [1,2,3] AS x)
+cyphermatching.with_optional_match_return_clauses_required: se requieren las cláusulas WITH, OPTIONAL MATCH y RETURN
+cyphermatching.with_return_clauses_required: se requieren las cláusulas WITH y RETURN
+cyphermerge.bulk_create_edges_failed: 'BulkCreateEdges: {{.Cause}}'
+cyphermerge.bulk_create_nodes_failed: 'BulkCreateNodes: {{.Cause}}'
+cyphermerge.clause_not_found: 'no se encontró la cláusula MERGE en la consulta: "{{.Query}}"'
+cyphermerge.create_edge_end_not_bound: 'CREATE de relación: la variable final "{{.Variable}}" no está vinculada'
+cyphermerge.create_edge_failed: 'no se pudo crear la relación: {{.Cause}}'
+cyphermerge.create_edge_start_not_bound: 'CREATE de relación: la variable inicial "{{.Variable}}" no está vinculada'
+cyphermerge.create_node_failed: 'no se pudo crear el nodo en MERGE: {{.Cause}}'
+cyphermerge.create_node_segment_failed: 'no se pudo crear el nodo: {{.Cause}}'
+cyphermerge.create_node_variable_required: el nodo CREATE debe tener un nombre de variable
+cyphermerge.create_relationship_failed: 'no se pudo crear la relación: {{.Cause}}'
+cyphermerge.end_variable_not_bound: 'la variable del nodo final ''{{.Variable}}'' no está en el contexto (disponibles: {{.Available}})'
+cyphermerge.find_relationship_failed: 'no se pudo buscar la relación para MERGE: {{.Cause}}'
+cyphermerge.find_relationship_segment_failed: 'no se pudo buscar la relación para el segmento MERGE: {{.Cause}}'
+cyphermerge.foreach_failed: 'FOREACH falló: {{.Cause}}'
+cyphermerge.get_edges_between_failed: 'GetEdgesBetween({{.StartID}},{{.EndID}}): {{.Cause}}'
+cyphermerge.get_nodes_by_label_failed: 'GetNodesByLabel({{.Label}}): {{.Cause}}'
+cyphermerge.initial_merge_failed: 'falló el MERGE inicial: {{.Cause}}'
+cyphermerge.inline_node_create_failed: 'no se pudo crear el nodo en línea: {{.Cause}}'
+cyphermerge.invalid_label_name: 'nombre de etiqueta no válido: "{{.Label}}"'
+cyphermerge.invalid_match_query: consulta MATCH ... MERGE no válida
+cyphermerge.invalid_property_key: 'clave de propiedad no válida: "{{.Property}}"'
+cyphermerge.invalid_property_value: valor de propiedad no válido para la clave "{{.Property}}"
+cyphermerge.malformed_relationship_pattern: 'patrón de relación incorrecto: {{.Pattern}}'
+cyphermerge.map_entry_empty: entrada de mapa vacía
+cyphermerge.map_entry_invalid: entrada de mapa no válida "{{.Entry}}"
+cyphermerge.map_key_empty: clave de mapa vacía
+cyphermerge.map_literal_enclosure_required: el mapa literal debe estar delimitado por { ... }
+cyphermerge.map_value_empty: valor de mapa vacío para la clave "{{.Key}}"
+cyphermerge.match_all_nodes_failed: 'no se pudieron obtener todos los nodos para MATCH: {{.Cause}}'
+cyphermerge.match_execution_failed: 'no se pudo ejecutar MATCH: {{.Cause}}'
+cyphermerge.match_failed: 'MATCH falló: {{.Cause}}'
+cyphermerge.match_label_lookup_failed: 'no se pudieron obtener los nodos con la etiqueta "{{.Label}}": {{.Cause}}'
+cyphermerge.match_pattern_variable_required: el patrón MATCH debe tener una variable
+cyphermerge.match_segment_clause_not_found: no se encontró MATCH en el segmento
+cyphermerge.node_failed: 'falló el MERGE de nodo: {{.Cause}}'
+cyphermerge.node_pattern_parse_failed: 'no se pudo analizar el patrón de nodo: {{.Pattern}}'
+cyphermerge.optional_match_failed: 'OPTIONAL MATCH falló: {{.Cause}}'
+cyphermerge.pipeline_create_node_failed: 'no se pudo crear el nodo: {{.Cause}}'
+cyphermerge.pipeline_with_required: la canalización requiere WITH
+cyphermerge.relationship_brackets_missing: 'patrón de relación no válido: faltan los corchetes de relación (se esperaba -[tipo]-> o -[tipo]-) en "{{.Pattern}}"'
+cyphermerge.relationship_create_collisions: la creación de la relación MERGE falló después de {{.Attempts}} colisiones de ID de relación
+cyphermerge.relationship_end_missing: 'patrón de relación no válido: falta el nodo final en "{{.Pattern}}"'
+cyphermerge.relationship_endpoints_not_bound: 'los extremos de la relación MERGE no están vinculados: {{.StartVariable}}, {{.EndVariable}}'
+cyphermerge.relationship_failed: 'falló el MERGE de relación: {{.Cause}}'
+cyphermerge.relationship_identity_exhausted: la identidad de propiedad de la relación MERGE no tiene una clave de almacenamiento libre
+cyphermerge.relationship_pattern_parse_failed: 'no se pudo analizar el patrón de relación: {{.Cause}}'
+cyphermerge.relationship_start_missing: 'patrón de relación no válido: falta el nodo inicial en "{{.Pattern}}"'
+cyphermerge.relationship_start_paren_missing: 'patrón de relación no válido: falta el paréntesis de cierre del nodo inicial en "{{.Pattern}}"'
+cyphermerge.relationship_type_required: se requiere el tipo de relación
+cyphermerge.segment_clause_not_found: no se encontró MERGE en el segmento
+cyphermerge.select_relationship_identity_failed: 'no se pudo seleccionar la identidad de la relación MERGE: {{.Cause}}'
+cyphermerge.source_node_id_empty: el nodo de origen {{.Variable}} tiene un ID vacío
+cyphermerge.source_resolution_failed: 'origen {{.Variable}}: {{.Cause}}'
+cyphermerge.start_variable_not_bound: 'la variable del nodo inicial ''{{.Variable}}'' no está en el contexto (disponibles: {{.Available}})'
+cyphermerge.target_node_id_empty: el nodo de destino {{.Variable}} tiene un ID vacío
+cyphermerge.target_resolution_failed: 'destino {{.Variable}}: {{.Cause}}'
+cyphermerge.unknown_function: 'función desconocida: {{.Function}}'
+cyphermerge.unwind_as_required: UNWIND requiere una cláusula AS en la consulta MATCH ... UNWIND ... MERGE
+cyphermerge.unwind_parameter_not_found: no se encontró el parámetro UNWIND ${{.Parameter}} o es nulo
+cyphermerge.update_edge_failed: 'UpdateEdge: {{.Cause}}'
+cyphermerge.update_edge_property_failed: 'no se pudo actualizar la propiedad de la relación: {{.Cause}}'
+cyphermerge.variable_not_found: 'no se encontró la variable en el contexto: {{.Content}}'
+cyphermutations.add_label_failed: 'no se pudo añadir la etiqueta: {{.Cause}}'
+cyphermutations.create_failed: 'CREATE falló: {{.Cause}}'
+cyphermutations.create_in_create_set_failed: 'CREATE falló en CREATE...SET: {{.Cause}}'
+cyphermutations.create_node_failed: 'no se pudo crear el nodo: {{.Cause}}'
+cyphermutations.create_relationship_failed: 'no se pudo crear la relación: {{.Cause}}'
+cyphermutations.create_set_clause_missing: no se encontró la cláusula SET en la consulta CREATE...SET
+cyphermutations.create_set_trailing_clause_unsupported: 'cláusula no compatible después de SET en la consulta CREATE...SET: {{.Clause}}'
+cyphermutations.create_set_with_continuation_required: WITH en CREATE...SET requiere una cláusula CREATE o RETURN
+cyphermutations.create_source_node_failed: 'no se pudo crear el nodo de origen: {{.Cause}}'
+cyphermutations.create_target_node_failed: 'no se pudo crear el nodo de destino: {{.Cause}}'
+cyphermutations.create_with_delete_invalid: consulta CREATE...WITH...DELETE no válida
+cyphermutations.delete_failed: 'DELETE falló: {{.Cause}}'
+cyphermutations.delete_match_required: DELETE requiere primero una cláusula MATCH (p. ej., MATCH (n) DELETE n)
+cyphermutations.delete_variables_required: la cláusula DELETE debe especificar las variables que se eliminarán (p. ej., DELETE n)
+cyphermutations.detach_delete_keywords_required: DETACH DELETE requiere juntas las palabras clave DETACH y DELETE
+cyphermutations.foreach_balanced_parentheses_required: FOREACH requiere paréntesis equilibrados
+cyphermutations.foreach_in_required: FOREACH requiere una cláusula IN (p. ej., FOREACH (x IN list | SET ...))
+cyphermutations.foreach_parentheses_required: FOREACH requiere paréntesis (p. ej., FOREACH (x IN list | SET ...))
+cyphermutations.foreach_separator_required: FOREACH requiere el separador |
+cyphermutations.invalid_label_name: 'nombre de etiqueta no válido: "{{.Label}}" (debe ser alfanumérico y comenzar con una letra o un guion bajo)'
+cyphermutations.invalid_label_reserved: 'nombre de etiqueta no válido: "{{.Label}}" (contiene una palabra reservada)'
+cyphermutations.invalid_property_key: 'clave de propiedad no válida: "{{.Property}}" (debe ser alfanumérica y comenzar con una letra o un guion bajo)'
+cyphermutations.invalid_property_map_cause: 'sintaxis de mapa de propiedades no válida en el patrón: {{.Cause}}'
+cyphermutations.invalid_property_value: 'valor de propiedad no válido para la clave "{{.Property}}": sintaxis incorrecta'
+cyphermutations.invalid_relationship_property_key: 'clave de propiedad de relación no válida: "{{.Property}}" (debe ser alfanumérica y comenzar con una letra o un guion bajo)'
+cyphermutations.invalid_relationship_type: 'tipo de relación no válido: "{{.RelationshipType}}" (debe ser alfanumérico y comenzar con una letra o un guion bajo)'
+cyphermutations.match_all_nodes_failed: 'no se pudieron obtener todos los nodos en el segmento MATCH: {{.Cause}}'
+cyphermutations.match_label_lookup_failed: 'no se pudieron obtener los nodos con la etiqueta "{{.Label}}" en el segmento MATCH: {{.Cause}}'
+cyphermutations.node_create_failed: 'falló CREATE del nodo: {{.Cause}}'
+cyphermutations.relationship_create_failed: 'falló CREATE de la relación: {{.Cause}}'
+cyphermutations.relationship_existence_check_failed: 'falló la comprobación de existencia de la relación {{.StartVariable}}-[:{{.RelationshipType}}]->{{.EndVariable}}: {{.Cause}}'
+cyphermutations.relationship_pattern_arrow_node_expected: 'patrón de relación no válido: se esperaba ->( después de ]'
+cyphermutations.relationship_pattern_forward_node_expected: 'patrón de relación no válido: se esperaba -( después de ]'
+cyphermutations.relationship_pattern_must_start_node: 'patrón de relación no válido: debe comenzar por ('
+cyphermutations.relationship_pattern_second_node_unmatched_parenthesis: 'patrón de relación no válido: paréntesis sin pareja para el segundo nodo'
+cyphermutations.relationship_pattern_unmatched_bracket: 'patrón de relación no válido: corchete sin pareja'
+cyphermutations.relationship_pattern_unmatched_parenthesis: 'patrón de relación no válido: paréntesis sin pareja'
+cyphermutations.relationship_properties_invalid: propiedades de relación no válidas
+cyphermutations.remove_match_required: REMOVE requiere primero una cláusula MATCH (p. ej., MATCH (n) REMOVE n.property)
+cyphermutations.replace_edge_properties_failed: 'no se pudieron reemplazar las propiedades de la relación: {{.Cause}}'
+cyphermutations.replace_node_properties_failed: 'no se pudieron reemplazar las propiedades del nodo: {{.Cause}}'
+cyphermutations.resolve_source_node_failed: 'no se pudo resolver el nodo de origen: {{.Cause}}'
+cyphermutations.resolve_target_node_failed: 'no se pudo resolver el nodo de destino: {{.Cause}}'
+cyphermutations.set_assignment_parameter_name_required: la asignación SET requiere un nombre de parámetro válido después de $
+cyphermutations.set_assignment_parameter_not_found: no se encontró el parámetro ${{.Parameter}} de la asignación SET entre los parámetros proporcionados
+cyphermutations.set_assignment_parameters_required: el parámetro ${{.Parameter}} de la asignación SET requiere que se proporcionen parámetros
+cyphermutations.set_assignment_required: la cláusula SET requiere al menos una asignación
+cyphermutations.set_entity_replace_failed: 'SET {{.Variable}} =: {{.Cause}}'
+cyphermutations.set_entity_required: SET {{.Variable}} = requiere un nodo o una relación
+cyphermutations.set_match_required: SET requiere primero una cláusula MATCH (p. ej., MATCH (n) SET n.property = value)
+cyphermutations.set_merge_map_literal_required: 'no se pudieron analizar las propiedades de SET +=: el literal de mapa debe estar entre { ... }'
+cyphermutations.set_merge_map_required: SET += {{.Source}} debe ser un mapa; se obtuvo el tipo {{.ValueType}}
+cyphermutations.set_merge_map_scope_required: SET += requiere una variable de mapa en el ámbito (falta "{{.Variable}}")
+cyphermutations.set_merge_map_variable_not_found: no se encontró la variable de mapa "{{.Variable}}" de SET += en el ámbito
+cyphermutations.set_merge_operator_expected: se esperaba el operador +=
+cyphermutations.set_merge_parameter_name_required: SET += requiere un nombre de parámetro válido después de $
+cyphermutations.set_merge_parameter_not_found: no se encontró el parámetro ${{.Parameter}} de SET += entre los parámetros proporcionados
+cyphermutations.set_merge_parameters_required: el parámetro ${{.Parameter}} de SET += requiere que se proporcionen parámetros
+cyphermutations.set_merge_parse_failed: 'no se pudieron analizar las propiedades de SET +=: {{.Cause}}'
+cyphermutations.set_merge_string_keys_required: SET += {{.Source}} debe ser un mapa con claves de cadena; se obtuvo una clave de tipo {{.KeyType}}
+cyphermutations.set_merge_syntax_invalid: sintaxis SET += no válida
+cyphermutations.set_merge_update_failed: 'SET {{.Variable}} +=: {{.Cause}}'
+cyphermutations.set_merge_variable_required: SET += requiere una variable de destino
+cyphermutations.set_property_entity_required: SET {{.Variable}}.{{.Property}} requiere un nodo o una relación
+cyphermutations.set_property_failed: 'SET {{.Variable}}.{{.Property}}: {{.Cause}}'
+cyphermutations.unknown_set_merge_variable: 'variable desconocida en SET +=: {{.Variable}}'
+cyphermutations.unknown_set_variable: 'variable desconocida en la cláusula SET: {{.Variable}}'
+cyphermutations.unwind_as_required: UNWIND requiere una cláusula AS (p. ej., UNWIND [1,2,3] AS x)
+cyphermutations.unwind_as_variable_non_empty: UNWIND requiere una variable AS no vacía
+cyphermutations.unwind_clause_expected: se esperaba una cláusula UNWIND
+cyphermutations.unwind_clause_missing: no se encontró la cláusula UNWIND
+cyphermutations.unwind_double_malformed: UNWIND doble con formato incorrecto
+cyphermutations.unwind_first_as_required: el primer UNWIND requiere una cláusula AS
+cyphermutations.unwind_fixed_chain_failed: 'falló la combinación de cadena fija de UNWIND: {{.Cause}}'
+cyphermutations.unwind_keys_unsupported: la función keys() con UNWIND no es compatible en este contexto
+cyphermutations.unwind_match_failed: 'falló UNWIND MATCH: {{.Cause}}'
+cyphermutations.unwind_match_update_failed: 'falló la actualización de la cadena UNWIND MATCH: {{.Cause}}'
+cyphermutations.unwind_merge_create_failed: 'falló la creación de la cadena UNWIND MERGE: {{.Cause}}'
+cyphermutations.unwind_merge_update_failed: 'falló la actualización de la cadena UNWIND MERGE: {{.Cause}}'
+cyphermutations.unwind_mutation_failed: 'falló la mutación UNWIND: {{.Cause}}'
+cyphermutations.unwind_parameter_name_required: UNWIND requiere un nombre de parámetro válido después de $
+cyphermutations.unwind_parameter_not_found: no se encontró el parámetro ${{.Parameter}} de UNWIND entre los parámetros proporcionados
+cyphermutations.unwind_parameters_required: el parámetro ${{.Parameter}} de UNWIND requiere que se proporcionen parámetros
+cyphermutations.unwind_relationship_assignment_failed: 'falló la asignación de relación de la cadena UNWIND MERGE: {{.Cause}}'
+cyphermutations.unwind_relationship_create_failed: 'falló la creación de relación de la cadena UNWIND MERGE: {{.Cause}}'
+cyphermutations.unwind_relationship_lookup_failed: 'falló la búsqueda de relación de la cadena UNWIND MERGE: {{.Cause}}'
+cyphermutations.unwind_relationship_update_failed: 'falló la actualización de relación de la cadena UNWIND MERGE: {{.Cause}}'
+cyphermutations.unwind_second_as_required: el segundo UNWIND requiere una cláusula AS
+cyphermutations.unwind_second_expected: se esperaba un segundo UNWIND
+cyphermutations.unwind_set_return_required: UNWIND en una consulta SET requiere una cláusula RETURN
+cyphermutations.unwind_variable_required: UNWIND requiere una variable después de AS
+cyphermutations.update_edge_failed: 'no se pudo actualizar la relación: {{.Cause}}'
+cyphermutations.update_edge_property_failed: 'no se pudo actualizar la propiedad de la relación: {{.Cause}}'
+cyphermutations.update_node_failed: 'no se pudo actualizar el nodo: {{.Cause}}'
+cyphermutations.update_node_property_failed: 'no se pudo actualizar la propiedad del nodo: {{.Cause}}'
+cyphermutations.variable_not_found: 'no se encontró la variable ''{{.Variable}}'' (disponibles: {{.Available}})'
+cyphermutations.with_clause_empty: la cláusula WITH no puede estar vacía
+cyphermutations.with_expression_required: la cláusula WITH requiere al menos una expresión
+cyphermutations.with_optional_return_required: se requieren las cláusulas WITH, OPTIONAL MATCH y RETURN
+cyphermutations.with_return_required: se requiere una cláusula RETURN después de WITH
+cypherproceduremetadata.db_awaitindex: Espera a que un índice esté en línea
+cypherproceduremetadata.db_awaitindexes: Espera a que todos los índices estén en línea
+cypherproceduremetadata.db_clearquerycaches: Borra las cachés de consultas
+cypherproceduremetadata.db_constraints: Enumera todas las restricciones de la base de datos
+cypherproceduremetadata.db_create_setnodevectorproperty: Establece una propiedad vectorial en un nodo
+cypherproceduremetadata.db_create_setrelationshipvectorproperty: Establece una propiedad vectorial en una relación
+cypherproceduremetadata.db_index_fulltext_createnodeindex: Crea un índice de texto completo en nodos
+cypherproceduremetadata.db_index_fulltext_createrelationshipindex: Crea un índice de texto completo en relaciones
+cypherproceduremetadata.db_index_fulltext_drop: Elimina un índice de texto completo
+cypherproceduremetadata.db_index_fulltext_listavailableanalyzers: Enumera los analizadores disponibles
+cypherproceduremetadata.db_index_fulltext_querynodes: Busca texto completo en nodos
+cypherproceduremetadata.db_index_fulltext_queryrelationships: Busca texto completo en relaciones
+cypherproceduremetadata.db_index_stats: Devuelve estadísticas del índice
+cypherproceduremetadata.db_index_vector_createnodeindex: Crea un índice vectorial en nodos
+cypherproceduremetadata.db_index_vector_createrelationshipindex: Crea un índice vectorial en relaciones
+cypherproceduremetadata.db_index_vector_drop: Elimina un índice vectorial
+cypherproceduremetadata.db_index_vector_embed: Genera el embedding del texto con el generador configurado
+cypherproceduremetadata.db_index_vector_querynodes: Realiza una búsqueda vectorial en nodos
+cypherproceduremetadata.db_index_vector_queryrelationships: Realiza una búsqueda vectorial en relaciones
+cypherproceduremetadata.db_indexes: Enumera todos los índices de la base de datos
+cypherproceduremetadata.db_infer: Procedimiento de inferencia LLM
+cypherproceduremetadata.db_info: Devuelve información de la base de datos
+cypherproceduremetadata.db_labels: Enumera todas las etiquetas de la base de datos
+cypherproceduremetadata.db_ping: Comprueba la conectividad de la base de datos
+cypherproceduremetadata.db_propertykeys: Enumera todas las claves de propiedad de la base de datos
+cypherproceduremetadata.db_relationshiptypes: Enumera todos los tipos de relación de la base de datos
+cypherproceduremetadata.db_rerank: Procedimiento independiente de reordenación
+cypherproceduremetadata.db_resampleindex: Vuelve a muestrear las estadísticas del índice
+cypherproceduremetadata.db_retrieve: Procedimiento de recuperación híbrida
+cypherproceduremetadata.db_rretrieve: Procedimiento de recuperación híbrida y reordenación
+cypherproceduremetadata.db_schema_nodeproperties: Devuelve las propiedades de nodo por etiqueta
+cypherproceduremetadata.db_schema_relproperties: Devuelve las propiedades de relación por tipo
+cypherproceduremetadata.db_schema_visualization: Visualiza el esquema
+cypherproceduremetadata.db_stats_clear: Borra las estadísticas recopiladas
+cypherproceduremetadata.db_stats_collect: Inicia la recopilación de estadísticas
+cypherproceduremetadata.db_stats_retrieve: Recupera las estadísticas recopiladas
+cypherproceduremetadata.db_stats_retrieveallanthestats: Recupera todas las estadísticas
+cypherproceduremetadata.db_stats_status: Devuelve el estado de la recopilación de estadísticas
+cypherproceduremetadata.db_stats_stop: Detiene la recopilación de estadísticas
+cypherproceduremetadata.db_temporal_asof: Lee el grafo temporal en un instante
+cypherproceduremetadata.db_temporal_assertnooverlap: Comprueba las restricciones de solapamiento temporal
+cypherproceduremetadata.db_txlog_bytxid: Devuelve las entradas WAL de un identificador de transacción
+cypherproceduremetadata.db_txlog_entries: Devuelve las entradas del registro de transacciones
+cypherproceduremetadata.dbms_clientconfig: Devuelve la configuración del cliente
+cypherproceduremetadata.dbms_components: Enumera los componentes del DBMS
+cypherproceduremetadata.dbms_functions: Enumera las funciones
+cypherproceduremetadata.dbms_info: Devuelve información del DBMS
+cypherproceduremetadata.dbms_listconfig: Enumera la configuración del DBMS
+cypherproceduremetadata.dbms_listconnections: Enumera las conexiones activas del DBMS
+cypherproceduremetadata.dbms_procedures: Enumera los procedimientos
+cypherproceduremetadata.gds_fastrp_stats: Ejecuta FastRP y devuelve estadísticas
+cypherproceduremetadata.gds_fastrp_stream: Transmite embeddings de FastRP
+cypherproceduremetadata.gds_graph_drop: Elimina un grafo GDS proyectado
+cypherproceduremetadata.gds_graph_list: Enumera los grafos GDS proyectados
+cypherproceduremetadata.gds_graph_project: Proyecta el grafo en el catálogo GDS
+cypherproceduremetadata.gds_linkprediction_adamicadar_stream: Ejecuta la predicción de enlaces Adamic-Adar
+cypherproceduremetadata.gds_linkprediction_commonneighbors_stream: Ejecuta la predicción de enlaces por vecinos comunes
+cypherproceduremetadata.gds_linkprediction_jaccard_stream: Ejecuta la predicción de enlaces Jaccard
+cypherproceduremetadata.gds_linkprediction_predict_stream: Ejecuta la predicción de enlaces basada en modelos
+cypherproceduremetadata.gds_linkprediction_preferentialattachment_stream: Ejecuta la predicción de enlaces por asociación preferente
+cypherproceduremetadata.gds_linkprediction_resourceallocation_stream: Ejecuta la predicción de enlaces por asignación de recursos
+cypherproceduremetadata.gds_version: Devuelve la versión de GDS
+cypherproceduremetadata.nornicdb_decay_info: Devuelve la configuración de puntuación de la capa de conocimiento
+cypherproceduremetadata.nornicdb_knowledgepolicy_deindexstatus: Devuelve el estado de la cola de desindexación de la capa de conocimiento
+cypherproceduremetadata.nornicdb_knowledgepolicy_info: Devuelve los recuentos del catálogo de perfiles y políticas de la capa de conocimiento
+cypherproceduremetadata.nornicdb_knowledgepolicy_policies: Devuelve los perfiles y las políticas de promoción de la capa de conocimiento
+cypherproceduremetadata.nornicdb_knowledgepolicy_profiles: Devuelve los paquetes y enlaces de decaimiento de la capa de conocimiento
+cypherproceduremetadata.nornicdb_knowledgepolicy_resolve: Resuelve la política de puntuación efectiva de la capa de conocimiento para una entidad, un conjunto de etiquetas o un tipo de arista
+cypherproceduremetadata.nornicdb_stats: Devuelve estadísticas de NornicDB
+cypherproceduremetadata.nornicdb_version: Devuelve la versión de NornicDB
+cypherproceduremetadata.tx_setmetadata: Establece los metadatos de la transacción
+cypherprocedures.already_exists: el procedimiento {{.Procedure}} ya existe
+cypherprocedures.argument_count: el procedimiento {{.Procedure}} requiere {{.Expected}} argumentos; se recibieron {{.Actual}}
+cypherprocedures.body_required: el cuerpo del procedimiento no puede estar vacío
+cypherprocedures.catalog_read_failed: 'no se pudo leer el catálogo de procedimientos de Cypher: {{.Cause}}'
+cypherprocedures.catalog_record_decode_failed: 'no se pudo decodificar el registro del catálogo de procedimientos de Cypher: node={{.Node}}'
+cypherprocedures.catalog_record_invalid: 'el registro del catálogo de procedimientos de Cypher no es válido: node={{.Node}}'
+cypherprocedures.create_fulltext_index_failed: 'no se pudo crear el índice de texto completo: {{.Cause}}'
+cypherprocedures.create_in_transaction: CREATE PROCEDURE no se permite dentro de una transacción activa
+cypherprocedures.create_invalid_syntax: sintaxis de CREATE PROCEDURE no válida
+cypherprocedures.create_relationship_fulltext_index_failed: 'no se pudo crear el índice de texto completo de relaciones: {{.Cause}}'
+cypherprocedures.create_relationship_vector_index_failed: 'no se pudo crear el índice vectorial de relaciones: {{.Cause}}'
+cypherprocedures.create_vector_index_failed: 'no se pudo crear el índice vectorial: {{.Cause}}'
+cypherprocedures.drop_failed: 'no se pudo eliminar el procedimiento {{.Procedure}}: {{.Cause}}'
+cypherprocedures.drop_in_transaction: DROP PROCEDURE no se permite dentro de una transacción activa
+cypherprocedures.drop_invalid_syntax: sintaxis de DROP PROCEDURE no válida
+cypherprocedures.duplicate_argument: 'argumento de procedimiento duplicado: {{.Argument}}'
+cypherprocedures.embed_parameter_failed: 'no se pudo generar el embedding del valor ''{{.Value}}'' del parámetro ${{.Parameter}}: {{.Cause}}'
+cypherprocedures.embed_query_failed: 'no se pudo generar el embedding de la consulta ''{{.Query}}'': {{.Cause}}'
+cypherprocedures.encode_record_failed: 'no se pudo codificar el registro del procedimiento: {{.Cause}}'
+cypherprocedures.fulltext_create_node_arguments_required: 'db.index.fulltext.createNodeIndex requiere al menos 3 argumentos: indexName, labels, properties'
+cypherprocedures.fulltext_create_node_invalid_syntax: 'sintaxis de db.index.fulltext.createNodeIndex no válida{{if .Parentheses}}: faltan los paréntesis{{end}}'
+cypherprocedures.fulltext_create_relationship_arguments_required: 'db.index.fulltext.createRelationshipIndex requiere al menos 3 argumentos: indexName, relationshipTypes, properties'
+cypherprocedures.fulltext_create_relationship_invalid_syntax: 'sintaxis de db.index.fulltext.createRelationshipIndex no válida{{if .Parentheses}}: faltan los paréntesis{{end}}'
+cypherprocedures.fulltext_drop_invalid_syntax: 'sintaxis de db.index.fulltext.drop no válida{{if .Parentheses}}: faltan los paréntesis{{end}}'
+cypherprocedures.invalid_argument_name: 'nombre de argumento de procedimiento no válido: {{.Argument}}'
+cypherprocedures.invalid_dimension: 'dimensión no válida: {{.Cause}}'
+cypherprocedures.invalid_mode: 'modo de procedimiento no válido: {{.Mode}}'
+cypherprocedures.metadata_active_transaction_required: tx.setMetaData() requiere una transacción activa. Use BEGIN TRANSACTION primero
+cypherprocedures.metadata_entry_required: tx.setMetaData requiere al menos un par clave-valor
+cypherprocedures.metadata_invalid_syntax: 'sintaxis de tx.setMetaData no válida{{if .Parentheses}}: faltan los paréntesis{{end}}'
+cypherprocedures.metadata_object_required: 'tx.setMetaData requiere un objeto de metadatos: {key: value}'
+cypherprocedures.metadata_transaction_unsupported: el tipo de transacción no admite metadatos
+cypherprocedures.node_not_found: 'no se encontró el nodo: {{.Node}}'
+cypherprocedures.parameter_non_numeric: 'el parámetro ${{.Parameter}} contiene un valor no numérico: {{.ValueType}}'
+cypherprocedures.parameter_not_provided: no se proporcionó el parámetro ${{.Parameter}}
+cypherprocedures.parameter_string_embedder_required: el parámetro ${{.Parameter}} es una cadena, pero no hay ningún generador de embeddings configurado; proporcione un vector o configure el servicio de embeddings
+cypherprocedures.parameter_unsupported_type: 'el parámetro ${{.Parameter}} tiene un tipo no compatible con la consulta vectorial: {{.ValueType}} (se esperaba []float32, []float64, []interface{} o string)'
+cypherprocedures.persist_catalog_failed: 'no se pudo guardar el catálogo de procedimientos: {{.Cause}}'
+cypherprocedures.query_input_possibly_unsupported: no se proporcionó un vector de consulta ni texto de búsqueda (es posible que el parámetro tenga un tipo no compatible; se esperaba []float32, []float64, []interface{} o string)
+cypherprocedures.query_input_required: no se proporcionó un vector de consulta ni texto de búsqueda
+cypherprocedures.read_contains_write: el cuerpo del procedimiento READ contiene operaciones de escritura
+cypherprocedures.registry_reload_failed: 'no se pudo recargar el registro de procedimientos de Cypher: {{.Cause}}'
+cypherprocedures.relationship_not_found: 'no se encontró la relación: {{.Relationship}}'
+cypherprocedures.set_metadata_failed: 'no se pudieron establecer los metadatos de la transacción: {{.Cause}}'
+cypherprocedures.set_node_vector_argument_required: 'db.create.setNodeVectorProperty: falta el argumento vector (se esperaba nodeId, propertyKey, [vector])'
+cypherprocedures.set_node_vector_arguments_required: 'db.create.setNodeVectorProperty: requiere 3 argumentos (nodeId, propertyKey, vector)'
+cypherprocedures.set_node_vector_invalid_syntax: sintaxis de db.create.setNodeVectorProperty no válida
+cypherprocedures.set_node_vector_parentheses_required: 'db.create.setNodeVectorProperty: faltan los paréntesis (se esperaba db.create.setNodeVectorProperty(nodeId, ''key'', [vector]))'
+cypherprocedures.set_relationship_vector_argument_required: 'db.create.setRelationshipVectorProperty: falta el argumento vector (se esperaba relId, propertyKey, [vector])'
+cypherprocedures.set_relationship_vector_arguments_required: 'db.create.setRelationshipVectorProperty: requiere 3 argumentos (relId, propertyKey, vector)'
+cypherprocedures.set_relationship_vector_invalid_syntax: sintaxis de db.create.setRelationshipVectorProperty no válida
+cypherprocedures.set_relationship_vector_parentheses_required: 'db.create.setRelationshipVectorProperty: faltan los paréntesis (se esperaba db.create.setRelationshipVectorProperty(relId, ''key'', [vector]))'
+cypherprocedures.string_query_embedder_required: se proporcionó una consulta de texto, pero no hay ningún generador de embeddings configurado; use un vector o configure el servicio de embeddings
+cypherprocedures.unsupported_parameters: no se proporcionó un vector de consulta ni texto de búsqueda; los parámetros {{.Parameters}} tienen un tipo no compatible (se esperaba []float32, []float64, []interface{} o string)
+cypherprocedures.update_catalog_failed: 'no se pudo actualizar el catálogo de procedimientos: {{.Cause}}'
+cypherprocedures.update_node_failed: 'no se pudo actualizar el nodo: {{.Cause}}'
+cypherprocedures.update_relationship_failed: 'no se pudo actualizar la relación: {{.Cause}}'
+cypherprocedures.vector_create_node_arguments_required: 'db.index.vector.createNodeIndex requiere al menos 4 argumentos: indexName, label, property, dimension'
+cypherprocedures.vector_create_node_invalid_syntax: '{{if .Parentheses}}sintaxis no válida: faltan los paréntesis{{else}}sintaxis de db.index.vector.createNodeIndex no válida{{end}}'
+cypherprocedures.vector_create_relationship_arguments_required: 'db.index.vector.createRelationshipIndex requiere al menos 4 argumentos: indexName, relationshipType, property, dimension'
+cypherprocedures.vector_create_relationship_invalid_syntax: 'sintaxis de db.index.vector.createRelationshipIndex no válida{{if .Parentheses}}: faltan los paréntesis{{end}}'
+cypherprocedures.vector_drop_invalid_syntax: 'sintaxis de db.index.vector.drop no válida{{if .Parentheses}}: faltan los paréntesis{{end}}'
+cypherprocedures.vector_query_parse_failed: 'error al analizar la consulta vectorial: {{.Cause}}'
+cypherresidual.collect_subquery_execution_failed: 'error al ejecutar la subconsulta COLLECT: {{.Cause}}'
+cypherresidual.collect_subquery_return_required: la subconsulta COLLECT debe tener una cláusula RETURN
+cypherresidual.collect_subquery_syntax_invalid: sintaxis de subconsulta COLLECT no válida
+cypherresidual.composite_show_target_required: '{{.Code}}: {{.Command}} en bases de datos compuestas requiere un destino constituyente. Use USE <composite>.<alias> {{.Command}}'
+cypherresidual.compound_optional_match_not_found: 'OPTIONAL MATCH no encontrado en la consulta compuesta: "{{.Query}}"'
+cypherresidual.create_relationship_invalid: 'patrón de relación no válido en CREATE: {{.Pattern}}'
+cypherresidual.create_set_scope_entity_required: el elemento WITH "{{.Item}}" no se resuelve como nodo o relación en el ámbito CREATE...SET
+cypherresidual.create_with_expression_invalid: 'consulta CREATE...WITH no válida: expresión WITH no válida "{{.Expression}}"'
+cypherresidual.empty_label_after_colon: 'nombre de etiqueta vacío después de los dos puntos en el patrón: {{.Pattern}}'
+cypherresidual.foreach_clause_not_found: 'cláusula FOREACH no encontrada en la consulta: "{{.Query}}"'
+cypherresidual.initial_nodes_lookup_failed: 'no se pudieron obtener los nodos iniciales: {{.Cause}}'
+cypherresidual.load_csv_unsupported: LOAD CSV no es compatible con el modo integrado de NornicDB
+cypherresidual.match_node_pattern_parse_failed: 'no se pudo analizar el patrón de nodo de la cláusula MATCH: "{{.Pattern}}"'
+cypherresidual.merge_pattern_invalid: 'patrón no válido: {{.Pattern}}'
+cypherresidual.optional_match_not_found: 'OPTIONAL MATCH no encontrado en la consulta: "{{.Query}}"'
+cypherresidual.policy_allowed_required: 'restricción de política infringida: ninguna política ALLOWED permite una arista de tipo {{.EdgeType}} con estas etiquetas de extremo'
+cypherresidual.policy_disallowed: 'restricción de política "{{.Name}}" infringida: ({{.SourceLabel}})-[:{{.EdgeType}}]->({{.TargetLabel}}) está DISALLOWED'
+cypherresidual.property_map_syntax_invalid: 'sintaxis de mapa de propiedades no válida en el patrón: {{.Pattern}}'
+cypherresidual.relationship_connector_expected: 'patrón de relación no válido: se esperaba -[ o <-[, se obtuvo: {{.Connector}}'
+cypherresidual.return_clause_required: se requiere la cláusula RETURN
+cypherresidual.set_assignment_invalid: 'asignación SET no válida: "{{.Assignment}}" (se esperaba n.property = value o n:Label)'
+cypherresidual.set_entity_assignment_invalid: 'asignación SET no válida: "{{.Assignment}}" (se esperaba variable.property = value o variable = {property: value}): {{.Cause}}'
+cypherresidual.set_merge_map_or_parameter_required: 'SET += requiere un mapa o parámetro (recibido: "{{.Value}}")'
+cypherresidual.show_aliases_manager_unavailable: el administrador de bases de datos no está disponible; SHOW ALIASES requiere compatibilidad con varias bases de datos
+cypherresidual.show_aliases_syntax_invalid: sintaxis SHOW ALIASES no válida
+cypherresidual.sum_arithmetic_term_unsupported: 'término aritmético SUM no compatible: {{.Term}}'
+cypherresidual.sum_numeric_required: SUM() requiere valores numéricos; se obtuvo {{.ValueType}} en la expresión "{{.Expression}}"
+cypherresidual.union_all_clause_not_found: 'cláusula UNION ALL no encontrada en la consulta: "{{.Query}}"'
+cypherresidual.union_branch_failed: 'error en la consulta UNION {{.Branch}} ("{{.Query}}"): {{.Cause}}'
+cypherresidual.union_clause_not_found: 'cláusula UNION no encontrada en la consulta: "{{.Query}}"'
+cypherresidual.union_column_count_mismatch: las consultas UNION deben devolver el mismo número de columnas (se obtuvieron {{.Expected}} y {{.Actual}})
+cypherresidual.unwind_clause_not_found: 'cláusula UNWIND no encontrada en la consulta: "{{.Query}}"'
+cypherresidual.with_clause_not_found: 'cláusula WITH no encontrada en la consulta: "{{.Query}}"'
+cypherresidual.with_item_invalid: 'elemento WITH no válido: "{{.Item}}"'
+cypherschema.add_fulltext_index_failed: 'no se pudo agregar el índice de texto completo: {{.Cause}}'
+cypherschema.add_fulltext_relationship_index_failed: 'no se pudo agregar el índice de texto completo de relaciones: {{.Cause}}'
+cypherschema.backfill_index_failed: 'no se pudo rellenar el índice para la etiqueta {{.Label}}: {{.Cause}}'
+cypherschema.backfill_property_index_failed: 'no se pudo rellenar el índice de propiedad {{.Label}}({{.Property}}): {{.Cause}}'
+cypherschema.composite_ddl_not_allowed: '{{.Code}}: el DDL de esquema en bases de datos compuestas requiere un destino constituyente. Use USE <composite>.<alias> para dirigirse a un constituyente específico'
+cypherschema.constraint_properties_required: la restricción {{.Kind}} requiere propiedades
+cypherschema.contract_entry_required: el contrato de restricción requiere al menos una entrada de bloque
+cypherschema.create_range_index_failed: 'no se pudo crear el índice de rango: {{.Cause}}'
+cypherschema.domain_allowed_value_required: la restricción DOMAIN requiere al menos un valor permitido
+cypherschema.domain_value_list_invalid: 'lista de valores de dominio no válida: {{.Cause}}'
+cypherschema.empty_clause: cláusula {{.Clause}} vacía
+cypherschema.empty_statement: sentencia vacía
+cypherschema.flush_pending_writes_failed: 'no se pudieron vaciar las escrituras asíncronas pendientes antes del DDL de esquema: {{.Cause}}'
+cypherschema.fulltext_properties_required: no se encontraron propiedades en la definición del índice de texto completo
+cypherschema.index_name_required: falta el nombre del índice
+cypherschema.index_properties_required: no se especificaron propiedades para el índice
+cypherschema.invalid_clause: cláusula {{.Clause}} no válida
+cypherschema.invalid_identifier_segment: segmento de identificador no válido
+cypherschema.invalid_if_not_exists_clause: cláusula IF NOT EXISTS no válida
+cypherschema.invalid_keyword: '{{.Keyword}} no válido'
+cypherschema.invalid_pattern: patrón {{.Pattern}} no válido
+cypherschema.invalid_syntax: sintaxis de {{.Subject}} no válida
+cypherschema.invalid_trailing_syntax: sintaxis final no válida
+cypherschema.malformed_require_block: bloque REQUIRE con formato incorrecto
+cypherschema.manager_unavailable: el administrador de esquemas no está disponible
+cypherschema.missing_keyword: falta {{.Keyword}}
+cypherschema.name_required: 'sintaxis de {{.Command}} no válida: se requiere el nombre de {{.Entity}}'
+cypherschema.nested_contract_entry_unsupported: las entradas FOR ... REQUIRE anidadas no se admiten dentro de bloques REQUIRE; cree una restricción de bloque dirigida independiente como {{.Entry}}
+cypherschema.positive_max_count_required: MAX COUNT debe ser un entero positivo; se obtuvo {{.Value}}
+cypherschema.range_index_single_property_required: RANGE INDEX solo admite una propiedad; se obtuvieron {{.Count}}
+cypherschema.temporal_node_arity_required: la restricción TEMPORAL requiere 3 propiedades (key, valid_from, valid_to)
+cypherschema.temporal_relationship_arity_required: la restricción TEMPORAL requiere al menos 3 propiedades (key..., valid_from, valid_to)
+cypherschema.unknown_command: 'comando de esquema desconocido: {{.Statement}}'
+cypherschema.unsupported_create_constraint_shape: forma de CREATE CONSTRAINT no admitida
+cypherschema.unsupported_predicate: predicado {{.Predicate}} no admitido
+cypherschema.unsupported_property_type: 'tipo de propiedad no admitido: {{.Type}}'
+cypherschema.unterminated_string: 'cadena sin terminar: {{.Raw}}'
+cypherspecializedcalls.argument_empty: '{{.Argument}} no puede estar vacío'
+cypherspecializedcalls.argument_required: '{{.Argument}} es obligatorio'
+cypherspecializedcalls.datetime_required: '{{.Argument}} debe ser una fecha y hora válida'
+cypherspecializedcalls.embed_parameter_failed: 'no se pudo generar el embedding del valor ''{{.Value}}'' del parámetro ${{.Parameter}}: {{.Cause}}'
+cypherspecializedcalls.embed_query_text_failed: 'no se pudo generar el embedding de la consulta ''{{.Query}}'': {{.Cause}}'
+cypherspecializedcalls.embedder_not_configured: no hay ningún generador de embeddings configurado
+cypherspecializedcalls.fulltext_argument_count: 'sintaxis de consulta de texto completo no válida: se esperaban 2 o 3 argumentos'
+cypherspecializedcalls.fulltext_index_not_found: 'no existe tal índice de esquema de texto completo: {{.Index}}'
+cypherspecializedcalls.fulltext_option_invalid: 'opción de texto completo options.{{.Option}} no válida: {{.Value}}'
+cypherspecializedcalls.parameter_non_numeric: 'el parámetro ${{.Parameter}} contiene un valor no numérico: {{.ValueType}}'
+cypherspecializedcalls.parameter_not_provided: no se proporcionó el parámetro ${{.Parameter}}
+cypherspecializedcalls.parameter_string_embedder_required: el parámetro ${{.Parameter}} es una cadena, pero no hay ningún generador de embeddings configurado; proporcione un vector o configure el servicio de embeddings
+cypherspecializedcalls.parameter_unsupported_type: 'el parámetro ${{.Parameter}} tiene un tipo no compatible con la consulta vectorial: {{.ValueType}} (se esperaba []float32, []float64, []interface{} o string)'
+cypherspecializedcalls.procedure_options_map_required: las opciones del procedimiento deben ser un MAP
+cypherspecializedcalls.query_input_possibly_unsupported: no se proporcionó un vector de consulta ni texto de búsqueda (es posible que el parámetro tenga un tipo no compatible; se esperaba []float32, []float64, []interface{} o string)
+cypherspecializedcalls.query_input_required: no se proporcionó un vector de consulta ni texto de búsqueda
+cypherspecializedcalls.string_query_embedder_required: se proporcionó una consulta de texto, pero no hay ningún generador de embeddings configurado; use un vector o configure el servicio de embeddings
+cypherspecializedcalls.temporal_asof_argument_count: db.temporal.asOf requiere 6 parámetros más systemTime y systemSequence opcionales
+cypherspecializedcalls.temporal_assert_argument_count: db.temporal.assertNoOverlap requiere 7 parámetros más systemTime y systemSequence opcionales
+cypherspecializedcalls.temporal_closing_parenthesis: falta el paréntesis de cierre en {{.Procedure}}
+cypherspecializedcalls.temporal_invalid_syntax: sintaxis de {{.Procedure}} no válida
+cypherspecializedcalls.temporal_lookup_failed: 'la búsqueda temporal falló para la etiqueta {{.Label}}: {{.Cause}}'
+cypherspecializedcalls.temporal_overlap: se detectó un solapamiento temporal para {{.Property}}={{.Value}}
+cypherspecializedcalls.temporal_read_nodes_failed: 'no se pudieron leer los nodos de la etiqueta {{.Label}}: {{.Cause}}'
+cypherspecializedcalls.txlog_by_id_argument_required: db.txlog.byTxId requiere el parámetro txId
+cypherspecializedcalls.txlog_closing_parenthesis: falta el paréntesis de cierre en {{.Procedure}}
+cypherspecializedcalls.txlog_entries_argument_required: db.txlog.entries requiere al menos el parámetro fromSeq
+cypherspecializedcalls.txlog_find_entries_failed: 'no se pudieron buscar las entradas de WAL: {{.Cause}}'
+cypherspecializedcalls.txlog_from_sequence_positive: fromSeq debe ser mayor que 0
+cypherspecializedcalls.txlog_id_empty: txId no puede estar vacío
+cypherspecializedcalls.txlog_invalid_sequence: '{{.Argument}} no válido: {{.Cause}}'
+cypherspecializedcalls.txlog_invalid_syntax: sintaxis de {{.Procedure}} no válida
+cypherspecializedcalls.txlog_read_entries_failed: 'no se pudieron leer las entradas de WAL: {{.Cause}}'
+cypherspecializedcalls.txlog_sequence_order: toSeq debe ser >= fromSeq
+cypherspecializedcalls.unsigned_non_negative: '{{.Argument}} debe ser no negativo'
+cypherspecializedcalls.unsigned_valid: '{{.Argument}} debe ser un uint64 válido'
+cypherspecializedcalls.unsigned_whole_non_negative: '{{.Argument}} debe ser un número entero no negativo'
+cypherspecializedcalls.unsupported_parameters: no se proporcionó un vector de consulta ni texto de búsqueda; los parámetros {{.Parameters}} tienen un tipo no compatible (se esperaba []float32, []float64, []interface{} o string)
+cypherspecializedcalls.vector_embed_argument_required: db.index.vector.embed requiere un argumento
+cypherspecializedcalls.vector_embed_failed: 'no se pudo generar el embedding de la consulta: {{.Cause}}'
+cypherspecializedcalls.vector_embed_invalid_syntax: sintaxis de db.index.vector.embed no válida
+cypherspecializedcalls.vector_embed_parameter_string: el parámetro ${{.Parameter}} de db.index.vector.embed debe ser STRING
+cypherspecializedcalls.vector_embed_string_required: db.index.vector.embed requiere texto STRING
+cypherspecializedcalls.vector_embed_text_required: db.index.vector.embed requiere texto no vacío
+cypherspecializedcalls.vector_embed_unmatched_parenthesis: paréntesis sin pareja en db.index.vector.embed
+cypherspecializedcalls.vector_parameters_missing: faltan parámetros
+cypherspecializedcalls.vector_procedure_not_found: no se encontró el procedimiento de consulta vectorial
+cypherspecializedcalls.vector_query_failed: la consulta vectorial falló
+cypherspecializedcalls.vector_query_parse_failed: 'error al analizar la consulta vectorial: {{.Cause}}'
+cypherspecializedcalls.vector_unmatched_parenthesis: paréntesis sin pareja
+cypherspecializedcalls.wal_config_unavailable: la configuración de WAL no está disponible
+cypherspecializedcalls.wal_directory_not_configured: el directorio de WAL no está configurado
+cypherspecializedcalls.wal_unavailable: WAL no está disponible (base de datos solo en memoria)
+cyphersubqueries.after_call_clause_unsupported: 'cláusula no admitida después de CALL {}: {{.Clause}} (admitidas: RETURN, ORDER BY, SKIP, LIMIT)'
+cyphersubqueries.batch_failed: 'error en el lote {{.Batch}}: {{.Cause}}'
+cyphersubqueries.batch_progress_failed: 'error en el lote {{.Batch}}/{{.Total}}: {{.Cause}}'
+cyphersubqueries.batched_lookup_columns_unexpected: 'la búsqueda CALL correlacionada por lotes produjo columnas inesperadas: {{.Columns}}'
+cyphersubqueries.batched_lookup_failed: 'error en la búsqueda CALL correlacionada por lotes: {{.Cause}}'
+cyphersubqueries.call_body_empty: 'subconsulta CALL {} no válida: cuerpo vacío'
+cyphersubqueries.call_body_expected: 'subconsulta CALL {} no válida: cuerpo vacío (se esperaba CALL { <query> })'
+cyphersubqueries.call_error: 'error de subconsulta CALL: {{.Cause}}'
+cyphersubqueries.call_for_node_failed: 'no se pudo ejecutar CALL para el nodo {{.Node}}: {{.Cause}}'
+cyphersubqueries.call_not_found: no se encontró CALL en la consulta
+cyphersubqueries.chained_transactions_unsupported: CALL {} IN TRANSACTIONS no se admite en subconsultas CALL encadenadas (batchSize={{.BatchSize}})
+cyphersubqueries.correlated_import_failed: 'no se pudo resolver la importación correlacionada {{.Import}}: {{.Cause}}'
+cyphersubqueries.correlated_union_branch_failed: 'error en la rama {{.Branch}} de la subconsulta UNION correlacionada para la semilla {{.Seed}}: {{.Cause}}'
+cyphersubqueries.correlated_union_parse_failed: no se pudieron analizar las ramas UNION de la subconsulta CALL correlacionada
+cyphersubqueries.correlated_variable_empty: variable correlacionada vacía
+cyphersubqueries.execution_failed: 'error de ejecución de subconsulta: {{.Cause}}'
+cyphersubqueries.first_batch_failed: 'error en el lote 1: {{.Cause}}'
+cyphersubqueries.infer_messages_empty: los mensajes de db.infer no pueden estar vacíos
+cyphersubqueries.infer_prompt_or_messages_required: db.infer requiere prompt o messages
+cyphersubqueries.inference_manager_unavailable: el administrador de inferencia no está configurado
+cyphersubqueries.match_before_call_not_found: no se encontró MATCH antes de CALL
+cyphersubqueries.node_load_failed: 'no se pudieron obtener los nodos: {{.Cause}}'
+cyphersubqueries.node_pattern_invalid: 'no se pudo analizar el patrón de nodo: {{.Pattern}}'
+cyphersubqueries.optional_import_fallback_failed: 'error en la reserva de importación opcional para {{.Import}}: {{.Cause}}'
+cyphersubqueries.outer_match_bindings_failed: 'no se pudieron evaluar los enlaces del MATCH externo: {{.Cause}}'
+cyphersubqueries.outer_match_projection_missing: el MATCH externo no proyectó la variable correlacionada {{.Variable}}
+cyphersubqueries.outer_match_seeds_failed: 'no se pudieron evaluar las semillas del MATCH externo: {{.Cause}}'
+cyphersubqueries.query_required: se requiere query
+cyphersubqueries.rag_candidate_id_required: se requiere el id del candidato de db.rerank
+cyphersubqueries.rag_candidates_required: db.rerank requiere candidatos no vacíos
+cyphersubqueries.rag_parameter_must_be_map: el parámetro {{.Parameter}} de {{.Procedure}} debe ser un mapa
+cyphersubqueries.rag_parenthesis_unmatched: paréntesis sin pareja en {{.Procedure}}
+cyphersubqueries.rag_request_argument_required: '{{.Procedure}} requiere un argumento de solicitud'
+cyphersubqueries.rag_request_must_be_map_literal: la solicitud de {{.Procedure}} debe ser un literal de mapa
+cyphersubqueries.rag_syntax_invalid: sintaxis de {{.Procedure}} no válida
+cyphersubqueries.seed_row_missing_variable: 'a la fila semilla de la subconsulta CALL le falta la variable: {{.Variable}}'
+cyphersubqueries.static_union_branch_failed: 'error en la rama {{.Branch}} de la subconsulta UNION estática: {{.Cause}}'
+cyphersubqueries.transaction_batch_failed: 'error en el lote {{.Batch}} de CALL ({{.Variable}}) IN TRANSACTIONS: {{.Cause}}'
+cyphersubqueries.transaction_body_empty: 'CALL ({{.Variable}}) IN TRANSACTIONS no válido: cuerpo vacío'
+cyphersubqueries.transaction_import_shape_unsupported: forma de importación de CALL ({{.Variable}}) IN TRANSACTIONS no admitida
+cyphersubqueries.union_column_count_mismatch: las consultas UNION deben devolver el mismo número de columnas (se obtuvieron {{.First}} y {{.Second}})
+cyphersubqueries.union_with_imports_failed: 'no se pudieron analizar las importaciones WITH de la rama UNION {{.Branch}}: {{.Cause}}'
+cyphersubqueries.use_clause_failed: 'error en la cláusula USE de la subconsulta CALL: {{.Cause}}'
+cyphersubqueries.use_database_failed: 'error de CALL subquery USE {{.Database}}: {{.Cause}}'
+cyphersubqueries.with_body_empty: 'subconsulta CALL {} no válida: cuerpo de consulta vacío después de WITH'
+cyphersubqueries.with_import_expression_invalid: 'expresión de importación WITH no válida: {{.Expression}}'
+cyphersubqueries.with_import_unknown_variable: 'WITH de la subconsulta CALL importa una variable desconocida: {{.Variable}}'
+cyphersubqueries.with_imports_required: 'subconsulta CALL {} no válida: la cláusula WITH no importa variables'
+cyphersubqueries.with_query_clause_required: 'subconsulta CALL {} no válida: WITH debe ir seguido de una cláusula de consulta'
+cyphertransactions.already_active: ya hay una transacción activa
+cyphertransactions.case_block_missing: 'script CASE de transacción no válido: falta el bloque CASE'
+cyphertransactions.case_syntax_invalid: 'sintaxis CASE de transacción no válida: se esperaba CASE WHEN ... THEN ROLLBACK ELSE RETURN ... COMMIT'
+cyphertransactions.commit_failed: 'error al confirmar la transacción: {{.Cause}}'
+cyphertransactions.condition_not_boolean: 'la expresión de condición no se evaluó como booleana: {{.Value}}'
+cyphertransactions.configure_failed: 'no se pudo configurar la transacción: {{.Cause}}'
+cyphertransactions.delete_residual_relationships: No se puede eliminar el nodo {{.NodeID}} porque todavía tiene relaciones. Para eliminar este nodo, primero debe eliminar sus relaciones (o usar DETACH DELETE)
+cyphertransactions.engine_unsupported: el motor no admite transacciones
+cyphertransactions.invalid_script_action: 'acción de script de transacción no válida: {{.Action}}'
+cyphertransactions.match_with_unwind_clauses_required: se requieren las cláusulas MATCH, WITH, UNWIND y RETURN (p. ej., MATCH (n) WITH n UNWIND n.items AS item RETURN item)
+cyphertransactions.multi_match_return_required: la consulta multi-MATCH requiere una cláusula RETURN
+cyphertransactions.multiple_match_expected: se esperaban varias cláusulas MATCH
+cyphertransactions.no_active: no hay ninguna transacción activa
+cyphertransactions.order_by_parse_failed: no se pudo analizar la cláusula ORDER BY
+cyphertransactions.pin_namespace_failed: 'no se pudo fijar el espacio de nombres de la transacción: {{.Cause}}'
+cyphertransactions.prime_namespace_failed: 'no se pudo inicializar el espacio de nombres de la transacción: {{.Cause}}'
+cyphertransactions.query_in_transaction_unsupported: 'tipo de consulta no admitido en la transacción: {{.Query}}'
+cyphertransactions.query_type_unsupported: 'tipo de consulta no admitido: {{.QueryType}} (admitidos: {{.Supported}})'
+cyphertransactions.return_clause_not_found: 'no se encontró la cláusula RETURN en la consulta: {{.Query}}'
+cyphertransactions.rollback_failed: 'error al revertir la transacción: {{.Cause}}'
+cyphertransactions.show_in_transaction_unsupported: 'comando SHOW no admitido en la transacción: {{.Query}}'
+cyphertransactions.start_failed: 'no se pudo iniciar la transacción: {{.Cause}}'
+cyphertransactions.storage_failed: 'error de almacenamiento: {{.Cause}}'
+cyphertransactions.syntax_start_invalid: 'error de sintaxis: la consulta debe comenzar con una cláusula válida ({{.ValidClauses}})'
+cyphertransactions.syntax_unbalanced_at: 'error de sintaxis: delimitadores desequilibrados en la posición {{.Position}}'
+cyphertransactions.syntax_unbalanced_curly_braces: 'error de sintaxis: llaves desequilibradas'
+cyphertransactions.syntax_unbalanced_parentheses: 'error de sintaxis: paréntesis desequilibrados'
+cyphertransactions.syntax_unbalanced_square_brackets: 'error de sintaxis: corchetes desequilibrados'
+cyphertransactions.syntax_unclosed_quote: 'error de sintaxis: comilla sin cerrar'
+cyphertransactions.unknown_type: tipo de transacción desconocido
+cyphertransactions.unwind_as_required: UNWIND requiere la cláusula AS (p. ej., UNWIND [1,2,3] AS x)
+cyphertransactions.wal_begin_failed: 'no se pudo escribir el inicio de la transacción en WAL: {{.Cause}}'
+database.not_found: La base de datos '{{.Name}}' no existe
+dbconfig.disallowed_key: 'clave no permitida o desconocida: {{.Key}}'
+dbconfig.invalid_interval: intervalo no válido
+dbconfig.invalid_limit: límite no válido
+dbconfig.manager_unavailable: administrador de bases de datos no disponible
+dbconfig.mvcc_composite_unsupported: los controles del ciclo de vida de mvcc no son compatibles con bases de datos compuestas
+dbconfig.mvcc_debt_unsupported: la inspección de deuda del ciclo de vida de mvcc no es compatible con esta base de datos
+dbconfig.mvcc_lifecycle_paused: ciclo de vida pausado
+dbconfig.mvcc_lifecycle_resumed: ciclo de vida reanudado
+dbconfig.mvcc_prune_triggered: poda activada
+dbconfig.mvcc_schedule_unsupported: el control de programación del ciclo de vida de mvcc no es compatible con esta base de datos
+dbconfig.store_unavailable: la configuración por base de datos no está disponible (la base de datos del sistema no está disponible)
+dbconfig.system_database_overrides_unsupported: la base de datos del sistema no puede tener anulaciones de configuración
+gdpr.confirmation_required: se requiere confirmación
+gdpr.legal_hold_prevents_deletion: los datos del usuario están sujetos a retención legal y no se pueden eliminar
+gdpr.own_data_delete_only: solo puede eliminar sus propios datos
+gdpr.own_data_export_only: solo puede exportar sus propios datos
+graph.database_access_denied: No se permite el acceso a la base de datos solicitada.
+graph.diff_node_limit_exceeded: node_ids supera el máximo de {{.Maximum}} para solicitudes de diferencias del grafo
+graph.historical_neighborhood_route: el recorrido histórico del vecindario está disponible mediante /nornicdb/graph/{database}/temporal o /nornicdb/graph/{database}/diff
+graph.historical_path_route: el recorrido histórico de rutas aún no está disponible en /nornicdb/graph/{database}/path; use /nornicdb/graph/{database}/temporal para reconstruir instantáneas
+graph.path_node_ids_required: se requieren source_node_id y target_node_id
+graph.temporal_node_limit_exceeded: node_ids supera el máximo de {{.Maximum}} para solicitudes de grafo temporal
+grpc.localization_initialization_failed: 'no se pudo inicializar la localización: {{.Cause}}'
+heimdall.autocomplete_failed: 'Error de autocompletado: {{.Cause}}'
+heimdall.bifrost_not_enabled: Bifrost no está habilitado
+heimdall.generation_failed: 'Error de generación: {{.Cause}}'
+heimdall.invalid_request_body: Cuerpo de solicitud no válido
+heimdall.method_not_allowed: Método no permitido
+heimdall.query_parameter_required: se requiere el parámetro query
+heimdall.streaming_not_supported: Transmisión no compatible
+localization.catalog_entry_missing: El mensaje {{.MessageID}} no está disponible en {{.Language}}; se usará inglés (Estados Unidos)
+localization.external_diagnostic: '{{.Cause}}'
+localization.items_processed: '{{.Count}} elementos procesados'
+localization.items_processed.one: '{{.Count}} elemento procesado'
+localization.language_pack_missing: 'El paquete de idioma {{.RequestedLanguage}} no está disponible; se usará {{.ResolvedLanguage}} (origen: {{.Source}})'
+localization.os_language_undetected: No se pudo determinar el idioma del sistema operativo; se usará inglés (Estados Unidos)
+mcp.authentication_context_missing: falta el contexto de autenticación
+mcp.authentication_required: se requiere autenticación
+mcp.authenticator_not_configured: autenticador no configurado
+mcp.create_edge_failed: 'no se pudo crear la relación: {{.Cause}}'
+mcp.create_task_failed: 'no se pudo crear la tarea: {{.Cause}}'
+mcp.cypher_executor_nil: el ejecutor de Cypher es nulo
+mcp.cypher_executor_unavailable: ejecutor de Cypher no disponible
+mcp.database_executor_unavailable: ejecutor con ámbito de base de datos no disponible para "{{.Database}}"
+mcp.delete_task_failed: 'no se pudo eliminar la tarea: {{.Cause}}'
+mcp.dependency_create_failed: 'no se pudo crear la dependencia de tarea "{{.ID}}": {{.Cause}}'
+mcp.embedding_dimensions_invalid: 'dimensiones de embedding no válidas: se esperaban {{.Expected}}, se obtuvieron {{.Got}}. El modelo de embedding configurado ({{.Model}}) requiere vectores de {{.Expected}} dimensiones'
+mcp.embedding_element_invalid: 'embedding no válido: el elemento {{.Index}} no es un número (se obtuvo {{.Type}})'
+mcp.embedding_empty: 'embedding no válido: la matriz no puede estar vacía'
+mcp.embedding_type_invalid: 'embedding no válido: debe ser una matriz de números (se obtuvo {{.Type}})'
+mcp.fetch_task_failed: 'no se pudo obtener la tarea actualizada: {{.Cause}}'
+mcp.field_required: se requiere {{.Field}}
+mcp.id_required_for_delete: se requiere id para eliminar
+mcp.invalid_label: 'etiqueta no válida: "{{.Label}}" (debe ser un identificador válido)'
+mcp.invalid_or_expired_token: token no válido o caducado
+mcp.invalid_relation: 'relación no válida: "{{.Relation}}" (debe ser un identificador válido y no vacío, p. ej. relates_to, depends_on)'
+mcp.invalid_request_body: cuerpo de solicitud no válido
+mcp.link_invalid_edge_id: la operación de enlace devolvió un id de relación no válido
+mcp.link_no_edge_id: la operación de enlace no devolvió un id de relación
+mcp.list_tasks_failed: 'no se pudieron enumerar las tareas: {{.Cause}}'
+mcp.method_not_found: Método no encontrado
+mcp.node_not_found: 'nodo no encontrado: {{.ID}}'
+mcp.parse_error: Error de análisis
+mcp.rate_limit_exceeded: 'límite de solicitudes superado: {{.Limit}} solicitudes por {{.Period}}'
+mcp.recall_failed: 'no se pudieron recuperar los nodos: {{.Cause}}'
+mcp.server_already_closed: el servidor ya está cerrado
+mcp.source_node_not_found: 'nodo origen no encontrado: {{.ID}}'
+mcp.store_invalid_node_id: la operación de guardado devolvió un id de nodo no válido
+mcp.store_no_executor: 'la operación de guardado falló: no hay un ejecutor de base de datos disponible (los datos no persistirían); asegúrese de que MCP esté conectado a la base de datos predeterminada del servidor'
+mcp.store_no_node_id: la operación de guardado no devolvió un id de nodo
+mcp.store_node_failed: 'no se pudo guardar el nodo: {{.Cause}}'
+mcp.target_node_not_found: 'nodo destino no encontrado: {{.ID}}'
+mcp.task_invalid_id: la creación de la tarea devolvió un id no válido
+mcp.task_no_id: la creación de la tarea no devolvió un id
+mcp.task_not_found: 'tarea no encontrada: {{.ID}}'
+mcp.title_required_for_new: se requiere title para las tareas nuevas
+mcp.tool_execution_failed: Error de ejecución de herramienta
+mcp.tool_permission_denied: 'permiso denegado: los roles {{.Roles}} no pueden usar la herramienta {{.Tool}}'
+mcp.unknown_role: 'rol MCP desconocido: {{.Role}}'
+mcp.unknown_tool: 'herramienta desconocida: {{.Name}}'
+mcp.update_task_failed: 'no se pudo actualizar la tarea: {{.Cause}}'
+multidb.access_mode_invalid: el modo de acceso debe ser 'read', 'write' o 'read_write'
+multidb.composite.alias_exists: el alias constituyente '{{.Alias}}' ya existe
+multidb.composite.alias_not_found: no se encontró el alias constituyente '{{.Alias}}'
+multidb.composite.constituent_database_not_found: 'no se encontró la base de datos constituyente ''{{.Database}}'': {{.Cause}}'
+multidb.composite.database_as_constituent: no se puede usar la base de datos compuesta '{{.Database}}' como constituyente
+multidb.composite.database_not_composite: la base de datos '{{.Database}}' no es una base de datos compuesta
+multidb.composite.duplicate_alias: 'alias constituyente duplicado: ''{{.Alias}}'''
+multidb.composite.persist_metadata_after_drop_failed: 'no se pudieron guardar los metadatos después de eliminar: {{.Cause}}'
+multidb.composite.secure_remote_credentials_failed: 'no se pudieron proteger las credenciales remotas del alias ''{{.Alias}}'': {{.Cause}}'
+multidb.constituent_alias_required: el alias del constituyente no puede estar vacío
+multidb.constituent_database_required: el nombre de la base de datos constituyente no puede estar vacío
+multidb.constituent_type_invalid: el tipo de constituyente debe ser 'local' o 'remote'
+multidb.credential_decrypt_key_required: se requiere la clave de cifrado de credenciales remotas para descifrar las credenciales almacenadas
+multidb.credential_format_invalid: la credencial remota no está cifrada con el formato esperado
+multidb.credential_key_config_required: la autenticación remota con usuario y contraseña requiere configurar la clave de cifrado de credenciales
+multidb.credential_payload_truncated: la carga de la credencial remota está truncada
+multidb.invalid_constituent: 'constituyente no válido en el índice {{.Index}}: {{.Cause}}'
+multidb.manager.alias_contains_whitespace: 'nombre de alias no válido: ''{{.Alias}}'' (no puede contener espacios en blanco)'
+multidb.manager.alias_reserved: 'nombre de alias no válido: ''{{.Alias}}'' (nombre reservado)'
+multidb.manager.delete_database_data_failed: 'no se pudieron eliminar los datos de la base de datos: {{.Cause}}'
+multidb.manager.get_constituent_storage_failed: 'no se pudo obtener el almacenamiento del constituyente ''{{.Database}}'': {{.Cause}}'
+multidb.manager.get_remote_storage_failed: 'no se pudo obtener el almacenamiento remoto del constituyente ''{{.Alias}}'': {{.Cause}}'
+multidb.manager.invalid_status: 'estado no válido: {{.Status}} (debe ser ''online'' u ''offline'')'
+multidb.manager.remote_engine_factory_not_configured: 'no se puede abrir el constituyente remoto ''{{.Alias}}'': la fábrica de motores remotos no está configurada'
+multidb.manager.remote_engine_factory_returned_nil: la fábrica de motores remotos devolvió nil para el constituyente '{{.Alias}}'
+multidb.manager.resolve_remote_credentials_failed: 'no se pudieron resolver las credenciales remotas del constituyente ''{{.Alias}}'': {{.Cause}}'
+multidb.max_bytes_exceeded: 'límite de almacenamiento superado: la base de datos ''{{.Name}}'' superaría el límite max_bytes (actual: {{.Current}} bytes, límite: {{.Limit}} bytes, entidad nueva: {{.EntitySize}} bytes)'
+multidb.max_concurrent_queries_reached: 'límite de consultas superado: la base de datos ''{{.Name}}'' alcanzó el límite max_concurrent_queries ({{.Current}}/{{.Limit}})'
+multidb.max_connections_reached: 'límite de conexiones superado: la base de datos ''{{.Name}}'' alcanzó el límite max_connections ({{.Current}}/{{.Limit}})'
+multidb.max_edges_reached: 'límite de almacenamiento superado: la base de datos ''{{.Name}}'' alcanzó el límite max_edges ({{.Current}}/{{.Limit}})'
+multidb.max_nodes_reached: 'límite de almacenamiento superado: la base de datos ''{{.Name}}'' alcanzó el límite max_nodes ({{.Current}}/{{.Limit}})'
+multidb.metadata.parse_failed: 'no se pudieron analizar los metadatos de la base de datos: {{.Cause}}'
+multidb.metadata.serialize_failed: 'no se pudieron serializar los metadatos de la base de datos: {{.Cause}}'
+multidb.oidc_credentials_forbidden: no se puede establecer el usuario ni la contraseña del constituyente remoto cuando el modo de autenticación es oidc_forwarding
+multidb.query_rate_exceeded: 'límite de frecuencia superado: la base de datos ''{{.Name}}'' superó max_queries_per_second ({{.Limit}})'
+multidb.remote_auth_mode_invalid: el modo de autenticación remota debe ser 'oidc_forwarding' o 'user_password'
+multidb.remote_password_empty: la contraseña del constituyente remoto no puede estar vacía
+multidb.remote_password_required: la contraseña del constituyente remoto no puede estar vacía cuando el modo de autenticación es user_password
+multidb.remote_uri_required: el URI del constituyente remoto no puede estar vacío
+multidb.remote_user_required: el usuario del constituyente remoto no puede estar vacío cuando el modo de autenticación es user_password
+multidb.storage.calculate_edge_size_failed: 'no se pudo calcular el tamaño de la relación: {{.Cause}}'
+multidb.storage.calculate_node_size_failed: 'no se pudo calcular el tamaño del nodo: {{.Cause}}'
+multidb.storage.encode_edge_failed: 'no se pudo codificar la relación: {{.Cause}}'
+multidb.storage.encode_node_failed: 'no se pudo codificar el nodo: {{.Cause}}'
+multidb.storage.get_all_edges_failed: 'no se pudieron obtener todas las relaciones: {{.Cause}}'
+multidb.storage.get_all_edges_for_size_calculation_failed: 'no se pudieron obtener todas las relaciones para calcular el tamaño: {{.Cause}}'
+multidb.storage.get_all_nodes_failed: 'no se pudieron obtener todos los nodos: {{.Cause}}'
+multidb.storage.get_all_nodes_for_size_calculation_failed: 'no se pudieron obtener todos los nodos para calcular el tamaño: {{.Cause}}'
+multidb.storage.get_edge_count_failed: 'no se pudo obtener el número de relaciones: {{.Cause}}'
+multidb.storage.get_incoming_edges_failed: 'no se pudieron obtener las relaciones entrantes: {{.Cause}}'
+multidb.storage.get_node_count_failed: 'no se pudo obtener el número de nodos: {{.Cause}}'
+multidb.storage.get_outgoing_edges_failed: 'no se pudieron obtener las relaciones salientes: {{.Cause}}'
+multidb.storage.get_size_failed: 'no se pudo obtener el tamaño del almacenamiento: {{.Cause}}'
+multidb.stored_password_missing: falta la contraseña del constituyente remoto
+multidb.write_rate_exceeded: 'límite de frecuencia superado: la base de datos ''{{.Name}}'' superó max_writes_per_second ({{.Limit}})'
+nornicdb.retention_sweep_budget_exhausted: presupuesto del barrido agotado ({{.Budget}} registros)
+nornicdbcli.adapter.bolt_failed: 'Bolt: {{.Cause}}'
+nornicdbcli.config.load_failed: 'no se pudo cargar la configuración desde {{.Path}}: {{.Cause}}'
+nornicdbcli.config.load_warning: '⚠️  Advertencia: no se pudo cargar la configuración desde {{.Path}}: {{.Cause}}'
+nornicdbcli.config.loaded: '📄 Configuración cargada desde: {{.Path}}'
+nornicdbcli.config.not_found: 📄 No se encontró un archivo de configuración (se usan valores predeterminados y variables de entorno)
+nornicdbcli.decay.load_nodes_failed: 'no se pudieron cargar los nodos: {{.Cause}}'
+nornicdbcli.decay.opening: Abriendo la base de datos en {{.Path}}...
+nornicdbcli.decay.per_label_breakdown: 'Desglose por etiqueta:'
+nornicdbcli.decay.per_label_row: '  {{printf "%-20s" .Label}}: {{.Count}} nodos, {{.Eligible}} aptos para supresión'
+nornicdbcli.decay.score_distribution: 'Distribución de puntuaciones:'
+nornicdbcli.decay.short: Operaciones de decaimiento de memoria
+nornicdbcli.decay.stats.short: Muestra las estadísticas de decaimiento
+nornicdbcli.decay.stats_summary: |-
+  Estadísticas de decaimiento (capa de conocimiento):
+    Total de nodos:        {{.Total}}
+    Visibilidad suprimida: {{.Suppressed}}
+    Con decaimiento:       {{.Scored}}
+    Sin perfil:            {{.NoDecay}}{{if .HasAverage}}
+    Puntuación media:      {{.Average}}{{end}}
+nornicdbcli.decay.suppress.short: Suprime los nodos por debajo del umbral de visibilidad
+nornicdbcli.decay.suppress_summary: |-
+  Supresión completada:
+    Recién suprimidos:     {{.Newly}}
+    Ya suprimidos:         {{.Already}}
+    Sobre el umbral:       {{.Above}}
+    Total evaluado:        {{.Total}}
+nornicdbcli.decay.suppress_warning: '  advertencia: no se pudo suprimir {{.Node}}: {{.Cause}}'
+nornicdbcli.decay.suppressing: Suprimiendo nodos con una puntuación inferior a {{.Threshold}} ({{.Count}} nodos por evaluar)...
+nornicdbcli.flag.address: Dirección de enlace (127.0.0.1 solo para localhost, 0.0.0.0 para todas las interfaces)
+nornicdbcli.flag.admin_password: 'Contraseña de administración (predeterminada: password)'
+nornicdbcli.flag.base_path: Ruta base de URL para el proxy inverso (p. ej., /nornicdb)
+nornicdbcli.flag.bolt_port: Puerto del protocolo Bolt (compatible con Neo4j)
+nornicdbcli.flag.cluster_advertise_address: Dirección anunciada del clúster (predeterminada a la dirección de enlace)
+nornicdbcli.flag.cluster_bind_address: Dirección de enlace del protocolo de replicación (p. ej., 127.0.0.1:7000)
+nornicdbcli.flag.cluster_data_dir: Directorio de estado del clúster (predeterminado <data-dir>/replication)
+nornicdbcli.flag.cluster_ha_peer_address: Dirección del par de espera de HA (host:port)
+nornicdbcli.flag.cluster_ha_role: 'Rol de espera de HA: primary|standby'
+nornicdbcli.flag.cluster_mode: 'Modo de clúster: standalone|ha_standby|raft|multi_region (vacío lo desactiva)'
+nornicdbcli.flag.cluster_node_id: ID del nodo del clúster (vacío=generación automática)
+nornicdbcli.flag.cluster_raft_bootstrap: Inicio de Raft (true para el primer nodo de un clúster nuevo)
+nornicdbcli.flag.cluster_raft_peers: 'Pares de Raft (formato: node2:host2:7000,node3:host3:7000)'
+nornicdbcli.flag.config: Ruta al archivo de configuración YAML (sustituye la detección automática)
+nornicdbcli.flag.data_dir: Directorio de datos
+nornicdbcli.flag.decay_threshold: 'Umbral de supresión de visibilidad (predeterminado: 0.05)'
+nornicdbcli.flag.embedding_cache: Tamaño de la caché de embeddings (0=desactivada, predeterminado 10000)
+nornicdbcli.flag.embedding_dimensions: Dimensiones de los embeddings
+nornicdbcli.flag.embedding_enabled: Activa la generación de embeddings (búsqueda semántica). Está desactivada salvo que se active mediante configuración o entorno.
+nornicdbcli.flag.embedding_gpu_layers: 'Capas de GPU para el proveedor local: -1=automático, 0=solo CPU'
+nornicdbcli.flag.embedding_key: Clave de la API de embeddings (openai)
+nornicdbcli.flag.embedding_model: Nombre del modelo de embeddings
+nornicdbcli.flag.embedding_provider: 'Proveedor de embeddings: local, ollama, openai'
+nornicdbcli.flag.embedding_url: URL de la API de embeddings (ollama/openai)
+nornicdbcli.flag.gc_percent: Intensidad de GC (100=predeterminada, un valor menor es más intenso)
+nornicdbcli.flag.gpu_backend: 'Backend de GPU: vulkan, cuda, metal, opencl (vacío=detección automática)'
+nornicdbcli.flag.headless: Desactiva la interfaz web y los puntos de conexión del navegador
+nornicdbcli.flag.http_port: Puerto de la API HTTP
+nornicdbcli.flag.log_queries: Registra todas las consultas Bolt en stdout (para depuración)
+nornicdbcli.flag.low_memory: Usa el mínimo de RAM (para entornos con recursos limitados)
+nornicdbcli.flag.mcp_enabled: Activa el servidor MCP (Model Context Protocol) para herramientas LLM
+nornicdbcli.flag.memory_limit: Límite de memoria en MB como entero (p. ej., 500; 0 sin límite)
+nornicdbcli.flag.no_auth: Desactiva la autenticación
+nornicdbcli.flag.parallel: Activa la ejecución paralela de consultas
+nornicdbcli.flag.parallel_batch_size: Tamaño mínimo de lote antes de paralelizar
+nornicdbcli.flag.parallel_workers: Máximo de procesos paralelos (0 = automático, usa todas las CPU)
+nornicdbcli.flag.pool_enabled: Activa la agrupación de objetos para reducir asignaciones
+nornicdbcli.flag.query_cache_size: Tamaño de la caché de planes de consulta (0 para desactivarla)
+nornicdbcli.flag.query_cache_ttl: TTL de la caché de planes de consulta
+nornicdbcli.flag.search_bm25_enabled: 'Activa la búsqueda de texto completo BM25 (predeterminado: true). Prevalece la configuración por base de datos en /admin/databases/{name}/config.'
+nornicdbcli.flag.search_bm25_warming: 'Inicio de BM25: startup al arrancar o lazy con la primera búsqueda. Predeterminado: startup.'
+nornicdbcli.flag.search_vector_enabled: Activa la búsqueda vectorial (ANN) para todas las estrategias. Si es false, los embeddings de nodos no se cargan en RAM. Prevalece la configuración por base de datos.
+nornicdbcli.flag.search_vector_warming: 'Inicio vectorial: startup o lazy. Predeterminado: startup.'
+nornicdbcli.flag.stdio_log_compact_seconds: Intervalo en segundos para comprobar el tamaño de los registros stdout/stderr
+nornicdbcli.flag.stdio_log_max_kb: Tamaño máximo de los registros stdout/stderr en KB antes del truncado automático (0 lo desactiva)
+nornicdbcli.flag.upgrade_storage: Autoriza la actualización unidireccional de la versión de almacenamiento mediante todas las migraciones admitidas. Haz una copia de seguridad antes de activarla.
+nornicdbcli.flag.uri: URI de NornicDB (para compatibilidad futura con clientes Bolt)
+nornicdbcli.init.create_directory_failed: 'no se pudo crear {{.Path}}: {{.Cause}}'
+nornicdbcli.init.progress: 📂 Inicializando la base de datos NornicDB en {{.Path}}
+nornicdbcli.init.short: Inicializa una nueva base de datos NornicDB
+nornicdbcli.init.summary: |-
+  ✅ Base de datos inicializada correctamente
+     Configuración: {{.Config}}
+
+  Pasos siguientes:
+    1. Inicia el servidor: nornicdb serve --data-dir {{.Data}}
+    2. Carga datos:        usa la ingesta Cypher/Bolt
+nornicdbcli.init.write_config_failed: 'no se pudo escribir la configuración: {{.Cause}}'
+nornicdbcli.operation.open_database_failed: 'no se pudo abrir la base de datos: {{.Cause}}'
+nornicdbcli.progress.initializing_gpu: 🎮 Inicializando la aceleración por GPU...
+nornicdbcli.progress.opening_database: 📂 Abriendo la base de datos...
+nornicdbcli.progress.setting_up_auth: 🔐 Configurando la autenticación...
+nornicdbcli.root.long: |-
+  NornicDB es una base de datos de grafos especializada escrita en Go,
+  diseñada para la memoria de agentes de IA y compatible con Neo4j Bolt/Cypher.
+
+  Funciones:
+    • Compatibilidad con el protocolo Neo4j Bolt
+    • Compatibilidad con el lenguaje de consultas Cypher
+    • Puntuación de la capa de conocimiento con perfiles de decaimiento declarativos
+    • Inferencia automática de relaciones
+    • Búsqueda vectorial integrada con clasificación híbrida RRF
+    • Generación de embeddings en el servidor
+nornicdbcli.root.short: NornicDB - Base de datos de grafos de alto rendimiento para agentes LLM
+nornicdbcli.serve.admin_created: '   ✅ Usuario administrador creado ({{.Username}})'
+nornicdbcli.serve.admin_setup_failed: '   ⚠️  No se pudo configurar el usuario administrador o ya existe'
+nornicdbcli.serve.authentication: |-
+  Autenticación:
+    • Usuario: {{.Username}}
+    • Contraseña: <redacted>
+nornicdbcli.serve.bolt_endpoint: '   Protocolo Bolt:      bolt://localhost:{{.Port}}'
+nornicdbcli.serve.bolt_tls_client_auth_failed: 'modo de autenticación de cliente TLS de Bolt no válido: {{.Cause}}'
+nornicdbcli.serve.bolt_tls_load_failed: 'no se pudo cargar TLS para Bolt: {{.Cause}}'
+nornicdbcli.serve.build_cuda: '      💡 Compila con Dockerfile.cuda para acelerar por GPU'
+nornicdbcli.serve.configured_jwt: '   Se usa el secreto JWT configurado ({{.Bytes}} bytes)'
+nornicdbcli.serve.create_authenticator_failed: 'no se pudo crear el autenticador: {{.Cause}}'
+nornicdbcli.serve.create_data_directory_failed: 'no se pudo crear el directorio de datos: {{.Cause}}'
+nornicdbcli.serve.create_server_failed: 'no se pudo crear el servidor: {{.Cause}}'
+nornicdbcli.serve.data_directory: '   Directorio de datos: {{.Path}}'
+nornicdbcli.serve.default_admin_password_warning: '⚠️  Advertencia: la contraseña predeterminada del administrador no se ha cambiado'
+nornicdbcli.serve.embedding_local: '   Embedding:           GGUF local ({{.Path}}/{{.Model}}.gguf, {{.Dimensions}} dims, GPU: {{.GPU}})'
+nornicdbcli.serve.embedding_model: '   Modelo de embedding: {{.Model}} ({{.Dimensions}} dims)'
+nornicdbcli.serve.embedding_url: '   URL de embeddings:   {{.URL}}'
+nornicdbcli.serve.embeddings_disabled: '   Embeddings:          ❌ desactivados (define NORNICDB_EMBEDDING_ENABLED=true o usa --embedding-enabled)'
+nornicdbcli.serve.embeddings_enabled: '   Embeddings:          ✅ activados ({{.Provider}}, {{.Model}}, {{.Dimensions}} dims)'
+nornicdbcli.serve.endpoints: |-
+  Puntos de conexión:
+    • API HTTP:      http://{{.Address}}:{{.HTTPPort}}
+    • Bolt:          bolt://{{.Address}}:{{.BoltPort}}
+    • Estado:        http://{{.Address}}:{{.HTTPPort}}/health
+    • Búsqueda:      POST http://{{.Address}}:{{.HTTPPort}}/nornicdb/search
+    • Cypher:        POST http://{{.Address}}:{{.HTTPPort}}/db/nornicdb/tx/commit{{if .MCPEnabled}}
+    • MCP:           {{.MCP}}{{end}}
+    • Telemetría:    {{.Metrics}}{{if .PprofEnabled}}
+    • pprof:         {{.Pprof}}{{end}}
+nornicdbcli.serve.gc_percent: '   Porcentaje de GC:    {{.Value}}% (más intenso)'
+nornicdbcli.serve.gpu_detected_no_cuda: '   ⚠️  GPU detectada: {{.Name}} ({{.Memory}}MB); CUDA no está compilado, se usa CPU'
+nornicdbcli.serve.gpu_disabled: '   ⚠️  GPU desactivada (reserva de CPU activa)'
+nornicdbcli.serve.gpu_enabled: '   ✅ GPU activada: {{.Name}} ({{.Backend}}, {{.Memory}}MB)'
+nornicdbcli.serve.gpu_unavailable: '   ⚠️  GPU no disponible: {{.Cause}} (se usa CPU)'
+nornicdbcli.serve.http_endpoint: '   API HTTP:            http://localhost:{{.Port}}'
+nornicdbcli.serve.localization_init_failed: 'no se pudo inicializar la localización: {{.Cause}}'
+nornicdbcli.serve.long: Inicia el servidor NornicDB con el protocolo Bolt y puntos de conexión de la API HTTP
+nornicdbcli.serve.memory_limit: '   Límite de memoria:   {{.Value}}'
+nornicdbcli.serve.memory_unlimited: '   Límite de memoria:   ilimitado'
+nornicdbcli.serve.no_jwt: '   ⚠️  No hay un secreto JWT; los tokens se invalidarán al reiniciar.'
+nornicdbcli.serve.object_pooling: '   Agrupación de objetos: ✅ activada'
+nornicdbcli.serve.observability_init_failed: 'no se pudo inicializar la observabilidad: {{.Cause}}'
+nornicdbcli.serve.parallel_disabled: '   Ejecución paralela:  ❌ desactivada'
+nornicdbcli.serve.parallel_enabled: '   Ejecución paralela:  ✅ activada ({{.Workers}} procesos, lote {{.Batch}})'
+nornicdbcli.serve.pprof_listener_failed: 'no se pudo iniciar el listener de pprof: {{.Cause}}'
+nornicdbcli.serve.press_to_stop: Pulsa Ctrl+C para detener el servidor
+nornicdbcli.serve.query_cache: '   Caché de consultas:  ✅ {{.Size}} entradas, TTL {{.TTL}}'
+nornicdbcli.serve.ready: ✅ NornicDB está listo.
+nornicdbcli.serve.short: Inicia el servidor NornicDB
+nornicdbcli.serve.start_server_failed: 'no se pudo iniciar el servidor: {{.Cause}}'
+nornicdbcli.serve.starting: 🚀 Iniciando NornicDB {{.Version}}
+nornicdbcli.serve.stopped: ✅ El servidor se detuvo correctamente
+nornicdbcli.serve.supervised_run_failed: 'falló la ejecución supervisada: {{.Cause}}'
+nornicdbcli.serve.telemetry_listener_failed: 'no se pudo iniciar el listener de telemetría: {{.Cause}}'
+nornicdbcli.shell.goodbye: 👋 Adiós.
+nornicdbcli.shell.intro: |-
+  ✅ Conexión con NornicDB establecida
+  Escribe 'exit' o pulsa Ctrl+D para salir
+  Introduce consultas Cypher (terminadas con punto y coma o una línea nueva):
+nornicdbcli.shell.opening: 📂 Abriendo la base de datos en {{.Path}}...
+nornicdbcli.shell.query_failed: ❌ No se pudo ejecutar la consulta
+nornicdbcli.shell.query_succeeded: ✅ Consulta ejecutada correctamente
+nornicdbcli.shell.read_input_failed: 'no se pudo leer la entrada: {{.Cause}}'
+nornicdbcli.shell.rows: ({{.Count}} filas)
+nornicdbcli.shell.rows.one: ({{.Count}} fila)
+nornicdbcli.shell.short: Consola interactiva de Cypher
+nornicdbcli.transaction.already_active: ya hay una transacción activa
+nornicdbcli.transaction.database_not_initialized: la base de datos no está inicializada
+nornicdbcli.transaction.not_found: no se encontró la transacción
+nornicdbcli.validation.decay_stats_storage: decay stats requiere almacenamiento BadgerEngine
+nornicdbcli.validation.decay_suppress_storage: decay suppress requiere almacenamiento BadgerEngine
+nornicdbcli.validation.invalid_memory_limit: 'valor no válido de --memory-limit {{printf "%q" .Value}}: {{.Cause}}'
+nornicdbcli.validation.invalid_stdio_interval: 'stdio-log-compact-seconds no válido ({{.Value}}): debe ser >= 0'
+nornicdbcli.validation.shell_unavailable: el ejecutor de Cypher no está disponible
+nornicdbcli.version.short: Muestra la información de versión
+nornicdbcore.auto_embed_not_enabled: auto-embed no está habilitado
+nornicdbcore.backup_edges_read_failed: 'no se pudieron obtener las relaciones: {{.Cause}}'
+nornicdbcore.backup_marshal_failed: 'no se pudo serializar la copia de seguridad: {{.Cause}}'
+nornicdbcore.backup_nodes_read_failed: 'no se pudieron obtener los nodos: {{.Cause}}'
+nornicdbcore.backup_parse_failed: 'no se pudo analizar la copia de seguridad: {{.Cause}}'
+nornicdbcore.backup_read_failed: 'no se pudo leer la copia de seguridad: {{.Cause}}'
+nornicdbcore.backup_write_failed: 'no se pudo escribir la copia de seguridad: {{.Cause}}'
+nornicdbcore.bootstrap_ddl_command_unsupported: comando DDL de arranque no admitido {{.CommandType}}
+nornicdbcore.bootstrap_ddl_expected: no es una instrucción DDL de política de conocimiento
+nornicdbcore.bootstrap_knowledge_policy_failed: 'no se pudo crear la política de conocimiento predeterminada para el espacio de nombres {{printf "%q" .Namespace}}: {{.Cause}}'
+nornicdbcore.clear_embeddings_unsupported: el motor de almacenamiento no admite ClearAllEmbeddings
+nornicdbcore.close_failed: 'errores de cierre: {{.Errors}}'
+nornicdbcore.consent_check_failed: 'error al comprobar el consentimiento: {{.Cause}}'
+nornicdbcore.consent_existing_check_failed: 'error al comprobar el consentimiento existente: {{.Cause}}'
+nornicdbcore.consent_get_failed: 'error al obtener el consentimiento: {{.Cause}}'
+nornicdbcore.consent_purpose_required: se requiere el propósito
+nornicdbcore.consent_stream_failed: 'error al transmitir los nodos de consentimiento: {{.Cause}}'
+nornicdbcore.consent_user_id_required: se requiere user_id
+nornicdbcore.cypher_row_decode_failed: 'no se pudo decodificar la fila: {{.Cause}}'
+nornicdbcore.data_directory_create_failed: 'no se pudo crear el directorio de datos: {{.Cause}}'
+nornicdbcore.database_closed: la base de datos está cerrada
+nornicdbcore.decode_assignment_failed: no se puede asignar {{.ValueType}} a {{.TargetType}}
+nornicdbcore.decode_destination_required: dest debe ser un puntero no nulo
+nornicdbcore.decode_field_failed: 'campo {{.Field}}: {{.Cause}}'
+nornicdbcore.embed_batch_failed: 'falló el lote {{.Start}}-{{.End}}/{{.Total}} para {{.NodeID}}: {{.Cause}}'
+nornicdbcore.embedding_count_mismatch: 'el recuento de embeddings no coincide para {{.NodeID}}: se obtuvieron {{.Actual}}, se esperaban {{.Expected}}'
+nornicdbcore.encryption_dek_ciphertext_decode_failed: 'no se pudo decodificar el texto cifrado DEK persistido: {{.Cause}}'
+nornicdbcore.encryption_dek_directory_create_failed: 'no se pudo crear el directorio de datos para los metadatos DEK: {{.Cause}}'
+nornicdbcore.encryption_dek_empty: el proveedor devolvió un DEK de texto plano vacío
+nornicdbcore.encryption_dek_generate_failed: 'no se pudo generar el DEK respaldado por el proveedor: {{.Cause}}'
+nornicdbcore.encryption_dek_metadata_decode_failed: 'no se pudieron decodificar los metadatos DEK persistidos: {{.Cause}}'
+nornicdbcore.encryption_dek_metadata_encode_failed: 'no se pudieron codificar los metadatos DEK: {{.Cause}}'
+nornicdbcore.encryption_dek_metadata_persist_failed: 'no se pudieron persistir los metadatos DEK: {{.Cause}}'
+nornicdbcore.encryption_dek_provider_mismatch: el DEK persistido se creó con el proveedor {{printf "%q" .PersistedProvider}}, no con {{printf "%q" .ConfiguredProvider}}
+nornicdbcore.encryption_dek_rotate_failed: 'no se pudo rotar el DEK envuelto persistido: {{.Cause}}'
+nornicdbcore.encryption_dek_unwrap_failed: 'no se pudo desenvolver el DEK persistido: {{.Cause}}'
+nornicdbcore.encryption_master_key_invalid: 'clave maestra de cifrado no válida: {{.Cause}}'
+nornicdbcore.encryption_master_key_length_invalid: se esperaba una clave de 32 bytes como base64, hex o cadena sin procesar
+nornicdbcore.encryption_master_key_required: se requiere una clave maestra para el cifrado respaldado por proveedor
+nornicdbcore.encryption_password_required: el cifrado está habilitado, pero no se proporcionó ninguna contraseña
+nornicdbcore.encryption_provider_initialize_failed: 'no se pudo inicializar el proveedor de cifrado {{printf "%q" .Provider}}: {{.Cause}}'
+nornicdbcore.encryption_salt_generate_failed: 'no se pudo generar el salt de cifrado: {{.Cause}}'
+nornicdbcore.encryption_salt_save_failed: 'no se pudo guardar el salt de cifrado: {{.Cause}}'
+nornicdbcore.find_similar_limit_invalid: el límite debe ser mayor que 0
+nornicdbcore.index_type_unsupported: 'tipo de índice no admitido: {{.IndexType}} (use: property, fulltext, vector, range)'
+nornicdbcore.inference_base_storage_unavailable: 'la inferencia no está disponible: el almacenamiento base es nil'
+nornicdbcore.inference_initialize_failed: 'no se pudo inicializar la inferencia: {{.Cause}}'
+nornicdbcore.invalid_id: ID no válido
+nornicdbcore.invalid_input: entrada no válida
+nornicdbcore.nil_database: 'nornicdb: DB es nil'
+nornicdbcore.node_already_exists: el nodo {{printf "%q" .NodeID}} ya existe
+nornicdbcore.node_embedding_missing: el nodo no tiene embedding
+nornicdbcore.node_id_required: el ID del nodo no debe estar vacío
+nornicdbcore.not_found: no se encontró
+nornicdbcore.persistent_storage_open_failed: 'no se pudo abrir el almacenamiento persistente: {{.Cause}}'
+nornicdbcore.query_embedding_dimension_mismatch: las dimensiones del embedding de consulta no coinciden
+nornicdbcore.query_embedding_dimension_mismatch_for_database: 'base de datos {{printf "%q" .Database}}: las dimensiones del embedding de consulta no coinciden (dimensiones del índice {{.IndexDimensions}}, dimensiones de la consulta {{.QueryDimensions}})'
+nornicdbcore.replication_replicator_create_failed: 'replicación: no se pudo crear el replicador: {{.Cause}}'
+nornicdbcore.replication_start_failed: 'replicación: no se pudo iniciar: {{.Cause}}'
+nornicdbcore.replication_storage_adapter_create_failed: 'replicación: no se pudo crear el adaptador de almacenamiento: {{.Cause}}'
+nornicdbcore.restore_edge_failed: 'no se pudo restaurar la relación {{.EdgeID}}: {{.Cause}}'
+nornicdbcore.restore_mvcc_heads_failed: 'no se pudieron reconstruir las cabeceras MVCC después de la restauración: {{.Cause}}'
+nornicdbcore.restore_node_failed: 'no se pudo restaurar el nodo {{.NodeID}}: {{.Cause}}'
+nornicdbcore.restore_temporal_indexes_failed: 'no se pudieron reconstruir los índices temporales después de la restauración: {{.Cause}}'
+nornicdbcore.schema_manager_not_initialized: el administrador de esquemas no está inicializado
+nornicdbcore.search_base_storage_unavailable: 'el servicio de búsqueda no está disponible: el almacenamiento base es nil'
+nornicdbcore.search_database_not_initialized: el servicio de búsqueda no está inicializado para la base de datos {{printf "%q" .Database}}
+nornicdbcore.search_persistence_database_invalid: 'nombre de base de datos no válido para la persistencia de búsqueda: {{printf "%q" .Database}}'
+nornicdbcore.search_service_not_initialized: el servicio de búsqueda no está inicializado
+nornicdbcore.search_system_database_unsupported: el servicio de búsqueda no está disponible para la base de datos del sistema
+nornicdbcore.source_node_not_found: no se encontró el nodo de origen
+nornicdbcore.storage_engine_not_initialized: 'nornicdb: el motor de almacenamiento no está inicializado'
+nornicdbcore.storage_probe_failed: 'nornicdb: error al sondear el almacenamiento: {{.Cause}}'
+nornicdbcore.target_node_not_found: no se encontró el nodo de destino
+nornicdbcore.wal_initialize_failed: 'no se pudo inicializar WAL: {{.Cause}}'
+qdrant.authentication_required: 'se requiere autenticación: {{.Cause}}'
+qdrant.collection_name_required: se requiere collection_name
+qdrant.collection_not_found: no se encontró la colección "{{.Name}}"
+qdrant.collection_not_found_with_cause: 'no se encontró la colección: {{.Cause}}'
+qdrant.collection_store_not_configured: almacén de colecciones no configurado
+qdrant.create_backup_failed: 'no se pudo crear la copia de seguridad: {{.Cause}}'
+qdrant.create_collection_failed: 'no se pudo crear la colección: {{.Cause}}'
+qdrant.create_points_failed: 'no se pudieron crear los puntos: {{.Cause}}'
+qdrant.database_access_denied: no se permite el acceso a la base de datos "{{.Name}}"
+qdrant.database_write_denied: no se permite escribir en la base de datos "{{.Name}}"
+qdrant.delete_collection_failed: 'no se pudo eliminar la colección: {{.Cause}}'
+qdrant.embed_query_failed: 'no se pudo generar el embedding de la consulta: {{.Cause}}'
+qdrant.field_required: se requiere {{.Field}}
+qdrant.fields_required: se requieren {{.Fields}}
+qdrant.full_snapshot_storage_required: las instantáneas completas requieren almacenamiento base
+qdrant.get_collection_points_failed: 'no se pudieron obtener los puntos de la colección: {{.Cause}}'
+qdrant.get_edges_failed: 'no se pudieron obtener las relaciones: {{.Cause}}'
+qdrant.get_nodes_failed: 'no se pudieron obtener los nodos: {{.Cause}}'
+qdrant.get_points_failed: 'no se pudieron obtener los puntos: {{.Cause}}'
+qdrant.hnsw_ef_too_large: hnsw_ef demasiado grande
+qdrant.index_point_failed: 'no se pudo indexar el punto {{.PointID}}: {{.Cause}}'
+qdrant.invalid_or_expired_token: token no válido o caducado
+qdrant.invalid_vectors_config: vectors_config no válido
+qdrant.limit_too_large: 'el límite es demasiado grande: {{.Limit}} > {{.Maximum}}'
+qdrant.list_collections_failed: 'no se pudieron enumerar las colecciones: {{.Cause}}'
+qdrant.missing_vector_for_point: falta el vector "{{.Name}}" para el punto {{.PointID}}
+qdrant.negative_average_failed: 'no se pudo calcular el promedio de vectores negativos: no hay vectores válidos'
+qdrant.offset_too_large: offset demasiado grande
+qdrant.permission_denied: permiso denegado
+qdrant.point_id_and_vectors_required: se requieren el id del punto y los vectores
+qdrant.point_not_found_with_cause: 'no se encontró el punto: {{.Cause}}'
+qdrant.points_selector_invalid: selector de puntos no válido
+qdrant.positive_average_failed: 'no se pudo calcular el promedio de vectores positivos: no hay vectores válidos'
+qdrant.positive_example_required: se requiere al menos un ejemplo positivo
+qdrant.query_variant_missing: la consulta sin Query.variant no está implementada
+qdrant.query_variant_unsupported: la variante de consulta {{.Variant}} no está implementada
+qdrant.read_existing_points_failed: 'no se pudieron leer los puntos existentes: {{.Cause}}'
+qdrant.recommend_dimension_mismatch: 'las dimensiones no coinciden: los vectores positivos tienen dimensión {{.Positive}} y los negativos dimensión {{.Negative}}'
+qdrant.scan_points_failed: 'no se pudieron examinar los puntos: {{.Cause}}'
+qdrant.snapshot_delete_failed: 'no se pudo eliminar la instantánea: {{.Cause}}'
+qdrant.snapshot_directory_create_failed: 'no se pudo crear el directorio de instantáneas: {{.Cause}}'
+qdrant.snapshot_list_failed: 'no se pudieron enumerar las instantáneas: {{.Cause}}'
+qdrant.snapshot_not_found: no se encontró la instantánea "{{.Name}}"
+qdrant.snapshot_save_failed: 'no se pudo guardar la instantánea: {{.Cause}}'
+qdrant.text_query_embeddings_required: la consulta de texto requiere embeddings; habilite los embeddings de NornicDB y configure EmbedQuery
+qdrant.too_many_points: 'demasiados puntos: {{.Count}} > {{.Maximum}}'
+qdrant.update_point_failed: 'no se pudo actualizar el punto {{.PointID}}: {{.Cause}}'
+qdrant.vector_dimension_mismatch: 'la dimensión del vector no coincide: se obtuvo {{.Got}}, se esperaba {{.Expected}}'
+qdrant.vector_input_variant_unsupported: la variante de entrada de vector {{.Variant}} no está implementada
+qdrant.vector_kind_unsupported: tipo de vector no compatible
+qdrant.vector_mutations_disabled: las mutaciones de vectores están deshabilitadas porque los embeddings administrados por NornicDB están habilitados; establezca NORNICDB_EMBEDDING_ENABLED=false para administrar vectores mediante Qdrant gRPC
+qdrant.vector_not_found_for_point: no se encontró el vector del punto
+qdrant.vector_size_positive: el tamaño del vector debe ser positivo
+qdrant.vectors_type_unsupported: tipo de vectores no compatible
+replication.closed: el replicador está cerrado
+replication.config.ha_peer_address_required: el modo {{.Mode}} requiere {{.EnvVar}}
+replication.config.ha_role_required: el modo {{.Mode}} requiere {{.EnvVar}} ({{.PrimaryRole}} o {{.StandbyRole}})
+replication.config.invalid_cross_region_sync_mode: 'modo de sincronización entre regiones no válido: {{.SyncMode}} (debe ser ''{{.AsyncMode}}'' o ''{{.QuorumMode}}'')'
+replication.config.invalid_ha_role: 'rol de HA no válido: {{.Role}} (debe ser ''{{.PrimaryRole}}'' o ''{{.StandbyRole}}'')'
+replication.config.invalid_ha_sync_mode: 'modo de sincronización de HA no válido: {{.SyncMode}} (debe ser ''{{.AsyncMode}}'' o ''{{.QuorumMode}}'')'
+replication.config.invalid_tls_min_version: 'versión mínima de TLS no válida: {{.Version}} (debe ser ''{{.TLS12}}'' o ''{{.TLS13}}'')'
+replication.config.node_id_required: se requiere {{.EnvVar}}
+replication.config.raft_peers_required: el modo {{.Mode}} requiere {{.PeersEnvVar}} o {{.BootstrapEnvVar}}=true
+replication.config.region_id_required: el modo {{.Mode}} requiere {{.EnvVar}}
+replication.config.secret_too_short: el secreto de replicación debe tener al menos {{.MinLength}} caracteres
+replication.config.tls_ca_required: la verificación de clientes TLS está habilitada, pero no se estableció {{.EnvVar}}
+replication.config.tls_cert_required: TLS está habilitado, pero no se estableció {{.EnvVar}}
+replication.config.tls_key_required: TLS está habilitado, pero no se estableció {{.EnvVar}}
+replication.config.unknown_mode: 'modo de replicación desconocido: {{.Mode}}'
+replication.engine.edge_required: la relación es nula
+replication.engine.encode_bulk_create_edges_failed: 'error al codificar la creación masiva de relaciones: {{.Cause}}'
+replication.engine.encode_bulk_create_nodes_failed: 'error al codificar la creación masiva de nodos: {{.Cause}}'
+replication.engine.encode_bulk_delete_edges_failed: 'error al codificar la eliminación masiva de relaciones: {{.Cause}}'
+replication.engine.encode_bulk_delete_nodes_failed: 'error al codificar la eliminación masiva de nodos: {{.Cause}}'
+replication.engine.encode_delete_edge_failed: 'error al codificar la solicitud de eliminación de relación: {{.Cause}}'
+replication.engine.encode_delete_prefix_failed: 'error al codificar la eliminación por prefijo: {{.Cause}}'
+replication.engine.encode_edge_failed: 'error al codificar la relación: {{.Cause}}'
+replication.engine.encode_node_failed: 'error al codificar el nodo: {{.Cause}}'
+replication.engine.node_required: el nodo es nulo
+replication.ha.ack_timed_out: 'se agotó el tiempo de espera de confirmación de replicación (mode={{.SyncMode}}, target={{.Target}}): {{.Cause}}'
+replication.ha.flush_wal_failed: 'error al vaciar el WAL: {{.Cause}}'
+replication.ha.init_transport_failed: 'error al inicializar el transporte: {{.Cause}}'
+replication.ha.primary_cannot_receive_wal: el nodo primario no puede recibir el WAL
+replication.ha.start_primary_failed: 'error al iniciar el nodo primario: {{.Cause}}'
+replication.ha.start_standby_failed: 'error al iniciar el nodo en espera: {{.Cause}}'
+replication.no_leader: no hay ningún líder disponible
+replication.not_leader: el nodo no es líder
+replication.not_ready: el replicador no está listo
+replication.operation_timed_out: la operación agotó el tiempo de espera
+replication.raft.append_entries_request_required: la solicitud de adición de entradas es nula
+replication.raft.apply_queue_full: la cola de aplicación está llena
+replication.raft.apply_timed_out: se agotó el tiempo de espera de aplicación
+replication.raft.commit_timed_out: se agotó el tiempo de espera de confirmación después de {{.Timeout}}
+replication.raft.connect_peer_failed: 'error al conectar con {{.Address}}: {{.Cause}}'
+replication.raft.forward_to_leader_failed: 'error al reenviar al líder: {{.Cause}}'
+replication.raft.init_transport_failed: 'error al inicializar el transporte: {{.Cause}}'
+replication.raft.send_append_entries_failed: 'error al enviar la adición de entradas: {{.Cause}}'
+replication.raft.send_vote_request_failed: 'error al enviar la solicitud de voto: {{.Cause}}'
+replication.raft.transport_not_configured: no hay ningún transporte configurado
+replication.raft.vote_request_required: la solicitud de voto es nula
+replication.rpc.authentication_fields_missing: faltan campos de autenticación
+replication.rpc.command_required: el comando es nulo
+replication.rpc.connection_closed: conexión cerrada
+replication.rpc.decode_failed: 'no se pudo decodificar{{if .Operation}} {{.Operation}}{{end}}: {{.Cause}}'
+replication.rpc.encode_failed: 'no se pudo codificar{{if .Operation}} {{.Operation}}{{end}}: {{.Cause}}'
+replication.rpc.invalid_signature: firma no válida
+replication.rpc.message_too_large: 'mensaje demasiado grande: {{.Actual}} > {{.Maximum}}'
+replication.rpc.not_connected: sin conexión
+replication.rpc.read_failed: '{{.Cause}}'
+replication.rpc.remote_apply_failed: '{{.Cause}}'
+replication.rpc.timestamp_outside_allowed_skew: la marca de tiempo está fuera del desfase permitido
+replication.rpc.write_failed: 'error de escritura: {{.Cause}}'
+replication.standby_mode: el nodo está en modo de espera
+replication.storage.command_required: el comando es nulo
+replication.storage.cypher_executor_unavailable: el ejecutor de Cypher no está disponible; no se puede ejecutar el comando Cypher
+replication.storage.cypher_query_empty: la consulta Cypher está vacía
+replication.storage.decode_batch_failed: 'error al decodificar el lote: {{.Cause}}'
+replication.storage.decode_bulk_create_edges_failed: 'error al decodificar la creación masiva de relaciones: {{.Cause}}'
+replication.storage.decode_bulk_create_nodes_failed: 'error al decodificar la creación masiva de nodos: {{.Cause}}'
+replication.storage.decode_bulk_delete_edges_failed: 'error al decodificar la eliminación masiva de relaciones: {{.Cause}}'
+replication.storage.decode_bulk_delete_nodes_failed: 'error al decodificar la eliminación masiva de nodos: {{.Cause}}'
+replication.storage.decode_cypher_command_failed: 'error al deserializar el comando Cypher: {{.Cause}}'
+replication.storage.decode_delete_edge_failed: 'error al decodificar la solicitud de eliminación de relación: {{.Cause}}'
+replication.storage.decode_delete_prefix_failed: 'error al decodificar la solicitud de eliminación por prefijo: {{.Cause}}'
+replication.storage.decode_edge_failed: 'error al decodificar la relación: {{.Cause}}'
+replication.storage.decode_node_failed: 'error al decodificar el nodo: {{.Cause}}'
+replication.storage.decode_set_property_failed: 'error al decodificar la solicitud de asignación de propiedad: {{.Cause}}'
+replication.storage.decode_snapshot_failed: 'error al decodificar la instantánea: {{.Cause}}'
+replication.storage.encode_snapshot_failed: 'error al codificar la instantánea: {{.Cause}}'
+replication.storage.execute_cypher_failed: 'error al ejecutar la consulta Cypher: {{.Cause}}'
+replication.storage.flush_wal_failed: 'error al vaciar el wal: {{.Cause}}'
+replication.storage.get_all_edges_failed: 'error al obtener todas las relaciones: {{.Cause}}'
+replication.storage.get_all_nodes_failed: 'error al obtener todos los nodos: {{.Cause}}'
+replication.storage.prefix_required: se requiere el prefijo
+replication.storage.read_snapshot_failed: 'error al leer la instantánea: {{.Cause}}'
+replication.storage.read_wal_entries_failed: 'error al leer las entradas del WAL: {{.Cause}}'
+replication.storage.restore_edge_failed: 'error al restaurar la relación: {{.Cause}}'
+replication.storage.restore_node_failed: 'error al restaurar el nodo: {{.Cause}}'
+replication.storage.unknown_command_type: 'tipo de comando desconocido: {{.CommandType}}'
+replication.storage.wal_append_failed: 'error al añadir datos al WAL: {{.Cause}}'
+replication.storage.wal_create_failed: 'error al crear el WAL: {{.Cause}}'
+replication.storage.wal_directory_create_failed: 'error al crear el directorio del WAL: {{.Cause}}'
+replication.transport.closed: el transporte está cerrado
+replication.transport.connect_failed: 'error al conectar con {{.Address}}: {{.Cause}}'
+replication.transport.invalid_tls_ca: archivo de CA de TLS no válido
+replication.transport.listen_failed: 'error al escuchar en {{.Address}}: {{.Cause}}'
+replication.transport.load_tls_cert_key_failed: 'error al cargar el certificado o la clave TLS: {{.Cause}}'
+replication.transport.read_tls_ca_failed: 'error al leer el archivo de CA de TLS: {{.Cause}}'
+replication.transport.unknown_tls_cipher_suite: 'suite de cifrado TLS desconocida: {{.CipherSuite}}'
+request.body_read_failed: no se pudo leer el cuerpo de la solicitud
+request.required: se requiere una solicitud
+retention.erasure_id_required: se requiere el id de borrado
+retention.hold_id_required: se requiere el id de la retención legal
+retention.manager_disabled: el administrador de retención está deshabilitado
+retention.policy_id_required: se requiere el id de la política
+runtime.log.heimdall_operator: '{{.Message}}'
+runtime.log.heimdall_tool_call: '[Heimdall] Tool call: request={{.RequestID}} action={{.Action}} params={{.Params}}'
+runtime.log.inference_edge_decay_started: '[EDGE-DECAY] Started | decay_rate={{.DecayRate}} min_conf={{.MinConfidence}} scan_interval={{.ScanInterval}} grace={{.GracePeriod}}'
+runtime.log.inference_heimdall_batch_error: '[HEIMDALL] ⚠️ Batch error, fail-open: {{.Error}}'
+runtime.log.inference_operator: '{{.Message}}'
+runtime.log.observability_instance_id_resolved: 'INFO observability: service.instance.id={{printf "%q" .InstanceID}} (resuelto desde {{.Source}})'
+runtime.log.observability_operator: '{{.Message}}'
+runtime.log.observability_tenant_labels_resolved: se resolvió la activación de etiquetas de inquilino
+runtime.log.replication_operator: '{{.Message}}'
+runtime.log.replication_raft_became_leader: '[Raft {{.NodeID}}] Became leader for term {{.Term}}'
+search-log.log.bm25_engine_selected: 'Motor BM25 de búsqueda seleccionado: {{.Engine}}'
+search-log.log.operator: '{{.Message}}'
+search.auto_embed_not_enabled: El embedding automático no está habilitado
+search.candidate_generation_failed: 'error al generar candidatos: {{.Cause}}'
+search.cluster_hnsw_lookup_not_configured: búsqueda HNSW por grupo no configurada
+search.cluster_index_not_clustered: el índice de agrupación no está agrupado
+search.cluster_query_dimensions_mismatch: 'error de búsqueda por grupos: las dimensiones de la consulta {{.QueryDimensions}} != las dimensiones del índice {{.IndexDimensions}}'
+search.cluster_search_failed: 'error de búsqueda por grupos: {{.Cause}}'
+search.clustering_failed: 'error de agrupación: {{.Cause}}'
+search.clustering_not_enabled: agrupación no habilitada; llame primero a EnableClustering()
+search.cuda_not_available: 'cuda: CUDA no está disponible en este sistema'
+search.dimensions_must_be_positive: las dimensiones deben ser > 0; se recibió {{.Dimensions}}
+search.exact_scoring_failed: 'error de puntuación exacta: {{.Cause}}'
+search.failed: 'búsqueda fallida: {{.Cause}}'
+search.gpu_accelerator_unavailable: no hay ningún acelerador GPU disponible
+search.gpu_embedding_index_unavailable: índice de embeddings de GPU no disponible
+search.gpu_kmeans_clustered_index_required: la generación de candidatos k-means por GPU requiere un índice agrupado
+search.gpu_not_enabled: gpu no habilitada
+search.hnsw_gpu_build_dimension_invalid: 'dimensión de compilación HNSW con GPU no válida: {{.Dimensions}}'
+search.hnsw_index_creation_failed: 'no se pudo crear el índice HNSW: {{.Cause}}'
+search.index_building: se está construyendo el índice de búsqueda; inténtelo de nuevo cuando finalice
+search.ivf_coarse_training_failed: 'error en el entrenamiento grueso de IVF: {{.Cause}}'
+search.ivfpq_dimensions_invalid: dimensiones no válidas
+search.ivfpq_index_not_configured: índice IVFPQ no configurado
+search.ivfpq_segments_invalid: 'segmentos PQ no válidos: dimensiones={{.Dimensions}} segmentos={{.Segments}}'
+search.ivfpq_training_vectors_insufficient: vectores de entrenamiento insuficientes ({{.VectorCount}}) para listas IVF ({{.ListCount}})
+search.ivfpq_vector_store_required: se requiere el almacén de archivos vectoriales
+search.ivfpq_vector_store_unavailable: almacén de archivos vectoriales no disponible para la compilación IVFPQ
+search.no_clusters: no hay grupos
+search.node_has_no_embedding: El nodo no tiene embedding
+search.node_not_found: No se encontró el nodo '{{.ID}}'
+search.pq_codebook_training_failed: 'error en el entrenamiento del libro de códigos PQ: {{.Cause}}'
+search.query_chunk_failed: 'no se pudo dividir la consulta: {{.Cause}}'
+search.query_chunking_failed: no se pudo dividir la consulta
+search.query_embedding_required: se requiere el embedding de la consulta
+search.query_required: se requiere una consulta
+search.rerank_api_status: la API de reclasificación devolvió el estado {{.Status}}
+search.rerank_request_creation_failed: 'no se pudo crear la solicitud: {{.Cause}}'
+search.rerank_request_failed: 'error en la solicitud de reclasificación: {{.Cause}}'
+search.rerank_request_marshal_failed: 'no se pudo serializar la solicitud: {{.Cause}}'
+search.rerank_response_parse_failed: 'no se pudo analizar la respuesta: {{.Cause}}'
+search.rerank_response_unrecognized: no se pudo analizar la respuesta de reclasificación
+search.searcher_required: se requiere un servicio de búsqueda
+search.service_unavailable: servicio de búsqueda no disponible
+search.vector_dimensions_invalid: dimensiones vectoriales no válidas
+search.vector_embedding_required: la búsqueda vectorial requiere un embedding
+search.vector_file_dimensions_mismatch: dimensiones del archivo vectorial {{.FileDimensions}} != dimensiones del almacén {{.StoreDimensions}}
+search.vector_file_magic_invalid: firma de archivo vectorial no válida
+search.vector_file_version_unsupported: versión de archivo vectorial {{.Version}} no compatible
+search.vector_index_nil: el índice vectorial es nulo
+search.vector_index_unavailable: índice vectorial no disponible
+search.vector_meta_dimensions_mismatch: dimensiones de metadatos {{.MetaDimensions}} != dimensiones del almacén {{.StoreDimensions}}
+search.vector_pipeline_failed: 'no se pudo obtener la canalización vectorial: {{.Cause}}'
+search.vulkan_device_not_initialized: 'vulkan: dispositivo no inicializado'
+search.vulkan_not_available: 'vulkan: Vulkan no está disponible en este sistema'
+security.admin_permission_required: Las operaciones administrativas requieren permiso de administrador
+security.database_access_denied: No se permite el acceso a la base de datos '{{.Name}}'.
+security.database_write_denied: No se permite escribir en la base de datos '{{.Name}}'.
+security.insufficient_permissions: permisos insuficientes
+security.invalid_authorization_token: 'Token de autorización no válido: {{.Cause}}'
+security.invalid_header: 'Encabezado {{.Name}} no válido: {{.Cause}}'
+security.invalid_token_parameter: 'Parámetro token no válido: {{.Cause}}'
+security.invalid_url_parameter: 'Parámetro {{.Name}} no válido: {{.Cause}}'
+security.no_authentication_provided: No se proporcionó autenticación
+security.not_authenticated: Sin autenticar
+security.read_permission_required: Las operaciones de lectura requieren permiso de lectura
+security.schema_permission_required: Las operaciones de esquema requieren permiso de esquema
+security.write_permission_required: Las operaciones de escritura requieren permiso de escritura
+server-runtime.log.auth_trace: autenticación
+server-runtime.log.create_database_defensive_fix: 'create_database: se aplicó la corrección defensiva del servidor; el ejecutor devolvió un resultado vacío y se completó con el nombre de la base de datos'
+server-runtime.log.dbconfig_rebuild_start_failed: error al iniciar la reconstrucción del servicio de búsqueda después de actualizar la configuración
+server-runtime.log.dbconfig_rebuild_storage_resolve_failed: error al resolver el almacenamiento para reconstruir la configuración de la base de datos
+server-runtime.log.dbconfig_reload_failed: error al recargar la configuración de la base de datos después de PUT
+server-runtime.log.embed_clear_failed: error al borrar las incrustaciones
+server-runtime.log.embed_cleared: incrustaciones borradas; activando la regeneración
+server-runtime.log.embed_regeneration_aborted: regeneración cancelada durante el apagado
+server-runtime.log.embed_regeneration_skipped_db_closing: 'regeneración omitida: la base de datos se está cerrando'
+server-runtime.log.embed_regeneration_starting: 'iniciando regeneración en segundo plano: deteniendo el procesador y borrando las incrustaciones'
+server-runtime.log.embed_worker_reset_failed: error al restablecer el procesador de incrustaciones
+server-runtime.log.embed_worker_trigger_failed: error al activar el procesador de incrustaciones
+server-runtime.log.embed_worker_triggered: procesador de incrustaciones activado para la regeneración
+server-runtime.log.graphql_request: solicitud GraphQL
+server-runtime.log.http_panic_recovered: pánico recuperado en el controlador HTTP
+server-runtime.log.http_panic_stack_trace: traza de pila del pánico
+server-runtime.log.http_request: solicitud HTTP
+server-runtime.log.oauth_callback_failed: error de devolución de llamada OAuth
+server-runtime.log.oauth_redirect_state_stored: 'redirección OAuth: estado guardado en memoria (caduca en 10 minutos)'
+server-runtime.log.oauth_user_authenticated: 'devolución de llamada OAuth: usuario autenticado'
+server-runtime.log.qdrant_grpc_enabled: gRPC de Qdrant habilitado
+server-runtime.log.rbac_allowlist_save_failed: error al guardar las bases de datos del rol en la lista de acceso
+server-runtime.log.rbac_privileges_put_matrix_failed: error de PutMatrix de privilegios
+server-runtime.log.rbac_role_entitlements_set_failed: error al establecer los derechos del rol
+server-runtime.log.retention_default_policy_add_failed: 'valores predeterminados de retención: error al añadir la directiva'
+server-runtime.log.search_chunked_query_embedding_failed: error al generar la incrustación de la consulta (por fragmentos)
+server-runtime.log.search_query_embedding_failed: error al generar la incrustación de la consulta
+server-runtime.log.search_request: solicitud de búsqueda
+server-runtime.log.search_storage_lookup_failed: 'búsqueda: error al localizar el almacenamiento'
+server-runtime.log.search_timing: tiempos de búsqueda
+server-runtime.log.slow_query: consulta lenta
+server.authentication_not_configured: autenticación no configurada
+server.backup_complete: copia de seguridad completada
+server.database_allowlist_unavailable: La lista de acceso a bases de datos no está configurada (autenticación deshabilitada o base de datos del sistema no disponible).
+server.database_name_required: se requiere el nombre de la base de datos
+server.database_not_found: No se encontró la base de datos '{{.Name}}'
+server.database_privileges_unavailable: Los privilegios de acceso a bases de datos no están configurados (autenticación deshabilitada o base de datos del sistema no disponible).
+server.embedding_regeneration_started: Regeneración iniciada; se borrarán y regenerarán las incrustaciones en segundo plano. Consulte /nornicdb/embed/stats para ver el progreso.
+server.embedding_worker_already_running: El procesador de incrustaciones ya está activo y continuará procesando
+server.embedding_worker_triggered: Procesador de incrustaciones activado; los nodos se procesarán en segundo plano
+server.gpu_acceleration_disabled: aceleración por GPU deshabilitada (respaldo de CPU activo)
+server.gpu_acceleration_enabled: aceleración por GPU habilitada
+server.gpu_manager_not_initialized: gestor de GPU no inicializado
+server.gpu_unavailable: 'GPU no disponible: {{.Cause}}'
+server.heimdall_disabled: Heimdall está deshabilitado por la configuración
+server.heimdall_initializing: Heimdall se está inicializando; inténtelo de nuevo en breve
+server.internal_error: error interno del servidor
+server.invalid_gpu_manager_type: tipo de gestor de GPU no válido
+server.invalid_json_body: cuerpo JSON no válido
+server.invalid_request_body: cuerpo de solicitud no válido
+server.log.apoc_plugins_load_failed: no se pudieron cargar los complementos APOC
+server.log.apoc_plugins_loading: cargando complementos APOC
+server.log.authentication_disabled: autenticación deshabilitada
+server.log.database_config_store_load_failed: no se pudo cargar el almacén de configuración por base de datos
+server.log.embedding_cache_enabled: caché de incrustaciones habilitada
+server.log.embedding_initialization_attempt_failed: falló el intento de inicialización de incrustaciones
+server.log.embedding_initialization_retry_interrupted: reintento de inicialización de incrustaciones interrumpido por el cierre del servidor
+server.log.embedding_initialization_retrying: reintentando la inicialización de incrustaciones (espera exponencial)
+server.log.embedding_model_loading: cargando modelo de incrustaciones
+server.log.embedding_retry_interval_capped: el intervalo de reintento de inicialización de incrustaciones alcanzó el límite; continúan los reintentos periódicos
+server.log.embedding_retry_loop_stopped: 'bucle de reintentos de inicialización de incrustaciones detenido: el servidor se está cerrando'
+server.log.embeddings_ready: incrustaciones listas
+server.log.graphql_enabled: API GraphQL habilitada
+server.log.heimdall_action_registered: acción de Heimdall registrada
+server.log.heimdall_disabled: asistente de IA Heimdall deshabilitado
+server.log.heimdall_initialization_failed: error al inicializar Heimdall
+server.log.heimdall_initializing: inicializando de forma asíncrona el asistente de IA Heimdall
+server.log.heimdall_plugins_directory_duplicate: el directorio de complementos de Heimdall coincide con el directorio de complementos; se omite
+server.log.heimdall_plugins_directory_empty: el directorio de complementos de Heimdall está vacío
+server.log.heimdall_plugins_load_failed: no se pudieron cargar los complementos de Heimdall
+server.log.heimdall_plugins_loading: cargando complementos de Heimdall
+server.log.heimdall_plugins_missing: no se cargaron complementos de Heimdall; no habrá registros del observador
+server.log.heimdall_provider_resolved: proveedor de Heimdall resuelto
+server.log.heimdall_ready: asistente de IA Heimdall listo
+server.log.http2_enabled: HTTP/2 habilitado
+server.log.http_serve_failed: error del servidor HTTP
+server.log.mcp_disabled: servidor MCP deshabilitado mediante la configuración
+server.log.rate_limit_enabled: limitación de solicitudes habilitada
+server.log.rbac_allowlist_load_failed: no se pudo cargar la lista de acceso de RBAC
+server.log.rbac_allowlist_seed_failed: no se pudo inicializar la lista de acceso de RBAC
+server.log.rbac_privileges_load_failed: no se pudieron cargar los privilegios de RBAC
+server.log.rbac_role_entitlements_load_failed: no se pudieron cargar los derechos de rol de RBAC
+server.log.rbac_roles_load_failed: no se pudieron cargar los roles de RBAC
+server.log.remote_credentials_key_fallback: respaldo de clave de cifrado de credenciales remotas en uso
+server.log.search_reconcile_failed: error en la reconciliación de búsqueda al inicio
+server.log.search_reconcile_storage_unavailable: 'reconciliación de búsqueda al inicio: almacenamiento no disponible'
+server.log.search_rerank_api_url_missing: reordenación de búsqueda habilitada pero sin URL de API; reordenación de segunda etapa deshabilitada
+server.log.search_rerank_disabled: reordenación de búsqueda deshabilitada
+server.log.search_reranker_health_check_failed: error en la comprobación de estado del reordenador de búsqueda
+server.log.search_reranker_loading: cargando modelo de reordenación de búsqueda
+server.log.search_reranker_model_unavailable: modelo de reordenación de búsqueda no disponible; reordenación de segunda etapa deshabilitada, solo orden RRF
+server.log.search_reranker_ready: reordenador de búsqueda listo (reordenación de segunda etapa habilitada)
+server.log.slow_query_log_open_failed: no se pudo abrir el archivo de registro de consultas lentas
+server.log.slow_query_logging_configured: registro de consultas lentas configurado
+server.log.slow_query_logging_enabled: registro de consultas lentas habilitado
+server.log.ui_enabled: navegador de UI habilitado
+server.log.ui_headless: 'modo sin interfaz: UI deshabilitada'
+server.log.ui_initialization_failed: error al inicializar la UI
+server.method_delete_required: se requiere DELETE
+server.method_get_or_post_required: se requiere GET o POST
+server.method_get_or_put_required: se requiere GET o PUT
+server.method_get_put_or_delete_required: se requiere GET, PUT o DELETE
+server.method_get_required: se requiere GET
+server.method_not_allowed: método no permitido
+server.method_patch_or_delete_required: se requiere PATCH o DELETE
+server.method_post_or_delete_required: se requiere POST o DELETE
+server.method_post_required: se requiere POST
+server.method_put_required: se requiere PUT
+server.new_role_already_exists: el nuevo nombre de rol ya existe
+server.not_authenticated: sin autenticar
+server.not_found: no encontrado
+server.oauth_not_configured: OAuth no configurado
+server.request_field_required: se requiere {{.Field}}
+server.retention_hold_released: liberada
+server.retention_policy_deleted: eliminada
+server.retention_sweep_triggered: barrido activado
+server.role_already_exists: el rol ya existe
+server.role_entitlements_body_invalid: el cuerpo debe contener role y entitlements o una matriz mappings
+server.role_entitlements_unavailable: Los derechos de rol no están configurados (autenticación deshabilitada o base de datos del sistema no disponible).
+server.role_in_use: 'no se puede eliminar el rol: al menos un usuario tiene este rol'
+server.roles_unavailable: Los roles no están configurados.
+server.roles_unavailable_detailed: Los roles no están configurados (autenticación deshabilitada o base de datos del sistema no disponible).
+server.temporal_graph_diff_unsupported: el motor de almacenamiento configurado no admite diferencias temporales del grafo
+server.temporal_graph_reconstruction_unsupported: el motor de almacenamiento configurado no admite la reconstrucción temporal del grafo
+server.transaction_not_found: transacción no encontrada
+server.unknown_endpoint: endpoint desconocido
+server.unknown_transaction_endpoint: endpoint de transacción desconocido
+server.user_not_found: usuario no encontrado
+storage-log.log.wal_embeddings_skipped: 'recuperación de WAL: se omitieron entradas de incrustación dañadas'
+storage-log.log.wal_incomplete_write: 'recuperación de WAL: se detectó una escritura incompleta al final'
+storage.client.async.close_engine_failed: '{{if .HasFlushErrors}}errores de vaciado: fallaron {{.NodesFailed}} nodos, {{.EdgesFailed}} relaciones y {{.DeletesFailed}} eliminaciones{{if .HasUnflushed}}; {{end}}{{end}}{{if .HasUnflushed}}sin vaciar: {{.PendingNodes}} nodos, {{.PendingEdges}} relaciones, {{.PendingNodeDeletes}} eliminaciones de nodos y {{.PendingEdgeDeletes}} eliminaciones de relaciones (POSIBLE PÉRDIDA DE DATOS){{end}}; cierre del motor: {{.Cause}}'
+storage.client.async.close_failed: 'cierre del motor asíncrono: {{if .HasFlushErrors}}errores de vaciado: fallaron {{.NodesFailed}} nodos, {{.EdgesFailed}} relaciones y {{.DeletesFailed}} eliminaciones{{if .HasUnflushed}}; {{end}}{{end}}{{if .HasUnflushed}}sin vaciar: {{.PendingNodes}} nodos, {{.PendingEdges}} relaciones, {{.PendingNodeDeletes}} eliminaciones de nodos y {{.PendingEdgeDeletes}} eliminaciones de relaciones (POSIBLE PÉRDIDA DE DATOS){{end}}'
+storage.client.async.flush_incomplete: 'vaciado incompleto: fallaron {{.NodesFailed}} nodos, {{.EdgesFailed}} relaciones y {{.DeletesFailed}} eliminaciones'
+storage.client.async.flush_incomplete_detailed: 'vaciado incompleto: fallaron {{.NodesFailed}} nodos, {{.EdgesFailed}} relaciones y {{.DeletesFailed}} eliminaciones ({{.Details}})'
+storage.client.backup.failed: 'falló la copia de seguridad: {{.Cause}}'
+storage.client.backup.file_create_failed: 'no se pudo crear el archivo de copia de seguridad: {{.Cause}}'
+storage.client.backup.flush_failed: 'no se pudo vaciar la copia de seguridad: {{.Cause}}'
+storage.client.backup.sync_failed: 'no se pudo sincronizar la copia de seguridad: {{.Cause}}'
+storage.client.delete_prefix.clean_edge_type_index_failed: 'no se pudo limpiar el índice de tipos de relación: {{.Cause}}'
+storage.client.delete_prefix.clean_label_index_failed: 'no se pudo limpiar el índice de etiquetas: {{.Cause}}'
+storage.client.delete_prefix.drop_failed: 'no se pudo eliminar el prefijo {{printf "%x" .Prefix}}: {{.Cause}}'
+storage.client.delete_prefix.required: el prefijo no puede estar vacío
+storage.client.edge.encode_failed: 'no se pudo codificar la relación: {{.Cause}}'
+storage.client.node.embedding_chunk_delete_failed: 'no se pudo eliminar el fragmento de incrustación anterior: {{.Cause}}'
+storage.client.node.embedding_chunk_store_failed: 'no se pudo almacenar el fragmento de incrustación {{.ChunkIndex}}: {{.Cause}}'
+storage.client.node.embedding_chunks_delete_failed: 'no se pudieron eliminar los fragmentos de incrustación anteriores: {{.Cause}}'
+storage.client.node.embedding_payload_budget_exceeded: 'no se pudo almacenar la carga de incrustación del fragmento {{.ChunkIndex}}: la entrada supera el presupuesto de escritura por transacción'
+storage.client.node.encode_failed: 'no se pudo codificar el nodo: {{.Cause}}'
+storage.client.node.id_namespace_required: 'el ID del nodo debe tener un prefijo de espacio de nombres (p. ej., ''nornic:node-123''); se obtuvo: {{.NodeID}}'
+storage.client.node.id_namespace_unprefixed: 'el ID del nodo debe tener un prefijo de espacio de nombres (p. ej., ''nornic:node-123''); se obtuvo el ID sin prefijo: {{.NodeID}}'
+storage.client.node.index_catalog_write_failed: 'no se pudo escribir el catálogo de índices: {{.Cause}}'
+storage.client.node.label_index_key_build_failed: 'no se pudo crear la clave del índice de etiquetas: {{.Cause}}'
+storage.client.node.label_index_write_failed: 'no se pudo escribir el índice de etiquetas: {{.Cause}}'
+storage.client.node.pending_embed_index_write_failed: 'no se pudo escribir el índice de incrustaciones pendientes: {{.Cause}}'
+storage.client.node.write_failed: 'no se pudo escribir el nodo: {{.Cause}}'
+storage.client.receipt.hash_marshal_failed: 'recibo: no se pudo serializar el hash: {{.Cause}}'
+storage.client.receipt.nil_receiver: 'recibo: receptor nulo'
+storage.client.receipt.transaction_id_required: 'recibo: se requiere tx_id'
+storage.client.receipt.wal_range_invalid: 'recibo: wal_seq_end ({{.WALSeqEnd}}) < wal_seq_start ({{.WALSeqStart}})'
+storage.client.receipt.wal_sequence_required: 'recibo: la secuencia WAL debe ser distinta de cero'
+storage.client.storage_closed: almacenamiento cerrado
+storage.loader.converting_node: 'al convertir el nodo: {{.Cause}}'
+storage.loader.converting_relationship: 'al convertir la relación: {{.Cause}}'
+storage.loader.creating_edges: 'al crear las relaciones: {{.Cause}}'
+storage.loader.creating_file: 'al crear el archivo: {{.Cause}}'
+storage.loader.creating_nodes: 'al crear los nodos: {{.Cause}}'
+storage.loader.decoding_json: 'al decodificar JSON: {{.Cause}}'
+storage.loader.encoding_json: 'al codificar JSON: {{.Cause}}'
+storage.loader.export_engine_unsupported: 'SaveToNeo4jExport: el tipo de motor {{.EngineType}} no admite la exportación completa'
+storage.loader.getting_all_edges: 'al obtener todas las relaciones: {{.Cause}}'
+storage.loader.getting_all_nodes: 'al obtener todos los nodos: {{.Cause}}'
+storage.loader.getting_edges: 'al obtener las relaciones: {{.Cause}}'
+storage.loader.getting_nodes: 'al obtener los nodos: {{.Cause}}'
+storage.loader.loading_nodes: 'al cargar los nodos: {{.Cause}}'
+storage.loader.loading_relationships: 'al cargar las relaciones: {{.Cause}}'
+storage.loader.opening_file: 'al abrir el archivo: {{.Cause}}'
+storage.loader.parsing_node_json: 'al analizar el JSON del nodo: {{.Cause}}'
+storage.loader.parsing_relationship_json: 'al analizar el JSON de la relación: {{.Cause}}'
+storage.loader.scanning_file: 'al explorar el archivo: {{.Cause}}'
+storage.log.bfs_adjacency_build: desglose de la fase de construcción de la caché de adyacencia BFS
+storage.log.bfs_edge_snapshot: desglose de la fase de instantánea de aristas BFS
+storage.log.flush_guard_failed: falló el vaciado del almacenamiento al liberar FlushGuard
+storage.property.invalid_index: 'índice {{.Index}}: {{.Cause}}'
+storage.property.invalid_map_key: 'clave {{printf "%q" .Key}}: {{.Cause}}'
+storage.property.invalid_value: 'valor de propiedad no válido para la clave {{printf "%q" .Key}}: {{.Cause}}'
+storage.property.type_unsupported: tipo de valor de propiedad no compatible {{.ActualType}}
+storage.remote.bolt_driver_create_failed: 'no se pudo crear el controlador Bolt: {{.Cause}}'
+storage.remote.create_node_no_rows: la creación remota del nodo no devolvió filas
+storage.remote.database_required: la base de datos del motor remoto no puede estar vacía
+storage.remote.delete_prefix_unsupported: DeleteByPrefix no es compatible con motores remotos (prefijo={{.Prefix}})
+storage.remote.error: '{{.Code}}: {{.Detail}}'
+storage.remote.node_map_expected: se esperaba un mapa de nodo, se obtuvo {{.ActualType}}
+storage.remote.relationship_map_expected: se esperaba un mapa de relación, se obtuvo {{.ActualType}}
+storage.remote.result_keys_failed: 'no se pudieron obtener las claves del resultado: {{.Cause}}'
+storage.remote.transaction_closed: la transacción remota está cerrada
+storage.remote.transaction_commit_url_missing: la apertura de la transacción remota devolvió una URL de confirmación vacía
+storage.remote.transaction_decode_failed: 'no se pudo decodificar la transacción remota (estado={{.Status}}): {{.Cause}}'
+storage.remote.transaction_open_decode_failed: 'no se pudo decodificar la apertura de la transacción remota (estado={{.Status}}): {{.Cause}}'
+storage.remote.uri_required: el URI del motor remoto no puede estar vacío
+storage.remote.uri_scheme_unsupported: 'esquema de URI del motor remoto no compatible: {{.URI}} (se esperaba bolt://, neo4j://, http:// o https://)'
+storage.transaction.adjacent_edge_changed: 'conflicto detectado: el nodo {{.NodeID}} tiene una relación adyacente {{.EdgeID}} que cambió después de iniciar la transacción'
+storage.transaction.commit_conflict: 'conflicto detectado: una transacción simultánea modificó los datos antes de la confirmación: {{.Cause}}'
+storage.transaction.commit_namespace_missing: 'confirmación: la transacción tiene escrituras pero no un espacio de nombres fijado'
+storage.transaction.concurrent_modification: 'conflicto detectado: una transacción simultánea modificó los datos antes de la confirmación'
+storage.transaction.constraint_violation: 'infracción de restricción: {{.Cause}}'
+storage.transaction.cross_namespace: 'la transacción abarca varios espacios de nombres: fijada en {{printf "%q" .PinnedNamespace}}, se intentó {{printf "%q" .AttemptedNamespace}}'
+storage.transaction.edge_changed: 'conflicto detectado: la relación {{.EdgeID}} cambió después de iniciar la transacción'
+storage.transaction.end_node_missing: el nodo final {{.NodeID}} no existe
+storage.transaction.endpoint_deleted: 'conflicto detectado: el nodo extremo {{.NodeID}} se eliminó después de iniciar la transacción'
+storage.transaction.engine_closed: el motor está cerrado
+storage.transaction.id_namespace_required: 'el ID debe tener un prefijo de espacio de nombres (p. ej., ''nornic:node-123''); se obtuvo: {{.ID}}'
+storage.transaction.metadata_too_large: 'los metadatos de la transacción son demasiado grandes: {{.Actual}} caracteres (máximo {{.Maximum}})'
+storage.transaction.namespace_required: el espacio de nombres no puede estar vacío
+storage.transaction.node_changed: 'conflicto detectado: el nodo {{.NodeID}} cambió después de iniciar la transacción'
+storage.transaction.node_changed_detailed: 'conflicto detectado: el nodo {{.NodeID}} cambió después de iniciar la transacción (head={{.Head}}, readTS={{.ReadTimestamp}})'
+storage.transaction.start_node_missing: el nodo inicial {{.NodeID}} no existe
+storage.validation.allowed_policy: 'infracción de directiva ALLOWED: ninguna directiva ALLOWED permite (:{{.SourceLabels}})-[:{{.RelationshipType}}]->(:{{.TargetLabels}})'
+storage.validation.allowed_policy_creation: 'No se puede crear la directiva ALLOWED: la relación existente {{.EdgeID}} conecta {{.StartNodeID}} con {{.EndNodeID}} mediante :{{.RelationshipType}} y no está cubierta por ningún par ALLOWED'
+storage.validation.cardinality_creation_exceeded: 'No se puede crear la restricción CARDINALITY: el nodo {{.NodeID}} tiene {{.Count}} relaciones {{.RelationshipType}} {{.Direction}}, superando el máximo de {{.MaxCount}}'
+storage.validation.cardinality_exceeded: 'añadir esta relación superaría el recuento máximo {{.Direction}} de {{.MaxCount}} para el tipo de relación {{.RelationshipType}} en el nodo {{.NodeID}} (actual: {{.Current}})'
+storage.validation.disallowed_policy: 'infracción de directiva DISALLOWED: (:{{.SourceLabel}})-[:{{.RelationshipType}}]->(:{{.TargetLabel}}) está prohibida (restricción {{printf "%q" .ConstraintName}})'
+storage.validation.disallowed_policy_creation: 'No se puede crear la directiva DISALLOWED: la relación {{.EdgeID}} conecta {{.StartNodeID}} (:{{.SourceLabel}}) con {{.EndNodeID}} (:{{.TargetLabel}}) mediante :{{.RelationshipType}}'
+storage.validation.domain_allowed_values_required: la restricción DOMAIN requiere al menos un valor permitido
+storage.validation.domain_edge_invalid: 'No se puede crear la restricción DOMAIN: la relación {{.EdgeID}} tiene {{.Property}}={{.Value}}, que no está entre los valores permitidos {{.AllowedValues}}'
+storage.validation.domain_node_invalid: 'No se puede crear la restricción DOMAIN: el nodo {{.NodeID}} tiene {{.Property}}={{.Value}}, que no está entre los valores permitidos {{.AllowedValues}}'
+storage.validation.domain_property_count: la restricción DOMAIN requiere exactamente 1 propiedad, se obtuvieron {{.Actual}}
+storage.validation.edge_key_null: la relación {{.EdgeID}} tiene {{.Property}} nulo
+storage.validation.exists_property_count: la restricción EXISTS requiere exactamente 1 propiedad, se obtuvieron {{.Actual}}
+storage.validation.expected_type: se esperaba {{.ExpectedType}}, se obtuvo {{.ActualType}}
+storage.validation.label_change_allowed: 'el cambio de etiqueta infringiría la directiva ALLOWED: ninguna directiva ALLOWED permite (:{{.SourceLabels}})-[:{{.RelationshipType}}]->(:{{.TargetLabels}})'
+storage.validation.label_change_disallowed: 'el cambio de etiqueta infringiría la directiva DISALLOWED: (:{{.SourceLabel}})-[:{{.RelationshipType}}]->(:{{.TargetLabel}}) (restricción {{printf "%q" .ConstraintName}})'
+storage.validation.node_composite_key_existing: 'ya existe un nodo con la clave compuesta {{.Properties}}={{.Values}} (nodeID: {{.NodeID}})'
+storage.validation.node_exists_missing_creation: 'No se puede crear la restricción EXISTS: al nodo {{.NodeID}} le falta la propiedad obligatoria {{.Property}}'
+storage.validation.node_key_duplicate_creation: 'No se puede crear la restricción NODE KEY: los nodos {{.FirstNodeID}} y {{.SecondNodeID}} tienen ambos la clave compuesta {{.Properties}}={{.Values}}'
+storage.validation.node_key_in_transaction: ya existe un nodo con la clave {{.Properties}}={{.Values}} en la transacción
+storage.validation.node_key_null: la propiedad NODE KEY {{.Property}} no puede ser nula
+storage.validation.node_key_null_creation: 'No se puede crear la restricción NODE KEY: el nodo {{.NodeID}} tiene un valor nulo para la propiedad {{.Property}}'
+storage.validation.node_key_property_required: la restricción NODE KEY requiere al menos 1 propiedad
+storage.validation.node_property_invalid: 'nodo {{.NodeID}}, propiedad {{.Property}}: {{.Cause}}'
+storage.validation.node_unique_concurrent: ya existe un nodo con {{.Property}}={{.Value}} (reclamado por una confirmación simultánea)
+storage.validation.node_unique_duplicate: 'No se puede crear la restricción UNIQUE: los nodos {{.FirstNodeID}} y {{.SecondNodeID}} tienen ambos {{.Property}}={{.Value}}'
+storage.validation.node_unique_existing: 'ya existe un nodo con {{.Property}}={{.Value}} (nodeID: {{.NodeID}})'
+storage.validation.node_unique_in_transaction: ya existe un nodo con {{.Property}}={{.Value}} en la transacción
+storage.validation.property_domain_invalid: el valor {{.Value}} de la propiedad {{.Property}} no está entre los valores permitidos {{.AllowedValues}}
+storage.validation.property_type_required: la propiedad {{.Property}} debe ser {{.ExpectedType}} ({{.Cause}})
+storage.validation.refresh_unique_failed: 'actualizar valores de restricción única: {{.Cause}}'
+storage.validation.refresh_unique_scan_failed: 'actualizar valores de restricción única: explorar nodos: {{.Cause}}'
+storage.validation.relationship_composite_duplicate: 'No se puede crear la restricción UNIQUE en la relación: las relaciones {{.FirstEdgeID}} y {{.SecondEdgeID}} tienen la clave compuesta duplicada {{.Key}}'
+storage.validation.relationship_composite_existing: 'ya existe una relación con una clave compuesta duplicada (edgeID: {{.EdgeID}})'
+storage.validation.relationship_constraint_type_unsupported: 'tipo de restricción de relación no compatible: {{.ConstraintType}}'
+storage.validation.relationship_exists_missing: 'No se puede crear la restricción EXISTS en la relación: a la relación {{.EdgeID}} le falta la propiedad obligatoria {{.Property}}'
+storage.validation.relationship_exists_property_count: la restricción EXISTS en relaciones requiere exactamente 1 propiedad
+storage.validation.relationship_property_invalid: 'relación {{.EdgeID}}, propiedad {{.Property}}: {{.Cause}}'
+storage.validation.relationship_property_missing: 'No se puede crear la restricción en la relación: a la relación {{.EdgeID}} le falta la propiedad obligatoria {{.Property}}'
+storage.validation.relationship_unique_duplicate: 'No se puede crear la restricción UNIQUE en la relación: las relaciones {{.FirstEdgeID}} y {{.SecondEdgeID}} tienen ambas {{.Property}}={{.Value}}'
+storage.validation.relationship_unique_existing: 'ya existe una relación con {{.Property}}={{.Value}} (edgeID: {{.EdgeID}})'
+storage.validation.relationship_unique_property_count: la restricción UNIQUE en relaciones requiere exactamente 1 propiedad
+storage.validation.required_property_missing: la propiedad {{.Property}} es obligatoria, pero falta
+storage.validation.scan_edges_failed: 'al explorar relaciones: {{.Cause}}'
+storage.validation.scan_nodes_failed: 'al explorar nodos: {{.Cause}}'
+storage.validation.temporal_creation_failed: 'No se puede crear la restricción TEMPORAL: {{.Detail}}'
+storage.validation.temporal_edge_invalid: 'No se puede crear la restricción TEMPORAL: la relación {{.EdgeID}} tiene {{.Property}} no válido'
+storage.validation.temporal_edge_overlap: 'infracción de restricción TEMPORAL: solapamiento con la relación {{.EdgeID}} para key={{.Key}}'
+storage.validation.temporal_edges_overlap: 'No se puede crear la restricción TEMPORAL: solapamiento entre las relaciones {{.FirstEdgeID}} y {{.SecondEdgeID}}'
+storage.validation.temporal_key_null: la propiedad clave TEMPORAL {{.Property}} no puede ser nula
+storage.validation.temporal_node_invalid_creation: 'No se puede crear la restricción TEMPORAL: el nodo {{.NodeID}} tiene {{.Property}} no válido'
+storage.validation.temporal_node_key_null_creation: 'No se puede crear la restricción TEMPORAL: el nodo {{.NodeID}} tiene {{.Property}} nulo'
+storage.validation.temporal_node_overlap: 'infracción de restricción TEMPORAL: solapamiento con el nodo {{.NodeID}} para {{.Property}}={{.Value}}'
+storage.validation.temporal_node_required: la restricción TEMPORAL requiere {{.Property}} para el nodo {{.NodeID}}
+storage.validation.temporal_nodes_overlap_creation: 'No se puede crear la restricción TEMPORAL: solapamiento entre {{.FirstNodeID}} y {{.SecondNodeID}}'
+storage.validation.temporal_properties_at_least_three: la restricción TEMPORAL requiere al menos 3 propiedades (clave..., valid_from, valid_to)
+storage.validation.temporal_properties_exactly_three: la restricción TEMPORAL requiere 3 propiedades (clave, valid_from, valid_to)
+storage.validation.temporal_start_invalid: la propiedad inicial TEMPORAL {{.Property}} debe ser una fecha y hora
+storage.validation.unique_property_count: la restricción UNIQUE requiere exactamente 1 propiedad, se obtuvieron {{.Actual}}
+storage.validation.unknown_constraint_type: 'tipo de restricción desconocido: {{.ConstraintType}}'
+storage.validation.unknown_property_type: 'tipo de propiedad desconocido: {{.PropertyType}}'
+storagecomposite.bulk_write_target_ambiguous: 'destino de escritura compuesto ambiguo en la creación masiva: use USE <composite.constituent> o establezca properties.database_id'
+storagecomposite.constituent_close_failed: 'error al cerrar el constituyente ''{{.Alias}}'': {{.Cause}}'
+storagecomposite.constituent_lookup_failed: 'no se pudo obtener el constituyente ''{{.Alias}}'': {{.Cause}}'
+storagecomposite.constituent_not_found: no se encontró el constituyente '{{.Alias}}'
+storagecomposite.constituent_query_failed: 'error al consultar el constituyente ''{{.Alias}}'': {{.Cause}}'
+storagecomposite.constituent_stream_failed: 'error al transmitir desde el constituyente ''{{.Alias}}'': {{.Cause}}'
+storagecomposite.default_constituent_lookup_failed: 'no se pudo obtener el constituyente predeterminado: {{.Cause}}'
+storagecomposite.delete_by_prefix_unsupported: DeleteByPrefix no se admite en bases de datos compuestas; elimine los datos de las bases de datos constituyentes
+storagecomposite.edge_bulk_create_failed: 'no se pudieron crear relaciones en el constituyente ''{{.Alias}}'': {{.Cause}}'
+storagecomposite.edge_count_failed: 'error al contar las relaciones del constituyente ''{{.Alias}}'': {{.Cause}}'
+storagecomposite.edge_required: la relación no puede ser nula
+storagecomposite.no_writable_constituents: no hay constituyentes disponibles para escritura
+storagecomposite.node_bulk_create_failed: 'no se pudieron crear nodos en el constituyente ''{{.Alias}}'': {{.Cause}}'
+storagecomposite.node_count_failed: 'error al contar los nodos del constituyente ''{{.Alias}}'': {{.Cause}}'
+storagecomposite.read_only_start_node: el nodo inicial se encontró en el constituyente de solo lectura '{{.Alias}}'; no se puede crear la relación
+storagecomposite.start_node_check_failed: 'error al comprobar el nodo inicial: {{.Cause}}'
+storagecomposite.start_node_not_found: no se encontró el nodo inicial en ningún constituyente
+storagecomposite.unrouted_edge_bulk_create_failed: 'no se pudieron crear las relaciones sin enrutar: {{.Cause}}'
+storagecomposite.write_target_ambiguous: 'destino de escritura compuesto ambiguo: use USE <composite.constituent> o establezca properties.database_id en un constituyente con permiso de escritura'
+storageschema.composite_index_min_properties: el índice compuesto requiere al menos 2 propiedades; se recibieron {{.Count}}
+storageschema.conflicting_cardinality_constraint: 'la restricción de cardinalidad en conflicto "{{.Name}}" ya existe en {{.Direction}} {{.Label}} con un recuento máximo de {{.ExistingMaxCount}} (nuevo: {{.RequestedMaxCount}})'
+storageschema.conflicting_constraint_already_exists: la restricción en conflicto "{{.Name}}" ya existe en el mismo esquema
+storageschema.conflicting_domain_constraint: la restricción de dominio en conflicto "{{.Name}}" ya existe en el mismo esquema con valores permitidos diferentes
+storageschema.conflicting_policy: 'política en conflicto: no se puede tener ALLOWED y DISALLOWED para {{.SourceLabel}}-[:{{.RelationshipType}}]->{{.TargetLabel}} (restricción "{{.ExistingName}}")'
+storageschema.constraint_already_exists: la restricción "{{.Name}}" ya existe
+storageschema.constraint_contract_already_exists: el contrato de restricciones "{{.Name}}" ya existe
+storageschema.constraint_contract_invalid: 'contrato de restricciones {{.Name}} no válido: predicado "{{.Predicate}}": {{.Cause}}'
+storageschema.constraint_contract_name_conflict: el contrato de restricciones "{{.Name}}" entra en conflicto con el nombre de una restricción existente
+storageschema.constraint_contract_violated: 'se infringió el contrato de restricciones {{.Name}}: el predicado "{{.Predicate}}" se evaluó como falso'
+storageschema.constraint_different_allowed_values: la restricción "{{.Name}}" ya existe con valores permitidos diferentes
+storageschema.constraint_different_max_count: la restricción "{{.Name}}" ya existe con un recuento máximo diferente ({{.ExistingMaxCount}} frente a {{.RequestedMaxCount}})
+storageschema.constraint_different_schema_or_type: la restricción "{{.Name}}" ya existe con un esquema o tipo diferente
+storageschema.constraint_not_found: la restricción "{{.Name}}" no existe
+storageschema.decay_edge_binding_conflict: el tipo de arista "{{.EdgeType}}" ya tiene una vinculación de perfil de decaimiento "{{.BindingName}}"
+storageschema.decay_label_binding_conflict: el conjunto de etiquetas {{.Labels}} ya tiene una vinculación de perfil de decaimiento "{{.BindingName}}"
+storageschema.decay_profile_binding_already_exists: la vinculación del perfil de decaimiento "{{.Name}}" ya existe
+storageschema.decay_profile_bundle_already_exists: el paquete de perfil de decaimiento "{{.Name}}" ya existe
+storageschema.decay_profile_bundle_name_required: el nombre del paquete de perfil de decaimiento es obligatorio
+storageschema.decay_profile_bundle_not_found: no se encontró el paquete de perfil de decaimiento "{{.Name}}"
+storageschema.decay_profile_bundle_referenced: 'no se puede eliminar el paquete de perfil de decaimiento "{{.Name}}": una vinculación activa hace referencia a él'
+storageschema.decay_profile_not_found: no se encontró el perfil de decaimiento "{{.Name}}"
+storageschema.decay_structural_index_conflict: la propiedad "{{.Property}}" está en un índice estructural y no puede tener una regla de decaimiento
+storageschema.equivalent_constraint_already_exists: la restricción equivalente "{{.Name}}" ya existe en el mismo esquema
+storageschema.index_not_found: el índice "{{.Name}}" no existe
+storageschema.invalid_decay_function: 'función de decaimiento no válida: "{{.Function}}"'
+storageschema.invalid_scope_type: 'tipo de ámbito no válido: "{{.Scope}}"'
+storageschema.invalid_score_from_mode: 'modo score-from no válido: "{{.Mode}}"'
+storageschema.missing_relationship_endpoint: falta un extremo de la relación
+storageschema.multiplier_non_negative: el multiplicador no puede ser negativo; se recibió {{printf "%.6f" .Value}}
+storageschema.promotion_policy_already_exists: la política de promoción "{{.Name}}" ya existe
+storageschema.promotion_policy_not_found: no se encontró la política de promoción "{{.Name}}"
+storageschema.promotion_profile_already_exists: el perfil de promoción "{{.Name}}" ya existe
+storageschema.promotion_profile_name_required: el nombre del perfil de promoción es obligatorio
+storageschema.promotion_profile_not_found: no se encontró el perfil de promoción "{{.Name}}"
+storageschema.promotion_profile_referenced: 'no se puede eliminar el perfil de promoción "{{.Name}}": una política de promoción activa hace referencia a él'
+storageschema.promotion_profile_when_clause_not_found: no se encontró el perfil de promoción "{{.Name}}" (referenciado en la cláusula WHEN)
+storageschema.property_index_not_found: no se encontró el índice de propiedad {{.Label}}:{{.Property}}
+storageschema.range_index_not_found: no se encontró el índice de rango {{.Name}}
+storageschema.range_index_numeric_value_required: el índice de rango solo admite valores numéricos; se recibió {{.Type}}
+storageschema.range_index_properties_required: el índice de rango requiere al menos una propiedad
+storageschema.scan_nodes_failed: 'error al examinar nodos: {{.Cause}}'
+storageschema.scan_relationships_failed: 'error al examinar relaciones: {{.Cause}}'
+storageschema.score_cap_out_of_range: scoreCap debe estar entre 0 y 1; se recibió {{printf "%.6f" .Value}}
+storageschema.score_floor_out_of_range: scoreFloor debe estar entre 0 y 1; se recibió {{printf "%.6f" .Value}}
+storageschema.score_from_property_required: scoreFromProperty es obligatorio cuando scoreFrom es CUSTOM
+storageschema.unique_constraint_violation: Node({{.Label}}) ya existe con {{.Property}} = {{.Value}}
+storageschema.unknown_option: 'opción desconocida: "{{.Option}}"'
+storageschema.unsupported_constraint_literal: literal no compatible "{{.Literal}}"
+storageschema.unsupported_constraint_pattern: patrón no compatible "{{.Pattern}}"
+storageschema.unsupported_contract_target_entity_type: 'tipo de entidad de destino del contrato de restricciones no compatible: {{.EntityType}}'
+storageschema.unsupported_node_predicate: predicado de nodo no compatible
+storageschema.unsupported_relationship_predicate: predicado de relación no compatible
+storageschema.visibility_threshold_out_of_range: visibilityThreshold debe estar entre 0 y 1; se recibió {{printf "%.6f" .Value}}

@@ -9,6 +9,7 @@ use crate::packstream::Value;
 use crate::wsconn;
 use crate::BoltError;
 use copperdb_errors::{map_transient_transaction_error, TransientTransactionCode};
+use copperdb_localization::{messages as localized_messages, LanguageTag, Manager};
 use copperdb_otel::{CancellationProtocol, CancellationStage, Telemetry};
 use opentelemetry::global;
 use opentelemetry::propagation::Extractor;
@@ -485,6 +486,7 @@ pub struct BoltServer {
     runtime_counters: Arc<BoltRuntimeCounters>,
     executor: Arc<dyn QueryExecutor>,
     auth_provider: Option<Arc<dyn BoltAuthProvider>>,
+    language_preferences: Vec<LanguageTag>,
 }
 
 impl BoltServer {
@@ -505,6 +507,7 @@ impl BoltServer {
             runtime_counters: Arc::new(BoltRuntimeCounters::default()),
             executor,
             auth_provider: None,
+            language_preferences: Vec::new(),
         }
     }
 
@@ -524,6 +527,11 @@ impl BoltServer {
 
     pub fn with_runtime_counters(mut self, runtime_counters: Arc<BoltRuntimeCounters>) -> Self {
         self.runtime_counters = runtime_counters;
+        self
+    }
+
+    pub fn with_language_preferences(mut self, preferences: Vec<LanguageTag>) -> Self {
+        self.language_preferences = preferences;
         self
     }
 
@@ -575,6 +583,7 @@ impl BoltServer {
         let auth_enabled = self.config.auth_enabled;
         let auth_provider = self.auth_provider.clone();
         let session_counters = Arc::clone(&self.runtime_counters);
+        let language_preferences = self.language_preferences.clone();
         let _ = telemetry.record_counter(
             "nornicdb_bolt_connections_total",
             &[("result", "success"), ("transport", "ws")],
@@ -596,11 +605,12 @@ impl BoltServer {
                         auth_enabled,
                         auth_provider,
                         session_counters,
+                        language_preferences,
                     )
                     .await;
                     if let Err(ref e) = result {
                         runtime_counters.record_failure();
-                        warn!(%peer_addr, %e, "bolt ws connection failed");
+                        warn!(event_id = "bolt.log.message_handling_error", %peer_addr, error = %e, "bolt ws connection failed");
                         let _ = telemetry.record_counter(
                             "nornicdb_bolt_connections_total",
                             &[("result", "error"), ("transport", "ws")],
@@ -609,7 +619,7 @@ impl BoltServer {
                 }
                 Err(e) => {
                     runtime_counters.record_failure();
-                    warn!(%peer_addr, %e, "ws upgrade failed");
+                    warn!(event_id = "bolt.log.websocket_upgrade_failed", %peer_addr, error = %e, "ws upgrade failed");
                 }
             }
             let active = runtime_counters.connection_closed();
@@ -634,6 +644,7 @@ impl BoltServer {
         let auth_enabled = self.config.auth_enabled;
         let auth_provider = self.auth_provider.clone();
         let session_counters = Arc::clone(&self.runtime_counters);
+        let language_preferences = self.language_preferences.clone();
         let _ = telemetry.record_counter(
             "nornicdb_bolt_connections_total",
             &[("result", "success"), ("transport", "tcp")],
@@ -654,6 +665,7 @@ impl BoltServer {
                 auth_enabled,
                 auth_provider,
                 session_counters,
+                language_preferences,
             )
             .await;
             if let Err(ref e) = result {
@@ -662,7 +674,7 @@ impl BoltServer {
                     "nornicdb_bolt_connections_total",
                     &[("result", "error"), ("transport", "tcp")],
                 );
-                warn!(%peer_addr, %e, "bolt tcp failed");
+                warn!(event_id = "bolt.log.message_handling_error", %peer_addr, error = %e, "bolt tcp failed");
             }
             let active = runtime_counters.connection_closed();
             let _ = telemetry.set_gauge(
@@ -706,15 +718,19 @@ async fn handle_tcp_session_with_counters(
     auth_enabled: bool,
     auth_provider: Option<Arc<dyn BoltAuthProvider>>,
     runtime_counters: Arc<BoltRuntimeCounters>,
+    language_preferences: Vec<LanguageTag>,
 ) -> Result<(), BoltError> {
     handle_tcp_session_with_timeout_and_counters(
         stream,
         telemetry,
         executor,
-        auth_enabled,
-        auth_provider,
         BOLT_RECEIVE_TIMEOUT,
-        Some(runtime_counters),
+        BoltSessionOptions {
+            auth_enabled,
+            auth_provider,
+            runtime_counters: Some(runtime_counters),
+            language_preferences,
+        },
     )
     .await
 }
@@ -732,28 +748,36 @@ async fn handle_tcp_session_with_timeout(
         stream,
         telemetry,
         executor,
-        auth_enabled,
-        auth_provider,
         receive_timeout,
-        None,
+        BoltSessionOptions {
+            auth_enabled,
+            auth_provider,
+            runtime_counters: None,
+            language_preferences: Vec::new(),
+        },
     )
     .await
+}
+
+struct BoltSessionOptions {
+    auth_enabled: bool,
+    auth_provider: Option<Arc<dyn BoltAuthProvider>>,
+    runtime_counters: Option<Arc<BoltRuntimeCounters>>,
+    language_preferences: Vec<LanguageTag>,
 }
 
 async fn handle_tcp_session_with_timeout_and_counters(
     stream: &mut TcpStream,
     telemetry: &Telemetry,
     executor: Arc<dyn QueryExecutor>,
-    auth_enabled: bool,
-    auth_provider: Option<Arc<dyn BoltAuthProvider>>,
     receive_timeout: Duration,
-    runtime_counters: Option<Arc<BoltRuntimeCounters>>,
+    options: BoltSessionOptions,
 ) -> Result<(), BoltError> {
     let peer = stream
         .peer_addr()
         .map(|a| a.to_string())
         .unwrap_or_default();
-    info!(%peer, "bolt tcp session started");
+    info!(event_id = "bolt.log.hello", %peer, transport = "tcp", "bolt tcp session started");
     let mut preamble = [0u8; 20];
     stream.read_exact(&mut preamble).await?;
     if preamble[..4] != [0x60, 0x60, 0xB0, 0x17] {
@@ -762,9 +786,13 @@ async fn handle_tcp_session_with_timeout_and_counters(
         ));
     }
     stream.write_all(&[0x00, 0x00, 0x04, 0x04]).await?;
-    info!(%peer, "bolt tcp version 4.4 sent, entering message loop");
+    info!(event_id = "bolt.log.hello", %peer, transport = "tcp", protocol_version = "4.4", "bolt tcp version sent");
 
-    let mut session = BoltSession::new_with_counters(auth_enabled, runtime_counters);
+    let mut session = BoltSession::new_with_preferences(
+        options.auth_enabled,
+        options.runtime_counters,
+        options.language_preferences,
+    );
     let mut decoder = wsconn::BoltChunkDecoder::new();
     let mut temp_buf = [0u8; 4096];
     let mut pending_frames = VecDeque::new();
@@ -790,7 +818,7 @@ async fn handle_tcp_session_with_timeout_and_counters(
                 &mut session,
                 telemetry,
                 Arc::clone(&executor),
-                auth_provider.clone(),
+                options.auth_provider.clone(),
             );
             tokio::pin!(processing);
             let mut interrupted = false;
@@ -822,7 +850,12 @@ async fn handle_tcp_session_with_timeout_and_counters(
                 continue;
             }
             for response_bytes in responses {
-                info!(len = response_bytes.len(), "bolt sending response");
+                info!(
+                    event_id = "bolt.log.run",
+                    response_bytes = response_bytes.len(),
+                    transport = "tcp",
+                    "bolt sending response"
+                );
                 stream
                     .write_all(&wsconn::encode_bolt_chunks(&response_bytes))
                     .await?;
@@ -840,6 +873,7 @@ async fn handle_ws_session_with_counters<S>(
     auth_enabled: bool,
     auth_provider: Option<Arc<dyn BoltAuthProvider>>,
     runtime_counters: Arc<BoltRuntimeCounters>,
+    language_preferences: Vec<LanguageTag>,
 ) -> Result<(), BoltError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -848,10 +882,13 @@ where
         ws,
         telemetry,
         executor,
-        auth_enabled,
-        auth_provider,
         BOLT_RECEIVE_TIMEOUT,
-        Some(runtime_counters),
+        BoltSessionOptions {
+            auth_enabled,
+            auth_provider,
+            runtime_counters: Some(runtime_counters),
+            language_preferences,
+        },
     )
     .await
 }
@@ -860,10 +897,8 @@ async fn handle_ws_session_with_timeout_and_counters<S>(
     ws: &mut tokio_tungstenite::WebSocketStream<S>,
     telemetry: &Telemetry,
     executor: Arc<dyn QueryExecutor>,
-    auth_enabled: bool,
-    auth_provider: Option<Arc<dyn BoltAuthProvider>>,
     receive_timeout: Duration,
-    runtime_counters: Option<Arc<BoltRuntimeCounters>>,
+    options: BoltSessionOptions,
 ) -> Result<(), BoltError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -895,13 +930,27 @@ where
         ));
     }
     // Respond with Bolt 4.4 (raw — handshake, not chunked)
-    info!("bolt WS preamble OK, sending version 4.4");
+    info!(
+        event_id = "bolt.log.hello",
+        transport = "websocket",
+        protocol_version = "4.4",
+        "bolt WS preamble OK"
+    );
     wsconn::write_ws_raw(ws, &[0x00, 0x00, 0x04, 0x04])
         .await
         .map_err(|e| BoltError::ProtocolViolation(format!("WS version response error: {e}")))?;
-    info!("bolt WS version response sent, entering message loop");
+    info!(
+        event_id = "bolt.log.hello",
+        transport = "websocket",
+        protocol_version = "4.4",
+        "bolt WS version response sent"
+    );
 
-    let mut session = BoltSession::new_with_counters(auth_enabled, runtime_counters);
+    let mut session = BoltSession::new_with_preferences(
+        options.auth_enabled,
+        options.runtime_counters,
+        options.language_preferences,
+    );
     let mut decoder = wsconn::BoltChunkDecoder::new();
     let mut pending_frames = VecDeque::new();
 
@@ -927,7 +976,7 @@ where
                 &mut session,
                 telemetry,
                 Arc::clone(&executor),
-                auth_provider.clone(),
+                options.auth_provider.clone(),
             );
             tokio::pin!(processing);
             let mut interrupted = false;
@@ -961,7 +1010,12 @@ where
                 continue;
             }
             for response_bytes in responses {
-                info!(len = response_bytes.len(), "bolt WS sending response");
+                info!(
+                    event_id = "bolt.log.run",
+                    response_bytes = response_bytes.len(),
+                    transport = "websocket",
+                    "bolt WS sending response"
+                );
                 if let Err(error) = wsconn::write_ws_message(ws, &response_bytes).await {
                     break 'session_loop Err(BoltError::ProtocolViolation(error.to_string()));
                 }
@@ -1047,7 +1101,10 @@ async fn process_frame(
                         "code".into(),
                         serde_json::json!("Neo.TransientError.General.UnknownError"),
                     ),
-                    ("message".into(), serde_json::json!(e.to_string())),
+                    (
+                        "message".into(),
+                        serde_json::json!(localize_display(session, &e)),
+                    ),
                 ]),
             };
             let response = dispatch::encode_message(&failure);
@@ -1076,6 +1133,8 @@ struct BoltSession {
     _session_counter: Option<ActiveBoltSession>,
     transaction_counter: Option<ActiveBoltTransaction>,
     runtime_counters: Option<Arc<BoltRuntimeCounters>>,
+    language: Option<LanguageTag>,
+    localizer: Manager,
 }
 
 struct BoltCursor {
@@ -1090,9 +1149,18 @@ impl BoltSession {
         Self::new_with_counters(auth_enabled, None)
     }
 
+    #[cfg(test)]
     fn new_with_counters(
         auth_enabled: bool,
         runtime_counters: Option<Arc<BoltRuntimeCounters>>,
+    ) -> Self {
+        Self::new_with_preferences(auth_enabled, runtime_counters, Vec::new())
+    }
+
+    fn new_with_preferences(
+        auth_enabled: bool,
+        runtime_counters: Option<Arc<BoltRuntimeCounters>>,
+        language_preferences: Vec<LanguageTag>,
     ) -> Self {
         let session_counter = runtime_counters
             .as_ref()
@@ -1112,6 +1180,8 @@ impl BoltSession {
             _session_counter: session_counter,
             transaction_counter: None,
             runtime_counters,
+            language: language_preferences.first().cloned(),
+            localizer: Manager::new(&language_preferences),
         }
     }
 
@@ -1127,6 +1197,47 @@ impl BoltSession {
         self.transaction_counter.take();
         self.transaction.take()
     }
+}
+
+fn locale_from_metadata(metadata: &HashMap<String, serde_json::Value>) -> Option<LanguageTag> {
+    metadata
+        .get("locale")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| LanguageTag::parse(value).ok().flatten())
+}
+
+fn localize(session: &BoltSession, message: &copperdb_localization::Message) -> String {
+    let preferences = session.language.as_slice();
+    session
+        .localizer
+        .render(preferences, message)
+        .map(|rendered| rendered.text)
+        .unwrap_or_else(|_| message.fallback.to_string())
+}
+
+fn localize_id(session: &BoltSession, id: &'static str) -> String {
+    copperdb_localization::Message::from_catalog(id)
+        .map(|message| localize(session, &message))
+        .unwrap_or_else(|| id.to_string())
+}
+
+fn localize_display(session: &BoltSession, display: &dyn std::fmt::Display) -> String {
+    session
+        .localizer
+        .render_display(session.language.as_slice(), display)
+        .map(|rendered| rendered.text)
+        .unwrap_or_else(|| display.to_string())
+}
+
+fn localized_authentication_error(session: &BoltSession, error: &str) -> String {
+    let id = if error.eq_ignore_ascii_case("Bolt authentication is unavailable") {
+        "bolt.authentication_not_configured"
+    } else if error.to_ascii_lowercase().contains("token") {
+        "bolt.invalid_or_expired_token"
+    } else {
+        "bolt.invalid_credentials"
+    };
+    localize_id(session, id)
 }
 
 fn database_from_metadata(metadata: &HashMap<String, serde_json::Value>) -> Option<String> {
@@ -1234,7 +1345,7 @@ fn authentication_required(session: &BoltSession) -> bool {
 fn rollback_active_transaction(session: &mut BoltSession, executor: &dyn QueryExecutor) {
     if let Some(transaction) = session.take_transaction() {
         if let Err(error) = executor.rollback_transaction(&transaction) {
-            warn!(%error, transaction_id = %transaction.id, "Bolt session cleanup rollback failed");
+            warn!(event_id = "bolt.log.transaction_cleanup_failed", error = %error, transaction_id = %transaction.id, database = %transaction.database, "Bolt session cleanup rollback failed");
         }
     }
 }
@@ -1337,12 +1448,17 @@ async fn process_message_with_telemetry(
         }
     };
     let msg = dispatch::decode_message(sig, fields)?;
-    info!(signature = format!("0x{sig:02X}"), "bolt message received");
+    info!(
+        event_id = "bolt.log.run",
+        signature = format!("0x{sig:02X}"),
+        "bolt message received"
+    );
     match msg {
         BoltMessage::Hello { extra } => {
             session.authenticated = !session.auth_enabled;
             session.principal = None;
             session.database = database_from_metadata(&extra);
+            session.language = locale_from_metadata(&extra).or_else(|| session.language.clone());
             if session.auth_enabled {
                 if let Some((username, password)) = credentials_from_hello(&extra) {
                     return Ok(
@@ -1353,7 +1469,9 @@ async fn process_message_with_telemetry(
                             &password,
                         ) {
                             Ok(()) => success_response(),
-                            Err(message) => authentication_failure_response(&message),
+                            Err(message) => authentication_failure_response(
+                                &localized_authentication_error(session, &message),
+                            ),
                         },
                     );
                 }
@@ -1367,7 +1485,11 @@ async fn process_message_with_telemetry(
                 ),
                 ("patch_bolt".into(), serde_json::json!(["utc"])),
             ]);
-            info!("bolt HELLO → SUCCESS");
+            info!(
+                event_id = "bolt.log.hello",
+                authenticated = session.authenticated,
+                "bolt HELLO succeeded"
+            );
             Ok(vec![dispatch::encode_message(&BoltMessage::Success {
                 metadata: meta,
             })])
@@ -1393,10 +1515,15 @@ async fn process_message_with_telemetry(
                         password,
                     ) {
                         Ok(()) => Ok(success_response()),
-                        Err(message) => Ok(authentication_failure_response(&message)),
+                        Err(message) => Ok(authentication_failure_response(
+                            &localized_authentication_error(session, &message),
+                        )),
                     }
                 }
-                _ => Ok(authentication_failure_response("missing Bolt credentials")),
+                _ => Ok(authentication_failure_response(&localize_id(
+                    session,
+                    "bolt.invalid_credentials",
+                ))),
             }
         }
         BoltMessage::Logoff => {
@@ -1415,8 +1542,12 @@ async fn process_message_with_telemetry(
             extra,
         } => {
             if authentication_required(session) {
-                return Ok(authentication_failure_response("authentication required"));
+                return Ok(authentication_failure_response(&localize(
+                    session,
+                    &localized_messages::not_authenticated(),
+                )));
             }
+            session.language = locale_from_metadata(&extra).or_else(|| session.language.clone());
             session.current_query = Some(query.clone());
             let requested_database = database_from_metadata(&extra);
             if let (Some(transaction), Some(requested_database)) =
@@ -1425,7 +1556,7 @@ async fn process_message_with_telemetry(
                 if requested_database != &transaction.database {
                     return Ok(transaction_failure_response(
                         "Neo.ClientError.Transaction.TransactionAccessedConcurrently",
-                        "cannot change database during an active transaction",
+                        &localize_id(session, "bolt.database_switch_during_transaction"),
                     ));
                 }
             }
@@ -1454,6 +1585,12 @@ async fn process_message_with_telemetry(
             // guard is dropped → cancel fires → the BFS (or any long-running
             // query) observes RequestCancelled and aborts.
             let (request_context, request_guard) = copperdb_util::RequestContext::root(None);
+            let request_context = request_context.with_language_preferences(
+                session
+                    .language
+                    .iter()
+                    .map(|language| language.as_str().to_string()),
+            );
             let mut cancellation_guard = BoltCancellationGuard {
                 request_guard: Some(request_guard),
                 request_context: request_context.clone(),
@@ -1533,7 +1670,7 @@ async fn process_message_with_telemetry(
                         .iter()
                         .map(|c| serde_json::Value::String(c.clone()))
                         .collect();
-                    info!(%query, fields = ?columns, "bolt RUN executed");
+                    info!(event_id = "bolt.log.query", %query, fields = ?columns, "bolt RUN executed");
                     Ok(vec![dispatch::encode_message(&BoltMessage::Success {
                         metadata: HashMap::from([
                             ("fields".into(), serde_json::json!(fields_json)),
@@ -1559,12 +1696,15 @@ async fn process_message_with_telemetry(
                         }
                     }
                     cancellation_guard.finish();
-                    warn!(%query, %e, "bolt RUN failed");
+                    warn!(event_id = "bolt.log.query_error", %query, error = %e, code = e.neo4j_code(), "bolt RUN failed");
                     rollback_active_transaction(session, executor.as_ref());
                     Ok(vec![dispatch::encode_message(&BoltMessage::Failure {
                         metadata: HashMap::from([
                             ("code".into(), serde_json::json!(e.neo4j_code())),
-                            ("message".into(), serde_json::json!(e.to_string())),
+                            (
+                                "message".into(),
+                                serde_json::json!(localize_display(session, &e)),
+                            ),
                         ]),
                     })])
                 }
@@ -1574,14 +1714,14 @@ async fn process_message_with_telemetry(
             let Some(qid) = cursor_qid(session, qid) else {
                 return Ok(client_failure_response(
                     "Neo.ClientError.Request.Invalid",
-                    "no Bolt result cursor is active",
+                    &localize_id(session, "bolt.no_active_cursor"),
                 ));
             };
             let pull = matches!(msg, BoltMessage::Pull { .. });
             let Some(cursor) = session.cursors.get_mut(&qid) else {
                 return Ok(client_failure_response(
                     "Neo.ClientError.Request.Invalid",
-                    "unknown Bolt result cursor",
+                    &localize_id(session, "bolt.unknown_cursor"),
                 ));
             };
             let end = cursor.index + cursor_limit(n, cursor.result.rows.len() - cursor.index);
@@ -1616,12 +1756,16 @@ async fn process_message_with_telemetry(
         }
         BoltMessage::Begin { extra } => {
             if authentication_required(session) {
-                return Ok(authentication_failure_response("authentication required"));
+                return Ok(authentication_failure_response(&localize(
+                    session,
+                    &localized_messages::not_authenticated(),
+                )));
             }
+            session.language = locale_from_metadata(&extra).or_else(|| session.language.clone());
             if session.transaction.is_some() {
                 return Ok(transaction_failure_response(
                     "Neo.ClientError.Transaction.TransactionStartFailed",
-                    "transaction already active",
+                    &localize_id(session, "bolt.transaction_already_active"),
                 ));
             }
             let database = database_from_metadata(&extra)
@@ -1637,18 +1781,24 @@ async fn process_message_with_telemetry(
                 }
                 Err(message) => Ok(transaction_failure_response(
                     "Neo.ClientError.Transaction.TransactionStartFailed",
-                    &message,
+                    &localize_display(session, &message),
                 )),
             }
         }
         BoltMessage::Commit => {
             if authentication_required(session) {
-                return Ok(authentication_failure_response("authentication required"));
+                return Ok(authentication_failure_response(&localize(
+                    session,
+                    &localized_messages::not_authenticated(),
+                )));
             }
             let Some(transaction) = session.take_transaction() else {
                 return Ok(transaction_failure_response(
                     "Neo.ClientError.Transaction.TransactionNotFound",
-                    "no transaction to commit",
+                    &localize(
+                        session,
+                        &localized_messages::bolt_no_transaction_to_commit(),
+                    ),
                 ));
             };
             match executor.commit_transaction(&transaction) {
@@ -1660,13 +1810,16 @@ async fn process_message_with_telemetry(
                 }
                 Err(error) => Ok(transaction_failure_response(
                     error.neo4j_code("Neo.ClientError.Transaction.TransactionCommitFailed"),
-                    &error.to_string(),
+                    &localize_display(session, &error),
                 )),
             }
         }
         BoltMessage::Rollback => {
             if authentication_required(session) {
-                return Ok(authentication_failure_response("authentication required"));
+                return Ok(authentication_failure_response(&localize(
+                    session,
+                    &localized_messages::bolt_authentication_required(),
+                )));
             }
             let Some(transaction) = session.take_transaction() else {
                 return Ok(vec![dispatch::encode_message(&BoltMessage::Success {
@@ -1679,7 +1832,7 @@ async fn process_message_with_telemetry(
                 })]),
                 Err(message) => Ok(transaction_failure_response(
                     "Neo.ClientError.Transaction.TransactionRollbackFailed",
-                    &message,
+                    &localize_display(session, &message),
                 )),
             }
         }
@@ -1696,7 +1849,10 @@ async fn process_message_with_telemetry(
         }
         BoltMessage::Route { .. } => {
             if authentication_required(session) {
-                return Ok(authentication_failure_response("authentication required"));
+                return Ok(authentication_failure_response(&localize(
+                    session,
+                    &localized_messages::bolt_authentication_required(),
+                )));
             }
             Ok(vec![dispatch::encode_message(&BoltMessage::Success {
                 metadata: HashMap::new(),
@@ -2297,6 +2453,165 @@ mod tests {
             panic!("expected Bolt failure code string");
         };
         code.clone()
+    }
+
+    fn failure_message_from_response(response: &[u8]) -> String {
+        let (value, _) = crate::packstream::decode(response).unwrap();
+        let Value::Struct {
+            signature: 0x7F,
+            fields,
+        } = value
+        else {
+            panic!("expected Bolt FAILURE response");
+        };
+        let [Value::Map(metadata)] = fields.as_slice() else {
+            panic!("expected Bolt FAILURE metadata");
+        };
+        let Value::String(message) = metadata
+            .iter()
+            .find_map(|(key, value)| (key == "message").then_some(value))
+            .expect("expected Bolt failure message")
+        else {
+            panic!("expected Bolt failure message string");
+        };
+        message.clone()
+    }
+
+    #[tokio::test]
+    async fn bolt_locale_metadata_localizes_failures_without_changing_codes() {
+        for (locale, expected) in [
+            ("es-ES", "No hay ninguna transacción que confirmar"),
+            ("en-XA", "[!! No transaction to commit !!]"),
+        ] {
+            let mut session = BoltSession::new(false);
+            let begin = Value::Struct {
+                signature: 0x11,
+                fields: vec![Value::Map(vec![(
+                    "locale".into(),
+                    Value::String(locale.into()),
+                )])],
+            };
+            process_message(&begin, &mut session, Arc::new(NoopExecutor), None)
+                .await
+                .unwrap();
+            session.take_transaction();
+
+            let commit = Value::Struct {
+                signature: 0x12,
+                fields: vec![],
+            };
+            let response = process_message(&commit, &mut session, Arc::new(NoopExecutor), None)
+                .await
+                .unwrap();
+            assert_eq!(
+                failure_code_from_response(&response[0]),
+                "Neo.ClientError.Transaction.TransactionNotFound"
+            );
+            assert_eq!(failure_message_from_response(&response[0]), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn hello_without_locale_preserves_inherited_language() {
+        let preferences = vec![LanguageTag::parse("es-ES").unwrap().unwrap()];
+        let mut session = BoltSession::new_with_preferences(false, None, preferences);
+        let hello = Value::Struct {
+            signature: 0x01,
+            fields: vec![Value::Map(Vec::new())],
+        };
+        process_message(&hello, &mut session, Arc::new(NoopExecutor), None)
+            .await
+            .unwrap();
+
+        let commit = Value::Struct {
+            signature: 0x12,
+            fields: vec![],
+        };
+        let response = process_message(&commit, &mut session, Arc::new(NoopExecutor), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            failure_code_from_response(&response[0]),
+            "Neo.ClientError.Transaction.TransactionNotFound"
+        );
+        assert_eq!(
+            failure_message_from_response(&response[0]),
+            "No hay ninguna transacción que confirmar"
+        );
+    }
+
+    #[tokio::test]
+    async fn reachable_bolt_state_failures_are_localized_with_stable_codes() {
+        let spanish = vec![LanguageTag::parse("es-ES").unwrap().unwrap()];
+        let pull = |qid| Value::Struct {
+            signature: 0x3F,
+            fields: vec![Value::Integer(-1), Value::Integer(qid)],
+        };
+
+        let mut switch_session = BoltSession::new_with_preferences(false, None, spanish.clone());
+        switch_session.set_transaction(BoltTransaction {
+            id: "tx-switch".into(),
+            database: "alpha".into(),
+        });
+        let switch = process_message(
+            &run_message_for_database("beta"),
+            &mut switch_session,
+            Arc::new(NoopExecutor),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut duplicate_session = BoltSession::new_with_preferences(false, None, spanish.clone());
+        duplicate_session.set_transaction(BoltTransaction {
+            id: "tx-duplicate".into(),
+            database: "copperdb".into(),
+        });
+        let duplicate = process_message(
+            &Value::Struct {
+                signature: 0x11,
+                fields: vec![Value::Map(vec![])],
+            },
+            &mut duplicate_session,
+            Arc::new(NoopExecutor),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut cursor_session = BoltSession::new_with_preferences(false, None, spanish.clone());
+        let missing = process_message(&pull(-1), &mut cursor_session, Arc::new(NoopExecutor), None)
+            .await
+            .unwrap();
+        let unknown = process_message(&pull(42), &mut cursor_session, Arc::new(NoopExecutor), None)
+            .await
+            .unwrap();
+
+        for (response, code, message) in [
+            (
+                &switch[0],
+                "Neo.ClientError.Transaction.TransactionAccessedConcurrently",
+                "no se puede cambiar de base de datos durante una transacción activa",
+            ),
+            (
+                &duplicate[0],
+                "Neo.ClientError.Transaction.TransactionStartFailed",
+                "ya hay una transacción activa",
+            ),
+            (
+                &missing[0],
+                "Neo.ClientError.Request.Invalid",
+                "no hay ningún cursor de resultados Bolt activo",
+            ),
+            (
+                &unknown[0],
+                "Neo.ClientError.Request.Invalid",
+                "cursor de resultados Bolt desconocido",
+            ),
+        ] {
+            assert_eq!(failure_code_from_response(response), code);
+            assert_eq!(failure_message_from_response(response), message);
+        }
     }
 
     #[tokio::test]

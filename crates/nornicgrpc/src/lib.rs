@@ -12,6 +12,7 @@ use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tonic::{Request, Response, Status};
 
+use copperdb_localization::{parse_accept_language, LanguageTag, Manager, Message};
 use copperdb_replication::{Command, ReplicaTransport, ReplicationError};
 use copperdb_search::{
     HydrationTransport, RankedSearchTransport, RrfHydrationRecord, RrfSearchBatch, SearchError,
@@ -33,6 +34,37 @@ const GRPC_AUTH_HEADER: &str = "authorization";
 const GRPC_CALLER_AUTH_HEADER: &str = "x-copperdb-caller-authorization";
 const GRPC_REQUEST_ID_HEADER: &str = "x-copperdb-request-id";
 const GRPC_REQUEST_DEADLINE_MS_HEADER: &str = "x-copperdb-request-deadline-ms";
+pub const GRPC_LANGUAGE_HEADER: &str = "accept-language";
+
+pub fn language_preferences_from_metadata<T>(request: &Request<T>) -> Vec<LanguageTag> {
+    let value = request
+        .metadata()
+        .get_all(GRPC_LANGUAGE_HEADER)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>()
+        .join(",");
+    parse_accept_language(&value)
+}
+
+pub fn attach_language_preferences<T>(
+    request: &mut Request<T>,
+    preferences: &[LanguageTag],
+) -> Result<(), GrpcError> {
+    if preferences.is_empty() {
+        return Ok(());
+    }
+    let value = preferences
+        .iter()
+        .map(LanguageTag::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    request.metadata_mut().insert(
+        GRPC_LANGUAGE_HEADER,
+        MetadataValue::try_from(value).map_err(|error| GrpcError::Encoding(error.to_string()))?,
+    );
+    Ok(())
+}
 
 pub trait GrpcAuthValidator: Send + Sync {
     fn validate(&self, token: &str) -> Result<(), GrpcError>;
@@ -72,13 +104,18 @@ fn authorize_request<T>(
         .map_err(status_from_grpc_error)
 }
 
-fn request_with_auth<T>(message: T, auth_token: Option<&str>) -> Result<Request<T>, GrpcError> {
+fn request_with_auth<T>(
+    message: T,
+    auth_token: Option<&str>,
+    language_preferences: &[LanguageTag],
+) -> Result<Request<T>, GrpcError> {
     let mut request = Request::new(message);
     if let Some(token) = auth_token {
         request
             .metadata_mut()
             .insert(GRPC_AUTH_HEADER, bearer_value(token)?);
     }
+    attach_language_preferences(&mut request, language_preferences)?;
     Ok(request)
 }
 
@@ -106,6 +143,7 @@ fn caller_auth_token_from_metadata<T>(request: &Request<T>) -> Result<Option<Str
 fn request_with_auth_headers<T>(
     message: T,
     caller_auth_token: Option<&str>,
+    language_preferences: &[LanguageTag],
 ) -> Result<Request<T>, GrpcError> {
     let mut request = Request::new(message);
     if let Some(token) = caller_auth_token {
@@ -113,11 +151,13 @@ fn request_with_auth_headers<T>(
             .metadata_mut()
             .insert(GRPC_CALLER_AUTH_HEADER, bearer_value(token)?);
     }
+    attach_language_preferences(&mut request, language_preferences)?;
     Ok(request)
 }
 
 fn request_context_from_metadata<T>(
     request: &Request<T>,
+    language_preferences: &[LanguageTag],
 ) -> Result<Option<RequestContextMetadata>, Status> {
     let Some(request_id) = request.metadata().get(GRPC_REQUEST_ID_HEADER) else {
         return Ok(None);
@@ -145,6 +185,10 @@ fn request_context_from_metadata<T>(
     Ok(Some(RequestContextMetadata {
         request_id,
         deadline_unix_ms,
+        language_preferences: language_preferences
+            .iter()
+            .map(|language| language.as_str().to_string())
+            .collect(),
     }))
 }
 
@@ -217,6 +261,27 @@ fn status_from_grpc_error(error: GrpcError) -> Status {
         GrpcError::PermissionDenied(message) => Status::permission_denied(message),
         other => Status::internal(other.to_string()),
     }
+}
+
+fn localized_status(status: Status, manager: &Manager, preferences: &[LanguageTag]) -> Status {
+    let message_id = match status.code() {
+        tonic::Code::Unauthenticated => "security.not_authenticated",
+        tonic::Code::PermissionDenied => "security.insufficient_permissions",
+        _ => return status,
+    };
+    let Some(message) = Message::from_catalog(message_id) else {
+        return status;
+    };
+    let Ok(rendered) = manager.render(preferences, &message) else {
+        return status;
+    };
+    let mut localized = Status::new(status.code(), rendered.text);
+    if let Ok(language) = MetadataValue::try_from(rendered.language.as_str()) {
+        localized
+            .metadata_mut()
+            .insert("content-language", language);
+    }
+    localized
 }
 
 fn search_error_from_grpc(error: GrpcError) -> SearchError {
@@ -525,6 +590,8 @@ pub struct NornicReplicaService {
     ranked_search_handler: Arc<dyn RemoteRankedSearchClient>,
     hydration_handler: Arc<dyn RemoteHydrationClient>,
     auth_validator: Option<Arc<dyn GrpcAuthValidator>>,
+    language_preferences: Vec<LanguageTag>,
+    localizer: Arc<Manager>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -564,12 +631,33 @@ impl NornicReplicaService {
             ranked_search_handler: Arc::new(UnsupportedRemoteRankedSearchClient),
             hydration_handler: Arc::new(UnsupportedRemoteHydrationClient),
             auth_validator: None,
+            language_preferences: Vec::new(),
+            localizer: Arc::new(Manager::new(&[])),
         }
     }
 
     pub fn with_auth_validator(mut self, validator: Arc<dyn GrpcAuthValidator>) -> Self {
         self.auth_validator = Some(validator);
         self
+    }
+
+    pub fn with_language_preferences(mut self, preferences: Vec<LanguageTag>) -> Self {
+        self.localizer = Arc::new(Manager::new(&preferences));
+        self.language_preferences = preferences;
+        self
+    }
+
+    fn preferences<T>(&self, request: &Request<T>) -> Vec<LanguageTag> {
+        let preferences = language_preferences_from_metadata(request);
+        if preferences.is_empty() {
+            self.language_preferences.clone()
+        } else {
+            preferences
+        }
+    }
+
+    fn localize_status(&self, status: Status, preferences: &[LanguageTag]) -> Status {
+        localized_status(status, &self.localizer, preferences)
     }
 
     pub fn with_ranked_search_handler(
@@ -596,13 +684,17 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
         &self,
         request: Request<proto::RemoteReplicaApplyRequest>,
     ) -> Result<Response<proto::RemoteReplicaApplyResponse>, Status> {
-        authorize_request(&request, self.auth_validator.as_ref())?;
-        let request = RemoteReplicaApplyRequest::try_from(request.into_inner())
-            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let preferences = self.preferences(&request);
+        authorize_request(&request, self.auth_validator.as_ref())
+            .map_err(|status| self.localize_status(status, &preferences))?;
+        let request =
+            RemoteReplicaApplyRequest::try_from(request.into_inner()).map_err(|error| {
+                self.localize_status(Status::invalid_argument(error.to_string()), &preferences)
+            })?;
         self.handler
             .apply_replica(request)
             .await
-            .map_err(status_from_grpc_error)?;
+            .map_err(|error| self.localize_status(status_from_grpc_error(error), &preferences))?;
         Ok(Response::new(proto::RemoteReplicaApplyResponse {}))
     }
 
@@ -610,12 +702,14 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
         &self,
         request: Request<proto::RemoteReplicaReadRequest>,
     ) -> Result<Response<proto::RemoteReplicaReadResponse>, Status> {
-        authorize_request(&request, self.auth_validator.as_ref())?;
+        let preferences = self.preferences(&request);
+        authorize_request(&request, self.auth_validator.as_ref())
+            .map_err(|status| self.localize_status(status, &preferences))?;
         let response = self
             .handler
             .read_replica(RemoteReplicaReadRequest::from(request.into_inner()))
             .await
-            .map_err(status_from_grpc_error)?;
+            .map_err(|error| self.localize_status(status_from_grpc_error(error), &preferences))?;
         Ok(Response::new(proto::RemoteReplicaReadResponse::from(
             response,
         )))
@@ -625,16 +719,17 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
         &self,
         request: Request<proto::RemoteGraphNodeRequest>,
     ) -> Result<Response<proto::RemoteGraphNodeResponse>, Status> {
-        let caller_auth_token = caller_auth_token_from_metadata(&request)?;
+        let preferences = self.preferences(&request);
+        let caller_auth_token = caller_auth_token_from_metadata(&request)
+            .map_err(|status| self.localize_status(status, &preferences))?;
         let request = RemoteGraphNodeRequest {
             caller_auth_token,
             ..RemoteGraphNodeRequest::from(request.into_inner())
         };
-        let response = self
-            .handler
-            .graph_node(request)
-            .await
-            .map_err(status_from_grpc_error)?;
+        let response =
+            self.handler.graph_node(request).await.map_err(|error| {
+                self.localize_status(status_from_grpc_error(error), &preferences)
+            })?;
         Ok(Response::new(proto::RemoteGraphNodeResponse::from(
             response,
         )))
@@ -644,7 +739,9 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
         &self,
         request: Request<proto::RemoteGraphEdgesRequest>,
     ) -> Result<Response<proto::RemoteGraphEdgesResponse>, Status> {
-        let caller_auth_token = caller_auth_token_from_metadata(&request)?;
+        let preferences = self.preferences(&request);
+        let caller_auth_token = caller_auth_token_from_metadata(&request)
+            .map_err(|status| self.localize_status(status, &preferences))?;
         let request = RemoteGraphEdgesRequest {
             caller_auth_token,
             ..RemoteGraphEdgesRequest::from(request.into_inner())
@@ -653,9 +750,10 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
             .handler
             .graph_edges_from_node(request)
             .await
-            .map_err(status_from_grpc_error)?;
-        let response = proto::RemoteGraphEdgesResponse::try_from(response)
-            .map_err(|error| Status::internal(error.to_string()))?;
+            .map_err(|error| self.localize_status(status_from_grpc_error(error), &preferences))?;
+        let response = proto::RemoteGraphEdgesResponse::try_from(response).map_err(|error| {
+            self.localize_status(Status::internal(error.to_string()), &preferences)
+        })?;
         Ok(Response::new(response))
     }
 
@@ -663,7 +761,9 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
         &self,
         request: Request<proto::RemoteGraphEdgesRequest>,
     ) -> Result<Response<proto::RemoteGraphEdgesResponse>, Status> {
-        let caller_auth_token = caller_auth_token_from_metadata(&request)?;
+        let preferences = self.preferences(&request);
+        let caller_auth_token = caller_auth_token_from_metadata(&request)
+            .map_err(|status| self.localize_status(status, &preferences))?;
         let request = RemoteGraphEdgesRequest {
             caller_auth_token,
             ..RemoteGraphEdgesRequest::from(request.into_inner())
@@ -672,9 +772,10 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
             .handler
             .graph_edges_to_node(request)
             .await
-            .map_err(status_from_grpc_error)?;
-        let response = proto::RemoteGraphEdgesResponse::try_from(response)
-            .map_err(|error| Status::internal(error.to_string()))?;
+            .map_err(|error| self.localize_status(status_from_grpc_error(error), &preferences))?;
+        let response = proto::RemoteGraphEdgesResponse::try_from(response).map_err(|error| {
+            self.localize_status(Status::internal(error.to_string()), &preferences)
+        })?;
         Ok(Response::new(response))
     }
 
@@ -682,7 +783,9 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
         &self,
         request: Request<proto::RemoteGraphNodesByLabelRequest>,
     ) -> Result<Response<proto::RemoteGraphNodesResponse>, Status> {
-        let caller_auth_token = caller_auth_token_from_metadata(&request)?;
+        let preferences = self.preferences(&request);
+        let caller_auth_token = caller_auth_token_from_metadata(&request)
+            .map_err(|status| self.localize_status(status, &preferences))?;
         let request = RemoteGraphNodesByLabelRequest {
             caller_auth_token,
             ..RemoteGraphNodesByLabelRequest::from(request.into_inner())
@@ -691,7 +794,7 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
             .handler
             .graph_nodes_by_label(request)
             .await
-            .map_err(status_from_grpc_error)?;
+            .map_err(|error| self.localize_status(status_from_grpc_error(error), &preferences))?;
         Ok(Response::new(proto::RemoteGraphNodesResponse::from(
             response,
         )))
@@ -701,17 +804,22 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
         &self,
         request: Request<proto::RemoteGraphNodesByPropertyRequest>,
     ) -> Result<Response<proto::RemoteGraphNodesResponse>, Status> {
-        let caller_auth_token = caller_auth_token_from_metadata(&request)?;
+        let preferences = self.preferences(&request);
+        let caller_auth_token = caller_auth_token_from_metadata(&request)
+            .map_err(|status| self.localize_status(status, &preferences))?;
         let request = RemoteGraphNodesByPropertyRequest {
             caller_auth_token,
-            ..RemoteGraphNodesByPropertyRequest::try_from(request.into_inner())
-                .map_err(|error| Status::invalid_argument(error.to_string()))?
+            ..RemoteGraphNodesByPropertyRequest::try_from(request.into_inner()).map_err(
+                |error| {
+                    self.localize_status(Status::invalid_argument(error.to_string()), &preferences)
+                },
+            )?
         };
         let response = self
             .handler
             .graph_nodes_by_property(request)
             .await
-            .map_err(status_from_grpc_error)?;
+            .map_err(|error| self.localize_status(status_from_grpc_error(error), &preferences))?;
         Ok(Response::new(proto::RemoteGraphNodesResponse::from(
             response,
         )))
@@ -721,7 +829,9 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
         &self,
         request: Request<proto::RemoteGraphAccessMetadataRequest>,
     ) -> Result<Response<proto::RemoteGraphAccessMetadataResponse>, Status> {
-        let caller_auth_token = caller_auth_token_from_metadata(&request)?;
+        let preferences = self.preferences(&request);
+        let caller_auth_token = caller_auth_token_from_metadata(&request)
+            .map_err(|status| self.localize_status(status, &preferences))?;
         let request = RemoteGraphAccessMetadataRequest {
             caller_auth_token,
             ..RemoteGraphAccessMetadataRequest::from(request.into_inner())
@@ -730,9 +840,11 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
             .handler
             .graph_access_metadata(request)
             .await
-            .map_err(status_from_grpc_error)?;
-        let response = proto::RemoteGraphAccessMetadataResponse::try_from(response)
-            .map_err(|error| Status::internal(error.to_string()))?;
+            .map_err(|error| self.localize_status(status_from_grpc_error(error), &preferences))?;
+        let response =
+            proto::RemoteGraphAccessMetadataResponse::try_from(response).map_err(|error| {
+                self.localize_status(Status::internal(error.to_string()), &preferences)
+            })?;
         Ok(Response::new(response))
     }
 
@@ -740,10 +852,15 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
         &self,
         request: Request<proto::RemoteRankedSearchRequest>,
     ) -> Result<Response<proto::RemoteRankedSearchResponse>, Status> {
-        let caller_auth_token = caller_auth_token_from_metadata(&request)?;
-        let request_context = request_context_from_metadata(&request)?;
-        let request = RemoteRankedSearchRequest::try_from(request.into_inner())
-            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let preferences = self.preferences(&request);
+        let caller_auth_token = caller_auth_token_from_metadata(&request)
+            .map_err(|status| self.localize_status(status, &preferences))?;
+        let request_context = request_context_from_metadata(&request, &preferences)
+            .map_err(|status| self.localize_status(status, &preferences))?;
+        let request =
+            RemoteRankedSearchRequest::try_from(request.into_inner()).map_err(|error| {
+                self.localize_status(Status::invalid_argument(error.to_string()), &preferences)
+            })?;
         let request = RemoteRankedSearchRequest {
             caller_auth_token,
             request_context,
@@ -753,9 +870,10 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
             .ranked_search_handler
             .search_ranked(request)
             .await
-            .map_err(status_from_grpc_error)?;
-        let response = proto::RemoteRankedSearchResponse::try_from(response)
-            .map_err(|error| Status::internal(error.to_string()))?;
+            .map_err(|error| self.localize_status(status_from_grpc_error(error), &preferences))?;
+        let response = proto::RemoteRankedSearchResponse::try_from(response).map_err(|error| {
+            self.localize_status(Status::internal(error.to_string()), &preferences)
+        })?;
         Ok(Response::new(response))
     }
 
@@ -763,10 +881,14 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
         &self,
         request: Request<proto::RemoteHydrationRequest>,
     ) -> Result<Response<proto::RemoteHydrationResponse>, Status> {
-        let caller_auth_token = caller_auth_token_from_metadata(&request)?;
-        let request_context = request_context_from_metadata(&request)?;
-        let request = RemoteHydrationRequest::try_from(request.into_inner())
-            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let preferences = self.preferences(&request);
+        let caller_auth_token = caller_auth_token_from_metadata(&request)
+            .map_err(|status| self.localize_status(status, &preferences))?;
+        let request_context = request_context_from_metadata(&request, &preferences)
+            .map_err(|status| self.localize_status(status, &preferences))?;
+        let request = RemoteHydrationRequest::try_from(request.into_inner()).map_err(|error| {
+            self.localize_status(Status::invalid_argument(error.to_string()), &preferences)
+        })?;
         let request = RemoteHydrationRequest {
             caller_auth_token,
             request_context,
@@ -776,9 +898,10 @@ impl proto::nornic_replica_server::NornicReplica for NornicReplicaService {
             .hydration_handler
             .hydrate_entities(request)
             .await
-            .map_err(status_from_grpc_error)?;
-        let response = proto::RemoteHydrationResponse::try_from(response)
-            .map_err(|error| Status::internal(error.to_string()))?;
+            .map_err(|error| self.localize_status(status_from_grpc_error(error), &preferences))?;
+        let response = proto::RemoteHydrationResponse::try_from(response).map_err(|error| {
+            self.localize_status(Status::internal(error.to_string()), &preferences)
+        })?;
         Ok(Response::new(response))
     }
 }
@@ -791,6 +914,7 @@ pub struct TonicRemoteReplicaClient {
     tls_ca_certificate_pem: Option<String>,
     tls_domain_name: Option<String>,
     tls_identity_pem: Option<(String, String)>,
+    language_preferences: Vec<LanguageTag>,
 }
 
 #[derive(Debug, Clone)]
@@ -800,6 +924,7 @@ pub struct TonicRemoteRankedSearchClient {
     tls_ca_certificate_pem: Option<String>,
     tls_domain_name: Option<String>,
     tls_identity_pem: Option<(String, String)>,
+    language_preferences: Vec<LanguageTag>,
 }
 
 #[derive(Debug, Clone)]
@@ -809,6 +934,7 @@ pub struct TonicRemoteHydrationClient {
     tls_ca_certificate_pem: Option<String>,
     tls_domain_name: Option<String>,
     tls_identity_pem: Option<(String, String)>,
+    language_preferences: Vec<LanguageTag>,
 }
 
 impl TonicRemoteReplicaClient {
@@ -820,6 +946,7 @@ impl TonicRemoteReplicaClient {
             tls_ca_certificate_pem: None,
             tls_domain_name: None,
             tls_identity_pem: None,
+            language_preferences: Vec::new(),
         }
     }
 
@@ -830,6 +957,11 @@ impl TonicRemoteReplicaClient {
 
     pub fn with_caller_auth_token(mut self, token: impl Into<String>) -> Self {
         self.caller_auth_token = Some(token.into());
+        self
+    }
+
+    pub fn with_language_preferences(mut self, preferences: Vec<LanguageTag>) -> Self {
+        self.language_preferences = preferences;
         self
     }
 
@@ -911,11 +1043,17 @@ impl TonicRemoteRankedSearchClient {
             tls_ca_certificate_pem: None,
             tls_domain_name: None,
             tls_identity_pem: None,
+            language_preferences: Vec::new(),
         }
     }
 
     pub fn with_caller_auth_token(mut self, token: impl Into<String>) -> Self {
         self.caller_auth_token = Some(token.into());
+        self
+    }
+
+    pub fn with_language_preferences(mut self, preferences: Vec<LanguageTag>) -> Self {
+        self.language_preferences = preferences;
         self
     }
 
@@ -952,11 +1090,17 @@ impl TonicRemoteHydrationClient {
             tls_ca_certificate_pem: None,
             tls_domain_name: None,
             tls_identity_pem: None,
+            language_preferences: Vec::new(),
         }
     }
 
     pub fn with_caller_auth_token(mut self, token: impl Into<String>) -> Self {
         self.caller_auth_token = Some(token.into());
+        self
+    }
+
+    pub fn with_language_preferences(mut self, preferences: Vec<LanguageTag>) -> Self {
+        self.language_preferences = preferences;
         self
     }
 
@@ -1010,6 +1154,7 @@ impl RemoteReplicaClient for TonicRemoteReplicaClient {
         let proto_request = request_with_auth(
             proto::RemoteReplicaApplyRequest::try_from(request)?,
             self.auth_token.as_deref(),
+            &self.language_preferences,
         )?;
         self.connect(&target_addr)
             .await?
@@ -1030,6 +1175,7 @@ impl RemoteReplicaClient for TonicRemoteReplicaClient {
             .read_replica(request_with_auth(
                 proto::RemoteReplicaReadRequest::from(request),
                 self.auth_token.as_deref(),
+                &self.language_preferences,
             )?)
             .await
             .map_err(|error| GrpcError::Transport(error.to_string()))?
@@ -1052,6 +1198,7 @@ impl RemoteReplicaClient for TonicRemoteReplicaClient {
             .graph_node(request_with_auth_headers(
                 proto::RemoteGraphNodeRequest::from(request),
                 caller_auth_token.as_deref(),
+                &self.language_preferences,
             )?)
             .await
             .map_err(|error| GrpcError::Transport(error.to_string()))?
@@ -1074,6 +1221,7 @@ impl RemoteReplicaClient for TonicRemoteReplicaClient {
             .graph_edges_from_node(request_with_auth_headers(
                 proto::RemoteGraphEdgesRequest::from(request),
                 caller_auth_token.as_deref(),
+                &self.language_preferences,
             )?)
             .await
             .map_err(|error| GrpcError::Transport(error.to_string()))?
@@ -1096,6 +1244,7 @@ impl RemoteReplicaClient for TonicRemoteReplicaClient {
             .graph_edges_to_node(request_with_auth_headers(
                 proto::RemoteGraphEdgesRequest::from(request),
                 caller_auth_token.as_deref(),
+                &self.language_preferences,
             )?)
             .await
             .map_err(|error| GrpcError::Transport(error.to_string()))?
@@ -1118,6 +1267,7 @@ impl RemoteReplicaClient for TonicRemoteReplicaClient {
             .graph_nodes_by_label(request_with_auth_headers(
                 proto::RemoteGraphNodesByLabelRequest::from(request),
                 caller_auth_token.as_deref(),
+                &self.language_preferences,
             )?)
             .await
             .map_err(|error| GrpcError::Transport(error.to_string()))?
@@ -1140,6 +1290,7 @@ impl RemoteReplicaClient for TonicRemoteReplicaClient {
             .graph_nodes_by_property(request_with_auth_headers(
                 proto::RemoteGraphNodesByPropertyRequest::try_from(request)?,
                 caller_auth_token.as_deref(),
+                &self.language_preferences,
             )?)
             .await
             .map_err(|error| GrpcError::Transport(error.to_string()))?
@@ -1162,6 +1313,7 @@ impl RemoteReplicaClient for TonicRemoteReplicaClient {
             .graph_access_metadata(request_with_auth_headers(
                 proto::RemoteGraphAccessMetadataRequest::from(request),
                 caller_auth_token.as_deref(),
+                &self.language_preferences,
             )?)
             .await
             .map_err(|error| GrpcError::Transport(error.to_string()))?
@@ -1181,6 +1333,7 @@ impl RemoteRankedSearchClient for TonicRemoteRankedSearchClient {
         let mut request = request_with_auth_headers(
             proto::RemoteRankedSearchRequest::try_from(request)?,
             self.caller_auth_token.as_deref(),
+            &self.language_preferences,
         )?;
         attach_request_context_metadata(&mut request, request_context.as_ref())?;
         let response = TonicRemoteReplicaClient {
@@ -1190,6 +1343,7 @@ impl RemoteRankedSearchClient for TonicRemoteRankedSearchClient {
             tls_ca_certificate_pem: self.tls_ca_certificate_pem.clone(),
             tls_domain_name: self.tls_domain_name.clone(),
             tls_identity_pem: self.tls_identity_pem.clone(),
+            language_preferences: self.language_preferences.clone(),
         }
         .connect(&target_addr)
         .await?
@@ -1218,6 +1372,7 @@ impl RemoteHydrationClient for TonicRemoteHydrationClient {
         let mut request = request_with_auth_headers(
             proto::RemoteHydrationRequest::try_from(request)?,
             self.caller_auth_token.as_deref(),
+            &self.language_preferences,
         )?;
         attach_request_context_metadata(&mut request, request_context.as_ref())?;
         let response = TonicRemoteReplicaClient {
@@ -1227,6 +1382,7 @@ impl RemoteHydrationClient for TonicRemoteHydrationClient {
             tls_ca_certificate_pem: self.tls_ca_certificate_pem.clone(),
             tls_domain_name: self.tls_domain_name.clone(),
             tls_identity_pem: self.tls_identity_pem.clone(),
+            language_preferences: self.language_preferences.clone(),
         }
         .connect(&target_addr)
         .await?

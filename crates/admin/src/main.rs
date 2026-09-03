@@ -5,6 +5,7 @@ use copperdb_adminimport::{
     export_neo4j_csv, import_offline, write_import_report, AdminImportError, ImportOptions,
     Neo4jCsvExportOptions,
 };
+use copperdb_localization::{resolve_process_preferences, LanguageTag, Manager, Message};
 use copperdb_storage::StorageEngine;
 use copperdb_util::RequestCancellation;
 
@@ -99,13 +100,52 @@ struct Neo4jCsvExportArgs {
 }
 
 fn main() -> ExitCode {
+    let preferences = match resolve_process_preferences("auto", || {
+        sys_locale::get_locale()
+            .map(|locale| vec![locale])
+            .ok_or_else(|| "operating system language was not detected".to_string())
+    }) {
+        Ok(preferences) => preferences.preferences,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let localizer = Manager::new(&preferences);
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("{error}");
+            eprintln!(
+                "{} {}",
+                render_catalog_message(&localizer, &preferences, "admincli.error_prefix", "Error:"),
+                render_command_error(&localizer, &preferences, error.as_ref())
+            );
             ExitCode::from(error.exit_code() as u8)
         }
     }
+}
+
+fn render_catalog_message(
+    localizer: &Manager,
+    preferences: &[LanguageTag],
+    id: &'static str,
+    fallback: &'static str,
+) -> String {
+    Message::from_catalog(id)
+        .and_then(|message| localizer.render(preferences, &message).ok())
+        .map(|rendered| rendered.text)
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn render_command_error(
+    localizer: &Manager,
+    preferences: &[LanguageTag],
+    error: &dyn std::fmt::Display,
+) -> String {
+    localizer
+        .render_display(preferences, error)
+        .map(|rendered| rendered.text)
+        .unwrap_or_else(|| error.to_string())
 }
 
 fn run(cli: Cli) -> AdminResult<()> {
@@ -121,10 +161,6 @@ fn run(cli: Cli) -> AdminResult<()> {
             let cancellation = RequestCancellation::new();
             let report = import_offline(&target, &options, &cancellation)?;
             write_import_report(&options, &report)?;
-            println!(
-                "imported {} nodes and {} relationships into {}",
-                report.nodes_imported, report.relationships_imported, report.database_name
-            );
             Ok(())
         }
         Command::Database {
@@ -137,13 +173,7 @@ fn run(cli: Cli) -> AdminResult<()> {
             let options = export_options_from_args(args)?;
             let engine = StorageEngine::open(source).map_err(AdminImportError::from)?;
             let cancellation = RequestCancellation::new();
-            let report = export_neo4j_csv(&engine, &options, &cancellation)?;
-            println!(
-                "exported {} nodes and {} relationships into {}",
-                report.nodes_exported,
-                report.relationships_exported,
-                options.output_directory.display()
-            );
+            export_neo4j_csv(&engine, &options, &cancellation)?;
             Ok(())
         }
     }
@@ -239,5 +269,24 @@ mod tests {
         assert_eq!(options.quote, b'\'');
         assert_eq!(options.array_delimiter, '|');
         assert_eq!(options.vector_delimiter, ':');
+    }
+
+    #[test]
+    fn localizes_admin_import_errors_and_prefix() {
+        let preferences = vec![LanguageTag::parse("es-ES").unwrap().unwrap()];
+        let localizer = Manager::new(&preferences);
+
+        assert_eq!(
+            render_catalog_message(&localizer, &preferences, "admincli.error_prefix", "Error:"),
+            "Error:"
+        );
+        assert_eq!(
+            render_command_error(
+                &localizer,
+                &preferences,
+                &AdminImportError::MissingDatabaseName
+            ),
+            "se requiere el nombre de la base de datos"
+        );
     }
 }
