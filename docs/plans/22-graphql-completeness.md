@@ -1,10 +1,10 @@
-# 21: GraphQL Completeness
+# 22: GraphQL Completeness
 
 Status: deferred. Priority: P2. Owners: `graphql`, `server`, `engine`, `auth`.
 
 ## Sequencing
 
-GraphQL work is deferred until item 17 proves the external package boundary with representative APOC and Heimdall packages. This avoids expanding another protocol adapter before extension registration, authorization, lifecycle, and database-scoped host services are stable.
+GraphQL feature work remains deferred until Plan 20 closes the latest upstream database settings, authorization, limits, localization, headless routing, and error contracts. This avoids expanding a protocol adapter before its shared engine and boundary behavior is stable.
 
 ## Objective
 
@@ -28,7 +28,7 @@ Stable node/relationship models, directional traversal, adjacency-backed neighbo
 
 ## Tests And Performance
 
-Database isolation, read/write/admin denial, rollback, constraints, traversal directions/types, cursor stability, N+1 prevention, malformed scalars, error extensions, audit, cancellation, and HTTP auth. Benchmark paginated scans, one/two-hop traversal, mutation batches, and complexity rejection.
+Database isolation, read/write/admin denial, rollback, constraints, traversal directions/types, cursor stability, N+1 prevention, malformed scalars, localized stable error extensions, audit, cancellation, and HTTP auth. Benchmark paginated scans, one/two-hop traversal, mutation batches, and complexity rejection.
 
 ## Definition Of Done
 

@@ -1,6 +1,6 @@
 # Audit Implementation Plans
 
-Date: 2026-07-28
+Date: 2026-09-03
 
 These plans expand the numbered findings in [../COPPERDB_NORNICDB_PARITY_PLAN.md](../COPPERDB_NORNICDB_PARITY_PLAN.md). The consolidated audit owns priority and status; these files own implementation detail. Documents under [old](old) are historical references only.
 
@@ -8,6 +8,8 @@ These plans expand the numbered findings in [../COPPERDB_NORNICDB_PARITY_PLAN.md
 
 - Implement in numeric order unless a plan explicitly states it can proceed independently.
 - Port upstream tests as behavioral specifications, not upstream internals.
+- Analyze every upstream production, test, generated, dependency, build, UI, documentation, packaging, and operational change for a CopperDB obligation. Implementation language alone never makes a change out of scope.
+- Complete missing prerequisite behavior in any area affected by the audited change. A no-code disposition requires repository evidence that CopperDB owns no analogous surface and must name the condition that reopens it.
 - Keep automatic indexing, search, embedding, inference, and graph mutation disabled by default.
 - Run focused tests after each phase, dependent-crate tests before completion, and workspace tests before changing audit status.
 - Add benchmarks only after correctness tests pass. Performance work must retain the same public behavior and error contract.
@@ -36,10 +38,11 @@ These plans expand the numbered findings in [../COPPERDB_NORNICDB_PARITY_PLAN.md
 | 17 | P2 | [Plugin packages and APOC verification](17-plugin-packages-apoc-verification.md) | 15, 16 |
 | 18 | P2 | [MCP transport and tools](18-mcp-transport-tools.md) | 1, 8, 12, 14, 17 |
 | 19 | P2 | [Heimdall, inference, link prediction, and reranking](19-ai-governance-runtime.md) | 11, 12, 16, 17 |
-| 20 | P2 | [GPU and SIMD acceleration](20-gpu-simd-acceleration.md) | 10, 12 and CPU benchmarks |
-| 21 | P2 | [GraphQL completeness](21-graphql-completeness.md) | 1, 2/8, 12, 14, 17 |
+| 20 | P1/P2 | [Upstream sync, September 2026](20-upstream-sync-2026-09.md) | 1-19 complete contracts |
+| 21 | P2 | [GPU and SIMD acceleration](21-gpu-simd-acceleration.md) | 10, 12, 20 and CPU benchmarks |
+| 22 | P2 | [GraphQL completeness](22-graphql-completeness.md) | 1, 2/8, 12, 14, 17, 20 |
+| 23 | P1 | [Deployment, CI, and release distribution](23-deployment-ci-release.md) | 20, 21; independent of 22 |
 
-TBD:   36f2e532..2ec94c08  main       -> origin/main - apply changes from upstream NornicDB security codeQL flagged items (security)
 ## Status Convention
 
 Each plan starts as `planned`. Change it to `in progress` only when implementation begins and to `complete` only when every definition-of-done item and validation command passes. Record blocked phases and upstream commit changes directly in the plan.

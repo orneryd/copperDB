@@ -135,8 +135,10 @@ The first work must close verified audit findings. New feature expansion should 
 19. **Complete:** expand Heimdall inference, link prediction, and reranking behavior after item 17 proves the package/action lifecycle and the benchmark-ready single-node core is stable.
    - Delivered: upstream-compatible read-only reranking; bounded storage-backed graph snapshots; normalized topology, semantic, and ensemble scoring; bounded similarity/co-access/temporal/transitive signals; canonical embedding identity; durable aggregate evidence and provenance; authenticated, audited model/human review; bounded provider scheduling and restart recovery; maintained-vector-index production wiring; and last-stage atomic materialization behind overriding global and per-database switches.
    - Safety: default operation never mutates graph state, configured providers cannot broaden submitted membership, stale evidence fails policy, duplicate concurrent decisions/materializations converge, and audit plus graph mutation commit atomically.
-20. Add GPU/SIMD acceleration only behind behaviorally identical CPU contracts and measured crossover thresholds.
-21. Complete GraphQL traversal, pagination, mutation, error, database-selection, and auth behavior after item 17.
+20. **Planned upstream sync:** analyze and close every CopperDB obligation from NornicDB `d9b76ae8..21b998cb`, including production, test, generated, dependency, build, UI, documentation, packaging, and operational changes. Complete missing prerequisite implementation in every affected area; implementation language is never a skip reason. Maintain a checked disposition for all 44 commits and 619 changed files, with repository evidence and a reopening trigger for every no-code decision.
+21. Add GPU/SIMD acceleration only behind behaviorally identical CPU contracts and measured crossover thresholds after item 20 closes fixed-stride vector and architecture-tolerance changes.
+22. Complete GraphQL traversal, pagination, mutation, error, database-selection, and auth behavior after item 20 stabilizes shared settings, authorization, localization, limits, and headless routing.
+23. Port NornicDB's full CI, Docker/Compose, macOS product and installer, documentation deployment, and release publication system after item 21 finalizes supported build targets. Rebrand every asset and default, preserve memory-safe test sharding, and publish only signed, notarized, checksummed, SBOM/provenance-backed artifacts. Item 23 may proceed before deferred item 22.
 
 ## Current Implementation Audit
 
@@ -163,7 +165,7 @@ Status meanings:
 | Temporal/decay/knowledge policy | Operational baseline | Policy persistence, scoring, ON ACCESS buffering, access metadata | Adaptive/Kalman behavior, computed mutations, search-time integration |
 | Convert/admin import | Operational baseline | Typed Neo4j conversion, bounded staged import, schema/index rebuild, deterministic streaming export, CLI, and performance workloads | Broader Neo4j administrative format coverage outside the audited full-import/CSV-export contract |
 | Observability | Partial | Metric catalog, validation, redaction/readiness foundations | Exporters, live ownership, protocol/search/storage instrumentation |
-| GraphQL | Deferred to item 21 | Storage-backed baseline operations | Resume full schema/resolver/auth/pagination behavior after plugin package verification |
+| GraphQL | Deferred to item 22 | Storage-backed baseline operations | Resume full schema/resolver/auth/pagination behavior after item 20 shared-runtime parity |
 | MCP, Heimdall, inference, linkpredict | Operational baseline | Governed inference runtime, durable suggestions/review, maintained-index signals, deterministic link prediction, and MCP contracts | Broader provider/model catalog and protocol presentation outside item 19 |
 | GPU and SIMD | Deferred | Configuration and utility foundations | Measured vector/graph acceleration with CPU parity |
 | Replication, fabric, topology, nornicgrpc, qdrantgrpc | Deferred | Placement, merge, transport, and topology contracts are substantial | No supported distributed runtime until deferred completion gates pass |
@@ -174,6 +176,7 @@ This ledger prevents recent NornicDB fixes from disappearing into broad package 
 
 | Upstream commit/family | Behavior | Copper disposition |
 | --- | --- | --- |
+| `d9b76ae8..21b998cb` | September 2026 localization, settings, isolation/security, streamed recovery, search/vector, and query regressions | Planned in item 20; 619-file disposition required before advancing the audit baseline |
 | `36f2e532` | Retryable post-snapshot edge update conflict | P0, complete; storage, Cypher, and live Bolt regressions |
 | `20215f13`, `1837c8c7` | Auth defaults on and explicit precedence | P0, complete |
 | `e090df01` | Lucene-classic fulltext grammar | P0, complete; shared truth-table mirror, public node/relationship regressions, maintained postings, and Criterion benchmarks |

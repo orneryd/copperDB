@@ -20,7 +20,7 @@ Status: complete. Priority: P2. Owners: `eval`, `engine`, `server`, `copperdb`, 
 
 Turn item 15's injected function/procedure registrars into a production package system that loads independently owned plugins at startup. Prove the contract with a separate `copperdb-apoc` package and a representative Heimdall package whose registration, discovery, authorization, lifecycle, cancellation, errors, and behavior match NornicDB. Do not port the full APOC suite in this item; make later function and procedure ports mechanical additions to the package.
 
-GraphQL completeness is deferred to item 21 and must not begin until this package boundary is complete.
+GraphQL completeness is deferred to item 22 and must not begin until this package boundary and item 20's shared-runtime audit are complete.
 
 ## Upstream Contract
 
