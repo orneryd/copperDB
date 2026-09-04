@@ -3801,10 +3801,10 @@ fn convert_engine_result(result: copperdb_engine::QueryResult) -> Neo4jResult {
     let data = result
         .rows
         .into_iter()
-        .map(|row| Neo4jRow {
+        .map(|mut row| Neo4jRow {
             row: columns
                 .iter()
-                .map(|column| row.get(column).cloned().unwrap_or(serde_json::Value::Null))
+                .map(|column| row.remove(column).unwrap_or(serde_json::Value::Null))
                 .collect(),
             meta: vec![],
         })
