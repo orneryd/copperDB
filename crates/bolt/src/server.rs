@@ -828,6 +828,8 @@ async fn handle_tcp_session_with_timeout_and_counters(
             pending_frames.extend(decoder.push(&temp_buf[..bytes_read]));
         }
 
+        let mut framed_responses = Vec::new();
+        let mut response_count = 0usize;
         while let Some(frame) = pending_frames.pop_front() {
             let processing = process_frame(
                 &frame,
@@ -866,8 +868,8 @@ async fn handle_tcp_session_with_timeout_and_counters(
                 continue;
             }
             if !responses.is_empty() {
-                let response_count = responses.len();
-                let mut framed_responses = Vec::with_capacity(
+                response_count += responses.len();
+                framed_responses.reserve(
                     responses
                         .iter()
                         .map(|response| response.len().saturating_add(6))
@@ -876,15 +878,17 @@ async fn handle_tcp_session_with_timeout_and_counters(
                 for response in responses {
                     wsconn::encode_bolt_chunks_into(&mut framed_responses, &response);
                 }
-                info!(
-                    event_id = "bolt.log.run",
-                    response_count,
-                    response_bytes = framed_responses.len(),
-                    transport = "tcp",
-                    "bolt sending responses"
-                );
-                stream.write_all(&framed_responses).await?;
             }
+        }
+        if !framed_responses.is_empty() {
+            info!(
+                event_id = "bolt.log.run",
+                response_count,
+                response_bytes = framed_responses.len(),
+                transport = "tcp",
+                "bolt sending responses"
+            );
+            stream.write_all(&framed_responses).await?;
         }
     };
     rollback_active_transaction(&mut session, executor.as_ref());
@@ -1515,10 +1519,7 @@ async fn process_message_with_telemetry(
             let meta = HashMap::from([
                 ("server".into(), serde_json::json!("copperdb/1.0")),
                 ("connection_id".into(), serde_json::json!("copperdb-1")),
-                (
-                    "hints".into(),
-                    serde_json::json!({"connection.recv_timeout_seconds": 120}),
-                ),
+                ("hints".into(), serde_json::json!({})),
                 ("patch_bolt".into(), serde_json::json!(["utc"])),
             ]);
             info!(
@@ -3427,6 +3428,8 @@ mod tests {
                 if let Value::Map(ref meta) = fields[0] {
                     let server = meta.iter().find(|(k, _)| k == "server").map(|(_, v)| v);
                     assert!(server.is_some(), "SUCCESS metadata should include 'server'");
+                    let hints = meta.iter().find(|(k, _)| k == "hints").map(|(_, v)| v);
+                    assert_eq!(hints, Some(&Value::Map(vec![])));
                 }
             }
             other => panic!("expected struct, got {other:?}"),

@@ -1,0 +1,1 @@
+841M	/Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb
