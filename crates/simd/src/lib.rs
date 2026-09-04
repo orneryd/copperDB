@@ -128,87 +128,91 @@ unsafe fn horizontal_sum_f32x8(value: __m256) -> f32 {
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn dot_f32_avx2_fma(a: &[f32], b: &[f32]) -> f32 {
-    let unrolled_len = a.len() / 32 * 32;
-    let vectorized_len = a.len() / 8 * 8;
-    let mut acc0 = _mm256_setzero_ps();
-    let mut acc1 = _mm256_setzero_ps();
-    let mut acc2 = _mm256_setzero_ps();
-    let mut acc3 = _mm256_setzero_ps();
-    let mut index = 0;
-    while index < unrolled_len {
-        let left = _mm256_loadu_ps(a.as_ptr().add(index));
-        let right = _mm256_loadu_ps(b.as_ptr().add(index));
-        acc0 = _mm256_fmadd_ps(left, right, acc0);
-        let left = _mm256_loadu_ps(a.as_ptr().add(index + 8));
-        let right = _mm256_loadu_ps(b.as_ptr().add(index + 8));
-        acc1 = _mm256_fmadd_ps(left, right, acc1);
-        let left = _mm256_loadu_ps(a.as_ptr().add(index + 16));
-        let right = _mm256_loadu_ps(b.as_ptr().add(index + 16));
-        acc2 = _mm256_fmadd_ps(left, right, acc2);
-        let left = _mm256_loadu_ps(a.as_ptr().add(index + 24));
-        let right = _mm256_loadu_ps(b.as_ptr().add(index + 24));
-        acc3 = _mm256_fmadd_ps(left, right, acc3);
-        index += 32;
-    }
-    acc0 = _mm256_add_ps(acc0, acc1);
-    acc2 = _mm256_add_ps(acc2, acc3);
-    acc0 = _mm256_add_ps(acc0, acc2);
-    while index < vectorized_len {
-        let left = _mm256_loadu_ps(a.as_ptr().add(index));
-        let right = _mm256_loadu_ps(b.as_ptr().add(index));
-        acc0 = _mm256_fmadd_ps(left, right, acc0);
-        index += 8;
-    }
+    unsafe {
+        let unrolled_len = a.len() / 32 * 32;
+        let vectorized_len = a.len() / 8 * 8;
+        let mut acc0 = _mm256_setzero_ps();
+        let mut acc1 = _mm256_setzero_ps();
+        let mut acc2 = _mm256_setzero_ps();
+        let mut acc3 = _mm256_setzero_ps();
+        let mut index = 0;
+        while index < unrolled_len {
+            let left = _mm256_loadu_ps(a.as_ptr().add(index));
+            let right = _mm256_loadu_ps(b.as_ptr().add(index));
+            acc0 = _mm256_fmadd_ps(left, right, acc0);
+            let left = _mm256_loadu_ps(a.as_ptr().add(index + 8));
+            let right = _mm256_loadu_ps(b.as_ptr().add(index + 8));
+            acc1 = _mm256_fmadd_ps(left, right, acc1);
+            let left = _mm256_loadu_ps(a.as_ptr().add(index + 16));
+            let right = _mm256_loadu_ps(b.as_ptr().add(index + 16));
+            acc2 = _mm256_fmadd_ps(left, right, acc2);
+            let left = _mm256_loadu_ps(a.as_ptr().add(index + 24));
+            let right = _mm256_loadu_ps(b.as_ptr().add(index + 24));
+            acc3 = _mm256_fmadd_ps(left, right, acc3);
+            index += 32;
+        }
+        acc0 = _mm256_add_ps(acc0, acc1);
+        acc2 = _mm256_add_ps(acc2, acc3);
+        acc0 = _mm256_add_ps(acc0, acc2);
+        while index < vectorized_len {
+            let left = _mm256_loadu_ps(a.as_ptr().add(index));
+            let right = _mm256_loadu_ps(b.as_ptr().add(index));
+            acc0 = _mm256_fmadd_ps(left, right, acc0);
+            index += 8;
+        }
 
-    horizontal_sum_f32x8(acc0)
-        + a[vectorized_len..]
-            .iter()
-            .zip(&b[vectorized_len..])
-            .map(|(left, right)| left * right)
-            .sum::<f32>()
+        horizontal_sum_f32x8(acc0)
+            + a[vectorized_len..]
+                .iter()
+                .zip(&b[vectorized_len..])
+                .map(|(left, right)| left * right)
+                .sum::<f32>()
+    }
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 unsafe fn dot_f32_avx2(a: &[f32], b: &[f32]) -> f32 {
-    let unrolled_len = a.len() / 32 * 32;
-    let vectorized_len = a.len() / 8 * 8;
-    let mut acc0 = _mm256_setzero_ps();
-    let mut acc1 = _mm256_setzero_ps();
-    let mut acc2 = _mm256_setzero_ps();
-    let mut acc3 = _mm256_setzero_ps();
-    let mut index = 0;
-    while index < unrolled_len {
-        let left = _mm256_loadu_ps(a.as_ptr().add(index));
-        let right = _mm256_loadu_ps(b.as_ptr().add(index));
-        acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(left, right));
-        let left = _mm256_loadu_ps(a.as_ptr().add(index + 8));
-        let right = _mm256_loadu_ps(b.as_ptr().add(index + 8));
-        acc1 = _mm256_add_ps(acc1, _mm256_mul_ps(left, right));
-        let left = _mm256_loadu_ps(a.as_ptr().add(index + 16));
-        let right = _mm256_loadu_ps(b.as_ptr().add(index + 16));
-        acc2 = _mm256_add_ps(acc2, _mm256_mul_ps(left, right));
-        let left = _mm256_loadu_ps(a.as_ptr().add(index + 24));
-        let right = _mm256_loadu_ps(b.as_ptr().add(index + 24));
-        acc3 = _mm256_add_ps(acc3, _mm256_mul_ps(left, right));
-        index += 32;
-    }
-    acc0 = _mm256_add_ps(acc0, acc1);
-    acc2 = _mm256_add_ps(acc2, acc3);
-    acc0 = _mm256_add_ps(acc0, acc2);
-    while index < vectorized_len {
-        let left = _mm256_loadu_ps(a.as_ptr().add(index));
-        let right = _mm256_loadu_ps(b.as_ptr().add(index));
-        acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(left, right));
-        index += 8;
-    }
+    unsafe {
+        let unrolled_len = a.len() / 32 * 32;
+        let vectorized_len = a.len() / 8 * 8;
+        let mut acc0 = _mm256_setzero_ps();
+        let mut acc1 = _mm256_setzero_ps();
+        let mut acc2 = _mm256_setzero_ps();
+        let mut acc3 = _mm256_setzero_ps();
+        let mut index = 0;
+        while index < unrolled_len {
+            let left = _mm256_loadu_ps(a.as_ptr().add(index));
+            let right = _mm256_loadu_ps(b.as_ptr().add(index));
+            acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(left, right));
+            let left = _mm256_loadu_ps(a.as_ptr().add(index + 8));
+            let right = _mm256_loadu_ps(b.as_ptr().add(index + 8));
+            acc1 = _mm256_add_ps(acc1, _mm256_mul_ps(left, right));
+            let left = _mm256_loadu_ps(a.as_ptr().add(index + 16));
+            let right = _mm256_loadu_ps(b.as_ptr().add(index + 16));
+            acc2 = _mm256_add_ps(acc2, _mm256_mul_ps(left, right));
+            let left = _mm256_loadu_ps(a.as_ptr().add(index + 24));
+            let right = _mm256_loadu_ps(b.as_ptr().add(index + 24));
+            acc3 = _mm256_add_ps(acc3, _mm256_mul_ps(left, right));
+            index += 32;
+        }
+        acc0 = _mm256_add_ps(acc0, acc1);
+        acc2 = _mm256_add_ps(acc2, acc3);
+        acc0 = _mm256_add_ps(acc0, acc2);
+        while index < vectorized_len {
+            let left = _mm256_loadu_ps(a.as_ptr().add(index));
+            let right = _mm256_loadu_ps(b.as_ptr().add(index));
+            acc0 = _mm256_add_ps(acc0, _mm256_mul_ps(left, right));
+            index += 8;
+        }
 
-    horizontal_sum_f32x8(acc0)
-        + a[vectorized_len..]
-            .iter()
-            .zip(&b[vectorized_len..])
-            .map(|(left, right)| left * right)
-            .sum::<f32>()
+        horizontal_sum_f32x8(acc0)
+            + a[vectorized_len..]
+                .iter()
+                .zip(&b[vectorized_len..])
+                .map(|(left, right)| left * right)
+                .sum::<f32>()
+    }
 }
 
 /// Compute squared L2 distance using SIMD.

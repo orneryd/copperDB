@@ -637,6 +637,9 @@ impl BoltServer {
     }
 
     fn spawn_tcp(&self, mut stream: TcpStream, peer_addr: std::net::SocketAddr) {
+        if let Err(error) = stream.set_nodelay(true) {
+            warn!(event_id = "bolt.log.tcp_nodelay_failed", %peer_addr, %error, "failed to disable Nagle buffering for bolt tcp connection");
+        }
         let started = std::time::Instant::now();
         let telemetry = Arc::clone(&self.telemetry);
         let runtime_counters = Arc::clone(&self.runtime_counters);
@@ -849,16 +852,25 @@ async fn handle_tcp_session_with_timeout_and_counters(
             if interrupted {
                 continue;
             }
-            for response_bytes in responses {
+            if !responses.is_empty() {
+                let response_count = responses.len();
+                let mut framed_responses = Vec::with_capacity(
+                    responses
+                        .iter()
+                        .map(|response| response.len().saturating_add(6))
+                        .sum(),
+                );
+                for response in responses {
+                    framed_responses.extend_from_slice(&wsconn::encode_bolt_chunks(&response));
+                }
                 info!(
                     event_id = "bolt.log.run",
-                    response_bytes = response_bytes.len(),
+                    response_count,
+                    response_bytes = framed_responses.len(),
                     transport = "tcp",
-                    "bolt sending response"
+                    "bolt sending responses"
                 );
-                stream
-                    .write_all(&wsconn::encode_bolt_chunks(&response_bytes))
-                    .await?;
+                stream.write_all(&framed_responses).await?;
             }
         }
     };

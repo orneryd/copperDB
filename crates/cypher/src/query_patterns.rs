@@ -315,7 +315,7 @@ fn detect_directional_count_agg(query: &str, incoming: bool) -> Option<CountAggD
     })
 }
 
-/// Verify the RETURN clause has exactly two items: `<start>.name` and
+/// Verify the RETURN clause has exactly two items: `<start>.<property>` and
 /// `count(<end>)` or `count(*)`.
 fn is_return_name_count_shape(query: &str, start_var: &str, end_var: &str) -> bool {
     let return_idx = match find_keyword_index(query, "RETURN") {
@@ -343,8 +343,15 @@ fn is_return_name_count_shape(query: &str, start_var: &str, end_var: &str) -> bo
     let left = strip_alias(parts[0].trim());
     let right = strip_alias(parts[1].trim());
 
-    // Require "<start>.name"
-    if !left.eq_ignore_ascii_case(&format!("{}.name", start_var)) {
+    let Some((variable, property)) = left.split_once('.') else {
+        return false;
+    };
+    if !variable.eq_ignore_ascii_case(start_var)
+        || property.is_empty()
+        || !property
+            .chars()
+            .all(|character| character == '_' || character.is_ascii_alphanumeric())
+    {
         return false;
     }
 
@@ -876,6 +883,16 @@ mod tests {
         assert_eq!(info.pattern, QueryPattern::IncomingCountAgg);
         assert!(!info.start_var.is_empty());
         assert!(!info.end_var.is_empty());
+    }
+
+    #[test]
+    fn test_northwind_products_per_category_count_pattern() {
+        let query = "MATCH (c:Category)<-[:PART_OF]-(p:Product) RETURN c.categoryName AS categoryName, count(p) AS productCount ORDER BY productCount DESC";
+        let info = detect_query_pattern(query);
+        assert_eq!(info.pattern, QueryPattern::IncomingCountAgg);
+        assert_eq!(info.start_var, "c");
+        assert_eq!(info.end_var, "p");
+        assert_eq!(info.rel_type, "PART_OF");
     }
 
     #[test]

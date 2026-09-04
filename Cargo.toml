@@ -180,6 +180,9 @@ dashmap = "7.0.0-rc2"
 
 # Dynamic library loading (replaces github.com/ebitengine/purego FFI)
 libloading = "0.9.0"
+wgpu = "30.0.1"
+pollster = "0.4.0"
+bytemuck = { version = "1.24.0", features = ["derive"] }
 
 # KMS provider clients
 aws-config = "1.8.16"

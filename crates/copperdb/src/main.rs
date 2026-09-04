@@ -405,7 +405,7 @@ async fn main() -> Result<()> {
     let _ = install_global_telemetry(Arc::clone(&telemetry));
     let auth = copperdb_server::AuthState::from_runtime_config(startup.runtime_config.as_ref())
         .context("failed to initialize configured authentication")?;
-    let mut state = AppState::with_auth(auth);
+    let mut state = AppState::with_auth_and_storage(auth, &startup.runtime_config.storage.path);
     state.language_preferences = process_preferences.preferences.clone();
     state.localizer = Arc::new(copperdb_localization::Manager::new(
         &process_preferences.preferences,

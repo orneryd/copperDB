@@ -1,6 +1,6 @@
 use super::*;
 use copperdb_cypher::{
-    can_execute_as_pipeline, detect_query_pattern, match_compound_query_shape, Parser, QueryPattern,
+    Parser, QueryPattern, can_execute_as_pipeline, detect_query_pattern, match_compound_query_shape,
 };
 use copperdb_filter::FunctionDescriptor;
 use copperdb_storage::{
@@ -805,11 +805,13 @@ fn cancelled_vector_index_finalization_removes_partial_state() {
 
     assert!(matches!(error, EvalError::RequestCancelled(_)));
     assert!(catalog.get(index_name).unwrap().is_none());
-    assert!(engine
-        .storage
-        .load_index_options(index_name)
-        .unwrap()
-        .is_none());
+    assert!(
+        engine
+            .storage
+            .load_index_options(index_name)
+            .unwrap()
+            .is_none()
+    );
     assert!(matches!(
         engine.vector_indexes.status(index_name),
         Err(VectorSpaceError::IndexNotFound(name)) if name == index_name
@@ -860,11 +862,13 @@ fn unwind_batch_observes_installed_request_cancellation_before_mutation() {
         .unwrap_err();
 
     assert!(matches!(error, EvalError::RequestCancelled(_)));
-    assert!(engine
-        .storage
-        .get_nodes_by_label("Star")
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .storage
+            .get_nodes_by_label("Star")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1436,6 +1440,71 @@ fn test_execute_with_routes_optimizes_incoming_count_aggregation() {
 }
 
 #[test]
+fn test_execute_with_routes_optimizes_northwind_products_per_category() {
+    let engine = make_engine();
+    let parser = Parser::new();
+    for (id, label, name) in [
+        ("category:1", "Category", "Beverages"),
+        ("category:2", "Category", "Condiments"),
+        ("product:1", "Product", "Chai"),
+        ("product:2", "Product", "Chang"),
+        ("product:3", "Product", "Aniseed Syrup"),
+        ("other:1", "Other", "Not a product"),
+    ] {
+        let property = if label == "Category" {
+            "categoryName"
+        } else {
+            "productName"
+        };
+        store_node(
+            engine.storage.as_ref(),
+            id,
+            &[label],
+            HashMap::from([(property.to_string(), Value::String(name.into()))]),
+        );
+    }
+    for (id, start, end) in [
+        ("part:1", "product:1", "category:1"),
+        ("part:2", "product:2", "category:1"),
+        ("part:3", "product:3", "category:2"),
+        ("part:4", "other:1", "category:1"),
+    ] {
+        engine
+            .storage
+            .put_edge_record(&EdgeRecord {
+                id: id.into(),
+                start_node: start.into(),
+                end_node: end.into(),
+                edge_type: "PART_OF".into(),
+                properties: BTreeMap::new(),
+                created_at_unix_ms: 0,
+                updated_at_unix_ms: 0,
+            })
+            .unwrap();
+    }
+
+    let cypher = "MATCH (c:Category)<-[:PART_OF]-(p:Product) RETURN c.categoryName AS categoryName, count(p) AS productCount ORDER BY productCount DESC";
+    let query = parser.parse(cypher).unwrap();
+    let pattern = detect_query_pattern(cypher);
+    let result = engine
+        .execute_with_routes(&query, &HashMap::new(), &pattern, None, None)
+        .unwrap();
+
+    assert_eq!(pattern.pattern, QueryPattern::IncomingCountAgg);
+    assert_eq!(result.rows.len(), 2);
+    assert_eq!(
+        result.rows[0].get("categoryName"),
+        Some(&Value::from("Beverages"))
+    );
+    assert_eq!(result.rows[0].get("productCount"), Some(&Value::from(2)));
+    assert_eq!(
+        result.rows[1].get("categoryName"),
+        Some(&Value::from("Condiments"))
+    );
+    assert_eq!(result.rows[1].get("productCount"), Some(&Value::from(1)));
+}
+
+#[test]
 fn test_execute_with_routes_optimizes_incoming_count_star_aggregation() {
     let engine = make_engine();
     let parser = Parser::new();
@@ -1701,8 +1770,8 @@ fn prof_raw_two_hop_match_count_benchmark_breakdown() {
         Some(&Value::from(count))
     );
     eprintln!(
-            "raw_two_hop_match_count_1000: parse={parse_elapsed:.2?} first_hop_type_scan={first_hop_elapsed:.2?} per_edge_expansion={expansion_elapsed:.2?} result_cache_miss_graph_warm={raw_elapsed:.2?} result_cache_hit={cache_hit_elapsed:.2?}"
-        );
+        "raw_two_hop_match_count_1000: parse={parse_elapsed:.2?} first_hop_type_scan={first_hop_elapsed:.2?} per_edge_expansion={expansion_elapsed:.2?} result_cache_miss_graph_warm={raw_elapsed:.2?} result_cache_hit={cache_hit_elapsed:.2?}"
+    );
 }
 
 #[test]
@@ -1844,11 +1913,13 @@ fn test_execute_with_routes_uses_compound_shape_fast_path() {
     );
     assert_eq!(result.stats.relationships_created, 1);
     assert_eq!(result.stats.relationships_deleted, 1);
-    assert!(engine
-        .storage
-        .get_edges_by_type("TEMP_KNOWS")
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .storage
+            .get_edges_by_type("TEMP_KNOWS")
+            .unwrap()
+            .is_empty()
+    );
 
     let trace = engine.hot_path_trace_snapshot();
     assert!(trace.compound_query_fast_path);
@@ -1893,11 +1964,13 @@ fn test_execute_with_routes_compound_fast_path_limit_zero_is_noop() {
     assert!(result.rows.is_empty());
     assert_eq!(result.stats.relationships_created, 0);
     assert_eq!(result.stats.relationships_deleted, 0);
-    assert!(engine
-        .storage
-        .get_edges_by_type("TEMP_REL")
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .storage
+            .get_edges_by_type("TEMP_REL")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -2195,11 +2268,13 @@ fn test_execute_with_routes_compound_fast_path_property_miss_falls_back_cleanly(
     assert!(result.rows.is_empty());
     assert_eq!(result.stats.relationships_created, 0);
     assert_eq!(result.stats.relationships_deleted, 0);
-    assert!(engine
-        .storage
-        .get_edges_by_type("TEMP_KNOWS")
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .storage
+            .get_edges_by_type("TEMP_KNOWS")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -2243,11 +2318,13 @@ fn test_execute_with_routes_compound_property_match_fast_path() {
     assert!(result.rows.is_empty());
     assert_eq!(result.stats.relationships_created, 1);
     assert_eq!(result.stats.relationships_deleted, 1);
-    assert!(engine
-        .storage
-        .get_edges_by_type("TEMP_KNOWS")
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .storage
+            .get_edges_by_type("TEMP_KNOWS")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -3024,13 +3101,13 @@ fn policy_schema_change_invalidates_resolver_and_raw_result_cache() {
     assert_eq!(cached.rows.len(), 1);
 
     for cypher in [
-            "CREATE DECAY PROFILE cached_decay OPTIONS { halfLifeSeconds: 1, visibilityThreshold: 0.75, scoreFloor: 0.0, function: 'step', scope: 'NODE', scoreFrom: 'CREATED', enabled: true }",
-            "CREATE DECAY PROFILE cached_binding FOR (n:MemoryEpisode) APPLY { DECAY PROFILE cached_decay, order: 10 }",
-        ] {
-            engine
-                .execute(&parser.parse(cypher).unwrap(), &HashMap::new())
-                .unwrap();
-        }
+        "CREATE DECAY PROFILE cached_decay OPTIONS { halfLifeSeconds: 1, visibilityThreshold: 0.75, scoreFloor: 0.0, function: 'step', scope: 'NODE', scoreFrom: 'CREATED', enabled: true }",
+        "CREATE DECAY PROFILE cached_binding FOR (n:MemoryEpisode) APPLY { DECAY PROFILE cached_decay, order: 10 }",
+    ] {
+        engine
+            .execute(&parser.parse(cypher).unwrap(), &HashMap::new())
+            .unwrap();
+    }
 
     let hidden = engine.execute_cypher(QUERY, &HashMap::new()).unwrap();
     assert!(hidden.rows.is_empty());
@@ -3115,8 +3192,8 @@ fn prof_raw_shortest_path_benchmark_breakdown() {
     assert_eq!(raw_result.rows[0].get("hops"), Some(&Value::from(999)));
     assert_eq!(cached_result.rows[0].get("hops"), Some(&Value::from(999)));
     eprintln!(
-            "raw_shortest_path_1000: parse={parse_elapsed:.2?} adjacency={adjacency_elapsed:.2?} bfs_plus_reconstruction={bfs_and_reconstruction_elapsed:.2?} result_cache_miss_graph_warm={raw_elapsed:.2?} result_cache_hit={cache_hit_elapsed:.2?}"
-        );
+        "raw_shortest_path_1000: parse={parse_elapsed:.2?} adjacency={adjacency_elapsed:.2?} bfs_plus_reconstruction={bfs_and_reconstruction_elapsed:.2?} result_cache_miss_graph_warm={raw_elapsed:.2?} result_cache_hit={cache_hit_elapsed:.2?}"
+    );
 }
 
 #[test]
@@ -3540,8 +3617,8 @@ fn prof_shortest_path_cost_breakdown() {
         );
 
         eprintln!(
-                "shortestPath:  parse={parse_time:.2?}  plan={plan_time:.2?}  exec={exec_time:.2?}  total={total:.2?}  hop_count=400"
-            );
+            "shortestPath:  parse={parse_time:.2?}  plan={plan_time:.2?}  exec={exec_time:.2?}  total={total:.2?}  hop_count=400"
+        );
     }
 }
 
@@ -3652,8 +3729,8 @@ fn prof_bfs_mesh_cost_breakdown() {
         let bfs_hops = path.as_ref().map(|p| p.hops).unwrap_or(0);
 
         eprintln!(
-                "bfs_mesh  nodes={node_count} edges={edge_count} adj_entries={adj_entries}  adj={adj_time:.2?}  bfs={bfs_time:.2?}  e2e_total={e2e_us}µs  hops={hops}  bfs_hops={bfs_hops}  parse={parse_us}µs  exec={exec_us}µs",
-            );
+            "bfs_mesh  nodes={node_count} edges={edge_count} adj_entries={adj_entries}  adj={adj_time:.2?}  bfs={bfs_time:.2?}  e2e_total={e2e_us}µs  hops={hops}  bfs_hops={bfs_hops}  parse={parse_us}µs  exec={exec_us}µs",
+        );
     }
 }
 
@@ -3715,10 +3792,10 @@ fn prof_batch_node_insert_cost_breakdown() {
         let io_and_index = insert_time.checked_sub(ser_only).unwrap_or_default();
 
         eprintln!(
-                "nodes={node_count}  build={build_time:.2?}  ser_only={ser_only:.2?}  insert={insert_time:.2?}  io_and_index={io_and_index:.2?}  per_node_insert={:.1}µs  per_node_io={:.1}µs",
-                insert_time.as_micros() as f64 / node_count as f64,
-                io_and_index.as_micros() as f64 / node_count as f64,
-            );
+            "nodes={node_count}  build={build_time:.2?}  ser_only={ser_only:.2?}  insert={insert_time:.2?}  io_and_index={io_and_index:.2?}  per_node_insert={:.1}µs  per_node_io={:.1}µs",
+            insert_time.as_micros() as f64 / node_count as f64,
+            io_and_index.as_micros() as f64 / node_count as f64,
+        );
     }
 }
 

@@ -789,11 +789,21 @@ impl Default for AppState {
 
 impl AppState {
     pub fn with_auth(auth: AuthState) -> Self {
+        Self::with_auth_and_storage(auth, "./data")
+    }
+
+    pub fn with_auth_and_storage(auth: AuthState, storage_root: impl Into<PathBuf>) -> Self {
+        let storage_root = storage_root.into();
+        let catalog_path = storage_root.join("copperdb-multidb");
+        let default_database_path = storage_root.join("copperdb");
         let db_manager = Arc::new(
-            DatabaseManager::open("./data/copperdb-multidb")
+            DatabaseManager::open(catalog_path)
                 .unwrap_or_else(|_| DatabaseManager::new()),
         );
-        let _ = db_manager.create("copperdb", "./data/copperdb");
+        let _ = db_manager.create(
+            "copperdb",
+            default_database_path.to_string_lossy().into_owned(),
+        );
         Self {
             started_at: Instant::now(),
             db_name: "copperdb".into(),

@@ -7,3 +7,4 @@ models/**/*
 .DS_Store
 test_output.txt
 target-plan01-validation
+docs/performance/1.1.0-northwind-results

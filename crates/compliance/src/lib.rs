@@ -73,7 +73,7 @@ pub enum ComplianceControl {
 
 pub struct ComplianceManager {
     storage: Arc<StorageEngine>,
-    policies_cache: RwLock<Option<(u64, Vec<CompliancePolicy>)>>,
+    policies_cache: RwLock<Option<Vec<CompliancePolicy>>>,
 }
 
 impl ComplianceManager {
@@ -120,13 +120,11 @@ impl ComplianceManager {
     }
 
     pub fn policies(&self) -> Result<Vec<CompliancePolicy>, ComplianceError> {
-        let generation = self.storage.wal_applied_sequence()?;
-        if let Some((cached_generation, policies)) = self
+        if let Some(policies) = self
             .policies_cache
             .read()
             .expect("compliance policy cache lock poisoned")
             .as_ref()
-            && *cached_generation == generation
         {
             return Ok(policies.clone());
         }
@@ -138,7 +136,7 @@ impl ComplianceManager {
         *self
             .policies_cache
             .write()
-            .expect("compliance policy cache lock poisoned") = Some((generation, policies.clone()));
+            .expect("compliance policy cache lock poisoned") = Some(policies.clone());
         Ok(policies)
     }
 

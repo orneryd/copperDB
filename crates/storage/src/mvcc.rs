@@ -52,8 +52,10 @@ pub struct MvccHead {
 #[derive(Debug, Clone)]
 pub(crate) enum MvccRecordMutation {
     PutNode(NodeRecord),
+    PutFreshNode(NodeRecord),
     DeleteNode(String),
     PutEdge(EdgeRecord),
+    PutFreshEdge(EdgeRecord),
     DeleteEdge(String),
 }
 
@@ -296,6 +298,36 @@ pub(crate) struct PersistedMvccStore {
     edge_type_history: BTreeMap<String, BTreeSet<String>>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub(crate) struct PersistedMvccHead {
+    current_version: u64,
+    floor: u64,
+}
+
+pub(crate) struct StagedMvccRecordBatch {
+    head: PersistedMvccHead,
+    states: BTreeMap<String, MvccKeyState>,
+    node_changes: Vec<(Option<NodeRecord>, Option<NodeRecord>)>,
+    edge_changes: Vec<(Option<EdgeRecord>, Option<EdgeRecord>)>,
+}
+
+impl StagedMvccRecordBatch {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.states.is_empty()
+    }
+
+    pub(crate) fn encoded_head(&self) -> Result<Vec<u8>, StorageError> {
+        Ok(rmp_serde::to_vec(&self.head)?)
+    }
+
+    pub(crate) fn encoded_states(&self) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        self.states
+            .iter()
+            .map(|(key, state)| Ok((key.clone(), rmp_serde::to_vec(state)?)))
+            .collect()
+    }
+}
+
 impl Default for MvccStore {
     fn default() -> Self {
         Self {
@@ -318,25 +350,100 @@ impl MvccStore {
         Self::default()
     }
 
-    pub(crate) fn persisted_state(&self) -> PersistedMvccStore {
-        PersistedMvccStore {
+    pub(crate) fn encoded_persisted_head(&self) -> Result<Vec<u8>, StorageError> {
+        Ok(rmp_serde::to_vec(&PersistedMvccHead {
             current_version: self.current_version.load(Ordering::SeqCst),
             floor: self.floor.load(Ordering::SeqCst),
-            values: self.values.read().clone(),
-            current_node_labels: self.current_node_labels.read().clone(),
-            node_label_history: self.node_label_history.read().clone(),
-            current_edge_types: self.current_edge_types.read().clone(),
-            edge_type_history: self.edge_type_history.read().clone(),
+        })?)
+    }
+
+    pub(crate) fn encoded_persisted_states(&self) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        self.values
+            .read()
+            .iter()
+            .map(|(key, state)| Ok((key.clone(), rmp_serde::to_vec(state)?)))
+            .collect()
+    }
+
+    pub(crate) fn restore_persisted_entries<I>(
+        &self,
+        encoded_head: &[u8],
+        entries: I,
+    ) -> Result<(), StorageError>
+    where
+        I: IntoIterator<Item = (String, Vec<u8>)>,
+    {
+        let head: PersistedMvccHead = rmp_serde::from_slice(encoded_head)?;
+        let values = entries
+            .into_iter()
+            .map(|(key, value)| Ok((key, rmp_serde::from_slice(&value)?)))
+            .collect::<Result<BTreeMap<String, MvccKeyState>, StorageError>>()?;
+        let mut current_node_labels = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut node_label_history = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut current_edge_types = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut edge_type_history = BTreeMap::<String, BTreeSet<String>>::new();
+
+        for (logical_key, state) in &values {
+            if logical_key.starts_with("node:") {
+                for raw in state
+                    .archived
+                    .values()
+                    .chain(state.head.iter().map(|head| &head.current_value))
+                    .flatten()
+                {
+                    let node = decode_node_record(raw)?;
+                    for label in &node.labels {
+                        node_label_history
+                            .entry(label.clone())
+                            .or_default()
+                            .insert(node.id.clone());
+                    }
+                }
+                if let Some(node) = current_live_node_from_state(state).transpose()? {
+                    for label in &node.labels {
+                        current_node_labels
+                            .entry(label.clone())
+                            .or_default()
+                            .insert(node.id.clone());
+                    }
+                }
+            } else if logical_key.starts_with("edge:") {
+                for raw in state
+                    .archived
+                    .values()
+                    .chain(state.head.iter().map(|head| &head.current_value))
+                    .flatten()
+                {
+                    let edge = decode_edge_record(raw)?;
+                    edge_type_history
+                        .entry(edge.edge_type.clone())
+                        .or_default()
+                        .insert(edge.id.clone());
+                }
+                if let Some(edge) = current_live_edge_from_state(state).transpose()? {
+                    current_edge_types
+                        .entry(edge.edge_type.clone())
+                        .or_default()
+                        .insert(edge.id.clone());
+                }
+            }
         }
+
+        self.restore_persisted_state(PersistedMvccStore {
+            current_version: head.current_version,
+            floor: head.floor,
+            values,
+            current_node_labels,
+            node_label_history,
+            current_edge_types,
+            edge_type_history,
+        });
+        Ok(())
     }
 
     pub(crate) fn restore_persisted_state(&self, persisted: PersistedMvccStore) {
         self.replace_persisted_state(persisted);
         self.active_readers.lock().clear();
-    }
-
-    pub(crate) fn publish_persisted_state(&self, persisted: PersistedMvccStore) {
-        self.replace_persisted_state(persisted);
     }
 
     fn replace_persisted_state(&self, persisted: PersistedMvccStore) {
@@ -386,39 +493,119 @@ impl MvccStore {
         version
     }
 
-    pub(crate) fn commit_record_batch<I>(&self, mutations: I) -> Result<u64, StorageError>
+    pub(crate) fn staged_record_batch<I>(
+        &self,
+        mutations: I,
+    ) -> Result<StagedMvccRecordBatch, StorageError>
     where
         I: IntoIterator<Item = MvccRecordMutation>,
     {
         let mutations = mutations.into_iter().collect::<Vec<_>>();
-        if mutations.is_empty() {
-            return Ok(self.current_version.load(Ordering::SeqCst));
-        }
+        let current_version = self.current_version.load(Ordering::SeqCst);
+        let version = current_version + u64::from(!mutations.is_empty());
+        let values = self.values.read();
+        let mut states = BTreeMap::<String, MvccKeyState>::new();
+        let mut node_changes = Vec::new();
+        let mut edge_changes = Vec::new();
 
-        let version = self.current_version.fetch_add(1, Ordering::SeqCst) + 1;
         for mutation in mutations {
+            let logical_key = match &mutation {
+                MvccRecordMutation::PutNode(node) | MvccRecordMutation::PutFreshNode(node) => {
+                    node_logical_key(&node.id)
+                }
+                MvccRecordMutation::DeleteNode(id) => node_logical_key(id),
+                MvccRecordMutation::PutEdge(edge) | MvccRecordMutation::PutFreshEdge(edge) => {
+                    edge_logical_key(&edge.id)
+                }
+                MvccRecordMutation::DeleteEdge(id) => edge_logical_key(id),
+            };
+            let state = states
+                .entry(logical_key.clone())
+                .or_insert_with(|| match mutation {
+                    MvccRecordMutation::PutFreshNode(_) | MvccRecordMutation::PutFreshEdge(_) => {
+                        MvccKeyState::default()
+                    }
+                    _ => values.get(&logical_key).cloned().unwrap_or_default(),
+                });
             match mutation {
-                MvccRecordMutation::PutNode(node) => self.put_node_record_at(&node, version)?,
-                MvccRecordMutation::DeleteNode(id) => self.delete_node_record_at(&id, version)?,
-                MvccRecordMutation::PutEdge(edge) => self.put_edge_record_at(&edge, version)?,
-                MvccRecordMutation::DeleteEdge(id) => self.delete_edge_record_at(&id, version)?,
+                MvccRecordMutation::PutNode(node) | MvccRecordMutation::PutFreshNode(node) => {
+                    let old = current_live_node_from_state(state).transpose()?;
+                    state.append_version(version, Some(encode_node_record(&node)?));
+                    node_changes.push((old, Some(node)));
+                }
+                MvccRecordMutation::DeleteNode(_) => {
+                    let old = current_live_node_from_state(state).transpose()?;
+                    state.append_version(version, None);
+                    node_changes.push((old, None));
+                }
+                MvccRecordMutation::PutEdge(edge) | MvccRecordMutation::PutFreshEdge(edge) => {
+                    let old = current_live_edge_from_state(state).transpose()?;
+                    state.append_version(version, Some(encode_edge_record(&edge)?));
+                    edge_changes.push((old, Some(edge)));
+                }
+                MvccRecordMutation::DeleteEdge(_) => {
+                    let old = current_live_edge_from_state(state).transpose()?;
+                    state.append_version(version, None);
+                    edge_changes.push((old, None));
+                }
             }
         }
-        Ok(version)
+
+        Ok(StagedMvccRecordBatch {
+            head: PersistedMvccHead {
+                current_version: version,
+                floor: self.floor.load(Ordering::SeqCst),
+            },
+            states,
+            node_changes,
+            edge_changes,
+        })
     }
 
-    pub(crate) fn staged_record_batch_state<I>(
-        &self,
-        mutations: I,
-    ) -> Result<(PersistedMvccStore, u64), StorageError>
-    where
-        I: IntoIterator<Item = MvccRecordMutation>,
-    {
-        let staged = MvccStore::new();
-        staged.restore_persisted_state(self.persisted_state());
-        let version = staged.commit_record_batch(mutations)?;
-        let state = staged.persisted_state();
-        Ok((state, version))
+    pub(crate) fn publish_record_batch(&self, staged: StagedMvccRecordBatch) {
+        self.values.write().extend(staged.states);
+
+        let mut current_node_labels = self.current_node_labels.write();
+        let mut node_label_history = self.node_label_history.write();
+        for (old, new) in staged.node_changes {
+            if let Some(old) = old.as_ref() {
+                remove_node_from_current_labels(&mut current_node_labels, old);
+            }
+            if let Some(new) = new {
+                for label in &new.labels {
+                    current_node_labels
+                        .entry(label.clone())
+                        .or_default()
+                        .insert(new.id.clone());
+                    node_label_history
+                        .entry(label.clone())
+                        .or_default()
+                        .insert(new.id.clone());
+                }
+            }
+        }
+        drop(current_node_labels);
+        drop(node_label_history);
+
+        let mut current_edge_types = self.current_edge_types.write();
+        let mut edge_type_history = self.edge_type_history.write();
+        for (old, new) in staged.edge_changes {
+            if let Some(old) = old.as_ref() {
+                remove_edge_from_current_types(&mut current_edge_types, old);
+            }
+            if let Some(new) = new {
+                current_edge_types
+                    .entry(new.edge_type.clone())
+                    .or_default()
+                    .insert(new.id.clone());
+                edge_type_history
+                    .entry(new.edge_type.clone())
+                    .or_default()
+                    .insert(new.id.clone());
+            }
+        }
+        self.current_version
+            .store(staged.head.current_version, Ordering::SeqCst);
     }
 
     pub fn read(&self, snapshot: &MvccSnapshot, key: &str) -> Option<Vec<u8>> {

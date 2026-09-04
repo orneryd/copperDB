@@ -1670,8 +1670,6 @@ impl CopperDb {
             tracing::info!("executing query");
         }
 
-        let _flush_guard = self.storage.hold_flush();
-
         let t0 = std::time::Instant::now();
         let parse_span = tracing::info_span!("nornicdb.cypher.parse");
         let parse_span_guard = parse_span.enter();
@@ -2660,12 +2658,15 @@ impl CopperDb {
         labels.dedup();
         properties.sort();
         properties.dedup();
+        let policies = self.compliance.enabled_policies_snapshot()?;
 
         for label in labels {
-            self.compliance.check_label_access(&label, roles)?;
+            self.compliance
+                .check_label_access_with_policies(&label, roles, &policies)?;
         }
         for property in properties {
-            self.compliance.check_property_access(&property, roles)?;
+            self.compliance
+                .check_property_access_with_policies(&property, roles, &policies)?;
         }
         Ok(())
     }

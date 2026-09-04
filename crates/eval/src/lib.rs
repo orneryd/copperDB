@@ -260,6 +260,7 @@ impl KnowledgePolicyInspection {
 
 /// The query executor.
 type KnowledgePolicyResolverCache = Arc<Mutex<Option<(u64, Arc<Resolver>)>>>;
+type KnowledgePolicyPresenceCache = Arc<Mutex<Option<(u64, bool)>>>;
 type BfsAdjacencyMap = HashMap<String, Vec<Arc<EdgeRecord>>>;
 
 pub struct EvalEngine {
@@ -282,6 +283,7 @@ pub struct EvalEngine {
     fulltext_query_cache:
         Arc<Mutex<HashMap<(u64, String), copperdb_search::lucene::FulltextQuery>>>,
     knowledge_policy_resolver_cache: KnowledgePolicyResolverCache,
+    knowledge_policy_presence_cache: KnowledgePolicyPresenceCache,
     access_flusher: Arc<AccessFlusher>,
     hot_path_trace: Arc<HotPathTraceState>,
 }
@@ -1016,6 +1018,24 @@ fn sort_rows_by_return_order(rows: &mut [Row], ret: &copperdb_cypher::ReturnClau
             let left_key = optimized_order_key(left, &resolved);
             let right_key = optimized_order_key(right, &resolved);
             let ord = compare_json(&left_key, &right_key);
+            if ord != std::cmp::Ordering::Equal {
+                return if item.descending { ord.reverse() } else { ord };
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+}
+
+fn sort_projected_rows_by_return_order(rows: &mut [Row], ret: &copperdb_cypher::ReturnClause) {
+    rows.sort_by(|left, right| {
+        for item in &ret.order_by {
+            let column = match &item.expression {
+                Expression::Variable(name) => name,
+                _ => return std::cmp::Ordering::Equal,
+            };
+            let left_key = left.get(column).unwrap_or(&Value::Null);
+            let right_key = right.get(column).unwrap_or(&Value::Null);
+            let ord = compare_json(left_key, right_key);
             if ord != std::cmp::Ordering::Equal {
                 return if item.descending { ord.reverse() } else { ord };
             }

@@ -15,5 +15,8 @@ tokio.workspace = true
 tracing.workspace = true
 libloading.workspace = true
 nalgebra.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true
 copperdb-simd = { workspace = true }
 copperdb-util = { workspace = true }

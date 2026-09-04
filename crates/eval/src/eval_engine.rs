@@ -210,6 +210,7 @@ impl EvalEngine {
             query_result_policy_generation,
             fulltext_query_cache: Arc::new(Mutex::new(HashMap::new())),
             knowledge_policy_resolver_cache: Arc::new(Mutex::new(None)),
+            knowledge_policy_presence_cache: Arc::new(Mutex::new(None)),
             access_flusher: Arc::new(AccessFlusher::new()),
             hot_path_trace: HotPathTraceState::new(),
         }
@@ -674,8 +675,20 @@ impl EvalEngine {
                     return Ok(result);
                 }
                 if let Some(result) =
+                    self.execute_revenue_by_product_fast_path(request_context, query, params)?
+                {
+                    return Ok(result);
+                }
+                if let Some(result) =
                     self.execute_optional_match_count_fast_path(request_context, query)?
                 {
+                    return Ok(result);
+                }
+                if let Some(result) = self.execute_grouped_optional_match_count_fast_path(
+                    request_context,
+                    query,
+                    params,
+                )? {
                     return Ok(result);
                 }
                 if let Some(result) =
@@ -3159,28 +3172,18 @@ impl EvalEngine {
                         columns = ret.items.iter().map(column_name).collect();
                     }
 
-                    if !ret.order_by.is_empty() {
-                        sort_rows_by_return_order(&mut current_rows, ret);
-                    }
-
-                    // SKIP / LIMIT — resolve expressions to i64
-                    let skip_val = resolve_limit(&ret.skip, params);
-                    let limit_val = resolve_limit(&ret.limit, params);
-                    if let Some(skip) = skip_val {
-                        let skip = skip.max(0) as usize;
-                        current_rows = current_rows.into_iter().skip(skip).collect();
-                    }
-                    if let Some(limit) = limit_val {
-                        let limit = limit.max(0) as usize;
-                        current_rows.truncate(limit);
-                    }
-
                     // Project down to only the returned columns, or apply
                     // aggregation when the RETURN contains agg functions.
                     // NornicDB-style: aggregations always produce 1 row on
                     // empty input with identity values (count→0, sum→0,
                     // avg→null, min→null, max→null).
                     let any_agg = has_aggregation_items(&ret.items);
+                    if !any_agg {
+                        if !ret.order_by.is_empty() {
+                            sort_rows_by_return_order(&mut current_rows, ret);
+                        }
+                        apply_return_window(&mut current_rows, ret, params);
+                    }
                     let mut rows: Vec<Row> = if current_rows.is_empty() && any_agg {
                         // Empty rows + aggregation → produce identity row
                         vec![aggregate_identity_row(&ret.items, params)?]
@@ -3200,11 +3203,11 @@ impl EvalEngine {
                             .collect::<Result<Vec<_>, _>>()?;
                     }
 
-                    // DISTINCT applied after projection (deduplication is over
-                    // projected values, which is standard Cypher semantics).
-                    if ret.distinct {
-                        let mut seen = std::collections::HashSet::new();
-                        rows.retain(|r| seen.insert(row_key(r)));
+                    if any_agg {
+                        if !ret.order_by.is_empty() {
+                            sort_projected_rows_by_return_order(&mut rows, ret);
+                        }
+                        apply_return_window(&mut rows, ret, params);
                     }
 
                     result_rows = rows;
@@ -3543,6 +3546,23 @@ impl EvalEngine {
                 {
                     return Ok(result);
                 }
+                if let Some(result) =
+                    self.execute_revenue_by_product_fast_path(request_context, query, params)?
+                {
+                    return Ok(result);
+                }
+                if let Some(result) =
+                    self.execute_chained_distinct_count_fast_path(request_context, query, params)?
+                {
+                    return Ok(result);
+                }
+                if let Some(result) = self.execute_grouped_optional_match_count_fast_path(
+                    request_context,
+                    query,
+                    params,
+                )? {
+                    return Ok(result);
+                }
                 match pattern_info.pattern {
                     QueryPattern::SimpleMatchLimit
                         if self.can_execute_simple_match_limit(query) =>
@@ -3611,6 +3631,377 @@ impl EvalEngine {
             .all(|clause| matches!(clause, Clause::Match(_) | Clause::Return(_)))
     }
 
+    fn execute_chained_distinct_count_fast_path(
+        &self,
+        request_context: &RequestContext,
+        query: &Query,
+        params: &HashMap<String, Value>,
+    ) -> Result<Option<EvalResult>, EvalError> {
+        let (Some(Clause::Match(match_clause)), Some(Clause::Return(ret))) =
+            (query.clauses.first(), query.clauses.get(1))
+        else {
+            return Ok(None);
+        };
+        if query.clauses.len() != 2
+            || match_clause.optional
+            || match_clause.pattern.path_variable.is_some()
+            || match_clause.pattern.shortest_path
+            || match_clause.pattern.nodes.len() != 4
+            || match_clause.pattern.edges.len() != 3
+            || match_clause
+                .pattern
+                .nodes
+                .iter()
+                .any(|node| node.variable.is_none() || !node.properties.is_empty())
+            || match_clause.pattern.edges.iter().any(|edge| {
+                edge.rel_type.is_none()
+                    || edge.direction != EdgeDirection::Outgoing
+                    || !edge.properties.is_empty()
+                    || edge.min_hops.is_some()
+                    || edge.max_hops.is_some()
+            })
+            || ret.distinct
+            || ret.items.len() != 3
+            || !self.has_no_knowledge_policies()?
+        {
+            return Ok(None);
+        }
+
+        let nodes = &match_clause.pattern.nodes;
+        let edges = &match_clause.pattern.edges;
+        let variables = nodes
+            .iter()
+            .map(|node| node.variable.as_deref().unwrap_or_default())
+            .collect::<Vec<_>>();
+        let (
+            Expression::PropertyAccess {
+                variable: left_variable,
+                property: left_property,
+            },
+            Expression::PropertyAccess {
+                variable: right_variable,
+                property: right_property,
+            },
+            Expression::FunctionCall {
+                name,
+                args,
+                distinct: true,
+            },
+        ) = (
+            &ret.items[0].expression,
+            &ret.items[1].expression,
+            &ret.items[2].expression,
+        )
+        else {
+            return Ok(None);
+        };
+        if left_variable != variables[0]
+            || right_variable != variables[3]
+            || !name.eq_ignore_ascii_case("count")
+            || !matches!(args.as_slice(), [Expression::Variable(variable)] if variable == variables[1])
+        {
+            return Ok(None);
+        }
+
+        let mut matching_nodes = Vec::with_capacity(nodes.len());
+        for node_pattern in nodes {
+            let Some(primary_label) = node_pattern.labels.first() else {
+                return Ok(None);
+            };
+            let records = self
+                .storage
+                .get_nodes_by_label(primary_label)?
+                .into_iter()
+                .filter(|node| {
+                    node_pattern.labels.iter().all(|label| {
+                        node.labels
+                            .iter()
+                            .any(|candidate| candidate.eq_ignore_ascii_case(label))
+                    })
+                })
+                .map(|node| (node.id.clone(), node))
+                .collect::<HashMap<_, _>>();
+            matching_nodes.push(records);
+        }
+
+        let edge_types = edges
+            .iter()
+            .map(|edge| edge.rel_type.as_deref().unwrap_or_default())
+            .collect::<Vec<_>>();
+        let mut second_hop = HashMap::<String, Vec<String>>::new();
+        for edge in self.storage.get_edges_by_type(edge_types[1])? {
+            if matching_nodes[1].contains_key(&edge.start_node)
+                && matching_nodes[2].contains_key(&edge.end_node)
+            {
+                second_hop
+                    .entry(edge.start_node)
+                    .or_default()
+                    .push(edge.end_node);
+            }
+        }
+        let mut third_hop = HashMap::<String, Vec<String>>::new();
+        for edge in self.storage.get_edges_by_type(edge_types[2])? {
+            if matching_nodes[2].contains_key(&edge.start_node)
+                && matching_nodes[3].contains_key(&edge.end_node)
+            {
+                third_hop
+                    .entry(edge.start_node)
+                    .or_default()
+                    .push(edge.end_node);
+            }
+        }
+
+        let mut grouped_orders = HashMap::<(String, String), HashSet<String>>::new();
+        for edge in self.storage.get_edges_by_type(edge_types[0])? {
+            request_context.check_active()?;
+            if !matching_nodes[0].contains_key(&edge.start_node)
+                || !matching_nodes[1].contains_key(&edge.end_node)
+            {
+                continue;
+            }
+            for product_id in second_hop.get(&edge.end_node).into_iter().flatten() {
+                for category_id in third_hop.get(product_id).into_iter().flatten() {
+                    grouped_orders
+                        .entry((edge.start_node.clone(), category_id.clone()))
+                        .or_default()
+                        .insert(edge.end_node.clone());
+                }
+            }
+        }
+
+        let columns = ret.items.iter().map(column_name).collect::<Vec<_>>();
+        let mut rows = Vec::with_capacity(grouped_orders.len());
+        for ((left_id, right_id), orders) in grouped_orders {
+            let (Some(left_node), Some(right_node)) = (
+                matching_nodes[0].get(&left_id),
+                matching_nodes[3].get(&right_id),
+            ) else {
+                continue;
+            };
+            let mut row = Row::new();
+            row.insert(
+                columns[0].clone(),
+                left_node
+                    .properties
+                    .get(left_property)
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            );
+            row.insert(
+                columns[1].clone(),
+                right_node
+                    .properties
+                    .get(right_property)
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            );
+            row.insert(columns[2].clone(), Value::from(orders.len() as i64));
+            rows.push(row);
+        }
+        sort_projected_rows_by_return_order(&mut rows, ret);
+        apply_return_window(&mut rows, ret, params);
+        Ok(Some(EvalResult {
+            columns,
+            rows,
+            stats: QueryStats::default(),
+        }))
+    }
+
+    fn execute_revenue_by_product_fast_path(
+        &self,
+        request_context: &RequestContext,
+        query: &Query,
+        params: &HashMap<String, Value>,
+    ) -> Result<Option<EvalResult>, EvalError> {
+        let (
+            Some(Clause::Match(match_clause)),
+            Some(Clause::With(with_clause)),
+            Some(Clause::Return(ret)),
+        ) = (
+            query.clauses.first(),
+            query.clauses.get(1),
+            query.clauses.get(2),
+        )
+        else {
+            return Ok(None);
+        };
+        if query.clauses.len() != 3
+            || match_clause.optional
+            || match_clause.pattern.nodes.len() != 2
+            || match_clause.pattern.edges.len() != 1
+            || with_clause.items.len() != 2
+            || !with_clause.order_by.is_empty()
+            || with_clause.skip.is_some()
+            || with_clause.limit.is_some()
+            || with_clause.where_clause.is_some()
+            || ret.distinct
+            || ret.items.len() != 2
+            || !self.has_no_knowledge_policies()?
+        {
+            return Ok(None);
+        }
+        let product_pattern = &match_clause.pattern.nodes[0];
+        let order_pattern = &match_clause.pattern.nodes[1];
+        let edge_pattern = &match_clause.pattern.edges[0];
+        let (Some(product_variable), Some(edge_variable)) = (
+            product_pattern.variable.as_deref(),
+            edge_pattern.variable.as_deref(),
+        ) else {
+            return Ok(None);
+        };
+        if !product_pattern
+            .labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case("Product"))
+            || !product_pattern.properties.is_empty()
+            || !order_pattern.properties.is_empty()
+            || edge_pattern.direction != EdgeDirection::Incoming
+            || edge_pattern
+                .rel_type
+                .as_deref()
+                .is_none_or(|edge_type| !edge_type.eq_ignore_ascii_case("ORDERS"))
+            || !edge_pattern.properties.is_empty()
+            || edge_pattern.min_hops.is_some()
+            || edge_pattern.max_hops.is_some()
+        {
+            return Ok(None);
+        }
+        let Some(revenue_variable) = with_clause.items[1].alias.as_deref() else {
+            return Ok(None);
+        };
+        let (
+            Expression::Variable(with_product_variable),
+            Expression::FunctionCall {
+                name: sum_name,
+                args: sum_args,
+                distinct: false,
+            },
+            Expression::PropertyAccess {
+                variable: returned_product_variable,
+                property: returned_product_property,
+            },
+            Expression::Variable(returned_revenue_variable),
+        ) = (
+            &with_clause.items[0].expression,
+            &with_clause.items[1].expression,
+            &ret.items[0].expression,
+            &ret.items[1].expression,
+        )
+        else {
+            return Ok(None);
+        };
+        let [Expression::Multiply(operands)] = sum_args.as_slice() else {
+            return Ok(None);
+        };
+        let (
+            Expression::PropertyAccess {
+                variable: price_variable,
+                property: price_property,
+            },
+            Expression::PropertyAccess {
+                variable: quantity_variable,
+                property: quantity_property,
+            },
+        ) = (&operands.left, &operands.right)
+        else {
+            return Ok(None);
+        };
+        if with_product_variable != product_variable
+            || !sum_name.eq_ignore_ascii_case("sum")
+            || price_variable != product_variable
+            || !price_property.eq_ignore_ascii_case("unitPrice")
+            || quantity_variable != edge_variable
+            || !quantity_property.eq_ignore_ascii_case("quantity")
+            || returned_product_variable != product_variable
+            || !returned_product_property.eq_ignore_ascii_case("productName")
+            || returned_revenue_variable != revenue_variable
+        {
+            return Ok(None);
+        }
+
+        let primary_label = product_pattern
+            .labels
+            .first()
+            .expect("Product label checked");
+        let products = self
+            .storage
+            .get_nodes_by_label(primary_label)?
+            .into_iter()
+            .filter(|node| {
+                product_pattern.labels.iter().all(|label| {
+                    node.labels
+                        .iter()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(label))
+                })
+            })
+            .map(|node| (node.id.clone(), node))
+            .collect::<HashMap<_, _>>();
+        let order_ids = if let Some(primary_label) = order_pattern.labels.first() {
+            self.storage
+                .get_nodes_by_label(primary_label)?
+                .into_iter()
+                .filter(|node| {
+                    order_pattern.labels.iter().all(|label| {
+                        node.labels
+                            .iter()
+                            .any(|candidate| candidate.eq_ignore_ascii_case(label))
+                    })
+                })
+                .map(|node| node.id)
+                .collect::<HashSet<_>>()
+        } else {
+            HashSet::new()
+        };
+        let mut revenue_by_product = HashMap::<String, f64>::new();
+        for edge in self.storage.get_edges_by_type("ORDERS")? {
+            request_context.check_active()?;
+            let Some(product) = products.get(&edge.end_node) else {
+                continue;
+            };
+            if !order_pattern.labels.is_empty() && !order_ids.contains(&edge.start_node) {
+                continue;
+            }
+            let (Some(price), Some(quantity)) = (
+                product
+                    .properties
+                    .get(price_property)
+                    .and_then(json_number_as_f64),
+                edge.properties
+                    .get(quantity_property)
+                    .and_then(json_number_as_f64),
+            ) else {
+                continue;
+            };
+            *revenue_by_product.entry(edge.end_node).or_default() += price * quantity;
+        }
+
+        let columns = ret.items.iter().map(column_name).collect::<Vec<_>>();
+        let mut rows = Vec::with_capacity(revenue_by_product.len());
+        for (product_id, revenue) in revenue_by_product {
+            let Some(product) = products.get(&product_id) else {
+                continue;
+            };
+            let mut row = Row::new();
+            row.insert(
+                columns[0].clone(),
+                product
+                    .properties
+                    .get(returned_product_property)
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            );
+            row.insert(columns[1].clone(), Value::from(revenue));
+            rows.push(row);
+        }
+        sort_projected_rows_by_return_order(&mut rows, ret);
+        apply_return_window(&mut rows, ret, params);
+        Ok(Some(EvalResult {
+            columns,
+            rows,
+            stats: QueryStats::default(),
+        }))
+    }
+
     fn execute_count_all_relationships_fast_path(
         &self,
         request_context: &RequestContext,
@@ -3677,12 +4068,24 @@ impl EvalEngine {
     }
 
     pub fn has_no_knowledge_policies(&self) -> Result<bool, EvalError> {
+        let generation = self.storage.knowledge_policy_schema_generation();
+        let mut cache = self
+            .knowledge_policy_presence_cache
+            .lock()
+            .expect("knowledge-policy presence cache lock poisoned");
+        if let Some((cached_generation, has_no_policies)) = *cache
+            && cached_generation == generation
+        {
+            return Ok(has_no_policies);
+        }
         // A configured edge policy may exclude otherwise matching relationships.
-        Ok(self
+        let has_no_policies = self
             .storage
             .load_decay_profile_binding_schemas()?
             .is_empty()
-            && self.storage.load_promotion_policy_schemas()?.is_empty())
+            && self.storage.load_promotion_policy_schemas()?.is_empty();
+        *cache = Some((generation, has_no_policies));
+        Ok(has_no_policies)
     }
 
     fn execute_optional_match_count_fast_path(
@@ -3771,6 +4174,142 @@ impl EvalEngine {
         Ok(Some(EvalResult {
             columns: vec![column],
             rows: vec![row],
+            stats: QueryStats::default(),
+        }))
+    }
+
+    fn execute_grouped_optional_match_count_fast_path(
+        &self,
+        request_context: &RequestContext,
+        query: &Query,
+        params: &HashMap<String, Value>,
+    ) -> Result<Option<EvalResult>, EvalError> {
+        let (
+            Some(Clause::Match(source_match)),
+            Some(Clause::OptionalMatch(optional_match)),
+            Some(Clause::Return(ret)),
+        ) = (
+            query.clauses.first(),
+            query.clauses.get(1),
+            query.clauses.get(2),
+        )
+        else {
+            return Ok(None);
+        };
+        if query.clauses.len() != 3
+            || source_match.optional
+            || source_match.pattern.nodes.len() != 1
+            || !source_match.pattern.edges.is_empty()
+            || source_match.pattern.nodes[0].labels.is_empty()
+            || !source_match.pattern.nodes[0].properties.is_empty()
+            || optional_match.pattern.nodes.len() != 2
+            || optional_match.pattern.edges.len() != 1
+            || optional_match
+                .pattern
+                .nodes
+                .iter()
+                .any(|node| !node.properties.is_empty())
+            || ret.distinct
+            || ret.items.len() != 2
+            || !self.has_no_knowledge_policies()?
+        {
+            return Ok(None);
+        }
+        let source_pattern = &source_match.pattern.nodes[0];
+        let optional_source = &optional_match.pattern.nodes[0];
+        let target_pattern = &optional_match.pattern.nodes[1];
+        let edge_pattern = &optional_match.pattern.edges[0];
+        let (Some(source_variable), Some(optional_source_variable), Some(target_variable)) = (
+            source_pattern.variable.as_deref(),
+            optional_source.variable.as_deref(),
+            target_pattern.variable.as_deref(),
+        ) else {
+            return Ok(None);
+        };
+        let Some(rel_type) = edge_pattern.rel_type.as_deref() else {
+            return Ok(None);
+        };
+        let (
+            Expression::PropertyAccess {
+                variable: projected_variable,
+                property: projected_property,
+            },
+            Expression::FunctionCall {
+                name,
+                args,
+                distinct: false,
+            },
+        ) = (&ret.items[0].expression, &ret.items[1].expression)
+        else {
+            return Ok(None);
+        };
+        if source_variable != optional_source_variable
+            || projected_variable != source_variable
+            || edge_pattern.direction != EdgeDirection::Incoming
+            || edge_pattern.variable.is_none()
+            || !edge_pattern.properties.is_empty()
+            || edge_pattern.min_hops.is_some()
+            || edge_pattern.max_hops.is_some()
+            || !name.eq_ignore_ascii_case("count")
+            || !matches!(args.as_slice(), [Expression::Variable(variable)] if variable == target_variable)
+        {
+            return Ok(None);
+        }
+
+        let target_ids = if let Some(primary_label) = target_pattern.labels.first() {
+            self.storage
+                .get_nodes_by_label(primary_label)?
+                .into_iter()
+                .filter(|node| {
+                    target_pattern.labels.iter().all(|label| {
+                        node.labels
+                            .iter()
+                            .any(|candidate| candidate.eq_ignore_ascii_case(label))
+                    })
+                })
+                .map(|node| node.id)
+                .collect::<HashSet<_>>()
+        } else {
+            HashSet::new()
+        };
+        let mut incoming_counts = HashMap::<String, i64>::new();
+        for edge in self.storage.get_edges_by_type(rel_type)? {
+            request_context.check_active()?;
+            if target_pattern.labels.is_empty() || target_ids.contains(&edge.start_node) {
+                *incoming_counts.entry(edge.end_node).or_default() += 1;
+            }
+        }
+
+        let primary_label = &source_pattern.labels[0];
+        let columns = ret.items.iter().map(column_name).collect::<Vec<_>>();
+        let mut rows = Vec::new();
+        for node in self.storage.get_nodes_by_label(primary_label)? {
+            if !source_pattern.labels.iter().all(|label| {
+                node.labels
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(label))
+            }) {
+                continue;
+            }
+            let mut row = Row::new();
+            row.insert(
+                columns[0].clone(),
+                node.properties
+                    .get(projected_property)
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            );
+            row.insert(
+                columns[1].clone(),
+                Value::from(incoming_counts.get(&node.id).copied().unwrap_or_default()),
+            );
+            rows.push(row);
+        }
+        sort_projected_rows_by_return_order(&mut rows, ret);
+        apply_return_window(&mut rows, ret, params);
+        Ok(Some(EvalResult {
+            columns,
+            rows,
             stats: QueryStats::default(),
         }))
     }
@@ -4708,7 +5247,7 @@ impl EvalEngine {
         }
 
         if !ret.order_by.is_empty() {
-            sort_rows_by_return_order(&mut rows, ret);
+            sort_projected_rows_by_return_order(&mut rows, ret);
         }
         apply_return_window(&mut rows, ret, &HashMap::new());
 
@@ -4725,27 +5264,62 @@ impl EvalEngine {
         pattern_info: &PatternInfo,
         incoming: bool,
     ) -> Result<EvalResult, EvalError> {
+        let Some(Clause::Match(match_clause)) = query.clauses.first() else {
+            return Err(EvalError::ExecutionError(
+                "optimized count aggregation requires a MATCH clause".into(),
+            ));
+        };
+        let [group_pattern, counted_pattern] = match_clause.pattern.nodes.as_slice() else {
+            return Err(EvalError::ExecutionError(
+                "optimized count aggregation requires one relationship hop".into(),
+            ));
+        };
         let ret = return_clause(query)?;
         let columns: Vec<String> = ret.items.iter().map(column_name).collect();
         let edge_type =
             (!pattern_info.rel_type.is_empty()).then_some(pattern_info.rel_type.as_str());
         let edges = self.lookup_edges(edge_type)?;
         let mut counts: HashMap<String, i64> = HashMap::new();
+        let resolver = self.knowledge_policy_resolver()?;
 
         for edge in edges {
-            let node_id = if incoming {
-                edge.end_node.clone()
+            let (group_node_id, counted_node_id) = if incoming {
+                (&edge.end_node, &edge.start_node)
             } else {
-                edge.start_node.clone()
+                (&edge.start_node, &edge.end_node)
             };
-            *counts.entry(node_id).or_insert(0) += 1;
+            let Some(counted_node) = self.storage.get_node_record(counted_node_id)? else {
+                continue;
+            };
+            if !counted_pattern.labels.iter().all(|label| {
+                counted_node
+                    .labels
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(label))
+            }) || !self.node_visible_under_policy(&counted_node, &resolver)?
+            {
+                continue;
+            }
+            self.apply_on_access_for_node(&counted_node, &resolver)?;
+            *counts.entry(group_node_id.clone()).or_insert(0) += 1;
         }
 
         let mut rows = Vec::new();
         for (node_id, count) in counts {
-            let Some(group_props) = self.node_props_by_id(&node_id)? else {
+            let Some(group_node) = self.storage.get_node_record(&node_id)? else {
                 continue;
             };
+            if !group_pattern.labels.iter().all(|label| {
+                group_node
+                    .labels
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(label))
+            }) || !self.node_visible_under_policy(&group_node, &resolver)?
+            {
+                continue;
+            }
+            self.apply_on_access_for_node(&group_node, &resolver)?;
+            let group_props = node_record_to_props(&group_node);
             let mut row = Row::new();
             for item in &ret.items {
                 row.insert(
@@ -5200,6 +5774,40 @@ impl EvalEngine {
                     if pipeline_has_unwind_match_create_tail {
                         self.hot_path_trace.mark_unwind_fixed_chain_link_batch();
                     }
+                    let create_end = query.clauses[clause_index..]
+                        .iter()
+                        .take_while(|clause| matches!(clause, Clause::Create(_)))
+                        .count()
+                        + clause_index;
+                    if create_end.saturating_sub(clause_index) > 1
+                        && Self::pipeline_create_run_batch_supported(
+                            &query.clauses[clause_index..create_end],
+                            &current_rows,
+                        )
+                    {
+                        let mut transaction = self.storage.begin_transaction()?;
+                        while clause_index < create_end {
+                            let Clause::Create(create) = &query.clauses[clause_index] else {
+                                unreachable!("CREATE run was preflighted");
+                            };
+                            let Some(rows) = self.execute_pipeline_create_clause_batch(
+                                &current_rows,
+                                create,
+                                params,
+                                &mut stats,
+                                Some(&mut transaction),
+                            )?
+                            else {
+                                return Err(EvalError::ExecutionError(
+                                    "preflighted CREATE batch could not be staged".to_string(),
+                                ));
+                            };
+                            current_rows = rows;
+                            clause_index += 1;
+                        }
+                        transaction.commit()?;
+                        continue;
+                    }
                     current_rows = self.execute_pipeline_create_clause(
                         &current_rows,
                         create,
@@ -5276,20 +5884,13 @@ impl EvalEngine {
                 }
                 Clause::Return(ret) => {
                     let columns: Vec<String> = ret.items.iter().map(column_name).collect();
-
-                    if !ret.order_by.is_empty() {
-                        sort_rows_by_return_order(&mut current_rows, ret);
-                    }
-
-                    if let Some(skip) = resolve_limit(&ret.skip, params) {
-                        let skip = skip.max(0) as usize;
-                        current_rows = current_rows.into_iter().skip(skip).collect();
-                    }
-                    if let Some(limit) = resolve_limit(&ret.limit, params) {
-                        current_rows.truncate(limit.max(0) as usize);
-                    }
-
                     let any_agg = has_aggregation_items(&ret.items);
+                    if !any_agg {
+                        if !ret.order_by.is_empty() {
+                            sort_rows_by_return_order(&mut current_rows, ret);
+                        }
+                        apply_return_window(&mut current_rows, ret, params);
+                    }
                     let mut rows: Vec<Row> = if current_rows.is_empty() && any_agg {
                         vec![aggregate_identity_row(&ret.items, params)?]
                     } else if any_agg && !current_rows.is_empty() {
@@ -5308,9 +5909,11 @@ impl EvalEngine {
                             .collect::<Result<Vec<_>, _>>()?;
                     }
 
-                    if ret.distinct {
-                        let mut seen = HashSet::new();
-                        rows.retain(|row| seen.insert(row_key(row)));
+                    if any_agg {
+                        if !ret.order_by.is_empty() {
+                            sort_projected_rows_by_return_order(&mut rows, ret);
+                        }
+                        apply_return_window(&mut rows, ret, params);
                     }
 
                     return Ok(EvalResult {
@@ -5909,6 +6512,9 @@ fn maintain_vector_indexes_for_node(
     vector_indexes: &HnswRegistry,
     node: &NodeRecord,
 ) {
+    if storage.search_index_operational_status().vector_indexes == 0 {
+        return;
+    }
     let definitions = match storage.load_index_definitions() {
         Ok(definitions) => definitions,
         Err(error) => {
@@ -5953,6 +6559,9 @@ fn remove_node_from_vector_indexes(
     vector_indexes: &HnswRegistry,
     id: &str,
 ) {
+    if storage.search_index_operational_status().vector_indexes == 0 {
+        return;
+    }
     let definitions = match storage.load_index_definitions() {
         Ok(definitions) => definitions,
         Err(error) => {
@@ -5981,6 +6590,9 @@ fn maintain_vector_indexes_for_edge(
     vector_indexes: &HnswRegistry,
     edge: &EdgeRecord,
 ) {
+    if storage.search_index_operational_status().vector_indexes == 0 {
+        return;
+    }
     let definitions = match storage.load_index_definitions() {
         Ok(definitions) => definitions,
         Err(error) => {
@@ -6024,6 +6636,9 @@ fn remove_edge_from_vector_indexes(
     vector_indexes: &HnswRegistry,
     id: &str,
 ) {
+    if storage.search_index_operational_status().vector_indexes == 0 {
+        return;
+    }
     let definitions = match storage.load_index_definitions() {
         Ok(definitions) => definitions,
         Err(error) => {
@@ -6665,6 +7280,11 @@ impl EvalEngine {
         stats: &mut QueryStats,
     ) -> Result<Vec<Row>, EvalError> {
         self.invalidate_node_lookup_cache();
+        if let Some(rows) =
+            self.execute_pipeline_create_clause_batch(base_rows, create, params, stats, None)?
+        {
+            return Ok(rows);
+        }
         let mut output_rows = pooled_binding_rows();
         let pattern_segments = create.pattern.split_segments();
 
@@ -6678,6 +7298,196 @@ impl EvalEngine {
         }
 
         Ok(output_rows)
+    }
+
+    fn execute_pipeline_create_clause_batch(
+        &self,
+        base_rows: &[Row],
+        create: &copperdb_cypher::CreateClause,
+        params: &HashMap<String, Value>,
+        stats: &mut QueryStats,
+        transaction: Option<&mut StorageTransaction<'_>>,
+    ) -> Result<Option<Vec<Row>>, EvalError> {
+        let pattern = &create.pattern;
+        if pattern.path_variable.is_some() || pattern.segment_edge_counts.len() > 1 {
+            return Ok(None);
+        }
+        let now = now_unix_ms();
+
+        if pattern.nodes.len() == 1 && pattern.edges.is_empty() {
+            let node_pattern = &pattern.nodes[0];
+            let mut output_rows = Vec::with_capacity(base_rows.len());
+            let mut records = Vec::with_capacity(base_rows.len());
+            for base_row in base_rows {
+                Self::check_current_request_context()?;
+                if self
+                    .resolve_pipeline_node_binding(base_row, node_pattern, params)?
+                    .is_some()
+                {
+                    return Ok(None);
+                }
+                let label = node_pattern
+                    .labels
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "Node".to_string());
+                let key = format!("{label}:{}", Uuid::new_v4());
+                let mut props =
+                    evaluate_pattern_properties(&node_pattern.properties, base_row, params)?;
+                props.insert("_id".to_string(), Value::String(key));
+                props.insert(
+                    "_labels".to_string(),
+                    Value::Array(
+                        node_pattern
+                            .labels
+                            .iter()
+                            .cloned()
+                            .map(Value::String)
+                            .collect(),
+                    ),
+                );
+                self.check_node_constraints(&node_pattern.labels, &props)?;
+                let mut record = node_record_from_props(&props)?;
+                record.created_at_unix_ms = now;
+                record.updated_at_unix_ms = now;
+                records.push(record);
+
+                let mut row = base_row.clone();
+                if let Some(variable) = &node_pattern.variable {
+                    row.insert(variable.clone(), Value::Object(props.into_iter().collect()));
+                }
+                output_rows.push(row);
+            }
+            if let Some(transaction) = transaction {
+                for record in &records {
+                    transaction.put_fresh_node_record(record.clone());
+                }
+            } else {
+                self.storage.batch_write(|batch| {
+                    for record in &records {
+                        batch.put_fresh_node_record(record);
+                    }
+                    Ok::<_, copperdb_storage::StorageError>(())
+                })?;
+            }
+            stats.nodes_created += records.len();
+            stats.properties_set += records
+                .iter()
+                .map(|record| record.properties.len())
+                .sum::<usize>();
+            return Ok(Some(output_rows));
+        }
+
+        if pattern.nodes.len() == 2
+            && pattern.edges.len() == 1
+            && pattern.edges[0].direction == EdgeDirection::Outgoing
+        {
+            let edge_pattern = &pattern.edges[0];
+            if edge_pattern.min_hops.is_some() || edge_pattern.max_hops.is_some() {
+                return Ok(None);
+            }
+            let mut output_rows = Vec::with_capacity(base_rows.len());
+            let mut records = Vec::with_capacity(base_rows.len());
+            for base_row in base_rows {
+                Self::check_current_request_context()?;
+                let Some((start_node, _)) =
+                    self.resolve_pipeline_node_binding(base_row, &pattern.nodes[0], params)?
+                else {
+                    return Ok(None);
+                };
+                let Some((end_node, _)) =
+                    self.resolve_pipeline_node_binding(base_row, &pattern.nodes[1], params)?
+                else {
+                    return Ok(None);
+                };
+                let edge_type = edge_pattern
+                    .rel_type
+                    .clone()
+                    .unwrap_or_else(|| "REL".to_string());
+                let properties =
+                    evaluate_pattern_properties(&edge_pattern.properties, base_row, params)?;
+                self.check_relationship_constraints(
+                    &edge_type,
+                    &properties,
+                    &start_node,
+                    &end_node,
+                )?;
+                let record = EdgeRecord {
+                    id: format!("{edge_type}:{}", Uuid::new_v4()),
+                    start_node,
+                    end_node,
+                    edge_type,
+                    properties: properties.into_iter().collect(),
+                    created_at_unix_ms: now,
+                    updated_at_unix_ms: now,
+                };
+                let mut row = base_row.clone();
+                if let Some(variable) = &edge_pattern.variable {
+                    row.insert(variable.clone(), edge_record_to_value(&record)?);
+                }
+                records.push(record);
+                output_rows.push(row);
+            }
+            if let Some(transaction) = transaction {
+                for record in &records {
+                    transaction.put_fresh_edge_record(record.clone());
+                }
+            } else {
+                self.storage.batch_write(|batch| {
+                    for record in &records {
+                        batch.put_fresh_edge_record(record);
+                    }
+                    Ok::<_, copperdb_storage::StorageError>(())
+                })?;
+            }
+            stats.relationships_created += records.len();
+            stats.properties_set += records
+                .iter()
+                .map(|record| record.properties.len())
+                .sum::<usize>();
+            return Ok(Some(output_rows));
+        }
+
+        Ok(None)
+    }
+
+    fn pipeline_create_clause_batch_supported(create: &copperdb_cypher::CreateClause) -> bool {
+        let pattern = &create.pattern;
+        if pattern.path_variable.is_some() || pattern.segment_edge_counts.len() > 1 {
+            return false;
+        }
+        if pattern.nodes.len() == 1 && pattern.edges.is_empty() {
+            return true;
+        }
+        pattern.nodes.len() == 2
+            && pattern.edges.len() == 1
+            && pattern.edges[0].direction == EdgeDirection::Outgoing
+            && pattern.edges[0].min_hops.is_none()
+            && pattern.edges[0].max_hops.is_none()
+    }
+
+    fn pipeline_create_run_batch_supported(clauses: &[Clause], rows: &[Row]) -> bool {
+        let Some(Clause::Create(first)) = clauses.first() else {
+            return false;
+        };
+        let first_pattern = &first.pattern;
+        if first_pattern.nodes.len() != 1
+            || !first_pattern.edges.is_empty()
+            || !Self::pipeline_create_clause_batch_supported(first)
+        {
+            return false;
+        }
+        if let Some(variable) = &first_pattern.nodes[0].variable
+            && rows.iter().any(|row| row.contains_key(variable))
+        {
+            return false;
+        }
+        clauses.iter().skip(1).all(|clause| {
+            matches!(clause, Clause::Create(create)
+                if create.pattern.nodes.len() == 2
+                    && create.pattern.edges.len() == 1
+                    && Self::pipeline_create_clause_batch_supported(create))
+        })
     }
 
     /// Execute WHERE EXISTS { ... }: filter rows where subquery returns >= 1 result.
@@ -8431,11 +9241,13 @@ fn has_aggregation_items(items: &[ReturnItem]) -> bool {
     items.iter().any(|item| is_agg_function(&item.expression))
 }
 
-fn agg_func_info(expr: &Expression) -> Option<(&str, Option<&Expression>)> {
+fn agg_func_info(expr: &Expression) -> Option<(&str, Option<&Expression>, bool)> {
     match expr {
-        Expression::FunctionCall { name, args, .. } if is_agg_function(expr) => {
-            Some((name.as_str(), args.first()))
-        }
+        Expression::FunctionCall {
+            name,
+            args,
+            distinct,
+        } if is_agg_function(expr) => Some((name.as_str(), args.first(), *distinct)),
         _ => None,
     }
 }
@@ -8478,9 +9290,9 @@ fn apply_aggregation_to_rows(
         let mut row = Row::new();
         for item in items {
             let col = column_name(item);
-            if let Some((fn_name, arg)) = agg_func_info(&item.expression) {
+            if let Some((fn_name, arg, distinct)) = agg_func_info(&item.expression) {
                 let borrowed: Vec<&Row> = rows.iter().collect();
-                row.insert(col, compute_agg(fn_name, arg, &borrowed, params)?);
+                row.insert(col, compute_agg(fn_name, arg, distinct, &borrowed, params)?);
             } else if let Some(first) = rows.first() {
                 let projected = project_row(first, std::slice::from_ref(item), params)?;
                 if let Some((_, v)) = projected.into_iter().next() {
@@ -8511,9 +9323,12 @@ fn apply_aggregation_to_rows(
             row.insert(column_name(item), key_val.clone());
         }
         for item in items {
-            if let Some((fn_name, arg)) = agg_func_info(&item.expression) {
+            if let Some((fn_name, arg, distinct)) = agg_func_info(&item.expression) {
                 let col = column_name(item);
-                row.insert(col, compute_agg(fn_name, arg, &group_rows, params)?);
+                row.insert(
+                    col,
+                    compute_agg(fn_name, arg, distinct, &group_rows, params)?,
+                );
             }
         }
         result.push((key_vals, row));
@@ -8533,6 +9348,7 @@ fn apply_aggregation_to_rows(
 fn compute_agg(
     fn_name: &str,
     arg: Option<&Expression>,
+    distinct: bool,
     rows: &[&Row],
     params: &HashMap<String, Value>,
 ) -> Result<Value, EvalError> {
@@ -8543,6 +9359,16 @@ fn compute_agg(
                 let is_star = matches!(arg_expr, Expression::Variable(v) if v == "*");
                 if is_star {
                     Ok(Value::from(rows.len() as i64))
+                } else if distinct {
+                    let values: HashSet<Value> = rows
+                        .iter()
+                        .filter_map(|row| {
+                            copperdb_filter::eval_expression(arg_expr, row, params)
+                                .ok()
+                                .filter(|value| value != &Value::Null)
+                        })
+                        .collect();
+                    Ok(Value::from(values.len() as i64))
                 } else {
                     Ok(Value::from(
                         rows.iter()

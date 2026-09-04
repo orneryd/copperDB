@@ -112,6 +112,10 @@ pub const STORAGE_SNAPSHOT_FORMAT_VERSION: u8 = 1;
 const META_LAYOUT_MANIFEST_KEY: &[u8] = b"layout_manifest";
 const META_ENCRYPTION_MANIFEST_KEY: &[u8] = b"encryption_manifest";
 const META_MVCC_STATE_KEY: &[u8] = b"mvcc_state";
+const META_MVCC_FORMAT_KEY: &[u8] = b"mvcc_format";
+const META_MVCC_HEAD_KEY: &[u8] = b"mvcc_head";
+const META_MVCC_ENTRY_PREFIX: &[u8] = b"mvcc_entry/";
+const MVCC_FORMAT_PER_KEY: &[u8] = &[2];
 const META_WAL_APPLIED_SEQUENCE_KEY: &[u8] = b"wal_applied_sequence";
 const META_GLOBAL_NODE_COUNT_KEY: &[u8] = b"global_node_count";
 const META_GLOBAL_EDGE_COUNT_KEY: &[u8] = b"global_edge_count";
@@ -399,6 +403,9 @@ struct WALDiskState {
     entries: Vec<WALEntry>,
 }
 
+const WAL_APPEND_MAGIC: &[u8; 8] = b"CDBWAL2\0";
+const WAL_APPEND_HEADER_LEN: usize = WAL_APPEND_MAGIC.len() + 16;
+
 #[derive(Debug)]
 pub struct WAL {
     config: WALConfig,
@@ -447,6 +454,8 @@ impl WAL {
             let raw = fs::read(&path)?;
             if raw.is_empty() {
                 (Vec::new(), 0, 0)
+            } else if raw.starts_with(WAL_APPEND_MAGIC) {
+                decode_append_wal(&raw)?
             } else {
                 match rmp_serde::from_slice::<WALDiskState>(&raw) {
                     Ok(state) => (state.entries, state.next_seq, state.compacted_through),
@@ -500,8 +509,8 @@ impl WAL {
         };
         {
             let mut entries = self.entries.lock();
+            self.append_entries(&entries, std::slice::from_ref(&entry))?;
             entries.push(entry.clone());
-            self.persist_entries(&entries)?;
             self.recompute_segments(entries.len());
         }
         Ok(entry)
@@ -534,8 +543,8 @@ impl WAL {
         let first = staged.first().map(|e| e.seq).unwrap_or(0);
         let last = staged.last().map(|e| e.seq).unwrap_or(0);
         let mut entries = self.entries.lock();
+        self.append_entries(&entries, &staged)?;
         entries.extend(staged);
-        self.persist_entries(&entries)?;
         self.recompute_segments(entries.len());
         Ok((first, last))
     }
@@ -731,18 +740,61 @@ impl WAL {
             fs::create_dir_all(parent)?;
         }
         let tmp_path = path.with_extension("tmp");
-        let state = WALDiskState {
-            next_seq: self.next_seq.load(Ordering::SeqCst),
-            compacted_through: self.compacted_through(),
-            entries: entries.to_vec(),
-        };
         let mut tmp_file = fs::File::create(&tmp_path)?;
-        tmp_file.write_all(&rmp_serde::to_vec(&state)?)?;
+        write_append_wal(
+            &mut tmp_file,
+            self.next_seq.load(Ordering::SeqCst),
+            self.compacted_through(),
+            entries,
+        )?;
         if self.config.sync_mode == WALSyncMode::Immediate {
             tmp_file.sync_all()?;
         }
         drop(tmp_file);
         fs::rename(tmp_path, path)?;
+        if self.config.sync_mode == WALSyncMode::Immediate {
+            self.sync_persistent_file()?;
+        }
+        Ok(())
+    }
+
+    fn append_entries(
+        &self,
+        existing_entries: &[WALEntry],
+        appended_entries: &[WALEntry],
+    ) -> Result<(), StorageError> {
+        if !self.config.enabled || appended_entries.is_empty() {
+            return Ok(());
+        }
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let append_format_exists = if path.exists() {
+            let mut magic = [0_u8; WAL_APPEND_MAGIC.len()];
+            fs::File::open(path)?.read_exact(&mut magic).is_ok() && magic == *WAL_APPEND_MAGIC
+        } else {
+            false
+        };
+        if !append_format_exists {
+            let mut all_entries = Vec::with_capacity(
+                existing_entries
+                    .len()
+                    .saturating_add(appended_entries.len()),
+            );
+            all_entries.extend_from_slice(existing_entries);
+            all_entries.extend_from_slice(appended_entries);
+            return self.persist_entries(&all_entries);
+        }
+
+        let mut file = fs::OpenOptions::new().append(true).open(path)?;
+        write_append_frames(&mut file, appended_entries)?;
+        if self.config.sync_mode == WALSyncMode::Immediate {
+            file.sync_all()?;
+        }
+        drop(file);
         if self.config.sync_mode == WALSyncMode::Immediate {
             self.sync_persistent_file()?;
         }
@@ -852,6 +904,78 @@ impl WAL {
         self.degraded.store(false, Ordering::SeqCst);
         Ok(removed)
     }
+}
+
+fn decode_append_wal(raw: &[u8]) -> Result<(Vec<WALEntry>, u64, u64), StorageError> {
+    if raw.len() < WAL_APPEND_HEADER_LEN {
+        return Err(StorageError::WalMissingOrInvalidTrailer);
+    }
+    let header_next_seq = u64::from_be_bytes(
+        raw[8..16]
+            .try_into()
+            .map_err(|_| StorageError::WalMissingOrInvalidTrailer)?,
+    );
+    let compacted_through = u64::from_be_bytes(
+        raw[16..24]
+            .try_into()
+            .map_err(|_| StorageError::WalMissingOrInvalidTrailer)?,
+    );
+    let mut entries = Vec::<WALEntry>::new();
+    let mut offset = WAL_APPEND_HEADER_LEN;
+    while offset < raw.len() {
+        let length_end = offset.saturating_add(8);
+        if length_end > raw.len() {
+            return Err(StorageError::WalMissingOrInvalidTrailer);
+        }
+        let frame_len = u64::from_be_bytes(
+            raw[offset..length_end]
+                .try_into()
+                .map_err(|_| StorageError::WalMissingOrInvalidTrailer)?,
+        );
+        let frame_len =
+            usize::try_from(frame_len).map_err(|_| StorageError::WalMissingOrInvalidTrailer)?;
+        let frame_end = length_end
+            .checked_add(frame_len)
+            .ok_or(StorageError::WalMissingOrInvalidTrailer)?;
+        if frame_end > raw.len() {
+            return Err(StorageError::WalMissingOrInvalidTrailer);
+        }
+        entries.push(
+            rmp_serde::from_slice(&raw[length_end..frame_end])
+                .map_err(|_| StorageError::WalMissingOrInvalidTrailer)?,
+        );
+        offset = frame_end;
+    }
+    let next_seq = entries
+        .last()
+        .map(|entry| entry.seq)
+        .unwrap_or(0)
+        .max(header_next_seq)
+        .max(compacted_through);
+    Ok((entries, next_seq, compacted_through))
+}
+
+fn write_append_wal(
+    writer: &mut impl Write,
+    next_seq: u64,
+    compacted_through: u64,
+    entries: &[WALEntry],
+) -> Result<(), StorageError> {
+    writer.write_all(WAL_APPEND_MAGIC)?;
+    writer.write_all(&next_seq.to_be_bytes())?;
+    writer.write_all(&compacted_through.to_be_bytes())?;
+    write_append_frames(writer, entries)
+}
+
+fn write_append_frames(writer: &mut impl Write, entries: &[WALEntry]) -> Result<(), StorageError> {
+    for entry in entries {
+        let frame = rmp_serde::to_vec(entry)?;
+        let frame_len =
+            u64::try_from(frame.len()).map_err(|_| StorageError::WalMissingOrInvalidTrailer)?;
+        writer.write_all(&frame_len.to_be_bytes())?;
+        writer.write_all(&frame)?;
+    }
+    Ok(())
 }
 
 /// A WAL snapshot checkpoint for recovery acceleration.
@@ -2144,6 +2268,8 @@ pub struct StorageTransaction<'a> {
     knowledge_policy: KnowledgePolicyCatalog,
     node_writes: BTreeMap<String, Option<NodeRecord>>,
     edge_writes: BTreeMap<String, Option<EdgeRecord>>,
+    fresh_node_writes: HashSet<String>,
+    fresh_edge_writes: HashSet<String>,
 }
 
 enum StorageTransactionEngine<'a> {
@@ -2677,11 +2803,35 @@ impl StorageEngine {
     }
 
     fn restore_or_bootstrap_mvcc(&self) -> Result<(), StorageError> {
+        if self
+            .meta
+            .fjall_get(META_MVCC_FORMAT_KEY)?
+            .is_some_and(|format| format.as_slice() == MVCC_FORMAT_PER_KEY)
+            && let Some(head) = self.meta.fjall_get(META_MVCC_HEAD_KEY)?
+        {
+            let entries = self
+                .meta
+                .scan_prefix(META_MVCC_ENTRY_PREFIX)
+                .map(|entry| {
+                    let (key, value) = entry?;
+                    let logical_key = std::str::from_utf8(
+                        key.as_slice()
+                            .strip_prefix(META_MVCC_ENTRY_PREFIX)
+                            .ok_or(StorageError::InvalidUtf8)?,
+                    )
+                    .map_err(|_| StorageError::InvalidUtf8)?
+                    .to_string();
+                    Ok((logical_key, value.to_vec()))
+                })
+                .collect::<Result<Vec<_>, StorageError>>()?;
+            return self.mvcc.restore_persisted_entries(head.as_ref(), entries);
+        }
+
         match self.meta.fjall_get(META_MVCC_STATE_KEY)? {
             Some(raw) => {
                 let state: PersistedMvccStore = rmp_serde::from_slice(raw.as_slice())?;
                 self.mvcc.restore_persisted_state(state);
-                Ok(())
+                self.persist_mvcc_state()
             }
             None => {
                 self.bootstrap_mvcc_from_current_state()?;
@@ -2691,11 +2841,30 @@ impl StorageEngine {
     }
 
     fn persist_mvcc_state(&self) -> Result<(), StorageError> {
-        self.meta.fjall_insert(
-            META_MVCC_STATE_KEY,
-            rmp_serde::to_vec(&self.mvcc.persisted_state())?,
-        )?;
-        Ok(())
+        let mut batch = StorageBackendBatch::new(self.backend.as_ref());
+        let stale_keys = self
+            .meta
+            .scan_prefix(META_MVCC_ENTRY_PREFIX)
+            .map(|entry| entry.map(|(key, _)| key.to_vec()))
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        for key in stale_keys {
+            batch.remove(&self.meta, key);
+        }
+        for (logical_key, state) in self.mvcc.encoded_persisted_states()? {
+            batch.insert(
+                &self.meta,
+                [META_MVCC_ENTRY_PREFIX, logical_key.as_bytes()].concat(),
+                state,
+            );
+        }
+        batch.insert(
+            &self.meta,
+            META_MVCC_HEAD_KEY,
+            self.mvcc.encoded_persisted_head()?,
+        );
+        batch.insert(&self.meta, META_MVCC_FORMAT_KEY, MVCC_FORMAT_PER_KEY);
+        batch.remove(&self.meta, META_MVCC_STATE_KEY);
+        batch.commit()
     }
 
     fn recover_wal_transactions(&self) -> Result<(), StorageError> {
@@ -3232,6 +3401,8 @@ impl StorageEngine {
             knowledge_policy,
             node_writes: BTreeMap::new(),
             edge_writes: BTreeMap::new(),
+            fresh_node_writes: HashSet::new(),
+            fresh_edge_writes: HashSet::new(),
         })
     }
 
@@ -3253,6 +3424,8 @@ impl StorageEngine {
             knowledge_policy,
             node_writes: BTreeMap::new(),
             edge_writes: BTreeMap::new(),
+            fresh_node_writes: HashSet::new(),
+            fresh_edge_writes: HashSet::new(),
         })
     }
 
@@ -6463,7 +6636,8 @@ impl StorageEngine {
     fn refresh_search_index_operational_status(&self) -> Result<(), StorageError> {
         let mut fulltext_indexes = 0_u64;
         let mut vector_indexes = 0_u64;
-        for index in self.load_index_definitions()? {
+        let definitions = self.load_index_definitions()?;
+        for index in &definitions {
             match index.kind {
                 IndexKind::FullText => fulltext_indexes += 1,
                 IndexKind::Vector => vector_indexes += 1,
@@ -7619,7 +7793,9 @@ enum BatchOp {
     DeleteIndexOptions(String),
     PutKnowledgePolicyCatalog(KnowledgePolicyCatalog),
     PutNode(NodeRecord),
+    PutFreshNode(NodeRecord),
     PutEdge(EdgeRecord),
+    PutFreshEdge(EdgeRecord),
     DeleteNode(String),
     DeleteEdge(String),
 }
@@ -8229,19 +8405,35 @@ impl<'a> StorageTransaction<'a> {
     }
 
     pub fn put_node_record(&mut self, node: NodeRecord) {
+        self.fresh_node_writes.remove(&node.id);
+        self.node_writes.insert(node.id.clone(), Some(node));
+    }
+
+    pub fn put_fresh_node_record(&mut self, node: NodeRecord) {
+        self.fresh_node_writes.insert(node.id.clone());
         self.node_writes.insert(node.id.clone(), Some(node));
     }
 
     pub fn delete_node_record(&mut self, id: impl Into<String>) {
-        self.node_writes.insert(id.into(), None);
+        let id = id.into();
+        self.fresh_node_writes.remove(&id);
+        self.node_writes.insert(id, None);
     }
 
     pub fn put_edge_record(&mut self, edge: EdgeRecord) {
+        self.fresh_edge_writes.remove(&edge.id);
+        self.edge_writes.insert(edge.id.clone(), Some(edge));
+    }
+
+    pub fn put_fresh_edge_record(&mut self, edge: EdgeRecord) {
+        self.fresh_edge_writes.insert(edge.id.clone());
         self.edge_writes.insert(edge.id.clone(), Some(edge));
     }
 
     pub fn delete_edge_record(&mut self, id: impl Into<String>) {
-        self.edge_writes.insert(id.into(), None);
+        let id = id.into();
+        self.fresh_edge_writes.remove(&id);
+        self.edge_writes.insert(id, None);
     }
 
     pub fn commit(&mut self) -> Result<(), StorageError> {
@@ -8272,12 +8464,18 @@ impl<'a> StorageTransaction<'a> {
             }
             for (id, node) in &self.node_writes {
                 match node {
+                    Some(node) if self.fresh_node_writes.contains(id) => {
+                        batch.put_fresh_node_record(node)
+                    }
                     Some(node) => batch.put_node_record(node),
                     None => batch.delete_node_record(id),
                 }
             }
             for (id, edge) in &self.edge_writes {
                 match edge {
+                    Some(edge) if self.fresh_edge_writes.contains(id) => {
+                        batch.put_fresh_edge_record(edge)
+                    }
                     Some(edge) => batch.put_edge_record(edge),
                     None => batch.delete_edge_record(id),
                 }
@@ -8299,12 +8497,17 @@ impl<'a> StorageTransaction<'a> {
         self.index_option_writes.clear();
         self.node_writes.clear();
         self.edge_writes.clear();
+        self.fresh_node_writes.clear();
+        self.fresh_edge_writes.clear();
         Ok(())
     }
 
     fn discard_noop_edge_writes(&mut self) -> Result<(), StorageError> {
         let mut no_op_ids = Vec::new();
         for (id, staged) in &self.edge_writes {
+            if self.fresh_edge_writes.contains(id) {
+                continue;
+            }
             let Some(staged) = staged else {
                 continue;
             };
@@ -8316,6 +8519,7 @@ impl<'a> StorageTransaction<'a> {
         }
         for id in no_op_ids {
             self.edge_writes.remove(&id);
+            self.fresh_edge_writes.remove(&id);
         }
         Ok(())
     }
@@ -8327,6 +8531,8 @@ impl<'a> StorageTransaction<'a> {
         self.knowledge_policy = self.initial_knowledge_policy.clone();
         self.node_writes.clear();
         self.edge_writes.clear();
+        self.fresh_node_writes.clear();
+        self.fresh_edge_writes.clear();
     }
 
     fn ensure_no_write_conflicts(&self) -> Result<(), StorageError> {
@@ -8369,9 +8575,15 @@ impl<'a> StorageTransaction<'a> {
             });
         }
         for id in self.node_writes.keys() {
+            if self.fresh_node_writes.contains(id) {
+                continue;
+            }
             self.ensure_key_is_unmodified_since_snapshot(&format!("node:{id}"))?;
         }
         for (id, edge) in &self.edge_writes {
+            if self.fresh_edge_writes.contains(id) {
+                continue;
+            }
             if edge.is_some()
                 && self
                     .engine()
@@ -8452,8 +8664,16 @@ impl<'a> BatchWriter<'a> {
         self.ops.push(BatchOp::PutNode(node.clone()));
     }
 
+    pub fn put_fresh_node_record(&mut self, node: &NodeRecord) {
+        self.ops.push(BatchOp::PutFreshNode(node.clone()));
+    }
+
     pub fn put_edge_record(&mut self, edge: &EdgeRecord) {
         self.ops.push(BatchOp::PutEdge(edge.clone()));
+    }
+
+    pub fn put_fresh_edge_record(&mut self, edge: &EdgeRecord) {
+        self.ops.push(BatchOp::PutFreshEdge(edge.clone()));
     }
 
     pub fn delete_node_record(&mut self, id: &str) {
@@ -8493,6 +8713,8 @@ impl<'a> BatchWriter<'a> {
         let mut index_options =
             BTreeMap::<String, Option<HashMap<String, serde_json::Value>>>::new();
         let mut knowledge_policy = None;
+        let mut fresh_node_ids = HashSet::new();
+        let mut fresh_edge_ids = HashSet::new();
 
         for op in &self.ops {
             match op {
@@ -8518,24 +8740,36 @@ impl<'a> BatchWriter<'a> {
                     knowledge_policy = Some(catalog.clone());
                 }
                 BatchOp::PutNode(node) => {
+                    fresh_node_ids.remove(&node.id);
                     let entry = nodes
                         .entry(node.id.clone())
                         .or_insert((self.engine.get_node_record(&node.id)?, None));
                     entry.1 = Some(node.clone());
                 }
+                BatchOp::PutFreshNode(node) => {
+                    fresh_node_ids.insert(node.id.clone());
+                    nodes.insert(node.id.clone(), (None, Some(node.clone())));
+                }
                 BatchOp::DeleteNode(id) => {
+                    fresh_node_ids.remove(id);
                     let entry = nodes
                         .entry(id.clone())
                         .or_insert((self.engine.get_node_record(id)?, None));
                     entry.1 = None;
                 }
                 BatchOp::PutEdge(edge) => {
+                    fresh_edge_ids.remove(&edge.id);
                     let entry = edges
                         .entry(edge.id.clone())
                         .or_insert((self.engine.get_edge_record(&edge.id)?, None));
                     entry.1 = Some(edge.clone());
                 }
+                BatchOp::PutFreshEdge(edge) => {
+                    fresh_edge_ids.insert(edge.id.clone());
+                    edges.insert(edge.id.clone(), (None, Some(edge.clone())));
+                }
                 BatchOp::DeleteEdge(id) => {
+                    fresh_edge_ids.remove(id);
                     let entry = edges
                         .entry(id.clone())
                         .or_insert((self.engine.get_edge_record(id)?, None));
@@ -8637,6 +8871,9 @@ impl<'a> BatchWriter<'a> {
         let mutations = nodes
             .iter()
             .filter_map(|(id, (_, new))| match new {
+                Some(node) if fresh_node_ids.contains(id) => {
+                    Some(MvccRecordMutation::PutFreshNode(node.clone()))
+                }
                 Some(node) => Some(MvccRecordMutation::PutNode(node.clone())),
                 None if self
                     .engine
@@ -8650,6 +8887,9 @@ impl<'a> BatchWriter<'a> {
             })
             .chain(edges.iter().filter_map(|(id, (_, new))| {
                 match new {
+                    Some(edge) if fresh_edge_ids.contains(id) => {
+                        Some(MvccRecordMutation::PutFreshEdge(edge.clone()))
+                    }
                     Some(edge) => Some(MvccRecordMutation::PutEdge(edge.clone())),
                     None if self
                         .engine
@@ -8663,10 +8903,7 @@ impl<'a> BatchWriter<'a> {
                 }
             }))
             .collect::<Vec<_>>();
-        let (staged_mvcc_state, _) = self
-            .engine
-            .mvcc
-            .staged_record_batch_state(mutations.clone())?;
+        let staged_mvcc_batch = self.engine.mvcc.staged_record_batch(mutations)?;
         let mut wal_records = knowledge_policy
             .iter()
             .map(|catalog| {
@@ -8956,11 +9193,22 @@ impl<'a> BatchWriter<'a> {
                 batch.insert(&self.engine.meta, key, rmp_serde::to_vec(&updated)?);
             }
         }
-        batch.insert(
-            &self.engine.meta,
-            META_MVCC_STATE_KEY,
-            rmp_serde::to_vec(&staged_mvcc_state)?,
-        );
+        if !staged_mvcc_batch.is_empty() {
+            batch.insert(
+                &self.engine.meta,
+                META_MVCC_HEAD_KEY,
+                staged_mvcc_batch.encoded_head()?,
+            );
+            for (logical_key, state) in staged_mvcc_batch.encoded_states()? {
+                batch.insert(
+                    &self.engine.meta,
+                    [META_MVCC_ENTRY_PREFIX, logical_key.as_bytes()].concat(),
+                    state,
+                );
+            }
+            batch.insert(&self.engine.meta, META_MVCC_FORMAT_KEY, MVCC_FORMAT_PER_KEY);
+            batch.remove(&self.engine.meta, META_MVCC_STATE_KEY);
+        }
         if let Some(wal_sequence) = wal_sequence {
             batch.insert(
                 &self.engine.meta,
@@ -9016,7 +9264,7 @@ impl<'a> BatchWriter<'a> {
 
         let node_changes = nodes.into_iter().collect::<Vec<_>>();
         let edge_changes = edges.into_iter().collect::<Vec<_>>();
-        self.engine.mvcc.publish_persisted_state(staged_mvcc_state);
+        self.engine.mvcc.publish_record_batch(staged_mvcc_batch);
 
         Ok(CommitNotifications {
             node_changes,

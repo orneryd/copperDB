@@ -513,8 +513,8 @@ fn test_relationship_temporal_index_supports_simple_where_comparisons() {
 }
 
 #[test]
-fn test_composite_relationship_temporal_index_supports_simple_where_comparisons_with_exact_suffix_properties(
-) {
+fn test_composite_relationship_temporal_index_supports_simple_where_comparisons_with_exact_suffix_properties()
+ {
     let engine = make_engine();
     let parser = Parser::new();
 
@@ -614,8 +614,8 @@ fn test_composite_relationship_temporal_index_supports_simple_where_comparisons_
 }
 
 #[test]
-fn test_non_leading_composite_relationship_temporal_index_supports_simple_where_comparisons_with_exact_prefix_properties(
-) {
+fn test_non_leading_composite_relationship_temporal_index_supports_simple_where_comparisons_with_exact_prefix_properties()
+ {
     let engine = make_engine();
     let parser = Parser::new();
 
@@ -715,8 +715,8 @@ fn test_non_leading_composite_relationship_temporal_index_supports_simple_where_
 }
 
 #[test]
-fn test_composite_relationship_range_index_supports_simple_where_comparisons_with_exact_suffix_properties(
-) {
+fn test_composite_relationship_range_index_supports_simple_where_comparisons_with_exact_suffix_properties()
+ {
     let engine = make_engine();
     let parser = Parser::new();
 
@@ -804,8 +804,8 @@ fn test_composite_relationship_range_index_supports_simple_where_comparisons_wit
 }
 
 #[test]
-fn test_composite_relationship_range_index_supports_all_simple_comparison_operators_with_exact_suffix_properties(
-) {
+fn test_composite_relationship_range_index_supports_all_simple_comparison_operators_with_exact_suffix_properties()
+ {
     let engine = make_engine();
     let parser = Parser::new();
 
@@ -926,8 +926,8 @@ fn test_composite_relationship_range_index_supports_all_simple_comparison_operat
 }
 
 #[test]
-fn test_composite_relationship_range_index_supports_reversed_operand_comparisons_with_exact_suffix_properties(
-) {
+fn test_composite_relationship_range_index_supports_reversed_operand_comparisons_with_exact_suffix_properties()
+ {
     let engine = make_engine();
     let parser = Parser::new();
 
@@ -1033,8 +1033,8 @@ fn test_composite_relationship_range_index_supports_reversed_operand_comparisons
 }
 
 #[test]
-fn test_composite_relationship_range_index_supports_simple_where_comparisons_without_exact_suffix_properties(
-) {
+fn test_composite_relationship_range_index_supports_simple_where_comparisons_without_exact_suffix_properties()
+ {
     let engine = make_engine();
     let parser = Parser::new();
 
@@ -1106,8 +1106,8 @@ fn test_composite_relationship_range_index_supports_simple_where_comparisons_wit
 }
 
 #[test]
-fn test_non_leading_composite_relationship_range_index_supports_simple_where_comparisons_with_exact_prefix_properties(
-) {
+fn test_non_leading_composite_relationship_range_index_supports_simple_where_comparisons_with_exact_prefix_properties()
+ {
     let engine = make_engine();
     let parser = Parser::new();
 
@@ -1195,8 +1195,8 @@ fn test_non_leading_composite_relationship_range_index_supports_simple_where_com
 }
 
 #[test]
-fn test_non_leading_composite_relationship_range_index_supports_all_simple_comparison_operators_with_exact_prefix_properties(
-) {
+fn test_non_leading_composite_relationship_range_index_supports_all_simple_comparison_operators_with_exact_prefix_properties()
+ {
     let engine = make_engine();
     let parser = Parser::new();
 
@@ -1333,8 +1333,8 @@ fn test_non_leading_composite_relationship_range_index_supports_all_simple_compa
 }
 
 #[test]
-fn test_non_leading_composite_relationship_range_index_supports_reversed_operand_comparisons_with_exact_prefix_properties(
-) {
+fn test_non_leading_composite_relationship_range_index_supports_reversed_operand_comparisons_with_exact_prefix_properties()
+ {
     let engine = make_engine();
     let parser = Parser::new();
 
@@ -1522,11 +1522,13 @@ fn test_execute_with_routes_pipeline_delete_relationship_binding() {
         result.rows[0].get("relType"),
         Some(&Value::String("FOLLOWS".into()))
     );
-    assert!(engine
-        .storage
-        .get_edges_by_type("FOLLOWS")
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .storage
+            .get_edges_by_type("FOLLOWS")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]

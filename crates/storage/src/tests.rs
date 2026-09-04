@@ -1933,6 +1933,36 @@ fn storage_transaction_keeps_writes_private_until_commit() {
 }
 
 #[test]
+fn storage_transaction_commits_explicit_fresh_records_atomically() {
+    let engine = StorageEngine::open_temporary().unwrap();
+    let snapshot = engine.begin_mvcc_snapshot();
+    let node = sample_node("fresh-node", &["Person"]);
+    let edge = sample_edge("fresh-edge", "KNOWS", "fresh-node", "fresh-node");
+    let wal_entries_before = engine.wal_stats().entries;
+
+    let mut transaction = engine.begin_transaction().unwrap();
+    transaction.put_fresh_node_record(node.clone());
+    transaction.put_fresh_edge_record(edge.clone());
+    transaction.commit().unwrap();
+
+    assert_eq!(engine.wal_stats().entries, wal_entries_before + 1);
+    assert_eq!(engine.get_node_record("fresh-node").unwrap(), Some(node));
+    assert_eq!(engine.get_edge_record("fresh-edge").unwrap(), Some(edge));
+    assert!(
+        engine
+            .get_node_record_visible_at(&snapshot, "fresh-node")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        engine
+            .get_edge_record_visible_at(&snapshot, "fresh-edge")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn storage_transaction_rolls_back_staged_constraints() {
     let engine = StorageEngine::open_temporary().unwrap();
     let constraint = Constraint {
