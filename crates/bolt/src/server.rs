@@ -71,8 +71,17 @@ impl Extractor for BoltTraceContext<'_> {
 pub struct BoltQueryResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<serde_json::Value>>,
+    pub encoded_rows: Option<Arc<Vec<Vec<u8>>>>,
     pub stats: BoltResultStats,
     pub notifications: Vec<BoltNotification>,
+}
+
+impl BoltQueryResult {
+    fn row_count(&self) -> usize {
+        self.encoded_rows
+            .as_ref()
+            .map_or_else(|| self.rows.len(), |rows| rows.len())
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -344,6 +353,7 @@ impl QueryExecutor for NoopExecutor {
                     serde_json::json!(true),
                     serde_json::json!([]),
                 ]],
+                encoded_rows: None,
                 stats: BoltResultStats::default(),
                 notifications: vec![],
             });
@@ -364,6 +374,7 @@ impl QueryExecutor for NoopExecutor {
                     serde_json::json!("copperdb"),
                     serde_json::json!(null),
                 ]],
+                encoded_rows: None,
                 stats: BoltResultStats::default(),
                 notifications: vec![],
             });
@@ -374,6 +385,7 @@ impl QueryExecutor for NoopExecutor {
             return Ok(BoltQueryResult {
                 columns: vec!["n".into()],
                 rows: vec![],
+                encoded_rows: None,
                 stats: BoltResultStats::default(),
                 notifications: vec![],
             });
@@ -381,6 +393,7 @@ impl QueryExecutor for NoopExecutor {
         Ok(BoltQueryResult {
             columns: vec![],
             rows: vec![],
+            encoded_rows: None,
             stats: BoltResultStats::default(),
             notifications: vec![],
         })
@@ -861,7 +874,7 @@ async fn handle_tcp_session_with_timeout_and_counters(
                         .sum(),
                 );
                 for response in responses {
-                    framed_responses.extend_from_slice(&wsconn::encode_bolt_chunks(&response));
+                    wsconn::encode_bolt_chunks_into(&mut framed_responses, &response);
                 }
                 info!(
                     event_id = "bolt.log.run",
@@ -1404,16 +1417,23 @@ fn cursor_summary(
     if let Some(bookmark) = &session.last_bookmark {
         metadata.insert("bookmark".into(), serde_json::json!(bookmark));
     }
-    metadata.insert(
-        "stats".into(),
-        serde_json::json!({
-            "nodes-created": stats.nodes_created,
-            "nodes-deleted": stats.nodes_deleted,
-            "relationships-created": stats.relationships_created,
-            "relationships-deleted": stats.relationships_deleted,
-            "properties-set": stats.properties_set,
-        }),
-    );
+    if stats.nodes_created > 0
+        || stats.nodes_deleted > 0
+        || stats.relationships_created > 0
+        || stats.relationships_deleted > 0
+        || stats.properties_set > 0
+    {
+        metadata.insert(
+            "stats".into(),
+            serde_json::json!({
+                "nodes-created": stats.nodes_created,
+                "nodes-deleted": stats.nodes_deleted,
+                "relationships-created": stats.relationships_created,
+                "relationships-deleted": stats.relationships_deleted,
+                "properties-set": stats.properties_set,
+            }),
+        );
+    }
     if !notifications.is_empty() {
         metadata.insert(
             "notifications".into(),
@@ -1614,7 +1634,7 @@ async fn process_message_with_telemetry(
             };
             let execution_context = request_context.clone();
 
-            let execution_task = tokio::task::spawn_blocking(move || {
+            let execute = move || {
                 run_span.in_scope(|| match transaction.as_ref() {
                     Some(transaction) => execution_executor.execute_in_transaction_with_context(
                         transaction,
@@ -1632,32 +1652,45 @@ async fn process_message_with_telemetry(
                         &bookmarks,
                     ),
                 })
-            });
-            let execution_result = match statement_timeout {
-                Some(timeout) => match tokio::time::timeout(timeout, execution_task).await {
-                    Ok(Ok(result)) => result,
-                    Ok(Err(error)) => {
-                        cancellation_guard.finish();
-                        return Err(BoltError::ProtocolViolation(format!(
-                            "bolt executor task failed: {error}"
-                        )));
+            };
+            let execution_result = match (
+                statement_timeout,
+                tokio::runtime::Handle::current().runtime_flavor(),
+            ) {
+                (None, tokio::runtime::RuntimeFlavor::MultiThread) => {
+                    tokio::task::block_in_place(execute)
+                }
+                (timeout, _) => {
+                    let execution_task = tokio::task::spawn_blocking(execute);
+                    match timeout {
+                        Some(timeout) => {
+                            match tokio::time::timeout(timeout, execution_task).await {
+                                Ok(Ok(result)) => result,
+                                Ok(Err(error)) => {
+                                    cancellation_guard.finish();
+                                    return Err(BoltError::ProtocolViolation(format!(
+                                        "bolt executor task failed: {error}"
+                                    )));
+                                }
+                                Err(_) => {
+                                    request_context.cancel_due_to_deadline();
+                                    Err(BoltExecutionError::RequestCancelled(
+                                        copperdb_util::RequestCancelled,
+                                    ))
+                                }
+                            }
+                        }
+                        None => match execution_task.await {
+                            Ok(result) => result,
+                            Err(error) => {
+                                cancellation_guard.finish();
+                                return Err(BoltError::ProtocolViolation(format!(
+                                    "bolt executor task failed: {error}"
+                                )));
+                            }
+                        },
                     }
-                    Err(_) => {
-                        request_context.cancel_due_to_deadline();
-                        Err(BoltExecutionError::RequestCancelled(
-                            copperdb_util::RequestCancelled,
-                        ))
-                    }
-                },
-                None => match execution_task.await {
-                    Ok(result) => result,
-                    Err(error) => {
-                        cancellation_guard.finish();
-                        return Err(BoltError::ProtocolViolation(format!(
-                            "bolt executor task failed: {error}"
-                        )));
-                    }
-                },
+                }
             };
 
             match execution_result {
@@ -1686,13 +1719,15 @@ async fn process_message_with_telemetry(
                         .map(|c| serde_json::Value::String(c.clone()))
                         .collect();
                     info!(event_id = "bolt.log.query", %query, fields = ?columns, "bolt RUN executed");
+                    let mut metadata = HashMap::from([
+                        ("fields".into(), serde_json::json!(fields_json)),
+                        ("t_first".into(), serde_json::json!(0)),
+                    ]);
+                    if session.transaction.is_some() {
+                        metadata.insert("qid".into(), serde_json::json!(qid));
+                    }
                     Ok(vec![dispatch::encode_message(&BoltMessage::Success {
-                        metadata: HashMap::from([
-                            ("fields".into(), serde_json::json!(fields_json)),
-                            ("qid".into(), serde_json::json!(qid)),
-                            ("t_first".into(), serde_json::json!(0)),
-                            ("result_available_after".into(), serde_json::json!(0)),
-                        ]),
+                        metadata,
                     })])
                 }
                 Err(e) => {
@@ -1739,17 +1774,21 @@ async fn process_message_with_telemetry(
                     &localize_id(session, "bolt.unknown_cursor"),
                 ));
             };
-            let end = cursor.index + cursor_limit(n, cursor.result.rows.len() - cursor.index);
+            let row_count = cursor.result.row_count();
+            let end = cursor.index + cursor_limit(n, row_count - cursor.index);
             let mut responses = if pull {
-                cursor.result.rows[cursor.index..end]
-                    .iter()
-                    .map(|row| dispatch::encode_record(row))
-                    .collect()
+                match cursor.result.encoded_rows.as_ref() {
+                    Some(rows) => rows[cursor.index..end].to_vec(),
+                    None => cursor.result.rows[cursor.index..end]
+                        .iter()
+                        .map(|row| dispatch::encode_record(row))
+                        .collect(),
+                }
             } else {
                 Vec::new()
             };
             cursor.index = end;
-            let has_more = cursor.index < cursor.result.rows.len();
+            let has_more = cursor.index < row_count;
             let database = cursor.database.clone();
             let stats = cursor.result.stats.clone();
             let notifications = cursor.result.notifications.clone();
@@ -2002,6 +2041,7 @@ mod tests {
             Ok(BoltQueryResult {
                 columns: vec![],
                 rows: vec![],
+                encoded_rows: None,
                 stats: BoltResultStats::default(),
                 notifications: vec![],
             })
@@ -2031,6 +2071,7 @@ mod tests {
             Ok(BoltQueryResult {
                 columns: vec![],
                 rows: vec![],
+                encoded_rows: None,
                 stats: BoltResultStats {
                     nodes_created: 2,
                     relationships_created: 1,
@@ -2052,6 +2093,7 @@ mod tests {
             Ok(BoltQueryResult {
                 columns: vec![],
                 rows: vec![],
+                encoded_rows: None,
                 stats: BoltResultStats::default(),
                 notifications: vec![BoltNotification {
                     code: "Neo.ClientNotification.Statement.UnknownLabelWarning".into(),
@@ -2072,11 +2114,13 @@ mod tests {
         ) -> Result<BoltQueryResult, String> {
             Ok(BoltQueryResult {
                 columns: vec!["value".into()],
-                rows: vec![
-                    vec![serde_json::json!(1)],
-                    vec![serde_json::json!(2)],
-                    vec![serde_json::json!(3)],
-                ],
+                rows: vec![],
+                encoded_rows: Some(Arc::new(
+                    [1, 2, 3]
+                        .into_iter()
+                        .map(|value| dispatch::encode_record(&[serde_json::json!(value)]))
+                        .collect(),
+                )),
                 stats: BoltResultStats::default(),
                 notifications: vec![],
             })
@@ -2123,6 +2167,7 @@ mod tests {
             Ok(BoltQueryResult {
                 columns: vec![],
                 rows: vec![],
+                encoded_rows: None,
                 stats: BoltResultStats::default(),
                 notifications: vec![],
             })
@@ -2155,6 +2200,7 @@ mod tests {
             Ok(BoltQueryResult {
                 columns: vec![],
                 rows: vec![],
+                encoded_rows: None,
                 stats: BoltResultStats::default(),
                 notifications: vec![],
             })
@@ -2309,6 +2355,7 @@ mod tests {
             Ok(BoltQueryResult {
                 columns: vec![],
                 rows: vec![],
+                encoded_rows: None,
                 stats: BoltResultStats::default(),
                 notifications: vec![],
             })
@@ -2345,6 +2392,7 @@ mod tests {
             Ok(BoltQueryResult {
                 columns: vec![],
                 rows: vec![],
+                encoded_rows: None,
                 stats: BoltResultStats::default(),
                 notifications: vec![],
             })
@@ -3061,11 +3109,7 @@ mod tests {
         let [Value::Map(metadata)] = fields.as_slice() else {
             panic!("expected RUN metadata");
         };
-        assert!(
-            metadata
-                .iter()
-                .any(|(key, value)| { key == "qid" && value == &Value::Integer(0) })
-        );
+        assert!(metadata.iter().all(|(key, _)| key != "qid"));
 
         let pull = Value::Struct {
             signature: 0x3F,

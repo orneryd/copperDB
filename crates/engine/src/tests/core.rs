@@ -1431,25 +1431,16 @@ fn test_execute_merge_uses_current_row_expression_properties() {
 }
 
 #[test]
-fn engine_records_durable_query_audit_events() {
+fn engine_omits_successful_read_audit_events_like_upstream() {
     let db = CopperDb::open_temporary().unwrap();
     db.execute("CREATE (n:Audit {v: 1})", Default::default())
         .unwrap();
     db.execute("MATCH (n:Audit) RETURN n", Default::default())
         .unwrap();
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-    let events = loop {
-        let events = db.audit_log().events().unwrap();
-        if events.len() == 2 || std::time::Instant::now() >= deadline {
-            break events;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    };
-    assert_eq!(events.len(), 2);
+    let events = db.audit_log().events().unwrap();
+    assert_eq!(events.len(), 1);
     assert_eq!(events[0].event_type, EventType::DataCreate);
-    assert_eq!(events[1].event_type, EventType::DataRead);
-    assert_eq!(events[1].resource.as_deref(), Some("cypher_query"));
     assert!(db.audit_log().verify_chain().unwrap().valid);
 }
 
@@ -1467,6 +1458,36 @@ fn engine_invalidates_cached_read_results_after_graph_mutation() {
     db.execute("CREATE (:Person {name: 'second'})", Default::default())
         .unwrap();
     assert_eq!(db.execute(query, Default::default()).unwrap().rows.len(), 2);
+}
+
+#[test]
+fn shared_query_api_reuses_cached_result_allocation() {
+    let db = CopperDb::open_temporary().unwrap();
+    db.execute("CREATE (:Person {name: 'first'})", Default::default())
+        .unwrap();
+
+    let request_context = copperdb_util::RequestContext::detached();
+    let query = "MATCH (n:Person) RETURN n";
+    let first = db
+        .execute_as_with_context_shared(
+            &request_context,
+            query,
+            Default::default(),
+            &["admin".into()],
+        )
+        .unwrap();
+    let second = db
+        .execute_as_with_context_shared(
+            &request_context,
+            query,
+            Default::default(),
+            &["admin".into()],
+        )
+        .unwrap();
+
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(second.rows.len(), 1);
+    assert_eq!(db.cypher_result_cache_stats().hits, 1);
 }
 
 #[test]

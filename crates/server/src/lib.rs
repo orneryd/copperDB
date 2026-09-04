@@ -3316,6 +3316,11 @@ fn bolt_execution_error(error: StatementExecutionError) -> BoltExecutionError {
     }
 }
 
+enum StatementResult {
+    Materialized(Neo4jResult),
+    Shared(Arc<copperdb_engine::QueryResult>),
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_statement(
     state: Arc<AppState>,
@@ -3329,6 +3334,37 @@ fn execute_statement(
     caller_auth_token: Option<String>,
     request_region: Option<String>,
 ) -> Result<Neo4jResult, StatementExecutionError> {
+    execute_statement_result(
+        state,
+        database,
+        request_context,
+        statement,
+        parameters,
+        roles,
+        distributed,
+        distributed_read_fence,
+        caller_auth_token,
+        request_region,
+    )
+    .map(|result| match result {
+        StatementResult::Materialized(result) => result,
+        StatementResult::Shared(result) => convert_shared_engine_result(result),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_statement_result(
+    state: Arc<AppState>,
+    database: String,
+    request_context: RequestContext,
+    statement: String,
+    parameters: HashMap<String, serde_json::Value>,
+    roles: Vec<String>,
+    distributed: bool,
+    distributed_read_fence: Option<LogicalTransactionId>,
+    caller_auth_token: Option<String>,
+    request_region: Option<String>,
+) -> Result<StatementResult, StatementExecutionError> {
     let query_started = Instant::now();
     let normalized = statement.trim();
     let upper = normalized.to_ascii_uppercase();
@@ -3339,17 +3375,17 @@ fn execute_statement(
 
     if database == "system" {
         if upper == "SHOW DATABASES" {
-            return Ok(show_databases_result(&state));
+            return Ok(StatementResult::Materialized(show_databases_result(&state)));
         }
         if upper.starts_with("CREATE DATABASE ") {
             let name = parse_database_name(normalized, "CREATE DATABASE ")?;
             create_database(&state, &name)?;
-            return Ok(empty_neo4j_result());
+            return Ok(StatementResult::Materialized(empty_neo4j_result()));
         }
         if upper.starts_with("DROP DATABASE ") {
             let name = parse_database_name(normalized, "DROP DATABASE ")?;
             drop_database(&state, &name)?;
-            return Ok(empty_neo4j_result());
+            return Ok(StatementResult::Materialized(empty_neo4j_result()));
         }
         return Err(format!("unsupported system statement: {}", statement).into());
     }
@@ -3358,7 +3394,7 @@ fn execute_statement(
         return Err(format!("database not found: {database}").into());
     }
 
-    let result = (|| -> Result<copperdb_engine::QueryResult, StatementExecutionError> {
+    let result = (|| -> Result<Arc<copperdb_engine::QueryResult>, StatementExecutionError> {
         let engine = open_engine(&state, &database)?;
         if distributed {
             let placement = PlacementKey::default_for_database(&database);
@@ -3391,12 +3427,12 @@ fn execute_statement(
                             transport,
                         )
                         .await
-                        .map(|outcome| outcome.result)
+                        .map(|outcome| Arc::new(outcome.result))
                         .map_err(StatementExecutionError::from)
                 })
         } else {
             engine
-                .execute_as_with_context(&request_context, normalized, parameters, &roles)
+                .execute_as_with_context_shared(&request_context, normalized, parameters, &roles)
                 .map_err(StatementExecutionError::from)
         }
     })();
@@ -3423,7 +3459,7 @@ fn execute_statement(
             result.rows.len() as f64,
         );
     }
-    result.map(convert_engine_result)
+    result.map(StatementResult::Shared)
 }
 
 fn is_fulltext_procedure_call(upper_statement: &str) -> bool {
@@ -3463,6 +3499,12 @@ fn observe_fulltext_procedure(
 pub struct AppStateBoltExecutor {
     state: Arc<AppState>,
     storage_transactions: Arc<Mutex<HashMap<uuid::Uuid, StorageTransaction<'static>>>>,
+    encoded_results: Arc<Mutex<HashMap<usize, EncodedBoltResult>>>,
+}
+
+struct EncodedBoltResult {
+    source: std::sync::Weak<copperdb_engine::QueryResult>,
+    rows: Arc<Vec<Vec<u8>>>,
 }
 
 impl AppStateBoltExecutor {
@@ -3470,6 +3512,48 @@ impl AppStateBoltExecutor {
         Self {
             state,
             storage_transactions: Arc::new(Mutex::new(HashMap::new())),
+            encoded_results: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn result_into_bolt(&self, result: StatementResult) -> BoltQueryResult {
+        match result {
+            StatementResult::Materialized(result) => BoltQueryResult {
+                columns: result.columns,
+                rows: result.data.into_iter().map(|row| row.row).collect(),
+                encoded_rows: None,
+                stats: bolt_result_stats(result.stats),
+                notifications: Vec::new(),
+            },
+            StatementResult::Shared(result) => {
+                let key = Arc::as_ptr(&result) as usize;
+                let mut cache = self.encoded_results.lock();
+                let source = Arc::downgrade(&result);
+                let encoded_rows = match cache.get(&key) {
+                    Some(cached) if cached.source.ptr_eq(&source) => Arc::clone(&cached.rows),
+                    _ => {
+                        let rows = Arc::new(copperdb_bolt::dispatch::encode_record_maps(
+                            &result.columns,
+                            &result.rows,
+                        ));
+                        cache.insert(
+                            key,
+                            EncodedBoltResult {
+                                source,
+                                rows: Arc::clone(&rows),
+                            },
+                        );
+                        rows
+                    }
+                };
+                BoltQueryResult {
+                    columns: result.columns.clone(),
+                    rows: Vec::new(),
+                    encoded_rows: Some(encoded_rows),
+                    stats: bolt_result_stats(result.stats.clone()),
+                    notifications: Vec::new(),
+                }
+            }
         }
     }
 }
@@ -3520,7 +3604,7 @@ impl QueryExecutor for AppStateBoltExecutor {
         params: &HashMap<String, serde_json::Value>,
         request_context: RequestContext,
     ) -> Result<BoltQueryResult, BoltExecutionError> {
-        let result = execute_statement(
+        let result = execute_statement_result(
             Arc::clone(&self.state),
             database.to_owned(),
             request_context,
@@ -3533,12 +3617,7 @@ impl QueryExecutor for AppStateBoltExecutor {
             None,
         )
         .map_err(bolt_execution_error)?;
-        Ok(BoltQueryResult {
-            columns: result.columns,
-            rows: result.data.into_iter().map(|row| row.row).collect(),
-            stats: bolt_result_stats(result.stats),
-            notifications: Vec::new(),
-        })
+        Ok(self.result_into_bolt(result))
     }
 
     fn execute_as_on_database_with_context(
@@ -3567,7 +3646,7 @@ impl QueryExecutor for AppStateBoltExecutor {
                     .map_err(|_| "procedure requires admin permission")?;
             }
         }
-        let result = execute_statement(
+        let result = execute_statement_result(
             Arc::clone(&self.state),
             database.to_owned(),
             request_context,
@@ -3580,12 +3659,7 @@ impl QueryExecutor for AppStateBoltExecutor {
             None,
         )
         .map_err(bolt_execution_error)?;
-        Ok(BoltQueryResult {
-            columns: result.columns,
-            rows: result.data.into_iter().map(|row| row.row).collect(),
-            stats: bolt_result_stats(result.stats),
-            notifications: Vec::new(),
-        })
+        Ok(self.result_into_bolt(result))
     }
 
     fn execute_as_on_database_with_context_and_bookmarks(
@@ -3751,6 +3825,7 @@ impl QueryExecutor for AppStateBoltExecutor {
         Ok(BoltQueryResult {
             columns: result.columns,
             rows: result.data.into_iter().map(|row| row.row).collect(),
+            encoded_rows: None,
             stats: bolt_result_stats(result.stats),
             notifications: Vec::new(),
         })
@@ -3813,6 +3888,31 @@ fn convert_engine_result(result: copperdb_engine::QueryResult) -> Neo4jResult {
         columns,
         data,
         stats: result.stats,
+    }
+}
+
+fn convert_shared_engine_result(result: Arc<copperdb_engine::QueryResult>) -> Neo4jResult {
+    match Arc::try_unwrap(result) {
+        Ok(result) => convert_engine_result(result),
+        Err(result) => {
+            let columns = result.columns.clone();
+            let data = result
+                .rows
+                .iter()
+                .map(|row| Neo4jRow {
+                    row: columns
+                        .iter()
+                        .map(|column| row.get(column).cloned().unwrap_or(serde_json::Value::Null))
+                        .collect(),
+                    meta: vec![],
+                })
+                .collect();
+            Neo4jResult {
+                columns,
+                data,
+                stats: result.stats.clone(),
+            }
+        }
     }
 }
 

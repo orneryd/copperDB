@@ -321,6 +321,46 @@ pub fn encode_record(data: &[serde_json::Value]) -> Vec<u8> {
     buf.to_vec()
 }
 
+pub fn encode_record_map(
+    columns: &[String],
+    row: &std::collections::HashMap<String, serde_json::Value>,
+) -> Vec<u8> {
+    use bytes::BytesMut;
+    let mut buf = BytesMut::with_capacity(256);
+    encode_record_map_into(&mut buf, columns, row);
+    buf.to_vec()
+}
+
+pub fn encode_record_maps(
+    columns: &[String],
+    rows: &[std::collections::HashMap<String, serde_json::Value>],
+) -> Vec<Vec<u8>> {
+    use bytes::BytesMut;
+    let mut buf = BytesMut::with_capacity(16 * 1024);
+    rows.iter()
+        .map(|row| {
+            encode_record_map_into(&mut buf, columns, row);
+            buf.to_vec()
+        })
+        .collect()
+}
+
+pub fn encode_record_map_into(
+    buf: &mut bytes::BytesMut,
+    columns: &[String],
+    row: &std::collections::HashMap<String, serde_json::Value>,
+) {
+    buf.clear();
+    crate::packstream::encode_struct_header(buf, 1, 0x71);
+    crate::packstream::encode_list_header(buf, columns.len());
+    for column in columns {
+        match row.get(column) {
+            Some(value) => encode_json_value(buf, value),
+            None => crate::packstream::encode_null(buf),
+        }
+    }
+}
+
 fn encode_metadata_map(buf: &mut bytes::BytesMut, metadata: &HashMap<String, serde_json::Value>) {
     crate::packstream::encode_map_header(buf, metadata.len());
     for (k, v) in metadata {

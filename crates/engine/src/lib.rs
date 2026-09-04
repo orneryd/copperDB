@@ -457,7 +457,7 @@ pub struct CopperDb {
     eval: EvalEngine,
     tx_manager: Arc<TransactionManager>,
     query_cache: Arc<QueryCache<copperdb_cypher::Query>>,
-    cypher_result_cache: Arc<QueryResultCache<QueryResult>>,
+    cypher_result_cache: Arc<QueryResultCache<Arc<QueryResult>>>,
     ranked_search_cache: Arc<QueryCache<RrfSearchBatch>>,
     audit_log: Arc<AuditLog>,
     suggestion_repository: Arc<SuggestionRepository>,

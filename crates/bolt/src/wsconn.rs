@@ -131,8 +131,13 @@ pub fn decode_bolt_chunks(data: &[u8]) -> Vec<Vec<u8>> {
 /// Encode data into Bolt chunked format with 2-byte size headers and
 /// a 0x00 0x00 terminator. Mirrors NornicDB's writeMessageNoFlush.
 pub fn encode_bolt_chunks(data: &[u8]) -> Vec<u8> {
-    const MAX_CHUNK: usize = 0xFFFF;
     let mut out = Vec::with_capacity(data.len() + 4);
+    encode_bolt_chunks_into(&mut out, data);
+    out
+}
+
+pub fn encode_bolt_chunks_into(out: &mut Vec<u8>, data: &[u8]) {
+    const MAX_CHUNK: usize = 0xFFFF;
     let mut remaining = data;
     while !remaining.is_empty() {
         let chunk_size = remaining.len().min(MAX_CHUNK);
@@ -144,7 +149,6 @@ pub fn encode_bolt_chunks(data: &[u8]) -> Vec<u8> {
     // Terminator chunk
     out.push(0x00);
     out.push(0x00);
-    out
 }
 
 #[cfg(test)]

@@ -1663,6 +1663,17 @@ impl CopperDb {
         params: HashMap<String, Value>,
         roles: &[String],
     ) -> Result<QueryResult, CopperDbError> {
+        self.execute_as_with_context_shared(request_context, cypher, params, roles)
+            .map(Arc::unwrap_or_clone)
+    }
+
+    pub fn execute_as_with_context_shared(
+        &self,
+        request_context: &RequestContext,
+        cypher: &str,
+        params: HashMap<String, Value>,
+        roles: &[String],
+    ) -> Result<Arc<QueryResult>, CopperDbError> {
         request_context.check_active()?;
         let start = Instant::now();
 
@@ -1726,7 +1737,7 @@ impl CopperDb {
                 Some(hash),
                 result.stats.execution_time_ms,
             )?;
-            return Ok(result);
+            return Ok(Arc::new(result));
         }
 
         let mut normalized_roles = roles.to_vec();
@@ -1747,10 +1758,9 @@ impl CopperDb {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         if cacheable_read
-            && let Some(mut cached) = self.cypher_result_cache.get(&cache_query, &cache_params)
+            && let Some(cached) = self.cypher_result_cache.get(&cache_query, &cache_params)
         {
             let elapsed_ms = start.elapsed().as_millis() as u64;
-            cached.stats.execution_time_ms = elapsed_ms;
             let audit_started = std::time::Instant::now();
             self.record_query_audit(
                 cypher,
@@ -1859,11 +1869,11 @@ impl CopperDb {
             "query phase breakdown"
         );
 
-        let result = QueryResult {
+        let result = Arc::new(QueryResult {
             columns: eval_result.columns,
             rows: eval_result.rows,
             stats,
-        };
+        });
         if cacheable_read {
             self.cypher_result_cache
                 .put(&cache_query, &cache_params, result.clone());
@@ -2680,6 +2690,10 @@ impl CopperDb {
         query_hash: Option<u64>,
         elapsed_ms: u64,
     ) -> Result<(), CopperDbError> {
+        if action == "READ" && success {
+            return Ok(());
+        }
+
         let mut event = Event {
             event_type: audit_event_type(action),
             user_id: Some("embedded".into()),
@@ -2701,20 +2715,6 @@ impl CopperDb {
         event
             .metadata
             .insert("elapsed_ms".into(), elapsed_ms.to_string());
-        if action == "READ" && success {
-            let audit_log = Arc::clone(&self.audit_log);
-            let deferred_event = event.clone();
-            let spawn_result = std::thread::Builder::new()
-                .name("copperdb-audit-read".into())
-                .spawn(move || {
-                    if let Err(error) = audit_log.record(deferred_event) {
-                        tracing::warn!(%error, "failed to persist deferred read audit event");
-                    }
-                });
-            if spawn_result.is_ok() {
-                return Ok(());
-            }
-        }
         self.audit_log.record(event)?;
         Ok(())
     }
