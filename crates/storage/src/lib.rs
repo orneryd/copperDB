@@ -11,14 +11,14 @@ use copperdb_util::{RequestCancellation, RequestCancelled};
 use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs;
 use std::hash::Hash;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -226,13 +226,21 @@ pub enum StorageError {
     InvalidUtf8,
     #[error("invalid fulltext index key: {0}")]
     InvalidFulltextIndexKey(String),
+    #[error("index memory budget exceeded: {resource} requires {required} bytes, limit is {limit}")]
+    IndexMemoryBudgetExceeded {
+        resource: &'static str,
+        required: i64,
+        limit: i64,
+    },
     #[error("mvcc rebuild is blocked by {active_readers} active reader(s)")]
     MvccRebuildBlocked { active_readers: u64 },
     #[error("mvcc head truncated: {0} bytes")]
     MvccHeadTruncated(usize),
     #[error("mvcc head missing floor: {0} bytes")]
     MvccHeadMissingFloor(usize),
-    #[error("transaction conflict on {logical_key}: version {current_version} is newer than snapshot {snapshot_version}")]
+    #[error(
+        "transaction conflict on {logical_key}: version {current_version} is newer than snapshot {snapshot_version}"
+    )]
     TransactionConflict {
         logical_key: String,
         snapshot_version: u64,
@@ -1264,16 +1272,15 @@ impl SchemaManager {
             .collect::<Vec<_>>();
 
         for (state, owner) in states.iter().zip(owners.iter()) {
-            if next_unique_keys.contains(&state.key) {
-                if let Some(existing) = owner.as_deref() {
-                    if existing != node_id {
-                        return Err(StorageError::UniqueConstraintViolation {
-                            label: state.key.label.clone(),
-                            property: state.key.properties.join(", "),
-                            value: state.key.values.join(", "),
-                        });
-                    }
-                }
+            if next_unique_keys.contains(&state.key)
+                && let Some(existing) = owner.as_deref()
+                && existing != node_id
+            {
+                return Err(StorageError::UniqueConstraintViolation {
+                    label: state.key.label.clone(),
+                    property: state.key.properties.join(", "),
+                    value: state.key.values.join(", "),
+                });
             }
         }
         for (state, owner) in states.iter().zip(owners.iter_mut()) {
@@ -1391,16 +1398,15 @@ impl SchemaManager {
             .map(|state| state.state.owner.lock())
             .collect::<Vec<_>>();
         for (state, owner) in states.iter().zip(owners.iter()) {
-            if next_unique_keys.contains(&state.key) {
-                if let Some(existing) = owner.as_deref() {
-                    if existing != edge_id {
-                        return Err(StorageError::UniqueConstraintViolation {
-                            label: state.key.label.clone(),
-                            property: state.key.properties.join(", "),
-                            value: state.key.values.join(", "),
-                        });
-                    }
-                }
+            if next_unique_keys.contains(&state.key)
+                && let Some(existing) = owner.as_deref()
+                && existing != edge_id
+            {
+                return Err(StorageError::UniqueConstraintViolation {
+                    label: state.key.label.clone(),
+                    property: state.key.properties.join(", "),
+                    value: state.key.values.join(", "),
+                });
             }
         }
         for (state, owner) in states.iter().zip(owners.iter_mut()) {
@@ -1764,10 +1770,10 @@ where
             entry.insert(value);
             return;
         }
-        if self.entries.len() >= self.capacity {
-            if let Some(oldest) = self.insertion_order.pop_front() {
-                self.entries.remove(&oldest);
-            }
+        if self.entries.len() >= self.capacity
+            && let Some(oldest) = self.insertion_order.pop_front()
+        {
+            self.entries.remove(&oldest);
         }
         self.insertion_order.push_back(key.clone());
         self.entries.insert(key, value);
@@ -1780,6 +1786,254 @@ where
 }
 
 /// A single opened copperdb storage instance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexCapacityPolicy {
+    pub bm25_enabled: bool,
+    pub vector_enabled: bool,
+    pub bm25_memory_max_bytes: i64,
+    pub vector_memory_max_bytes: i64,
+    pub metadata_memory_max_bytes: i64,
+    pub bm25_storage_mode: String,
+    pub vector_storage_mode: String,
+    pub vector_dimensions: usize,
+}
+
+impl Default for IndexCapacityPolicy {
+    fn default() -> Self {
+        Self {
+            bm25_enabled: true,
+            vector_enabled: true,
+            bm25_memory_max_bytes: 0,
+            vector_memory_max_bytes: 0,
+            metadata_memory_max_bytes: 0,
+            bm25_storage_mode: "memory".into(),
+            vector_storage_mode: "auto".into(),
+            vector_dimensions: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct IndexCapacityUsage {
+    bm25_resident: i64,
+    vector_resident: i64,
+    bm25_metadata: i64,
+    vector_metadata: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct IndexCapacityState {
+    policy: IndexCapacityPolicy,
+    bm25_resident_bytes: i64,
+    vector_resident_bytes: i64,
+    bm25_metadata_bytes: i64,
+    vector_metadata_bytes: i64,
+    nodes: HashMap<String, IndexCapacityUsage>,
+    edges: HashMap<String, IndexCapacityUsage>,
+}
+
+impl IndexCapacityState {
+    fn has_limits(&self) -> bool {
+        self.policy.bm25_memory_max_bytes > 0
+            || self.policy.vector_memory_max_bytes > 0
+            || self.policy.metadata_memory_max_bytes > 0
+    }
+
+    fn replace_node(&mut self, id: &str, node: Option<&NodeRecord>) -> Result<(), StorageError> {
+        let previous = self.nodes.remove(id).unwrap_or_default();
+        self.remove_usage(previous);
+        let Some(node) = node else {
+            return Ok(());
+        };
+        let usage = estimate_node_index_capacity(node, &self.policy);
+        self.check_usage(usage)?;
+        self.add_usage(usage);
+        self.nodes.insert(id.to_owned(), usage);
+        Ok(())
+    }
+
+    fn replace_edge(&mut self, id: &str, edge: Option<&EdgeRecord>) -> Result<(), StorageError> {
+        let previous = self.edges.remove(id).unwrap_or_default();
+        self.remove_usage(previous);
+        let Some(edge) = edge else {
+            return Ok(());
+        };
+        let usage = estimate_edge_index_capacity(edge, &self.policy);
+        self.check_usage(usage)?;
+        self.add_usage(usage);
+        self.edges.insert(id.to_owned(), usage);
+        Ok(())
+    }
+
+    fn check_usage(&self, usage: IndexCapacityUsage) -> Result<(), StorageError> {
+        for (resource, required, limit) in [
+            (
+                "bm25",
+                self.bm25_resident_bytes + usage.bm25_resident,
+                self.policy.bm25_memory_max_bytes,
+            ),
+            (
+                "vector",
+                self.vector_resident_bytes + usage.vector_resident,
+                self.policy.vector_memory_max_bytes,
+            ),
+            (
+                "bm25 metadata",
+                self.bm25_metadata_bytes + usage.bm25_metadata,
+                self.policy.metadata_memory_max_bytes,
+            ),
+            (
+                "vector metadata",
+                self.vector_metadata_bytes + usage.vector_metadata,
+                self.policy.metadata_memory_max_bytes,
+            ),
+        ] {
+            if limit > 0 && required > limit {
+                return Err(StorageError::IndexMemoryBudgetExceeded {
+                    resource,
+                    required,
+                    limit,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn add_usage(&mut self, usage: IndexCapacityUsage) {
+        self.bm25_resident_bytes += usage.bm25_resident;
+        self.vector_resident_bytes += usage.vector_resident;
+        self.bm25_metadata_bytes += usage.bm25_metadata;
+        self.vector_metadata_bytes += usage.vector_metadata;
+    }
+
+    fn remove_usage(&mut self, usage: IndexCapacityUsage) {
+        self.bm25_resident_bytes -= usage.bm25_resident;
+        self.vector_resident_bytes -= usage.vector_resident;
+        self.bm25_metadata_bytes -= usage.bm25_metadata;
+        self.vector_metadata_bytes -= usage.vector_metadata;
+    }
+}
+
+fn estimate_node_index_capacity(
+    node: &NodeRecord,
+    policy: &IndexCapacityPolicy,
+) -> IndexCapacityUsage {
+    let mut usage = IndexCapacityUsage::default();
+    if policy.bm25_enabled {
+        let text = node
+            .properties
+            .values()
+            .filter_map(indexable_text)
+            .collect::<Vec<_>>()
+            .join(" ");
+        usage.bm25_resident = i64::try_from(text.len()).unwrap_or(i64::MAX);
+        if !text.is_empty() {
+            usage.bm25_metadata = i64::try_from(node.id.len() + 16).unwrap_or(i64::MAX);
+            let terms = tokenize_fulltext(&text).into_iter().collect::<HashSet<_>>();
+            usage.bm25_metadata = usage.bm25_metadata.saturating_add(
+                terms
+                    .iter()
+                    .map(|term| i64::try_from(term.len() + 8).unwrap_or(i64::MAX))
+                    .sum(),
+            );
+        }
+    }
+    if !policy.vector_enabled {
+        return usage;
+    }
+    usage.vector_metadata = i64::try_from(node.id.len() + 16).unwrap_or(i64::MAX);
+    usage.vector_metadata = node
+        .labels
+        .iter()
+        .fold(usage.vector_metadata, |total, label| {
+            total.saturating_add(i64::try_from(label.len() + 8).unwrap_or(i64::MAX))
+        });
+    let disk_vectors = policy.vector_storage_mode == "disk";
+    let mut add_vector = |id_len: usize, dimensions: usize| {
+        if dimensions == 0
+            || (policy.vector_dimensions > 0 && dimensions != policy.vector_dimensions)
+        {
+            return;
+        }
+        usage.vector_metadata = usage
+            .vector_metadata
+            .saturating_add(i64::try_from(id_len + 16).unwrap_or(i64::MAX));
+        if !disk_vectors {
+            usage.vector_resident = usage
+                .vector_resident
+                .saturating_add(i64::try_from(dimensions.saturating_mul(8)).unwrap_or(i64::MAX));
+        }
+    };
+    for (name, vector) in &node.named_embeddings {
+        add_vector(node.id.len() + 7 + name.len(), vector.len());
+    }
+    if let Some(first) = node.chunk_embeddings.first() {
+        add_vector(node.id.len(), first.len());
+        if node.chunk_embeddings.len() > 1 {
+            for (index, vector) in node.chunk_embeddings.iter().enumerate() {
+                add_vector(node.id.len() + 7 + index.to_string().len(), vector.len());
+            }
+        }
+    }
+    for (property, value) in &node.properties {
+        if let Some(dimensions) = numeric_vector_dimensions(value) {
+            add_vector(node.id.len() + 6 + property.len(), dimensions);
+        }
+    }
+    usage
+}
+
+fn estimate_edge_index_capacity(
+    edge: &EdgeRecord,
+    policy: &IndexCapacityPolicy,
+) -> IndexCapacityUsage {
+    let mut usage = IndexCapacityUsage::default();
+    if !policy.vector_enabled {
+        return usage;
+    }
+    for (property, value) in &edge.properties {
+        let Some(dimensions) = numeric_vector_dimensions(value) else {
+            continue;
+        };
+        if policy.vector_dimensions > 0 && dimensions != policy.vector_dimensions {
+            continue;
+        }
+        usage.vector_metadata = usage.vector_metadata.saturating_add(
+            i64::try_from(edge.id.len() + edge.edge_type.len() + property.len() + 32)
+                .unwrap_or(i64::MAX),
+        );
+        if policy.vector_storage_mode != "disk" {
+            usage.vector_resident = usage
+                .vector_resident
+                .saturating_add(i64::try_from(dimensions.saturating_mul(4)).unwrap_or(i64::MAX));
+        }
+    }
+    usage
+}
+
+fn indexable_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Array(values) => {
+            let text = values
+                .iter()
+                .filter_map(indexable_text)
+                .collect::<Vec<_>>()
+                .join(" ");
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    }
+}
+
+fn numeric_vector_dimensions(value: &serde_json::Value) -> Option<usize> {
+    let values = value.as_array()?;
+    (!values.is_empty() && values.iter().all(|value| value.as_f64().is_some()))
+        .then_some(values.len())
+}
+
 pub struct StorageEngine {
     backend: Arc<dyn StorageBackend>,
     meta: StorageKeyspace,
@@ -1793,6 +2047,7 @@ pub struct StorageEngine {
     pending_embedding_count: AtomicU64,
     embedding_dead_letter_count: AtomicU64,
     fulltext_runtime_indexes: Mutex<HashMap<String, Arc<FulltextRuntimeIndex>>>,
+    index_capacity: Mutex<IndexCapacityState>,
     graph_node_cache: Mutex<BoundedCache<String, Option<NodeRecord>>>,
     graph_edge_cache: Mutex<BoundedCache<String, Option<EdgeRecord>>>,
     graph_query_cache: Mutex<BoundedCache<String, Vec<EdgeRecord>>>,
@@ -2375,6 +2630,7 @@ impl StorageEngine {
             pending_embedding_count: AtomicU64::new(0),
             embedding_dead_letter_count: AtomicU64::new(0),
             fulltext_runtime_indexes: Mutex::new(HashMap::new()),
+            index_capacity: Mutex::new(IndexCapacityState::default()),
             graph_node_cache: Mutex::new(BoundedCache::new(GRAPH_NODE_CACHE_CAPACITY)),
             graph_edge_cache: Mutex::new(BoundedCache::new(GRAPH_EDGE_CACHE_CAPACITY)),
             graph_query_cache: Mutex::new(BoundedCache::new(GRAPH_QUERY_CACHE_CAPACITY)),
@@ -2777,6 +3033,66 @@ impl StorageEngine {
 
     // --- Structured node/edge APIs (storage v0 baseline) ---
 
+    pub fn set_index_capacity_policy(
+        &self,
+        mut policy: IndexCapacityPolicy,
+    ) -> Result<(), StorageError> {
+        policy.bm25_storage_mode = "memory".into();
+        policy.vector_storage_mode = match policy
+            .vector_storage_mode
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "memory" => "memory".into(),
+            "disk" => "disk".into(),
+            _ => "auto".into(),
+        };
+        let _commit_guard = self.batch_commit_lock.lock();
+        let mut state = IndexCapacityState {
+            policy,
+            ..Default::default()
+        };
+        if state.has_limits() {
+            for node in self.all_node_records()? {
+                state.replace_node(&node.id, Some(&node))?;
+            }
+            for edge in self.all_edges()? {
+                state.replace_edge(&edge.id, Some(&edge))?;
+            }
+        }
+        *self.index_capacity.lock() = state;
+        Ok(())
+    }
+
+    pub fn index_capacity_policy(&self) -> IndexCapacityPolicy {
+        self.index_capacity.lock().policy.clone()
+    }
+
+    fn projected_index_capacity(
+        &self,
+        nodes: &HashMap<String, (Option<NodeRecord>, Option<NodeRecord>)>,
+        edges: &HashMap<String, (Option<EdgeRecord>, Option<EdgeRecord>)>,
+    ) -> Result<Option<IndexCapacityState>, StorageError> {
+        let current = self.index_capacity.lock();
+        if !current.has_limits() {
+            return Ok(None);
+        }
+        let mut projected = current.clone();
+        drop(current);
+        let mut node_ids = nodes.keys().collect::<Vec<_>>();
+        node_ids.sort();
+        for id in node_ids {
+            projected.replace_node(id, nodes[id].1.as_ref())?;
+        }
+        let mut edge_ids = edges.keys().collect::<Vec<_>>();
+        edge_ids.sort();
+        for id in edge_ids {
+            projected.replace_edge(id, edges[id].1.as_ref())?;
+        }
+        Ok(Some(projected))
+    }
+
     pub fn put_node_record(&self, node: &NodeRecord) -> Result<(), StorageError> {
         self.batch_write(|batch| {
             batch.put_node_record(node);
@@ -3066,10 +3382,10 @@ impl StorageEngine {
             if self.has_index_tombstone(key_str) {
                 continue;
             }
-            if let Some(node_id) = key_str.rsplit('/').next() {
-                if let Some(node) = self.get_node_record(node_id)? {
-                    out.push(node);
-                }
+            if let Some(node_id) = key_str.rsplit('/').next()
+                && let Some(node) = self.get_node_record(node_id)?
+            {
+                out.push(node);
             }
         }
 
@@ -3110,12 +3426,12 @@ impl StorageEngine {
             if self.has_index_tombstone(key_str) {
                 continue;
             }
-            if let Some(node_id) = key_str.rsplit('/').next() {
-                if let Some(node) = self.get_node_record(node_id)? {
-                    out.push(node);
-                    if out.len() == limit {
-                        break;
-                    }
+            if let Some(node_id) = key_str.rsplit('/').next()
+                && let Some(node) = self.get_node_record(node_id)?
+            {
+                out.push(node);
+                if out.len() == limit {
+                    break;
                 }
             }
         }
@@ -3158,11 +3474,11 @@ impl StorageEngine {
             if self.has_index_tombstone(key_str) {
                 continue;
             }
-            if let Some(node_id) = key_str.rsplit('/').next() {
-                if let Some(node) = self.get_node_record(node_id)? {
-                    visit(node)?;
-                    visited += 1;
-                }
+            if let Some(node_id) = key_str.rsplit('/').next()
+                && let Some(node) = self.get_node_record(node_id)?
+            {
+                visit(node)?;
+                visited += 1;
             }
         }
 
@@ -3915,10 +4231,10 @@ impl StorageEngine {
             let (key, _) = entry?;
             let key_str =
                 std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
-            if let Some(node_id) = key_str.rsplit('/').next() {
-                if let Some(node) = self.get_node_record(node_id)? {
-                    out.push(node);
-                }
+            if let Some(node_id) = key_str.rsplit('/').next()
+                && let Some(node) = self.get_node_record(node_id)?
+            {
+                out.push(node);
             }
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -4421,17 +4737,17 @@ impl StorageEngine {
                 let (key, _) = entry?;
                 let key_str =
                     std::str::from_utf8(key.as_ref()).map_err(|_| StorageError::InvalidUtf8)?;
-                if let Some(rest) = key_str.strip_prefix(&prefix) {
-                    if let Some((encoded_token, node_id)) = rest.split_once('/') {
-                        let token = unescape_index_component(encoded_token)?;
-                        if token.len() >= 2 && !is_stop_word(&token) {
-                            document_ids.insert(node_id.to_string());
-                            *term_docs
-                                .entry(token)
-                                .or_default()
-                                .entry(node_id.to_string())
-                                .or_default() += 1;
-                        }
+                if let Some(rest) = key_str.strip_prefix(&prefix)
+                    && let Some((encoded_token, node_id)) = rest.split_once('/')
+                {
+                    let token = unescape_index_component(encoded_token)?;
+                    if token.len() >= 2 && !is_stop_word(&token) {
+                        document_ids.insert(node_id.to_string());
+                        *term_docs
+                            .entry(token)
+                            .or_default()
+                            .entry(node_id.to_string())
+                            .or_default() += 1;
                     }
                 }
             }
@@ -4705,12 +5021,11 @@ impl StorageEngine {
             if self.has_index_tombstone(key_str) {
                 continue;
             }
-            if let Some(edge_id) = key_str.rsplit('/').next() {
-                if let Some(edge) = self.get_edge_record(edge_id)? {
-                    if edge.end_node == end_node {
-                        return Ok(Some(edge));
-                    }
-                }
+            if let Some(edge_id) = key_str.rsplit('/').next()
+                && let Some(edge) = self.get_edge_record(edge_id)?
+                && edge.end_node == end_node
+            {
+                return Ok(Some(edge));
             }
         }
         Ok(None)
@@ -6105,10 +6420,10 @@ impl StorageEngine {
             if self.has_index_tombstone(key_str) {
                 continue;
             }
-            if let Some(edge_id) = key_str.rsplit('/').next() {
-                if let Some(edge) = self.get_edge_record(edge_id)? {
-                    out.push(edge);
-                }
+            if let Some(edge_id) = key_str.rsplit('/').next()
+                && let Some(edge) = self.get_edge_record(edge_id)?
+            {
+                out.push(edge);
             }
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -6126,10 +6441,10 @@ impl StorageEngine {
             if self.has_index_tombstone(key_str) {
                 continue;
             }
-            if let Some(node_id) = key_str.rsplit('/').next() {
-                if let Some(node) = self.get_node_record(node_id)? {
-                    out.push(node);
-                }
+            if let Some(node_id) = key_str.rsplit('/').next()
+                && let Some(node) = self.get_node_record(node_id)?
+            {
+                out.push(node);
             }
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -7069,12 +7384,12 @@ fn validate_decay_profile_binding(binding: &DecayProfileBindingSchema) -> Result
         ));
     }
 
-    if let Some(threshold) = binding.visibility_threshold {
-        if !(0.0..=1.0).contains(&threshold) {
-            return Err(StorageError::KnowledgePolicyInvalid(
-                "visibilityThreshold must be between 0 and 1".into(),
-            ));
-        }
+    if let Some(threshold) = binding.visibility_threshold
+        && !(0.0..=1.0).contains(&threshold)
+    {
+        return Err(StorageError::KnowledgePolicyInvalid(
+            "visibilityThreshold must be between 0 and 1".into(),
+        ));
     }
 
     Ok(())
@@ -7568,17 +7883,16 @@ impl<'a> StorageTransaction<'a> {
         mut binding: DecayProfileBindingSchema,
     ) -> Result<(), StorageError> {
         validate_decay_profile_binding(&binding)?;
-        if let Some(profile_ref) = &binding.profile_ref {
-            if !self
+        if let Some(profile_ref) = &binding.profile_ref
+            && !self
                 .knowledge_policy
                 .decay_profiles
                 .iter()
                 .any(|profile| profile.name == *profile_ref)
-            {
-                return Err(StorageError::KnowledgePolicyNotFound(format!(
-                    "decay profile {profile_ref}"
-                )));
-            }
+        {
+            return Err(StorageError::KnowledgePolicyNotFound(format!(
+                "decay profile {profile_ref}"
+            )));
         }
         if self
             .knowledge_policy
@@ -7994,10 +8308,10 @@ impl<'a> StorageTransaction<'a> {
             let Some(staged) = staged else {
                 continue;
             };
-            if let Some(current) = self.engine().get_edge_record(id)? {
-                if edge_content_matches(staged, &current) {
-                    no_op_ids.push(id.clone());
-                }
+            if let Some(current) = self.engine().get_edge_record(id)?
+                && edge_content_matches(staged, &current)
+            {
+                no_op_ids.push(id.clone());
             }
         }
         for id in no_op_ids {
@@ -8267,6 +8581,7 @@ impl<'a> BatchWriter<'a> {
             .filter(|index| is_relationship_fulltext_index(index))
             .cloned()
             .collect::<Vec<_>>();
+        let projected_index_capacity = self.engine.projected_index_capacity(&nodes, &edges)?;
 
         let replacement_schema_manager = if constraints.is_empty() {
             None
@@ -8659,6 +8974,9 @@ impl<'a> BatchWriter<'a> {
             }
             return Err(error);
         }
+        if let Some(projected) = projected_index_capacity {
+            *self.engine.index_capacity.lock() = projected;
+        }
         self.engine
             .pending_embedding_count
             .store(pending_embedding_count, Ordering::Release);
@@ -8726,10 +9044,10 @@ impl<'a> BatchWriter<'a> {
         let mut changes = Batch::new();
         if is_node_property_index(index) {
             for node in self.final_nodes(nodes)? {
-                if node.labels.iter().any(|label| label == &index.label) {
-                    if let Some(key) = node_property_index_key_for_node(index, &node) {
-                        changes.push((key.into_bytes(), Some(Vec::new())));
-                    }
+                if node.labels.iter().any(|label| label == &index.label)
+                    && let Some(key) = node_property_index_key_for_node(index, &node)
+                {
+                    changes.push((key.into_bytes(), Some(Vec::new())));
                 }
             }
         } else if is_node_fulltext_index(index) {
@@ -8769,10 +9087,10 @@ impl<'a> BatchWriter<'a> {
             }
         } else if is_relationship_property_index(index) {
             for edge in self.final_edges(edges)? {
-                if edge.edge_type == index.label {
-                    if let Some(key) = relationship_property_index_key_for_edge(index, &edge) {
-                        changes.push((key.into_bytes(), Some(Vec::new())));
-                    }
+                if edge.edge_type == index.label
+                    && let Some(key) = relationship_property_index_key_for_edge(index, &edge)
+                {
+                    changes.push((key.into_bytes(), Some(Vec::new())));
                 }
             }
         }

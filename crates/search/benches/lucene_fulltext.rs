@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
-use copperdb_search::lucene::{evaluate_fulltext_query, parse_fulltext_query, FulltextDocument};
+use copperdb_search::lucene::{FulltextDocument, evaluate_fulltext_query, parse_fulltext_query};
 use copperdb_search::{
     CandidateEmbeddingSource, IdentityReranker, MmrReranker, RerankCandidate, Reranker, SearchError,
 };
 use copperdb_util::RequestContext;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
 const VOCABULARY_SIZES: [usize; 2] = [256, 2_048];
 const NORNICDB_FULLTEXT_PARSING_QUERIES: [&str; 4] = [

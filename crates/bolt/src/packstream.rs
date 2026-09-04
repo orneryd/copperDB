@@ -8,7 +8,7 @@
 //! Reference: https://7687.org/packstream/packstream-specification-1.html
 
 use bytes::{BufMut, BytesMut};
-use time::{format_description::well_known::Rfc3339, OffsetDateTime, UtcOffset};
+use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
 
 const DATETIME_UTC_PATCHED_SIGNATURE: u8 = 0x49;
 const DATETIME_LEGACY_SIGNATURE: u8 = 0x46;
@@ -444,7 +444,7 @@ fn decode_map_body(
             _ => {
                 return Err(crate::BoltError::PackStream(
                     "map key must be string".into(),
-                ))
+                ));
             }
         };
         let (val, val_consumed) = decode(&data[pos..])?;

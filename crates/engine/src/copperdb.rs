@@ -13,6 +13,97 @@ const NORNICDB_HYBRID_MIN_SIMILARITY: f32 = 0.5;
 const NORNICDB_HYBRID_MIN_RRF_SCORE: f32 = 0.01;
 
 impl CopperDb {
+    pub fn update_configured_settings(&self, configured: BTreeMap<String, String>) {
+        self.settings_snapshot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .configured = configured;
+    }
+
+    pub fn update_active_settings(&self, active: BTreeMap<String, String>) {
+        self.settings_snapshot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active = active;
+    }
+
+    fn execute_show_settings(&self, names: &[String]) -> QueryResult {
+        const COLUMNS: [&str; 9] = [
+            "name",
+            "description",
+            "value",
+            "isDynamic",
+            "defaultValue",
+            "startupValue",
+            "validValues",
+            "isExplicitlySet",
+            "isDeprecated",
+        ];
+
+        let selected: BTreeSet<&str> = names.iter().map(String::as_str).collect();
+        let snapshot = self
+            .settings_snapshot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut definitions: Vec<_> = copperdb_config::settings().iter().collect();
+        definitions.sort_by_key(|definition| definition.key);
+        definitions.dedup_by_key(|definition| definition.key);
+        let rows = definitions
+            .into_iter()
+            .filter(|definition| selected.is_empty() || selected.contains(definition.key))
+            .map(|definition| {
+                let configured = snapshot.configured.get(definition.key);
+                let active = snapshot.active.get(definition.key);
+                let mut value = active
+                    .or(configured)
+                    .map(String::as_str)
+                    .unwrap_or(definition.default_value);
+                let mut startup_value = active
+                    .map(String::as_str)
+                    .unwrap_or(definition.default_value);
+                if definition.redacted {
+                    if !value.is_empty() {
+                        value = "<REDACTED>";
+                    }
+                    if !startup_value.is_empty() {
+                        startup_value = "<REDACTED>";
+                    }
+                }
+                HashMap::from([
+                    ("name".into(), Value::String(definition.key.into())),
+                    (
+                        "description".into(),
+                        Value::String(definition.description.into()),
+                    ),
+                    ("value".into(), Value::String(value.into())),
+                    ("isDynamic".into(), Value::Bool(definition.dynamic)),
+                    (
+                        "defaultValue".into(),
+                        Value::String(definition.default_value.into()),
+                    ),
+                    ("startupValue".into(), Value::String(startup_value.into())),
+                    (
+                        "validValues".into(),
+                        Value::Array(
+                            definition
+                                .valid_values
+                                .iter()
+                                .map(|value| Value::String((*value).into()))
+                                .collect(),
+                        ),
+                    ),
+                    ("isExplicitlySet".into(), Value::Bool(configured.is_some())),
+                    ("isDeprecated".into(), Value::Bool(definition.deprecated)),
+                ])
+            })
+            .collect();
+        QueryResult {
+            columns: COLUMNS.into_iter().map(str::to_owned).collect(),
+            rows,
+            stats: ResultStats::default(),
+        }
+    }
+
     fn ensure_ranked_search_query_enabled(&self, query: &SearchQuery) -> Result<(), CopperDbError> {
         match query {
             SearchQuery::FullText { .. } if !self.config.runtime_config.bm25_enabled => {
@@ -62,8 +153,20 @@ impl CopperDb {
         self.ranked_search_cache.set_enabled(enabled);
     }
 
+    pub fn set_ranked_search_cache_policy(&self, max_entries: usize, ttl: std::time::Duration) {
+        self.ranked_search_cache.set_policy(max_entries, Some(ttl));
+    }
+
+    pub fn ranked_search_cache_stats(&self) -> copperdb_cache::CacheStats {
+        self.ranked_search_cache.stats()
+    }
+
     pub fn cypher_result_cache_stats(&self) -> copperdb_cache::CacheStats {
         self.cypher_result_cache.stats()
+    }
+
+    pub fn cypher_plan_cache_stats(&self) -> copperdb_cache::CacheStats {
+        self.query_cache.stats()
     }
 
     /// Return all currently configured index definitions.
@@ -1342,6 +1445,16 @@ impl CopperDb {
         procedure_registry: Arc<ProcedureRegistry>,
         inference_review_provider: Option<Arc<dyn copperdb_inference::ReviewProvider>>,
     ) -> Result<Self, CopperDbError> {
+        storage.set_index_capacity_policy(copperdb_storage::IndexCapacityPolicy {
+            bm25_enabled: config.runtime_config.bm25_enabled,
+            vector_enabled: config.runtime_config.vector_enabled,
+            bm25_memory_max_bytes: config.runtime_config.bm25_memory_max_bytes,
+            vector_memory_max_bytes: config.runtime_config.vector_memory_max_bytes,
+            metadata_memory_max_bytes: config.runtime_config.metadata_memory_max_bytes,
+            bm25_storage_mode: config.runtime_config.bm25_storage_mode.clone(),
+            vector_storage_mode: config.runtime_config.vector_storage_mode.clone(),
+            vector_dimensions: config.runtime_config.embedding_dimensions,
+        })?;
         let local_import_files: Arc<dyn ImportFileService> = match &config.package_import_file_root
         {
             Some(root) => Arc::new(
@@ -1390,6 +1503,74 @@ impl CopperDb {
             &config.runtime_config,
         ));
         embedding_runtime.start_workers(config.runtime_config.embedding_workers);
+        let reranker: Option<Arc<dyn Reranker>> = if !config.runtime_config.rerank_enabled {
+            None
+        } else if config.runtime_config.rerank_provider.trim() == "local" {
+            let configured_model = config.runtime_config.rerank_model.trim();
+            let mut model_name = if configured_model.is_empty() {
+                "bge-reranker-v2-m3-Q4_K_M.gguf".to_owned()
+            } else {
+                configured_model.to_owned()
+            };
+            if !model_name.ends_with(".gguf") {
+                model_name.push_str(".gguf");
+            }
+            let configured_path = PathBuf::from(&model_name);
+            let model_path = if configured_path.is_absolute()
+                || configured_path
+                    .parent()
+                    .is_some_and(|parent| !parent.as_os_str().is_empty())
+            {
+                configured_path
+            } else {
+                PathBuf::from(
+                    std::env::var_os("COPPERDB_MODELS_DIR").unwrap_or_else(|| "models".into()),
+                )
+                .join(configured_path)
+            };
+            match GgufRerankScorer::load(&model_path) {
+                Ok(scorer) => {
+                    tracing::info!(
+                        path = %model_path.display(),
+                        backend = scorer.backend(),
+                        "local GGUF reranker loaded"
+                    );
+                    Some(Arc::new(LocalReranker::new(
+                        Arc::new(scorer),
+                        LocalRerankerConfig {
+                            enabled: true,
+                            ..Default::default()
+                        },
+                    )) as Arc<dyn Reranker>)
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        path = %model_path.display(),
+                        %error,
+                        "local GGUF reranker unavailable"
+                    );
+                    None
+                }
+            }
+        } else {
+            config
+                .runtime_config
+                .rerank_api_url
+                .as_deref()
+                .filter(|url| !url.is_empty())
+                .map(|api_url| {
+                    CrossEncoderReranker::new(CrossEncoderConfig {
+                        enabled: true,
+                        api_url: api_url.to_owned(),
+                        api_key: config.runtime_config.rerank_api_key.clone(),
+                        model: config.runtime_config.rerank_model.clone(),
+                        ..Default::default()
+                    })
+                    .map(|reranker| Arc::new(reranker) as Arc<dyn Reranker>)
+                    .map_err(|error| CopperDbError::Init(error.to_string()))
+                })
+                .transpose()?
+        };
         let eval = EvalEngine::new_with_vector_index_service_and_registries(
             Arc::clone(&storage),
             vector_indexes.registry(),
@@ -1400,10 +1581,27 @@ impl CopperDb {
         )
         .with_import_file_service(import_files)
         .with_package_graph_write_enabled(config.package_graph_write_enabled);
-        let cypher_result_cache = Arc::new(QueryResultCache::new(
-            1024,
-            Some(std::time::Duration::from_secs(300)),
+        let query_cache_capacity = config.runtime_config.query_cache_max_entries;
+        let query_cache_ttl = Some(std::time::Duration::from_millis(
+            config.runtime_config.query_cache_ttl_ms,
         ));
+        let cypher_result_cache = Arc::new(QueryResultCache::new(
+            query_cache_capacity.max(1),
+            query_cache_ttl,
+        ));
+        cypher_result_cache.set_enabled(query_cache_capacity > 0);
+        let query_cache = Arc::new(QueryCache::new(
+            query_cache_capacity.max(1),
+            query_cache_ttl,
+        ));
+        query_cache.set_enabled(query_cache_capacity > 0);
+        let ranked_search_cache = Arc::new(QueryCache::new(
+            config.runtime_config.search_result_cache_max_entries.max(1),
+            Some(std::time::Duration::from_millis(
+                config.runtime_config.search_result_cache_ttl_ms,
+            )),
+        ));
+        ranked_search_cache.set_enabled(config.runtime_config.search_result_cache_max_entries > 0);
         let invalidated_cypher_result_cache = Arc::clone(&cypher_result_cache);
         storage.on_commit_completed(Arc::new(move || {
             invalidated_cypher_result_cache.invalidate();
@@ -1413,22 +1611,22 @@ impl CopperDb {
             storage.on_node_updated(dispatcher.callback());
         }
         let compliance = Arc::new(ComplianceManager::new(Arc::clone(&storage)));
+        let settings_snapshot = SettingsSnapshot {
+            configured: config.configured_settings.clone(),
+            active: config.runtime_config.effective.clone(),
+        };
         Ok(Self {
             config,
+            settings_snapshot: RwLock::new(settings_snapshot),
             storage,
             vector_indexes,
             embedding_runtime,
+            reranker,
             eval,
             tx_manager: Arc::new(TransactionManager::new()),
-            query_cache: Arc::new(QueryCache::new(
-                1024,
-                Some(std::time::Duration::from_secs(300)),
-            )),
+            query_cache,
             cypher_result_cache,
-            ranked_search_cache: Arc::new(QueryCache::new(
-                1024,
-                Some(std::time::Duration::from_secs(300)),
-            )),
+            ranked_search_cache,
             audit_log,
             suggestion_repository,
             inference_runtime,
@@ -1519,6 +1717,20 @@ impl CopperDb {
         drop(compliance_span_guard);
         let t_compliance = t1.elapsed();
 
+        if let [Clause::ShowSettings(clause)] = parsed.clauses.as_slice() {
+            let mut result = self.execute_show_settings(&clause.names);
+            result.stats.execution_time_ms = start.elapsed().as_millis() as u64;
+            self.record_query_audit(
+                cypher,
+                query_action(&parsed.query_type),
+                true,
+                None,
+                Some(hash),
+                result.stats.execution_time_ms,
+            )?;
+            return Ok(result);
+        }
+
         let mut normalized_roles = roles.to_vec();
         normalized_roles.sort();
         normalized_roles.dedup();
@@ -1536,29 +1748,29 @@ impl CopperDb {
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
-        if cacheable_read {
-            if let Some(mut cached) = self.cypher_result_cache.get(&cache_query, &cache_params) {
-                let elapsed_ms = start.elapsed().as_millis() as u64;
-                cached.stats.execution_time_ms = elapsed_ms;
-                let audit_started = std::time::Instant::now();
-                self.record_query_audit(
-                    cypher,
-                    query_action(&parsed.query_type),
-                    true,
-                    None,
-                    Some(hash),
-                    elapsed_ms,
-                )?;
-                tracing::info!(
-                    query_hash = hash,
-                    phase_parse_cache_us = t_parse_cache.as_micros(),
-                    phase_compliance_us = t_compliance.as_micros(),
-                    phase_audit_spawn_us = audit_started.elapsed().as_micros(),
-                    phase_total_us = start.elapsed().as_micros(),
-                    "query result-cache hit phase breakdown"
-                );
-                return Ok(cached);
-            }
+        if cacheable_read
+            && let Some(mut cached) = self.cypher_result_cache.get(&cache_query, &cache_params)
+        {
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            cached.stats.execution_time_ms = elapsed_ms;
+            let audit_started = std::time::Instant::now();
+            self.record_query_audit(
+                cypher,
+                query_action(&parsed.query_type),
+                true,
+                None,
+                Some(hash),
+                elapsed_ms,
+            )?;
+            tracing::info!(
+                query_hash = hash,
+                phase_parse_cache_us = t_parse_cache.as_micros(),
+                phase_compliance_us = t_compliance.as_micros(),
+                phase_audit_spawn_us = audit_started.elapsed().as_micros(),
+                phase_total_us = start.elapsed().as_micros(),
+                "query result-cache hit phase breakdown"
+            );
+            return Ok(cached);
         }
 
         let t2 = std::time::Instant::now();
@@ -1685,6 +1897,19 @@ impl CopperDb {
         let start = Instant::now();
         let parsed = Parser::new().parse(cypher)?;
         self.enforce_compliance(&parsed, roles)?;
+        if let [Clause::ShowSettings(clause)] = parsed.clauses.as_slice() {
+            let mut result = self.execute_show_settings(&clause.names);
+            result.stats.execution_time_ms = start.elapsed().as_millis() as u64;
+            self.record_query_audit(
+                cypher,
+                query_action(&parsed.query_type),
+                true,
+                None,
+                None,
+                result.stats.execution_time_ms,
+            )?;
+            return Ok(result);
+        }
         let mut capabilities = vec!["query:read".to_string()];
         if is_mutating_query(&parsed.query_type)
             || self.eval.query_requires_write_capability(&parsed)
@@ -1984,14 +2209,13 @@ impl CopperDb {
     ) -> Vec<String> {
         let mut labels = BTreeSet::new();
 
-        if let Some(database) = database {
-            if let Some(shard) = database
+        if let Some(database) = database
+            && let Some(shard) = database
                 .shards
                 .iter()
                 .find(|shard| shard.placement == *placement)
-            {
-                labels.extend(shard.labels.iter().cloned());
-            }
+        {
+            labels.extend(shard.labels.iter().cloned());
         }
 
         if labels.is_empty() {
@@ -2065,6 +2289,67 @@ impl CopperDb {
         hydrate_rrf_search_outcome(outcome, hydration, policy)
     }
 
+    pub fn rerank_search_outcome(
+        &self,
+        request_context: &RequestContext,
+        query: &str,
+        outcome: RrfSearchOutcome,
+        top_k: usize,
+    ) -> RrfSearchOutcome {
+        let fused_hits = outcome.fused_hits;
+        let hydration = outcome
+            .results
+            .iter()
+            .filter_map(|hit| {
+                self.storage
+                    .get_node_record(&hit.global_id.local_id)
+                    .ok()
+                    .flatten()
+                    .map(|node| RrfHydrationRecord {
+                        global_id: hit.global_id.clone(),
+                        labels: node.labels,
+                        entity: Value::Object(node.properties.into_iter().collect()),
+                    })
+            })
+            .collect();
+        let hydrated = hydrate_rrf_search_outcome(outcome, hydration, RrfSearchPolicy::default());
+        let reranked = self.rerank_hydrated_search_outcome(request_context, query, hydrated, top_k);
+        RrfSearchOutcome {
+            results: reranked
+                .results
+                .into_iter()
+                .map(|result| result.hit)
+                .collect(),
+            touched_shards: reranked.touched_shards,
+            sources: reranked.sources,
+            input_hits: reranked.input_hits,
+            fused_hits,
+            output_hits: reranked.output_hits,
+            filtered_hits: reranked.filtered_hits,
+        }
+    }
+
+    pub fn rerank_hydrated_search_outcome(
+        &self,
+        request_context: &RequestContext,
+        query: &str,
+        outcome: RrfHydratedSearchOutcome,
+        top_k: usize,
+    ) -> RrfHydratedSearchOutcome {
+        apply_reranker_to_hydrated_outcome(
+            request_context,
+            query,
+            outcome,
+            self.reranker.as_deref(),
+            top_k,
+        )
+        .0
+    }
+
+    pub fn reranker_name(&self) -> Option<&str> {
+        self.reranker.as_deref().map(Reranker::name)
+    }
+
     pub fn execute_fabric_ranked_search(
         &self,
         database: &FabricDatabase,
@@ -2117,6 +2402,11 @@ impl CopperDb {
         transport: Arc<dyn RankedSearchTransport>,
     ) -> Result<FabricRankedSearchExecution, CopperDbError> {
         self.ensure_ranked_search_query_enabled(&query)?;
+        let rerank_request = match &query {
+            SearchQuery::FullText { query, limit, .. } => Some((query.clone(), *limit)),
+            SearchQuery::Hybrid { text, k, .. } => Some((text.clone(), *k)),
+            SearchQuery::Semantic { .. } => None,
+        };
         let plans = self.plan_fabric_searches(database)?;
         let collected = collect_planned_fabric_ranked_batches_with_context(
             request_context,
@@ -2134,6 +2424,14 @@ impl CopperDb {
             config,
             policy,
         );
+        if let Some((query, top_k)) = rerank_request {
+            execution.hydrated = self.rerank_hydrated_search_outcome(
+                request_context,
+                &query,
+                execution.hydrated,
+                top_k,
+            );
+        }
         execution.responded_nodes = collected.responded_nodes;
         execution.failed_nodes = collected.failed_nodes;
         Ok(execution)
@@ -2233,6 +2531,11 @@ impl CopperDb {
         hydration_transport: Arc<dyn HydrationTransport>,
     ) -> Result<FabricRankedSearchExecution, CopperDbError> {
         self.ensure_ranked_search_query_enabled(&query)?;
+        let rerank_request = match &query {
+            SearchQuery::FullText { query, limit, .. } => Some((query.clone(), *limit)),
+            SearchQuery::Hybrid { text, k, .. } => Some((text.clone(), *k)),
+            SearchQuery::Semantic { .. } => None,
+        };
         let plans = self.plan_fabric_searches(database)?;
         let collected = collect_planned_fabric_ranked_batches_with_context(
             request_context,
@@ -2260,6 +2563,14 @@ impl CopperDb {
             config,
             policy,
         );
+        if let Some((query, top_k)) = rerank_request {
+            execution.hydrated = self.rerank_hydrated_search_outcome(
+                request_context,
+                &query,
+                execution.hydrated,
+                top_k,
+            );
+        }
         execution.responded_nodes = collected.responded_nodes;
         execution.failed_nodes = collected.failed_nodes;
         Ok(execution)
@@ -2803,10 +3114,10 @@ fn distributed_leading_match(
 
 fn distributed_extend_bound_variables(bound_variables: &mut Vec<String>, pattern: &Pattern) {
     for node in &pattern.nodes {
-        if let Some(variable) = &node.variable {
-            if !bound_variables.iter().any(|bound| bound == variable) {
-                bound_variables.push(variable.clone());
-            }
+        if let Some(variable) = &node.variable
+            && !bound_variables.iter().any(|bound| bound == variable)
+        {
+            bound_variables.push(variable.clone());
         }
     }
 }
@@ -2817,10 +3128,10 @@ fn distributed_bind_optional_leading_match_nulls(
 ) {
     match leading_match {
         DistributedLeadingMatch::Node { variable, .. } => {
-            if let Some(variable) = variable {
-                if !row.contains_key(variable) {
-                    row.insert(variable.clone(), Value::Null);
-                }
+            if let Some(variable) = variable
+                && !row.contains_key(variable)
+            {
+                row.insert(variable.clone(), Value::Null);
             }
         }
         DistributedLeadingMatch::Relationship {
@@ -2889,14 +3200,14 @@ fn distributed_node_selector(
 ) -> Option<DistributedNodeSelector> {
     let literal_properties = distributed_literal_properties(&node.properties)?;
 
-    if let Some(variable) = &node.variable {
-        if bound_variables.iter().any(|bound| bound == variable) {
-            return Some(DistributedNodeSelector::Bound {
-                variable: variable.clone(),
-                labels: node.labels.clone(),
-                properties: literal_properties,
-            });
-        }
+    if let Some(variable) = &node.variable
+        && bound_variables.iter().any(|bound| bound == variable)
+    {
+        return Some(DistributedNodeSelector::Bound {
+            variable: variable.clone(),
+            labels: node.labels.clone(),
+            properties: literal_properties,
+        });
     }
 
     if node.labels.is_empty() {

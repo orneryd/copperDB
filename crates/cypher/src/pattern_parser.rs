@@ -1,6 +1,6 @@
 use crate::{
-    parse_context::ParseContext, parser_support::is_keyword, CypherError, EdgeDirection,
-    EdgePattern, NodePattern, Pattern, PropertyEntry,
+    CypherError, EdgeDirection, EdgePattern, NodePattern, Pattern, PropertyEntry,
+    parse_context::ParseContext, parser_support::is_keyword,
 };
 
 impl<'a> ParseContext<'a> {
@@ -54,10 +54,13 @@ impl<'a> ParseContext<'a> {
         let mut labels: Vec<String> = Vec::new();
         let mut properties: Vec<PropertyEntry> = Vec::new();
 
-        if let Some(t) = self.peek() {
-            if t != ")" && t != ":" && t != "{" && !is_keyword(t) {
-                variable = Some(self.advance().unwrap().to_string());
-            }
+        if let Some(t) = self.peek()
+            && t != ")"
+            && t != ":"
+            && t != "{"
+            && !is_keyword(t)
+        {
+            variable = Some(self.advance().unwrap().to_string());
         }
 
         while self.peek() == Some(":") {
@@ -137,10 +140,13 @@ impl<'a> ParseContext<'a> {
         let mut min_hops: Option<u32> = None;
         let mut max_hops: Option<u32> = None;
 
-        if let Some(t) = self.peek() {
-            if t != "]" && t != ":" && t != "*" && t != "{" {
-                variable = Some(self.advance().unwrap().to_string());
-            }
+        if let Some(t) = self.peek()
+            && t != "]"
+            && t != ":"
+            && t != "*"
+            && t != "{"
+        {
+            variable = Some(self.advance().unwrap().to_string());
         }
 
         if self.peek() == Some(":") {
@@ -159,11 +165,11 @@ impl<'a> ParseContext<'a> {
                     if self.peek() == Some(".") {
                         self.advance();
                         self.expect(".")?;
-                        if let Some(max_t) = self.peek() {
-                            if let Ok(max) = max_t.parse::<u32>() {
-                                self.advance();
-                                max_hops = Some(max);
-                            }
+                        if let Some(max_t) = self.peek()
+                            && let Ok(max) = max_t.parse::<u32>()
+                        {
+                            self.advance();
+                            max_hops = Some(max);
                         }
                     } else {
                         max_hops = Some(min);
@@ -171,11 +177,11 @@ impl<'a> ParseContext<'a> {
                 } else if t == "." {
                     self.advance();
                     self.expect(".")?;
-                    if let Some(max_t) = self.peek() {
-                        if let Ok(max) = max_t.parse::<u32>() {
-                            self.advance();
-                            max_hops = Some(max);
-                        }
+                    if let Some(max_t) = self.peek()
+                        && let Ok(max) = max_t.parse::<u32>()
+                    {
+                        self.advance();
+                        max_hops = Some(max);
                     }
                 }
             }

@@ -1987,10 +1987,12 @@ mod tests {
             results.iter().map(|(id, _)| id).collect::<Vec<_>>(),
             oracle.iter().map(|(id, _)| id).collect::<Vec<_>>()
         );
-        assert!(results
-            .iter()
-            .zip(oracle.iter())
-            .all(|((_, actual), (_, expected))| (actual - expected).abs() < 1e-6));
+        assert!(
+            results
+                .iter()
+                .zip(oracle.iter())
+                .all(|((_, actual), (_, expected))| (actual - expected).abs() < 1e-6)
+        );
         assert!(
             stats.visited_nodes < index.len(),
             "HNSW query must traverse graph neighbors instead of scanning all vectors"
@@ -2000,14 +2002,16 @@ mod tests {
     #[test]
     fn hnsw_rejects_invalid_configuration_and_dimension_mismatches() {
         assert!(HnswIndex::new(0, HnswConfig::default()).is_err());
-        assert!(HnswIndex::new(
-            2,
-            HnswConfig {
-                m: 0,
-                ..HnswConfig::default()
-            }
-        )
-        .is_err());
+        assert!(
+            HnswIndex::new(
+                2,
+                HnswConfig {
+                    m: 0,
+                    ..HnswConfig::default()
+                }
+            )
+            .is_err()
+        );
 
         let mut index = HnswIndex::new(2, HnswConfig::default()).unwrap();
         assert!(index.insert("bad", vec![1.0]).is_err());
@@ -2122,11 +2126,13 @@ mod tests {
         assert!(before_query.ready);
         assert_eq!(before_query.generation, 0);
         assert!(before_query.estimated_memory_bytes > 0);
-        assert!(registry
-            .knn("documents.embedding", &[1.0, 0.0], 3)
-            .unwrap()
-            .0
-            .is_empty());
+        assert!(
+            registry
+                .knn("documents.embedding", &[1.0, 0.0], 3)
+                .unwrap()
+                .0
+                .is_empty()
+        );
         assert_eq!(
             registry.status("documents.embedding").unwrap().generation,
             before_query.generation,
@@ -2155,9 +2161,11 @@ mod tests {
                 .0,
             "doc-1"
         );
-        assert!(registry
-            .create_index("documents.embedding", 2, HnswConfig::default())
-            .is_err());
+        assert!(
+            registry
+                .create_index("documents.embedding", 2, HnswConfig::default())
+                .is_err()
+        );
     }
 
     #[test]
@@ -2181,9 +2189,11 @@ mod tests {
         assert_eq!(status.strategy, SimilarityMetric::ExactEuclidean);
         assert_eq!(status.generation, 2);
         assert!(status.estimated_memory_bytes > 0);
-        assert!(registry
-            .upsert("documents.embedding", "invalid", vec![1.0])
-            .is_err());
+        assert!(
+            registry
+                .upsert("documents.embedding", "invalid", vec![1.0])
+                .is_err()
+        );
     }
 
     #[test]

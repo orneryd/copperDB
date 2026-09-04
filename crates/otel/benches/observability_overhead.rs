@@ -1,7 +1,7 @@
 use std::hint::black_box;
 
 use copperdb_otel::Telemetry;
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use tracing::info_span;

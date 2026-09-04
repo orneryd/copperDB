@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-pub use copperdb_math::{cosine_similarity, dot, l2_norm, normalize, MathError};
+pub use copperdb_math::{MathError, cosine_similarity, dot, l2_norm, normalize};
 
 const MANAGED_PROPERTIES: [&str; 11] = [
     "embedding",

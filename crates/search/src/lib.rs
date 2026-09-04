@@ -8,9 +8,9 @@ pub mod lucene;
 mod rerank;
 
 pub use rerank::{
-    apply_reranker_to_hydrated_outcome, CandidateEmbeddingSource, IdentityReranker, LocalReranker,
-    LocalRerankerConfig, MmrReranker, RerankApplication, RerankCandidate, RerankResult,
-    RerankScorer, Reranker,
+    CandidateEmbeddingSource, CrossEncoderConfig, CrossEncoderReranker, GgufRerankScorer,
+    IdentityReranker, LocalReranker, LocalRerankerConfig, MmrReranker, RerankApplication,
+    RerankCandidate, RerankResult, RerankScorer, Reranker, apply_reranker_to_hydrated_outcome,
 };
 
 use async_trait::async_trait;
@@ -1125,11 +1125,11 @@ impl SearchIndex {
         }
         let mut scores: HashMap<String, usize> = HashMap::new();
         for token in &tokens {
-            if let Some(field_map) = self.field_inverted.get(token) {
-                if let Some(ids) = field_map.get(field) {
-                    for id in ids {
-                        *scores.entry(id.clone()).or_default() += 1;
-                    }
+            if let Some(field_map) = self.field_inverted.get(token)
+                && let Some(ids) = field_map.get(field)
+            {
+                for id in ids {
+                    *scores.entry(id.clone()).or_default() += 1;
                 }
             }
         }

@@ -662,28 +662,32 @@ async fn engine_routes_distributed_leading_match_optional_path_with_row_preserva
             .unwrap();
 
     assert_eq!(hit.result.rows.len(), 2);
-    assert!(hit
-        .result
-        .rows
-        .iter()
-        .all(|row| row.get("hops") == Some(&Value::from(0))));
-    assert!(hit
-        .result
-        .rows
-        .iter()
-        .all(|row| row.get("path").and_then(Value::as_object).is_some()));
+    assert!(
+        hit.result
+            .rows
+            .iter()
+            .all(|row| row.get("hops") == Some(&Value::from(0)))
+    );
+    assert!(
+        hit.result
+            .rows
+            .iter()
+            .all(|row| row.get("path").and_then(Value::as_object).is_some())
+    );
 
     assert_eq!(miss.result.rows.len(), 2);
-    assert!(miss
-        .result
-        .rows
-        .iter()
-        .all(|row| row.get("path") == Some(&Value::Null)));
-    assert!(miss
-        .result
-        .rows
-        .iter()
-        .all(|row| row.get("hops") == Some(&Value::Null)));
+    assert!(
+        miss.result
+            .rows
+            .iter()
+            .all(|row| row.get("path") == Some(&Value::Null))
+    );
+    assert!(
+        miss.result
+            .rows
+            .iter()
+            .all(|row| row.get("hops") == Some(&Value::Null))
+    );
 }
 
 #[tokio::test]

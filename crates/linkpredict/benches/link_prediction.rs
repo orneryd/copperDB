@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use copperdb_linkpredict::{
-    common_neighbors, AdjacencyStream, GraphBuildConfig, GraphSnapshot, LinkPredictError,
+    AdjacencyStream, GraphBuildConfig, GraphSnapshot, LinkPredictError, common_neighbors,
 };
 use copperdb_util::RequestContext;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
 struct GeneratedGraph {
     nodes: Vec<String>,

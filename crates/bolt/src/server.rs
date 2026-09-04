@@ -3,20 +3,20 @@
 //! Supports both raw TCP (standard Bolt) and WebSocket upgrades on the same port.
 //! Mirrors NornicDB's `pkg/bolt/server.go` + `pkg/bolt/transport_ws.go`.
 
+use crate::BoltError;
 use crate::dispatch;
 use crate::messages::BoltMessage;
 use crate::packstream::Value;
 use crate::wsconn;
-use crate::BoltError;
-use copperdb_errors::{map_transient_transaction_error, TransientTransactionCode};
-use copperdb_localization::{messages as localized_messages, LanguageTag, Manager};
+use copperdb_errors::{TransientTransactionCode, map_transient_transaction_error};
+use copperdb_localization::{LanguageTag, Manager, messages as localized_messages};
 use copperdb_otel::{CancellationProtocol, CancellationStage, Telemetry};
 use opentelemetry::global;
 use opentelemetry::propagation::Extractor;
 use std::collections::{HashMap, VecDeque};
 use std::error::Error;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -914,12 +914,12 @@ where
             Some(Ok(other)) => {
                 return Err(BoltError::ProtocolViolation(format!(
                     "expected Binary preamble, got {other:?}"
-                )))
+                )));
             }
             Some(Err(e)) => {
                 return Err(BoltError::ProtocolViolation(format!(
                     "WS preamble read error: {e}"
-                )))
+                )));
             }
             None => return Ok(()),
         }
@@ -963,7 +963,7 @@ where
                 Ok(Some(Err(error))) => {
                     break Err(BoltError::ProtocolViolation(format!(
                         "WS read error: {error}"
-                    )))
+                    )));
                 }
                 Ok(None) => break Ok(()),
                 Err(_) => break Err(BoltError::ProtocolViolation("Bolt receive timeout".into())),
@@ -1343,10 +1343,10 @@ fn authentication_required(session: &BoltSession) -> bool {
 }
 
 fn rollback_active_transaction(session: &mut BoltSession, executor: &dyn QueryExecutor) {
-    if let Some(transaction) = session.take_transaction() {
-        if let Err(error) = executor.rollback_transaction(&transaction) {
-            warn!(event_id = "bolt.log.transaction_cleanup_failed", error = %error, transaction_id = %transaction.id, database = %transaction.database, "Bolt session cleanup rollback failed");
-        }
+    if let Some(transaction) = session.take_transaction()
+        && let Err(error) = executor.rollback_transaction(&transaction)
+    {
+        warn!(event_id = "bolt.log.transaction_cleanup_failed", error = %error, transaction_id = %transaction.id, database = %transaction.database, "Bolt session cleanup rollback failed");
     }
 }
 
@@ -1378,10 +1378,12 @@ fn cursor_summary(
         ("t_last".into(), serde_json::json!(0)),
         (
             "db".into(),
-            serde_json::json!(database
-                .or(session.last_query_database.as_deref())
-                .or(session.database.as_deref())
-                .unwrap_or("copperdb")),
+            serde_json::json!(
+                database
+                    .or(session.last_query_database.as_deref())
+                    .or(session.database.as_deref())
+                    .unwrap_or("copperdb")
+            ),
         ),
     ]);
     if has_more {
@@ -1403,16 +1405,18 @@ fn cursor_summary(
     if !notifications.is_empty() {
         metadata.insert(
             "notifications".into(),
-            serde_json::json!(notifications
-                .iter()
-                .map(|notification| serde_json::json!({
-                    "code": notification.code,
-                    "title": notification.title,
-                    "description": notification.description,
-                    "severity": notification.severity,
-                    "category": notification.category,
-                }))
-                .collect::<Vec<_>>()),
+            serde_json::json!(
+                notifications
+                    .iter()
+                    .map(|notification| serde_json::json!({
+                        "code": notification.code,
+                        "title": notification.title,
+                        "description": notification.description,
+                        "severity": notification.severity,
+                        "category": notification.category,
+                    }))
+                    .collect::<Vec<_>>()
+            ),
         );
     }
     vec![dispatch::encode_message(&BoltMessage::Success { metadata })]
@@ -1444,7 +1448,7 @@ async fn process_message_with_telemetry(
         _ => {
             return Err(BoltError::ProtocolViolation(
                 "expected struct message".into(),
-            ))
+            ));
         }
     };
     let msg = dispatch::decode_message(sig, fields)?;
@@ -1459,22 +1463,22 @@ async fn process_message_with_telemetry(
             session.principal = None;
             session.database = database_from_metadata(&extra);
             session.language = locale_from_metadata(&extra).or_else(|| session.language.clone());
-            if session.auth_enabled {
-                if let Some((username, password)) = credentials_from_hello(&extra) {
-                    return Ok(
-                        match authenticate_session(
-                            session,
-                            auth_provider.as_deref(),
-                            &username,
-                            &password,
-                        ) {
-                            Ok(()) => success_response(),
-                            Err(message) => authentication_failure_response(
-                                &localized_authentication_error(session, &message),
-                            ),
-                        },
-                    );
-                }
+            if session.auth_enabled
+                && let Some((username, password)) = credentials_from_hello(&extra)
+            {
+                return Ok(
+                    match authenticate_session(
+                        session,
+                        auth_provider.as_deref(),
+                        &username,
+                        &password,
+                    ) {
+                        Ok(()) => success_response(),
+                        Err(message) => authentication_failure_response(
+                            &localized_authentication_error(session, &message),
+                        ),
+                    },
+                );
             }
             let meta = HashMap::from([
                 ("server".into(), serde_json::json!("copperdb/1.0")),
@@ -1552,13 +1556,12 @@ async fn process_message_with_telemetry(
             let requested_database = database_from_metadata(&extra);
             if let (Some(transaction), Some(requested_database)) =
                 (session.transaction.as_ref(), requested_database.as_ref())
+                && requested_database != &transaction.database
             {
-                if requested_database != &transaction.database {
-                    return Ok(transaction_failure_response(
-                        "Neo.ClientError.Transaction.TransactionAccessedConcurrently",
-                        &localize_id(session, "bolt.database_switch_during_transaction"),
-                    ));
-                }
+                return Ok(transaction_failure_response(
+                    "Neo.ClientError.Transaction.TransactionAccessedConcurrently",
+                    &localize_id(session, "bolt.database_switch_during_transaction"),
+                ));
             }
             let database = session
                 .transaction
@@ -1649,10 +1652,10 @@ async fn process_message_with_telemetry(
                 Ok(result) => {
                     cancellation_guard.finish();
                     let columns = result.columns.clone();
-                    if session.cursors.len() == MAX_BOLT_CURSORS {
-                        if let Some(oldest_qid) = session.cursors.keys().min().copied() {
-                            session.cursors.remove(&oldest_qid);
-                        }
+                    if session.cursors.len() == MAX_BOLT_CURSORS
+                        && let Some(oldest_qid) = session.cursors.keys().min().copied()
+                    {
+                        session.cursors.remove(&oldest_qid);
                     }
                     let qid = session.next_qid;
                     session.next_qid = session.next_qid.wrapping_add(1);
@@ -1865,7 +1868,7 @@ async fn process_message_with_telemetry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use neo4rs::{query, ConfigBuilder, Graph};
+    use neo4rs::{ConfigBuilder, Graph, query};
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -3047,9 +3050,11 @@ mod tests {
         let [Value::Map(metadata)] = fields.as_slice() else {
             panic!("expected RUN metadata");
         };
-        assert!(metadata
-            .iter()
-            .any(|(key, value)| { key == "qid" && value == &Value::Integer(0) }));
+        assert!(
+            metadata
+                .iter()
+                .any(|(key, value)| { key == "qid" && value == &Value::Integer(0) })
+        );
 
         let pull = Value::Struct {
             signature: 0x3F,
@@ -3074,9 +3079,11 @@ mod tests {
         let [Value::Map(metadata)] = fields.as_slice() else {
             panic!("expected PULL summary metadata");
         };
-        assert!(metadata
-            .iter()
-            .any(|(key, value)| { key == "has_more" && value == &Value::Bool(true) }));
+        assert!(
+            metadata
+                .iter()
+                .any(|(key, value)| { key == "has_more" && value == &Value::Bool(true) })
+        );
 
         let discard = Value::Struct {
             signature: 0x2F,
@@ -3153,18 +3160,26 @@ mod tests {
         let Value::Map(counters) = stats else {
             panic!("expected stats map");
         };
-        assert!(counters
-            .iter()
-            .any(|(key, value)| { key == "nodes-created" && value == &Value::Integer(2) }));
-        assert!(counters
-            .iter()
-            .any(|(key, value)| { key == "relationships-created" && value == &Value::Integer(1) }));
-        assert!(counters
-            .iter()
-            .any(|(key, value)| { key == "relationships-deleted" && value == &Value::Integer(1) }));
-        assert!(counters
-            .iter()
-            .any(|(key, value)| { key == "properties-set" && value == &Value::Integer(3) }));
+        assert!(
+            counters
+                .iter()
+                .any(|(key, value)| { key == "nodes-created" && value == &Value::Integer(2) })
+        );
+        assert!(
+            counters.iter().any(|(key, value)| {
+                key == "relationships-created" && value == &Value::Integer(1)
+            })
+        );
+        assert!(
+            counters.iter().any(|(key, value)| {
+                key == "relationships-deleted" && value == &Value::Integer(1)
+            })
+        );
+        assert!(
+            counters
+                .iter()
+                .any(|(key, value)| { key == "properties-set" && value == &Value::Integer(3) })
+        );
     }
 
     #[tokio::test]
@@ -3898,7 +3913,7 @@ mod tests {
     #[tokio::test]
     async fn ws_close_cancels_active_run_and_records_ingress() {
         use futures::{SinkExt, StreamExt};
-        use tokio_tungstenite::tungstenite::{http::Request, Message};
+        use tokio_tungstenite::tungstenite::{Message, http::Request};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -4013,11 +4028,13 @@ mod tests {
             .get("value")
             .expect("Bolt result should expose the value column");
         assert_eq!(first, 1);
-        assert!(result
-            .next()
-            .await
-            .expect("Neo4rs result stream should succeed")
-            .is_some());
+        assert!(
+            result
+                .next()
+                .await
+                .expect("Neo4rs result stream should succeed")
+                .is_some()
+        );
 
         drop(result);
         drop(graph);

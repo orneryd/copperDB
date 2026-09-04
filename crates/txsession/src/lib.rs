@@ -3,7 +3,7 @@
 //! Provides ACID transaction handling with begin, commit, rollback, and
 //! pending-write buffering.
 
-use copperdb_errors::{map_transient_transaction_error, TransientTransactionCode};
+use copperdb_errors::{TransientTransactionCode, map_transient_transaction_error};
 use copperdb_topology::{DistributedTransactionClock, LogicalTransactionId, TransactionTimeOracle};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -957,12 +957,16 @@ mod tests {
             .open_for_owner(&config, Some("  user:alice  "))
             .unwrap();
 
-        assert!(manager
-            .get_for_owner(&session_id, Some("user:alice"))
-            .is_some());
-        assert!(manager
-            .get_for_owner(&session_id, Some("user:bob"))
-            .is_none());
+        assert!(
+            manager
+                .get_for_owner(&session_id, Some("user:alice"))
+                .is_some()
+        );
+        assert!(
+            manager
+                .get_for_owner(&session_id, Some("user:bob"))
+                .is_none()
+        );
         assert!(manager.get_for_owner(&session_id, None).is_none());
         assert_eq!(
             manager

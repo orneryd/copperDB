@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tokio::sync::{oneshot, Notify};
+use tokio::sync::{Notify, oneshot};
 
 const REPAIR_QUEUE_PREFIX: &str = "replication:repair:";
 
@@ -1999,7 +1999,10 @@ mod tests {
         assert_eq!(not_leader.diagnostic_id(), "replication.not_leader");
         assert_eq!(
             manager
-                .render(std::slice::from_ref(&spanish), &not_leader.localized_message())
+                .render(
+                    std::slice::from_ref(&spanish),
+                    &not_leader.localized_message()
+                )
                 .unwrap()
                 .text,
             "el nodo no es líder"

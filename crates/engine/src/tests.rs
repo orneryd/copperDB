@@ -17,3 +17,6 @@ mod distributed_paths;
 
 #[path = "tests/smoke.rs"]
 mod smoke;
+
+#[path = "tests/show_settings.rs"]
+mod show_settings;

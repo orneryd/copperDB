@@ -81,13 +81,15 @@ impl LocalGgufEmbedder {
         };
 
         // Start warmup goroutine (matching NornicDB's warmupLoop)
-        if let Some(interval) = warmup_interval {
-            if interval > Duration::ZERO {
-                let (tx, rx) = crossbeam_channel::bounded(1);
-                *embedder.stop_warmup.lock().unwrap() = Some(tx);
-                let model = Arc::clone(&embedder.model);
-                let last_embed = Arc::clone(&embedder.last_embed_time);
-                thread::spawn(move || loop {
+        if let Some(interval) = warmup_interval
+            && interval > Duration::ZERO
+        {
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            *embedder.stop_warmup.lock().unwrap() = Some(tx);
+            let model = Arc::clone(&embedder.model);
+            let last_embed = Arc::clone(&embedder.last_embed_time);
+            thread::spawn(move || {
+                loop {
                     match rx.recv_timeout(interval) {
                         Ok(_) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                         Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
@@ -111,9 +113,9 @@ impl LocalGgufEmbedder {
                             tracing::warn!(error = %e, "model warmup failed");
                         }
                     }
-                });
-                tracing::info!(interval = ?interval, "model warmup enabled");
-            }
+                }
+            });
+            tracing::info!(interval = ?interval, "model warmup enabled");
         }
 
         Ok(embedder)

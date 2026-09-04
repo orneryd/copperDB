@@ -11,9 +11,9 @@ use thiserror::Error;
 mod registry;
 
 pub use registry::{
-    with_function_registry, FunctionCallContext, FunctionDescriptor, FunctionExecutionContext,
-    FunctionHandler, FunctionRegistrar, FunctionRegistry, FunctionRegistryBuilder,
-    FunctionRegistryError,
+    FunctionCallContext, FunctionDescriptor, FunctionExecutionContext, FunctionHandler,
+    FunctionRegistrar, FunctionRegistry, FunctionRegistryBuilder, FunctionRegistryError,
+    with_function_registry,
 };
 
 /// A result row: variable → value bindings.
@@ -238,10 +238,11 @@ pub fn eval_expression(
                     if bf == 0.0 {
                         return Ok(Value::Null);
                     }
-                    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
-                        if bi != 0 && ai % bi == 0 {
-                            return Ok(Value::Number((ai / bi).into()));
-                        }
+                    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64())
+                        && bi != 0
+                        && ai % bi == 0
+                    {
+                        return Ok(Value::Number((ai / bi).into()));
                     }
                     let af = a.as_f64().unwrap_or(0.0);
                     Ok(Value::Number(
@@ -260,10 +261,10 @@ pub fn eval_expression(
             let rv = eval_expression(&operands.right, row, params)?;
             match (&lv, &rv) {
                 (Value::Number(a), Value::Number(b)) => {
-                    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64()) {
-                        if bi != 0 {
-                            return Ok(Value::Number((ai % bi).into()));
-                        }
+                    if let (Some(ai), Some(bi)) = (a.as_i64(), b.as_i64())
+                        && bi != 0
+                    {
+                        return Ok(Value::Number((ai % bi).into()));
                     }
                     let af = a.as_f64().unwrap_or(0.0);
                     let bf = b.as_f64().unwrap_or(0.0);
@@ -314,10 +315,10 @@ pub fn eval_expression(
             for item in &items {
                 let mut ext_row = row.clone();
                 ext_row.insert(comp.variable.clone(), item.clone());
-                if let Some(ref pred) = comp.predicate {
-                    if !eval_predicate(pred, &ext_row, params)? {
-                        continue;
-                    }
+                if let Some(ref pred) = comp.predicate
+                    && !eval_predicate(pred, &ext_row, params)?
+                {
+                    continue;
                 }
                 let result = eval_expression(&comp.expression, &ext_row, params)?;
                 results.push(result);
@@ -776,10 +777,10 @@ fn eval_registered_function(
                 }
                 Value::Number(n) => {
                     // Epoch days → date
-                    if let Some(days) = n.as_i64() {
-                        if let Some((y, m, d)) = epoch_days_to_date_opt(days + 719468) {
-                            return Ok(Value::String(format!("{y:04}-{m:02}-{d:02}")));
-                        }
+                    if let Some(days) = n.as_i64()
+                        && let Some((y, m, d)) = epoch_days_to_date_opt(days + 719468)
+                    {
+                        return Ok(Value::String(format!("{y:04}-{m:02}-{d:02}")));
                     }
                 }
                 _ => {}
@@ -829,10 +830,10 @@ fn eval_registered_function(
                 return Ok(Value::String(format!("{h:02}:{mi:02}:{s:02}Z")));
             }
             let v = eval_arg(0)?;
-            if let Value::String(s) = &v {
-                if let Some((h, mi, s)) = parse_iso_time(s) {
-                    return Ok(Value::String(format!("{h:02}:{mi:02}:{s:02}Z")));
-                }
+            if let Value::String(s) = &v
+                && let Some((h, mi, s)) = parse_iso_time(s)
+            {
+                return Ok(Value::String(format!("{h:02}:{mi:02}:{s:02}Z")));
             }
             Ok(Value::Null)
         }
@@ -844,10 +845,10 @@ fn eval_registered_function(
                 )));
             }
             let v = eval_arg(0)?;
-            if let Value::String(s) = &v {
-                if s.len() >= 19 {
-                    return Ok(Value::String(s.trim_end_matches('Z').to_string()));
-                }
+            if let Value::String(s) = &v
+                && s.len() >= 19
+            {
+                return Ok(Value::String(s.trim_end_matches('Z').to_string()));
             }
             Ok(Value::Null)
         }
@@ -857,10 +858,10 @@ fn eval_registered_function(
                 return Ok(Value::String(format!("{h:02}:{mi:02}:{s:02}")));
             }
             let v = eval_arg(0)?;
-            if let Value::String(s) = &v {
-                if let Some((h, mi, s)) = parse_iso_time(s) {
-                    return Ok(Value::String(format!("{h:02}:{mi:02}:{s:02}")));
-                }
+            if let Value::String(s) = &v
+                && let Some((h, mi, s)) = parse_iso_time(s)
+            {
+                return Ok(Value::String(format!("{h:02}:{mi:02}:{s:02}")));
             }
             Ok(Value::Null)
         }
@@ -953,17 +954,17 @@ fn eval_registered_function(
         }
         "ceil" | "floor" | "round" => {
             let v = eval_arg(0)?;
-            if let Value::Number(n) = &v {
-                if let Some(f) = n.as_f64() {
-                    let result = match name_lower {
-                        "ceil" => f.ceil(),
-                        "floor" => f.floor(),
-                        _ => f.round(),
-                    };
-                    return Ok(Value::Number(
-                        serde_json::Number::from_f64(result).unwrap_or(serde_json::Number::from(0)),
-                    ));
-                }
+            if let Value::Number(n) = &v
+                && let Some(f) = n.as_f64()
+            {
+                let result = match name_lower {
+                    "ceil" => f.ceil(),
+                    "floor" => f.floor(),
+                    _ => f.round(),
+                };
+                return Ok(Value::Number(
+                    serde_json::Number::from_f64(result).unwrap_or(serde_json::Number::from(0)),
+                ));
             }
             Err(FilterError::TypeError(format!(
                 "{name}() requires a number"
@@ -971,31 +972,29 @@ fn eval_registered_function(
         }
         "sign" => {
             let v = eval_arg(0)?;
-            if let Value::Number(n) = &v {
-                if let Some(f) = n.as_f64() {
-                    let s = if f > 0.0 {
-                        1
-                    } else if f < 0.0 {
-                        -1
-                    } else {
-                        0
-                    };
-                    return Ok(Value::Number(s.into()));
-                }
+            if let Value::Number(n) = &v
+                && let Some(f) = n.as_f64()
+            {
+                let s = if f > 0.0 {
+                    1
+                } else if f < 0.0 {
+                    -1
+                } else {
+                    0
+                };
+                return Ok(Value::Number(s.into()));
             }
             Err(FilterError::TypeError("sign() requires a number".into()))
         }
         "sqrt" => {
             let v = eval_arg(0)?;
-            if let Value::Number(n) = &v {
-                if let Some(f) = n.as_f64() {
-                    if f >= 0.0 {
-                        return Ok(Value::Number(
-                            serde_json::Number::from_f64(f.sqrt())
-                                .unwrap_or(serde_json::Number::from(0)),
-                        ));
-                    }
-                }
+            if let Value::Number(n) = &v
+                && let Some(f) = n.as_f64()
+                && f >= 0.0
+            {
+                return Ok(Value::Number(
+                    serde_json::Number::from_f64(f.sqrt()).unwrap_or(serde_json::Number::from(0)),
+                ));
             }
             Err(FilterError::TypeError(
                 "sqrt() requires a non-negative number".into(),

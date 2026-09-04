@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use axum::{body::Body, http::Request};
-use copperdb_server::{build_router, AppState};
-use criterion::{criterion_group, criterion_main, Criterion};
+use copperdb_server::{AppState, build_router};
+use criterion::{Criterion, criterion_group, criterion_main};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use tower::ServiceExt as _;

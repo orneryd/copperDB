@@ -60,7 +60,7 @@ members = [
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 rust-version = "1.95"
 authors = ["copperdb contributors"]
 license = "Apache-2.0"
@@ -92,6 +92,7 @@ toml = "1.1.2"
 # Error handling
 thiserror = "2.0.18"
 anyhow = "1.0.102"
+go-parse-duration = "0.1.1"
 
 # Logging / tracing
 tracing = "0.1.44"
@@ -102,8 +103,8 @@ opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "trace", "testin
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto", "reqwest-client", "tls-roots", "trace"] }
 
 # Cryptography (replaces golang.org/x/crypto)
-aes-gcm = "0.11.0-rc.3"
-chacha20poly1305 = "0.11.0-rc.3"
+aes-gcm = "0.11.1"
+chacha20poly1305 = "0.11.0"
 argon2 = "0.6.0-rc.8"
 sha2 = "0.11.0"
 hmac = "0.13.0"
@@ -113,7 +114,7 @@ zeroize = { version = "1.8.2", features = ["derive"] }
 uuid = { version = "1.15.1", features = ["v4", "serde"] }
 
 # JWT (replaces github.com/golang-jwt/jwt)
-jsonwebtoken = { version = "10.3.0", default-features = false, features = ["rust_crypto"] }
+jsonwebtoken = { version = "10.3.0", default-features = false, features = ["aws_lc_rs"] }
 
 # HTTP client / server
 reqwest = { version = "0.13.2", features = ["blocking", "json", "stream"] }
@@ -138,7 +139,7 @@ async-graphql = "8.0.0-rc.4"
 async-graphql-axum = "8.0.0-rc.4"
 
 # Storage engine (replaces github.com/dgraph-io/badger)
-fjall = "3"
+fjall = "3.1.10"
 
 # Configuration (replaces github.com/spf13/cobra / gopkg.in/yaml.v3)
 clap = { version = "4.6.1", features = ["derive"] }
@@ -148,14 +149,14 @@ config = "0.15.22"
 petgraph = "0.8.3"
 
 # Numeric / linear algebra
-nalgebra = "0.34.2"
+nalgebra = "0.35.0"
 ndarray = "0.17.2"
 
 # SIMD / vectorized math (replaces github.com/viterin/vek)
 wide = "1.3.0"
 
 # Full-text search (replaces Bleve / custom search)
-tantivy = "0.26.0"
+tantivy = "0.26.1"
 regex = "1.12.2"
 rand = "0.8"
 criterion = "0.5.1"

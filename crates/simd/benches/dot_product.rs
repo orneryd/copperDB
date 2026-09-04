@@ -1,5 +1,5 @@
 use copperdb_simd::dot_f32;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
 const DIMENSIONS: [usize; 8] = [128, 256, 384, 512, 768, 1_024, 1_536, 3_072];
 

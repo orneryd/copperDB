@@ -4,23 +4,23 @@
 
 use copperdb_cache::QueryResultCache;
 use copperdb_cypher::{
-    hot_path_trace::{HotPathTrace, HotPathTraceState},
     Clause, ConstraintEntityType as CypherConstraintEntityType, ConstraintKind, EdgeDirection,
     EdgePattern, Expression, LiteralValue, NodePattern, Pattern, PatternComprehension, PatternInfo,
     PipelineClause, PipelineClauseKind, PropertyEntry, Query, QueryPattern, RemoveItem,
     ReturnClause, ReturnItem, SetItem, ShapeKind, ShapeMatch, ShapeValue, SubqueryClause,
     WithClause,
+    hot_path_trace::{HotPathTrace, HotPathTraceState},
 };
 use copperdb_filter::{
-    eval_expression, eval_predicate, FunctionExecutionContext, FunctionRegistrar, FunctionRegistry,
-    FunctionRegistryBuilder, FunctionRegistryError,
+    FunctionExecutionContext, FunctionRegistrar, FunctionRegistry, FunctionRegistryBuilder,
+    FunctionRegistryError, eval_expression, eval_predicate,
 };
 use copperdb_indexing::{CatalogRangeIndexComparison, IndexCatalog, IndexError};
 use copperdb_knowledgepolicy::{
-    access_metadata_after_policy_access, build_binding_table, build_bundles_by_name,
+    AccessFlusher, AccessMutationBuffer, CompiledBinding, PromotionProfileDef, Resolver,
+    ScoreFromMode, access_metadata_after_policy_access, build_binding_table, build_bundles_by_name,
     build_decay_bindings, build_promotion_policies_by_name, build_promotion_profiles_by_name,
-    merge_access_metadata, score_binding, AccessFlusher, AccessMutationBuffer, CompiledBinding,
-    PromotionProfileDef, Resolver, ScoreFromMode,
+    merge_access_metadata, score_binding,
 };
 use copperdb_storage::{
     Constraint, ConstraintEntityType, ConstraintType, DecayProfileBindingSchema,
@@ -795,10 +795,11 @@ fn bind_optional_pattern_nulls(row: &mut Row, pattern: &Pattern) {
 }
 
 fn bind_single_node_path_variable(row: &mut Row, pattern: &Pattern, node_value: Value) {
-    if pattern.edges.is_empty() && pattern.nodes.len() == 1 {
-        if let Some(path_var) = &pattern.path_variable {
-            row.insert(path_var.clone(), path_value(vec![node_value], Vec::new()));
-        }
+    if pattern.edges.is_empty()
+        && pattern.nodes.len() == 1
+        && let Some(path_var) = &pattern.path_variable
+    {
+        row.insert(path_var.clone(), path_value(vec![node_value], Vec::new()));
     }
 }
 
@@ -837,11 +838,7 @@ fn options_to_btreemap(options: &HashMap<String, Value>) -> BTreeMap<String, Val
 }
 
 fn binding_scope(binding: &DecayProfileBindingSchema) -> &'static str {
-    if binding.is_edge {
-        "EDGE"
-    } else {
-        "NODE"
-    }
+    if binding.is_edge { "EDGE" } else { "NODE" }
 }
 
 fn binding_target(binding: &DecayProfileBindingSchema) -> String {

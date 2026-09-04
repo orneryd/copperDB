@@ -1,6 +1,6 @@
 use crate::{
-    parse_context::ParseContext, BinaryExpression, CypherError, EdgePattern, Expression,
-    LiteralValue, NodePattern, Pattern, PatternComprehension, PropertyEntry,
+    BinaryExpression, CypherError, EdgePattern, Expression, LiteralValue, NodePattern, Pattern,
+    PatternComprehension, PropertyEntry, parse_context::ParseContext,
 };
 
 impl<'a> ParseContext<'a> {
@@ -193,10 +193,10 @@ impl<'a> ParseContext<'a> {
 
     fn parse_primary(&mut self) -> Result<Expression, CypherError> {
         // Try pattern predicate: (n)-[:REL]->(m)
-        if self.peek() == Some("(") {
-            if let Some(pred) = self.try_parse_pattern_predicate() {
-                return Ok(pred);
-            }
+        if self.peek() == Some("(")
+            && let Some(pred) = self.try_parse_pattern_predicate()
+        {
+            return Ok(pred);
         }
 
         // CASE expression

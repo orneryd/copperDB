@@ -5,8 +5,8 @@
 //! Records which specialised execution paths were taken during the most recent
 //! `Execute` call.  Useful for diagnostics, benchmarking, and test assertions.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Snapshot of hot-path flags for a single query execution.
 ///

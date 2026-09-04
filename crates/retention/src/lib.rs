@@ -686,7 +686,7 @@ mod tests {
     fn test_retention_manager_is_expired() {
         let mut mgr = RetentionManager::new();
         mgr.add_policy(RetentionPolicy::new("Log", 60)); // 1-minute TTL
-                                                         // Created 2 minutes ago
+        // Created 2 minutes ago
         let old = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
         assert!(mgr.is_expired("Log", old));
         // Created 10 seconds ago

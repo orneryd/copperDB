@@ -7,7 +7,7 @@ use copperdb_eval::{EvalEngine, EvalResult};
 use copperdb_storage::{
     EdgeRecord, IndexDefinition, IndexEntityType, IndexKind, NodeRecord, StorageEngine,
 };
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use serde_json::Value;
 
 const NODE_COUNT: usize = 1_000;

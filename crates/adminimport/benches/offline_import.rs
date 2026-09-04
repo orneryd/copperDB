@@ -6,17 +6,17 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use copperdb_adminimport::{import_offline, ImportOptions};
+use copperdb_adminimport::{ImportOptions, import_offline};
 use copperdb_storage::{
     IndexDefinition, IndexEntityType, IndexKind, NodeEmbeddingMetadata, NodeRecord, StorageEngine,
 };
 use copperdb_util::RequestCancellation;
 use criterion::{
-    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
+    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
 };
-use flate2::{write::GzEncoder, Compression};
+use flate2::{Compression, write::GzEncoder};
 use tempfile::TempDir;
-use zip::{write::SimpleFileOptions, ZipWriter};
+use zip::{ZipWriter, write::SimpleFileOptions};
 
 const DEFAULT_NODE_COUNT: usize = 10_000;
 const DEFAULT_RELATIONSHIP_COUNT: usize = 50_000;

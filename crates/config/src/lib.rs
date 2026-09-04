@@ -106,6 +106,7 @@ pub struct Config {
     pub encryption: EncryptionConfig,
     pub embedding: EmbeddingConfig,
     pub search: SearchConfig,
+    pub databases: BTreeMap<String, BTreeMap<String, String>>,
     pub packages: PackageConfig,
     pub features: FeatureConfig,
     pub vectorspace: VectorSpaceConfig,
@@ -355,6 +356,7 @@ impl Default for Config {
             encryption: EncryptionConfig::default(),
             embedding: EmbeddingConfig::default(),
             search: SearchConfig::default(),
+            databases: BTreeMap::new(),
             packages: PackageConfig::default(),
             features: FeatureConfig::default(),
             vectorspace: VectorSpaceConfig::default(),
@@ -639,6 +641,8 @@ impl Default for EmbeddingConfig {
 pub struct SearchConfig {
     /// Minimum similarity threshold for vector search.
     pub min_similarity: f64,
+    /// Full-text search engine implementation (`v1` or `v2`).
+    pub bm25_engine: String,
     /// Master switch for BM25 fulltext.
     pub bm25_enabled: bool,
     /// Warming mode for BM25 indexes.
@@ -649,17 +653,32 @@ pub struct SearchConfig {
     pub vector_warming: String,
     /// Reranking master switch. Represented for parity but default-off.
     pub rerank_enabled: bool,
+    pub rerank_provider: String,
+    pub rerank_model: String,
+    pub rerank_api_url: Option<String>,
+    pub rerank_api_key: String,
+    /// Default query cache capacity inherited by each database.
+    pub query_cache_max_entries: usize,
+    /// Default query cache lifetime inherited by each database, in milliseconds.
+    pub query_cache_ttl_ms: u64,
 }
 
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
             min_similarity: 0.0,
+            bm25_engine: "v2".into(),
             bm25_enabled: false,
             bm25_warming: "lazy".into(),
             vector_enabled: false,
             vector_warming: "lazy".into(),
             rerank_enabled: false,
+            rerank_provider: String::new(),
+            rerank_model: String::new(),
+            rerank_api_url: None,
+            rerank_api_key: String::new(),
+            query_cache_max_entries: 1_000,
+            query_cache_ttl_ms: 300_000,
         }
     }
 }
@@ -703,9 +722,54 @@ pub struct FeatureConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PerDatabaseConfigKey {
     pub key: &'static str,
+    pub environment_variable: Option<&'static str>,
     pub value_type: &'static str,
     pub category: &'static str,
     pub description: &'static str,
+    pub default_value: &'static str,
+    pub scope: &'static str,
+    pub dynamic: bool,
+    pub restart_level: &'static str,
+    pub hot_reload: Option<&'static str>,
+    pub zero_semantics: Option<&'static str>,
+    pub deprecated: bool,
+    pub redacted: bool,
+    pub valid_values: &'static [&'static str],
+}
+
+const fn setting(
+    key: &'static str,
+    environment_variable: Option<&'static str>,
+    value_type: &'static str,
+    category: &'static str,
+) -> PerDatabaseConfigKey {
+    PerDatabaseConfigKey {
+        key,
+        environment_variable,
+        value_type,
+        category,
+        description: "",
+        default_value: "",
+        scope: "database",
+        dynamic: false,
+        restart_level: "process",
+        hot_reload: None,
+        zero_semantics: None,
+        deprecated: false,
+        redacted: false,
+        valid_values: &[],
+    }
+}
+
+macro_rules! setting {
+    ($key:literal, $environment_variable:expr, $value_type:literal, $category:literal) => {
+        setting($key, $environment_variable, $value_type, $category)
+    };
+    ($key:literal, $environment_variable:expr, $value_type:literal, $category:literal, $($field:ident = $value:expr),+ $(,)?) => {{
+        let mut definition = setting($key, $environment_variable, $value_type, $category);
+        $(definition.$field = $value;)+
+        definition
+    }};
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -726,193 +790,755 @@ pub struct EffectiveDatabaseConfig {
     pub embedding_properties_exclude: Vec<String>,
     pub embedding_include_labels: bool,
     pub search_min_similarity: f64,
+    pub bm25_engine: String,
     pub bm25_enabled: bool,
     pub bm25_warming: String,
     pub vector_enabled: bool,
     pub vector_warming: String,
     pub rerank_enabled: bool,
+    pub rerank_provider: String,
+    pub rerank_model: String,
+    pub rerank_api_url: Option<String>,
+    pub rerank_api_key: String,
     pub auto_links_enabled: bool,
     pub auto_tlp_enabled: bool,
+    pub query_cache_max_entries: usize,
+    pub query_cache_ttl_ms: u64,
+    pub search_result_cache_max_entries: usize,
+    pub search_result_cache_ttl_ms: u64,
+    pub bm25_memory_max_bytes: i64,
+    pub vector_memory_max_bytes: i64,
+    pub metadata_memory_max_bytes: i64,
+    pub bm25_storage_mode: String,
+    pub vector_storage_mode: String,
     pub effective: BTreeMap<String, String>,
 }
 
-pub const PER_DATABASE_CONFIG_KEYS: [PerDatabaseConfigKey; 23] = [
-    PerDatabaseConfigKey {
-        key: "COPPERDB_EMBEDDING_ENABLED",
-        value_type: "boolean",
-        category: "Embeddings",
-        description: "Master switch for embedding work on this database. Default: false.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_EMBEDDING_PROVIDER",
-        value_type: "string",
-        category: "Embeddings",
-        description: "Embedding backend identifier for this database.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_EMBEDDING_MODEL",
-        value_type: "string",
-        category: "Embeddings",
-        description: "Embedding model name or path for this database.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_EMBEDDING_API_URL",
-        value_type: "string",
-        category: "Embeddings",
-        description: "Optional embedding API URL for this database.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_EMBEDDING_DIMENSIONS",
-        value_type: "number",
-        category: "Embeddings",
-        description: "Embedding dimensions for this database.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_EMBEDDING_WARMING",
-        value_type: "enum:startup,lazy",
-        category: "Embeddings",
-        description: "Provider loading policy for this database. Default: startup.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_EMBEDDING_WARMUP_INTERVAL_MS",
-        value_type: "number",
-        category: "Embeddings",
-        description: "Interval between local provider warmups in milliseconds. Zero disables it.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_EMBEDDING_CACHE_CAPACITY",
-        value_type: "number",
-        category: "Embeddings",
-        description: "Maximum cached embeddings for this database. Zero disables caching.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_EMBEDDING_WORKERS",
-        value_type: "number",
-        category: "Embeddings",
-        description: "Maximum concurrent embedding workers for this database. Default: 1.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_EMBEDDING_MAX_ATTEMPTS",
-        value_type: "number",
-        category: "Embeddings",
-        description: "Attempts before an embedding is dead-lettered. Default: 3.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_EMBEDDING_RETRY_BACKOFF_MS",
-        value_type: "number",
-        category: "Embeddings",
-        description: "Delay in milliseconds before retrying a failed embedding. Default: 250.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_EMBEDDING_SHUTDOWN_TIMEOUT_MS",
-        value_type: "number",
-        category: "Embeddings",
-        description: "Maximum wait for embedding workers during shutdown. Default: 1000.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_EMBEDDING_PROPERTIES_INCLUDE",
-        value_type: "string",
-        category: "Embeddings",
-        description: "Comma-separated property allowlist for canonical embedding text.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_EMBEDDING_PROPERTIES_EXCLUDE",
-        value_type: "string",
-        category: "Embeddings",
-        description: "Comma-separated property denylist for canonical embedding text.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_EMBEDDING_INCLUDE_LABELS",
-        value_type: "boolean",
-        category: "Embeddings",
-        description: "Include node labels in canonical embedding text. Default: true.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_SEARCH_MIN_SIMILARITY",
-        value_type: "number",
-        category: "Search",
-        description: "Minimum similarity threshold for vector search.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_SEARCH_BM25_ENABLED",
-        value_type: "boolean",
-        category: "Search",
-        description: "Master switch for BM25 fulltext on this database. Default: false.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_SEARCH_BM25_WARMING",
-        value_type: "enum:startup,lazy",
-        category: "Search",
-        description: "BM25 warming mode for this database.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_SEARCH_VECTOR_ENABLED",
-        value_type: "boolean",
-        category: "Search",
-        description: "Master switch for vector search on this database. Default: false.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_SEARCH_VECTOR_WARMING",
-        value_type: "enum:startup,lazy",
-        category: "Search",
-        description: "Vector warming mode for this database.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_SEARCH_RERANK_ENABLED",
-        value_type: "boolean",
-        category: "Search",
-        description: "Reranking switch. Deferred from MVP and default false.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_AUTO_LINKS_ENABLED",
-        value_type: "boolean",
-        category: "Features",
-        description: "Automatic link creation on this database. Default: false.",
-    },
-    PerDatabaseConfigKey {
-        key: "COPPERDB_AUTO_TLP_ENABLED",
-        value_type: "boolean",
-        category: "Features",
-        description: "Automatic topology/TLP workflows on this database. Default: false.",
-    },
+pub const SETTINGS_REGISTRY: [PerDatabaseConfigKey; 72] = [
+    setting!(
+        "db.copper.embedding.enabled",
+        Some("COPPERDB_EMBEDDING_ENABLED"),
+        "boolean",
+        "Embeddings"
+    ),
+    setting!(
+        "db.copper.embedding.provider",
+        Some("COPPERDB_EMBEDDING_PROVIDER"),
+        "string",
+        "Embeddings",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-rebuild")
+    ),
+    setting!(
+        "db.copper.embedding.model",
+        Some("COPPERDB_EMBEDDING_MODEL"),
+        "string",
+        "Embeddings",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-rebuild")
+    ),
+    setting!(
+        "db.copper.embedding.api.url",
+        Some("COPPERDB_EMBEDDING_API_URL"),
+        "string",
+        "Embeddings",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-rebuild")
+    ),
+    setting!(
+        "db.copper.embedding.api.key",
+        Some("COPPERDB_EMBEDDING_API_KEY"),
+        "string",
+        "Embeddings",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-rebuild"),
+        redacted = true
+    ),
+    setting!(
+        "db.copper.embedding.dimensions",
+        Some("COPPERDB_EMBEDDING_DIMENSIONS"),
+        "number",
+        "Embeddings",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-rebuild")
+    ),
+    setting!(
+        "db.copper.embedding.cache.size",
+        Some("COPPERDB_EMBEDDING_CACHE_SIZE"),
+        "number",
+        "Embeddings"
+    ),
+    setting!(
+        "db.copper.embedding.properties.include",
+        Some("COPPERDB_EMBEDDING_PROPERTIES_INCLUDE"),
+        "string",
+        "Embeddings"
+    ),
+    setting!(
+        "db.copper.embedding.properties.exclude",
+        Some("COPPERDB_EMBEDDING_PROPERTIES_EXCLUDE"),
+        "string",
+        "Embeddings"
+    ),
+    setting!(
+        "db.copper.embedding.include.labels",
+        Some("COPPERDB_EMBEDDING_INCLUDE_LABELS"),
+        "boolean",
+        "Embeddings"
+    ),
+    setting!(
+        "db.copper.embedding.gpu.layers",
+        Some("COPPERDB_EMBEDDING_GPU_LAYERS"),
+        "number",
+        "Embeddings",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-rebuild")
+    ),
+    setting!(
+        "db.copper.embedding.warmup.interval",
+        Some("COPPERDB_EMBEDDING_WARMUP_INTERVAL"),
+        "duration",
+        "Embeddings"
+    ),
+    setting!(
+        "db.copper.search.min.similarity",
+        Some("COPPERDB_SEARCH_MIN_SIMILARITY"),
+        "number",
+        "Search",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-rebuild")
+    ),
+    setting!(
+        "db.copper.search.bm25.engine",
+        Some("COPPERDB_SEARCH_BM25_ENGINE"),
+        "string",
+        "Search",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-rebuild")
+    ),
+    setting!(
+        "db.copper.search.bm25.enabled",
+        Some("COPPERDB_SEARCH_BM25_ENABLED"),
+        "boolean",
+        "Search",
+        description = "Master switch for BM25 fulltext search on this database. When false, no BM25 build runs and search returns no fulltext results. Default: true.",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-rebuild")
+    ),
+    setting!(
+        "db.copper.search.bm25.warming",
+        Some("COPPERDB_SEARCH_BM25_WARMING"),
+        "enum",
+        "Search",
+        description = "When BM25 is enabled, choose startup or lazy warming.",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-rebuild"),
+        valid_values = &["startup", "lazy"]
+    ),
+    setting!(
+        "db.copper.search.vector.enabled",
+        Some("COPPERDB_SEARCH_VECTOR_ENABLED"),
+        "boolean",
+        "Search",
+        description = "Master switch for vector search on this database. Default: true.",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-rebuild")
+    ),
+    setting!(
+        "db.copper.search.vector.warming",
+        Some("COPPERDB_SEARCH_VECTOR_WARMING"),
+        "enum",
+        "Search",
+        description = "When vector search is enabled, choose startup or lazy warming.",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-rebuild"),
+        valid_values = &["startup", "lazy"]
+    ),
+    setting!(
+        "db.copper.search.rerank.enabled",
+        Some("COPPERDB_SEARCH_RERANK_ENABLED"),
+        "boolean",
+        "Search",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-rebuild")
+    ),
+    setting!(
+        "db.copper.search.rerank.provider",
+        Some("COPPERDB_SEARCH_RERANK_PROVIDER"),
+        "string",
+        "Search",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-rebuild")
+    ),
+    setting!(
+        "db.copper.search.rerank.model",
+        Some("COPPERDB_SEARCH_RERANK_MODEL"),
+        "string",
+        "Search",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-rebuild")
+    ),
+    setting!(
+        "db.copper.search.rerank.api.url",
+        Some("COPPERDB_SEARCH_RERANK_API_URL"),
+        "string",
+        "Search",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-rebuild")
+    ),
+    setting!(
+        "db.copper.search.rerank.api.key",
+        Some("COPPERDB_SEARCH_RERANK_API_KEY"),
+        "string",
+        "Search",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-rebuild"),
+        redacted = true
+    ),
+    setting!(
+        "db.copper.search.index.persist.delay.sec",
+        Some("COPPERDB_SEARCH_INDEX_PERSIST_DELAY_SEC"),
+        "number",
+        "Search"
+    ),
+    setting!(
+        "db.copper.vector.ann.quality",
+        Some("COPPERDB_VECTOR_ANN_QUALITY"),
+        "string",
+        "HNSW"
+    ),
+    setting!(
+        "db.copper.vector.hnsw.m",
+        Some("COPPERDB_VECTOR_HNSW_M"),
+        "number",
+        "HNSW"
+    ),
+    setting!(
+        "db.copper.vector.hnsw.ef.construction",
+        Some("COPPERDB_VECTOR_HNSW_EF_CONSTRUCTION"),
+        "number",
+        "HNSW"
+    ),
+    setting!(
+        "db.copper.vector.hnsw.ef.search",
+        Some("COPPERDB_VECTOR_HNSW_EF_SEARCH"),
+        "number",
+        "HNSW"
+    ),
+    setting!(
+        "db.copper.vector.hnsw.metal.min.candidates",
+        Some("COPPERDB_VECTOR_HNSW_METAL_MIN_CANDIDATES"),
+        "number",
+        "HNSW"
+    ),
+    setting!(
+        "db.copper.vector.ivf.hnsw.enabled",
+        Some("COPPERDB_VECTOR_IVF_HNSW_ENABLED"),
+        "boolean",
+        "IVF-HNSW"
+    ),
+    setting!(
+        "db.copper.vector.ivf.hnsw.min.cluster.size",
+        Some("COPPERDB_VECTOR_IVF_HNSW_MIN_CLUSTER_SIZE"),
+        "number",
+        "IVF-HNSW"
+    ),
+    setting!(
+        "db.copper.vector.ivf.hnsw.max.clusters",
+        Some("COPPERDB_VECTOR_IVF_HNSW_MAX_CLUSTERS"),
+        "number",
+        "IVF-HNSW"
+    ),
+    setting!(
+        "db.copper.vector.cpu.brute.max.n",
+        Some("COPPERDB_VECTOR_CPU_BRUTE_MAX_N"),
+        "number",
+        "Vector"
+    ),
+    setting!(
+        "db.copper.vector.gpu.brute.min.n",
+        Some("COPPERDB_VECTOR_GPU_BRUTE_MIN_N"),
+        "number",
+        "Vector"
+    ),
+    setting!(
+        "db.copper.vector.gpu.brute.max.n",
+        Some("COPPERDB_VECTOR_GPU_BRUTE_MAX_N"),
+        "number",
+        "Vector"
+    ),
+    setting!(
+        "db.copper.kmeans.clustering.enabled",
+        Some("COPPERDB_KMEANS_CLUSTERING_ENABLED"),
+        "boolean",
+        "K-means"
+    ),
+    setting!(
+        "db.copper.kmeans.min.embeddings",
+        Some("COPPERDB_KMEANS_MIN_EMBEDDINGS"),
+        "number",
+        "K-means"
+    ),
+    setting!(
+        "db.copper.kmeans.cluster.interval",
+        Some("COPPERDB_KMEANS_CLUSTER_INTERVAL"),
+        "duration",
+        "K-means"
+    ),
+    setting!(
+        "db.copper.kmeans.num.clusters",
+        Some("COPPERDB_KMEANS_NUM_CLUSTERS"),
+        "number",
+        "K-means"
+    ),
+    setting!(
+        "db.copper.kmeans.max.iterations",
+        Some("COPPERDB_KMEANS_MAX_ITERATIONS"),
+        "number",
+        "K-means"
+    ),
+    setting!(
+        "db.copper.auto.links.enabled",
+        Some("COPPERDB_AUTO_LINKS_ENABLED"),
+        "boolean",
+        "Auto-links"
+    ),
+    setting!(
+        "db.copper.auto.links.threshold",
+        Some("COPPERDB_AUTO_LINKS_THRESHOLD"),
+        "number",
+        "Auto-links"
+    ),
+    setting!(
+        "db.copper.auto.tlp.enabled",
+        Some("COPPERDB_AUTO_TLP_ENABLED"),
+        "boolean",
+        "Auto-TLP"
+    ),
+    setting!(
+        "db.copper.auto.tlp.llm.qc.enabled",
+        Some("COPPERDB_AUTO_TLP_LLM_QC_ENABLED"),
+        "boolean",
+        "Auto-TLP"
+    ),
+    setting!(
+        "db.copper.auto.tlp.llm.augment.enabled",
+        Some("COPPERDB_AUTO_TLP_LLM_AUGMENT_ENABLED"),
+        "boolean",
+        "Auto-TLP"
+    ),
+    setting!(
+        "db.copper.embed.worker.num.workers",
+        Some("COPPERDB_EMBED_WORKER_NUM_WORKERS"),
+        "number",
+        "Embed worker"
+    ),
+    setting!(
+        "db.copper.embed.scan.interval",
+        Some("COPPERDB_EMBED_SCAN_INTERVAL"),
+        "duration",
+        "Embed worker"
+    ),
+    setting!(
+        "db.copper.embed.batch.delay",
+        Some("COPPERDB_EMBED_BATCH_DELAY"),
+        "duration",
+        "Embed worker"
+    ),
+    setting!(
+        "db.copper.embed.trigger.debounce",
+        Some("COPPERDB_EMBED_TRIGGER_DEBOUNCE"),
+        "duration",
+        "Embed worker"
+    ),
+    setting!(
+        "db.copper.embed.max.retries",
+        Some("COPPERDB_EMBED_MAX_RETRIES"),
+        "number",
+        "Embed worker"
+    ),
+    setting!(
+        "db.copper.embed.chunk.size",
+        Some("COPPERDB_EMBED_CHUNK_SIZE"),
+        "number",
+        "Embed worker"
+    ),
+    setting!(
+        "db.copper.embed.chunk.overlap",
+        Some("COPPERDB_EMBED_CHUNK_OVERLAP"),
+        "number",
+        "Embed worker"
+    ),
+    setting!(
+        "db.copper.mvcc.lifecycle.interval",
+        Some("COPPERDB_MVCC_LIFECYCLE_INTERVAL"),
+        "duration",
+        "MVCC lifecycle"
+    ),
+    setting!(
+        "db.copper.query_cache.max_entries",
+        Some("COPPERDB_QUERY_CACHE_SIZE"),
+        "number",
+        "Query cache",
+        description = "Maximum entries in this database's query cache. Correlates with Neo4j's server.memory.query_cache.per_db_cache_num_entries, but is independently configurable per database.",
+        default_value = "1000",
+        zero_semantics = Some("disabled")
+    ),
+    setting!(
+        "db.copper.query_cache.ttl",
+        Some("COPPERDB_QUERY_CACHE_TTL"),
+        "number",
+        "Query cache",
+        description = "Query result cache TTL in milliseconds for this database.",
+        default_value = "300000"
+    ),
+    setting!(
+        "db.copper.query_plan_cache.max_entries",
+        None,
+        "number",
+        "Query cache",
+        default_value = "500",
+        zero_semantics = Some("disabled")
+    ),
+    setting!(
+        "db.copper.fabric_plan_cache.max_entries",
+        None,
+        "number",
+        "Query cache",
+        default_value = "500",
+        zero_semantics = Some("disabled")
+    ),
+    setting!(
+        "db.copper.query_analysis_cache.max_entries",
+        None,
+        "number",
+        "Query cache",
+        default_value = "1000",
+        zero_semantics = Some("disabled")
+    ),
+    setting!(
+        "db.copper.search_result_cache.max_entries",
+        None,
+        "number",
+        "Search",
+        default_value = "1000",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-cache"),
+        zero_semantics = Some("disabled")
+    ),
+    setting!(
+        "db.copper.search_result_cache.ttl",
+        None,
+        "duration",
+        "Search",
+        default_value = "5m",
+        dynamic = true,
+        restart_level = "none",
+        hot_reload = Some("search-cache")
+    ),
+    setting!(
+        "db.copper.query_lookup_metadata.max_entries",
+        None,
+        "number",
+        "Query cache",
+        default_value = "0",
+        zero_semantics = Some("existing per-cache bounds")
+    ),
+    setting!(
+        "db.memory.transaction.total.max",
+        None,
+        "bytes",
+        "Transactions",
+        default_value = "0",
+        zero_semantics = Some("unlimited")
+    ),
+    setting!(
+        "db.copper.memory.index.bm25.max",
+        None,
+        "bytes",
+        "Index capacity",
+        default_value = "0",
+        zero_semantics = Some("unlimited")
+    ),
+    setting!(
+        "db.copper.memory.index.vector.max",
+        None,
+        "bytes",
+        "Index capacity",
+        default_value = "0",
+        zero_semantics = Some("unlimited")
+    ),
+    setting!(
+        "db.copper.memory.index.metadata.max",
+        None,
+        "bytes",
+        "Index capacity",
+        default_value = "0",
+        zero_semantics = Some("unlimited per index")
+    ),
+    setting!(
+        "db.copper.index.bm25.storage",
+        None,
+        "enum",
+        "Index capacity",
+        default_value = "memory",
+        valid_values = &["memory"]
+    ),
+    setting!(
+        "db.copper.index.vector.storage",
+        None,
+        "enum",
+        "Index capacity",
+        default_value = "auto",
+        valid_values = &["auto", "memory", "disk"]
+    ),
+    setting!(
+        "db.copper.memory.storage.mode",
+        None,
+        "enum",
+        "Storage",
+        default_value = "default",
+        scope = "physical-engine",
+        valid_values = &["default", "low"]
+    ),
+    setting!(
+        "db.copper.memory.storage.node_cache.max_entries",
+        Some("COPPERDB_BADGER_NODE_CACHE_MAX_ENTRIES"),
+        "number",
+        "Storage",
+        default_value = "10000",
+        scope = "physical-engine"
+    ),
+    setting!(
+        "db.copper.memory.storage.edge_type_cache.max_entries",
+        Some("COPPERDB_BADGER_EDGE_TYPE_CACHE_MAX_TYPES"),
+        "number",
+        "Storage",
+        default_value = "50",
+        scope = "physical-engine"
+    ),
+    setting!(
+        "db.copper.recovery.batch.max_bytes",
+        None,
+        "bytes",
+        "Recovery",
+        default_value = "0",
+        scope = "physical-engine",
+        zero_semantics = Some("unlimited")
+    ),
+    setting!(
+        "db.copper.recovery.memory.max",
+        None,
+        "bytes",
+        "Recovery",
+        default_value = "0",
+        scope = "physical-engine",
+        zero_semantics = Some("unlimited")
+    ),
 ];
 
+pub fn settings() -> &'static [PerDatabaseConfigKey] {
+    &SETTINGS_REGISTRY
+}
+
 pub fn allowed_per_database_config_keys() -> &'static [PerDatabaseConfigKey] {
-    &PER_DATABASE_CONFIG_KEYS
+    &SETTINGS_REGISTRY[..67]
+}
+
+pub fn canonical_setting_name(name: &str) -> String {
+    let trimmed = name.trim();
+    lookup_setting(trimmed)
+        .map(|setting| setting.key)
+        .unwrap_or(trimmed)
+        .to_owned()
+}
+
+pub fn lookup_setting(name: &str) -> Option<&'static PerDatabaseConfigKey> {
+    let trimmed = name.trim();
+    settings()
+        .iter()
+        .find(|setting| setting.key == trimmed || setting.environment_variable == Some(trimmed))
 }
 
 pub fn is_allowed_per_database_config_key(key: &str) -> bool {
-    allowed_per_database_config_keys()
-        .iter()
-        .any(|meta| meta.key.eq_ignore_ascii_case(key))
+    lookup_setting(key).is_some_and(|setting| setting.scope != "physical-engine")
+}
+
+pub fn canonicalize_per_database_overrides(
+    overrides: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut canonical = BTreeMap::new();
+    for setting in settings() {
+        if let Some(environment_variable) = setting.environment_variable
+            && let Some(value) = overrides.get(environment_variable)
+        {
+            canonical.insert(setting.key.to_owned(), value.clone());
+        }
+    }
+    for (key, value) in overrides {
+        let name = canonical_setting_name(key);
+        if name == key.trim() {
+            canonical.insert(name, value.clone());
+        }
+    }
+    canonical
+}
+
+pub fn normalize_setting_value(key: &str, value: &str) -> Result<String, ConfigError> {
+    let setting = lookup_setting(key)
+        .ok_or_else(|| ConfigError::InvalidPerDatabaseOverrideKey(key.to_owned()))?;
+    let value = value.trim();
+    let normalized = if setting.value_type == "enum" {
+        setting
+            .valid_values
+            .iter()
+            .copied()
+            .find(|candidate| candidate.eq_ignore_ascii_case(value))
+            .map(str::to_owned)
+    } else {
+        match setting.value_type {
+            "boolean" => match value.to_ascii_lowercase().as_str() {
+                "1" | "t" | "true" => Some("true".into()),
+                "0" | "f" | "false" => Some("false".into()),
+                _ => None,
+            },
+            "number" if is_floating_point_setting(setting.key) => {
+                value.parse::<f64>().ok().and_then(|parsed| {
+                    (parsed.is_finite() && parsed >= 0.0).then(|| parsed.to_string())
+                })
+            }
+            "number" => value
+                .parse::<i64>()
+                .ok()
+                .and_then(|parsed| (parsed >= 0).then(|| parsed.to_string())),
+            "duration" => normalize_duration(value),
+            "bytes" => parse_byte_size(value).map(|parsed| parsed.to_string()),
+            "string" => Some(value.to_owned()),
+            _ => None,
+        }
+    };
+    normalized.ok_or_else(|| ConfigError::InvalidPerDatabaseOverrideValue {
+        key: setting.key.to_owned(),
+        value: value.to_owned(),
+    })
+}
+
+fn is_floating_point_setting(key: &str) -> bool {
+    matches!(
+        key,
+        "db.copper.search.min.similarity" | "db.copper.auto.links.threshold"
+    )
+}
+
+pub fn parse_byte_size(raw: &str) -> Option<i64> {
+    let value = raw.trim().to_ascii_lowercase();
+    let (digits, multiplier) = match value.as_bytes().last().copied() {
+        Some(b'k') => (&value[..value.len() - 1], 1_i64 << 10),
+        Some(b'm') => (&value[..value.len() - 1], 1_i64 << 20),
+        Some(b'g') => (&value[..value.len() - 1], 1_i64 << 30),
+        Some(b't') => (&value[..value.len() - 1], 1_i64 << 40),
+        Some(b'0'..=b'9') => (value.as_str(), 1),
+        _ => return None,
+    };
+    let parsed = digits.trim().parse::<i64>().ok()?;
+    (parsed >= 0).then_some(parsed)?.checked_mul(multiplier)
+}
+
+fn normalize_duration(raw: &str) -> Option<String> {
+    let nanoseconds = go_parse_duration::parse_duration(raw).ok()?;
+    (nanoseconds >= 0).then(|| format_go_duration(nanoseconds))
+}
+
+fn format_go_duration(nanoseconds: i64) -> String {
+    if nanoseconds == 0 {
+        return "0s".to_owned();
+    }
+    if nanoseconds < 1_000_000_000 {
+        let (unit, suffix) = if nanoseconds < 1_000 {
+            (1, "ns")
+        } else if nanoseconds < 1_000_000 {
+            (1_000, "us")
+        } else {
+            (1_000_000, "ms")
+        };
+        return format_duration_component(nanoseconds, unit, suffix);
+    }
+
+    let hours = nanoseconds / 3_600_000_000_000;
+    let after_hours = nanoseconds % 3_600_000_000_000;
+    let minutes = after_hours / 60_000_000_000;
+    let after_minutes = after_hours % 60_000_000_000;
+    let mut formatted = String::new();
+    if hours > 0 {
+        formatted.push_str(&format!("{hours}h"));
+    }
+    if hours > 0 || minutes > 0 {
+        formatted.push_str(&format!("{minutes}m"));
+    }
+    formatted.push_str(&format_duration_component(
+        after_minutes,
+        1_000_000_000,
+        "s",
+    ));
+    formatted
+}
+
+fn format_duration_component(value: i64, unit: i64, suffix: &str) -> String {
+    let whole = value / unit;
+    let remainder = value % unit;
+    if remainder == 0 {
+        return format!("{whole}{suffix}");
+    }
+    let width = unit.ilog10() as usize;
+    let fraction = format!("{remainder:0width$}")
+        .trim_end_matches('0')
+        .to_owned();
+    format!("{whole}.{fraction}{suffix}")
 }
 
 pub fn validate_per_database_overrides(
     overrides: &BTreeMap<String, String>,
 ) -> Result<(), ConfigError> {
-    for (key, value) in overrides {
-        let Some(meta) = allowed_per_database_config_keys()
-            .iter()
-            .find(|meta| meta.key.eq_ignore_ascii_case(key))
-        else {
-            return Err(ConfigError::InvalidPerDatabaseOverrideKey(key.clone()));
-        };
-        if !value_matches_type(meta.value_type, value) {
-            return Err(ConfigError::InvalidPerDatabaseOverrideValue {
-                key: key.clone(),
-                value: value.clone(),
-            });
-        }
-    }
-    Ok(())
+    normalize_per_database_overrides(overrides).map(|_| ())
+}
+
+pub fn normalize_per_database_overrides(
+    overrides: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, ConfigError> {
+    canonicalize_per_database_overrides(overrides)
+        .into_iter()
+        .map(|(key, value)| {
+            if !is_allowed_per_database_config_key(&key) {
+                return Err(ConfigError::InvalidPerDatabaseOverrideKey(key));
+            }
+            let normalized = normalize_setting_value(&key, &value)?;
+            Ok((key, normalized))
+        })
+        .collect()
 }
 
 pub fn resolve_per_database_config(
     global: &Config,
     overrides: &BTreeMap<String, String>,
 ) -> Result<EffectiveDatabaseConfig, ConfigError> {
-    validate_per_database_overrides(overrides)?;
-
     let mut resolved = EffectiveDatabaseConfig {
         embedding_enabled: global.embedding.enabled,
         embedding_provider: global.embedding.provider.clone(),
@@ -930,34 +1556,46 @@ pub fn resolve_per_database_config(
         embedding_properties_exclude: global.embedding.properties_exclude.clone(),
         embedding_include_labels: global.embedding.include_labels,
         search_min_similarity: global.search.min_similarity,
+        bm25_engine: normalize_bm25_engine(&global.search.bm25_engine),
         bm25_enabled: global.search.bm25_enabled,
         bm25_warming: normalize_warming(&global.search.bm25_warming),
         vector_enabled: global.search.vector_enabled,
         vector_warming: normalize_warming(&global.search.vector_warming),
         rerank_enabled: global.search.rerank_enabled,
+        rerank_provider: global.search.rerank_provider.clone(),
+        rerank_model: global.search.rerank_model.clone(),
+        rerank_api_url: global.search.rerank_api_url.clone(),
+        rerank_api_key: global.search.rerank_api_key.clone(),
         auto_links_enabled: global.features.auto_links_enabled,
         auto_tlp_enabled: global.features.auto_tlp_enabled,
+        query_cache_max_entries: global.search.query_cache_max_entries,
+        query_cache_ttl_ms: global.search.query_cache_ttl_ms,
+        search_result_cache_max_entries: 1_000,
+        search_result_cache_ttl_ms: 300_000,
+        bm25_memory_max_bytes: 0,
+        vector_memory_max_bytes: 0,
+        metadata_memory_max_bytes: 0,
+        bm25_storage_mode: "memory".into(),
+        vector_storage_mode: "auto".into(),
         effective: effective_values_from_global(global),
     };
 
-    for (key, value) in overrides {
-        apply_per_database_override(&mut resolved, key, value);
-    }
-    for (key, value) in &global.cli_overrides {
-        if is_allowed_per_database_config_key(key) && value_matches_known_type(key, value) {
-            apply_per_database_override(&mut resolved, key, value);
+    for (key, value) in canonicalize_per_database_overrides(&global.cli_overrides) {
+        if !is_allowed_per_database_config_key(&key) {
+            continue;
+        }
+        if let Ok(value) = normalize_setting_value(&key, &value) {
+            apply_per_database_override(&mut resolved, &key, &value);
         }
     }
-    resolved.auto_links_enabled &= global.features.auto_links_enabled;
-    resolved.auto_tlp_enabled &= global.features.auto_tlp_enabled;
-    resolved.effective.insert(
-        "COPPERDB_AUTO_LINKS_ENABLED".into(),
-        resolved.auto_links_enabled.to_string(),
-    );
-    resolved.effective.insert(
-        "COPPERDB_AUTO_TLP_ENABLED".into(),
-        resolved.auto_tlp_enabled.to_string(),
-    );
+    for (key, value) in canonicalize_per_database_overrides(overrides) {
+        if !is_allowed_per_database_config_key(&key) {
+            continue;
+        }
+        if let Ok(value) = normalize_setting_value(&key, &value) {
+            apply_per_database_override(&mut resolved, &key, &value);
+        }
+    }
     Ok(resolved)
 }
 
@@ -975,7 +1613,7 @@ pub struct VectorSpaceConfig {
 impl Default for VectorSpaceConfig {
     fn default() -> Self {
         Self {
-            dimensions: 1536,
+            dimensions: 1024,
             hnsw_m: 16,
             hnsw_ef_construction: 200,
         }
@@ -1220,6 +1858,9 @@ pub fn apply_env_overrides_from(config: &mut Config, env: &BTreeMap<String, Stri
         parse_env_f64(env, "COPPERDB_SEARCH_MIN_SIMILARITY"),
         |value| config.search.min_similarity = value,
     );
+    set_if_present(env_nonempty(env, "COPPERDB_SEARCH_BM25_ENGINE"), |value| {
+        config.search.bm25_engine = normalize_bm25_engine(&value)
+    });
     set_if_present(
         parse_env_bool(env, "COPPERDB_SEARCH_BM25_ENABLED"),
         |value| config.search.bm25_enabled = value,
@@ -1239,6 +1880,29 @@ pub fn apply_env_overrides_from(config: &mut Config, env: &BTreeMap<String, Stri
         parse_env_bool(env, "COPPERDB_SEARCH_RERANK_ENABLED"),
         |value| config.search.rerank_enabled = value,
     );
+    set_if_present(
+        env_nonempty(env, "COPPERDB_SEARCH_RERANK_PROVIDER"),
+        |value| config.search.rerank_provider = value,
+    );
+    set_if_present(env_nonempty(env, "COPPERDB_SEARCH_RERANK_MODEL"), |value| {
+        config.search.rerank_model = value
+    });
+    set_if_present(
+        env_nonempty(env, "COPPERDB_SEARCH_RERANK_API_URL"),
+        |value| config.search.rerank_api_url = Some(value),
+    );
+    set_if_present(
+        env.get("COPPERDB_SEARCH_RERANK_API_KEY").cloned(),
+        |value| config.search.rerank_api_key = value,
+    );
+    set_if_present(parse_env_usize(env, "COPPERDB_QUERY_CACHE_SIZE"), |value| {
+        config.search.query_cache_max_entries = value
+    });
+    set_if_present(parse_env_u64(env, "COPPERDB_QUERY_CACHE_TTL"), |value| {
+        if value > 0 {
+            config.search.query_cache_ttl_ms = value;
+        }
+    });
     set_if_present(env_nonempty(env, "COPPERDB_PACKAGES_ENABLED"), |value| {
         config.packages.enabled = split_package_ids(&value)
     });
@@ -1389,130 +2053,137 @@ fn parse_bool_override(value: &str, fallback: bool) -> bool {
     }
 }
 
-fn value_matches_type(expected: &str, value: &str) -> bool {
-    if let Some(values) = expected.strip_prefix("enum:") {
-        return values
-            .split(',')
-            .any(|candidate| candidate.eq_ignore_ascii_case(value.trim()));
+fn normalize_bm25_engine(value: &str) -> String {
+    if value.trim().eq_ignore_ascii_case("v1") {
+        "v1".into()
+    } else {
+        "v2".into()
     }
-    match expected {
-        "boolean" => matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "0" | "true" | "false" | "yes" | "no"
-        ),
-        "number" => value.parse::<f64>().is_ok(),
-        "string" => true,
-        _ => false,
-    }
-}
-
-fn value_matches_known_type(key: &str, value: &str) -> bool {
-    allowed_per_database_config_keys()
-        .iter()
-        .find(|meta| meta.key.eq_ignore_ascii_case(key))
-        .map(|meta| value_matches_type(meta.value_type, value))
-        .unwrap_or(false)
 }
 
 fn effective_values_from_global(global: &Config) -> BTreeMap<String, String> {
-    let mut effective = BTreeMap::new();
+    let mut effective: BTreeMap<String, String> = allowed_per_database_config_keys()
+        .iter()
+        .filter(|setting| !setting.default_value.is_empty())
+        .map(|setting| (setting.key.to_owned(), setting.default_value.to_owned()))
+        .collect();
     effective.insert(
-        "COPPERDB_EMBEDDING_ENABLED".into(),
+        "db.copper.embedding.enabled".into(),
         global.embedding.enabled.to_string(),
     );
     effective.insert(
-        "COPPERDB_EMBEDDING_PROVIDER".into(),
+        "db.copper.embedding.provider".into(),
         global.embedding.provider.clone(),
     );
     effective.insert(
-        "COPPERDB_EMBEDDING_MODEL".into(),
+        "db.copper.embedding.model".into(),
         global.embedding.model.clone(),
     );
     effective.insert(
-        "COPPERDB_EMBEDDING_API_URL".into(),
+        "db.copper.embedding.api.url".into(),
         global.embedding.api_url.clone().unwrap_or_default(),
     );
     effective.insert(
-        "COPPERDB_EMBEDDING_DIMENSIONS".into(),
+        "db.copper.embedding.dimensions".into(),
         normalized_embedding_dimensions(global.embedding.dimensions).to_string(),
     );
     effective.insert(
-        "COPPERDB_EMBEDDING_WARMING".into(),
-        normalize_warming(&global.embedding.warming),
+        "db.copper.embedding.warmup.interval".into(),
+        format_go_duration(
+            i64::try_from(global.embedding.warmup_interval_ms)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(1_000_000),
+        ),
     );
     effective.insert(
-        "COPPERDB_EMBEDDING_WARMUP_INTERVAL_MS".into(),
-        global.embedding.warmup_interval_ms.to_string(),
-    );
-    effective.insert(
-        "COPPERDB_EMBEDDING_CACHE_CAPACITY".into(),
+        "db.copper.embedding.cache.size".into(),
         global.embedding.cache_capacity.to_string(),
     );
     effective.insert(
-        "COPPERDB_EMBEDDING_WORKERS".into(),
+        "db.copper.embed.worker.num.workers".into(),
         global.embedding.workers.max(1).to_string(),
     );
     effective.insert(
-        "COPPERDB_EMBEDDING_MAX_ATTEMPTS".into(),
-        global.embedding.max_attempts.max(1).to_string(),
-    );
-    effective.insert(
-        "COPPERDB_EMBEDDING_RETRY_BACKOFF_MS".into(),
-        global.embedding.retry_backoff_ms.to_string(),
-    );
-    effective.insert(
-        "COPPERDB_EMBEDDING_SHUTDOWN_TIMEOUT_MS".into(),
-        global.embedding.shutdown_timeout_ms.to_string(),
-    );
-    effective.insert(
-        "COPPERDB_EMBEDDING_PROPERTIES_INCLUDE".into(),
+        "db.copper.embedding.properties.include".into(),
         global.embedding.properties_include.join(","),
     );
     effective.insert(
-        "COPPERDB_EMBEDDING_PROPERTIES_EXCLUDE".into(),
+        "db.copper.embedding.properties.exclude".into(),
         global.embedding.properties_exclude.join(","),
     );
     effective.insert(
-        "COPPERDB_EMBEDDING_INCLUDE_LABELS".into(),
+        "db.copper.embedding.include.labels".into(),
         global.embedding.include_labels.to_string(),
     );
     effective.insert(
-        "COPPERDB_SEARCH_MIN_SIMILARITY".into(),
+        "db.copper.search.min.similarity".into(),
         global.search.min_similarity.to_string(),
     );
     effective.insert(
-        "COPPERDB_SEARCH_BM25_ENABLED".into(),
+        "db.copper.search.bm25.engine".into(),
+        normalize_bm25_engine(&global.search.bm25_engine),
+    );
+    effective.insert(
+        "db.copper.search.bm25.enabled".into(),
         global.search.bm25_enabled.to_string(),
     );
     effective.insert(
-        "COPPERDB_SEARCH_BM25_WARMING".into(),
+        "db.copper.search.bm25.warming".into(),
         normalize_warming(&global.search.bm25_warming),
     );
     effective.insert(
-        "COPPERDB_SEARCH_VECTOR_ENABLED".into(),
+        "db.copper.search.vector.enabled".into(),
         global.search.vector_enabled.to_string(),
     );
     effective.insert(
-        "COPPERDB_SEARCH_VECTOR_WARMING".into(),
+        "db.copper.search.vector.warming".into(),
         normalize_warming(&global.search.vector_warming),
     );
     effective.insert(
-        "COPPERDB_SEARCH_RERANK_ENABLED".into(),
+        "db.copper.search.rerank.enabled".into(),
         global.search.rerank_enabled.to_string(),
     );
     effective.insert(
-        "COPPERDB_AUTO_LINKS_ENABLED".into(),
+        "db.copper.search.rerank.provider".into(),
+        global.search.rerank_provider.clone(),
+    );
+    effective.insert(
+        "db.copper.search.rerank.model".into(),
+        global.search.rerank_model.clone(),
+    );
+    effective.insert(
+        "db.copper.search.rerank.api.url".into(),
+        global.search.rerank_api_url.clone().unwrap_or_default(),
+    );
+    effective.insert(
+        "db.copper.search.rerank.api.key".into(),
+        global.search.rerank_api_key.clone(),
+    );
+    effective.insert(
+        "db.copper.query_cache.max_entries".into(),
+        global.search.query_cache_max_entries.to_string(),
+    );
+    effective.insert(
+        "db.copper.query_cache.ttl".into(),
+        global.search.query_cache_ttl_ms.to_string(),
+    );
+    effective.insert(
+        "db.copper.auto.links.enabled".into(),
         global.features.auto_links_enabled.to_string(),
     );
     effective.insert(
-        "COPPERDB_AUTO_TLP_ENABLED".into(),
+        "db.copper.auto.tlp.enabled".into(),
         global.features.auto_tlp_enabled.to_string(),
     );
     effective
 }
 
 fn apply_per_database_override(resolved: &mut EffectiveDatabaseConfig, key: &str, value: &str) {
-    match key.to_ascii_uppercase().as_str() {
+    let Some(setting) = lookup_setting(key) else {
+        return;
+    };
+    let behavior_key = setting.environment_variable.unwrap_or(setting.key);
+    match behavior_key {
         "COPPERDB_EMBEDDING_ENABLED" => {
             resolved.embedding_enabled = parse_bool_override(value, resolved.embedding_enabled)
         }
@@ -1530,35 +2201,20 @@ fn apply_per_database_override(resolved: &mut EffectiveDatabaseConfig, key: &str
                 resolved.embedding_dimensions = normalized_embedding_dimensions(parsed);
             }
         }
-        "COPPERDB_EMBEDDING_WARMING" => resolved.embedding_warming = normalize_warming(value),
-        "COPPERDB_EMBEDDING_WARMUP_INTERVAL_MS" => {
-            if let Ok(parsed) = value.parse::<u64>() {
-                resolved.embedding_warmup_interval_ms = parsed;
+        "COPPERDB_EMBEDDING_WARMUP_INTERVAL" => {
+            if let Ok(parsed) = go_parse_duration::parse_duration(value) {
+                resolved.embedding_warmup_interval_ms =
+                    u64::try_from(parsed / 1_000_000).unwrap_or(0);
             }
         }
-        "COPPERDB_EMBEDDING_CACHE_CAPACITY" => {
+        "COPPERDB_EMBEDDING_CACHE_SIZE" => {
             if let Ok(parsed) = value.parse::<usize>() {
                 resolved.embedding_cache_capacity = parsed;
             }
         }
-        "COPPERDB_EMBEDDING_WORKERS" => {
+        "COPPERDB_EMBED_WORKER_NUM_WORKERS" => {
             if let Ok(parsed) = value.parse::<usize>() {
                 resolved.embedding_workers = parsed.max(1);
-            }
-        }
-        "COPPERDB_EMBEDDING_MAX_ATTEMPTS" => {
-            if let Ok(parsed) = value.parse::<u32>() {
-                resolved.embedding_max_attempts = parsed.max(1);
-            }
-        }
-        "COPPERDB_EMBEDDING_RETRY_BACKOFF_MS" => {
-            if let Ok(parsed) = value.parse::<u64>() {
-                resolved.embedding_retry_backoff_ms = parsed;
-            }
-        }
-        "COPPERDB_EMBEDDING_SHUTDOWN_TIMEOUT_MS" => {
-            if let Ok(parsed) = value.parse::<u64>() {
-                resolved.embedding_shutdown_timeout_ms = parsed;
             }
         }
         "COPPERDB_EMBEDDING_PROPERTIES_INCLUDE" => {
@@ -1576,6 +2232,7 @@ fn apply_per_database_override(resolved: &mut EffectiveDatabaseConfig, key: &str
                 resolved.search_min_similarity = parsed;
             }
         }
+        "COPPERDB_SEARCH_BM25_ENGINE" => resolved.bm25_engine = normalize_bm25_engine(value),
         "COPPERDB_SEARCH_BM25_ENABLED" => {
             resolved.bm25_enabled = parse_bool_override(value, resolved.bm25_enabled)
         }
@@ -1587,17 +2244,65 @@ fn apply_per_database_override(resolved: &mut EffectiveDatabaseConfig, key: &str
         "COPPERDB_SEARCH_RERANK_ENABLED" => {
             resolved.rerank_enabled = parse_bool_override(value, resolved.rerank_enabled)
         }
+        "COPPERDB_SEARCH_RERANK_PROVIDER" => resolved.rerank_provider = value.to_owned(),
+        "COPPERDB_SEARCH_RERANK_MODEL" => resolved.rerank_model = value.to_owned(),
+        "COPPERDB_SEARCH_RERANK_API_URL" => {
+            resolved.rerank_api_url = (!value.is_empty()).then(|| value.to_owned())
+        }
+        "COPPERDB_SEARCH_RERANK_API_KEY" => resolved.rerank_api_key = value.to_owned(),
         "COPPERDB_AUTO_LINKS_ENABLED" => {
             resolved.auto_links_enabled = parse_bool_override(value, resolved.auto_links_enabled)
         }
         "COPPERDB_AUTO_TLP_ENABLED" => {
             resolved.auto_tlp_enabled = parse_bool_override(value, resolved.auto_tlp_enabled)
         }
+        "COPPERDB_QUERY_CACHE_SIZE" => {
+            if let Ok(parsed) = value.parse::<usize>() {
+                resolved.query_cache_max_entries = parsed;
+            }
+        }
+        "COPPERDB_QUERY_CACHE_TTL" => {
+            if let Ok(parsed) = value.parse::<u64>()
+                && parsed > 0
+            {
+                resolved.query_cache_ttl_ms = parsed;
+            }
+        }
+        "db.copper.search_result_cache.max_entries" => {
+            if let Ok(parsed) = value.parse::<usize>() {
+                resolved.search_result_cache_max_entries = parsed;
+            }
+        }
+        "db.copper.search_result_cache.ttl" => {
+            if let Ok(nanoseconds) = go_parse_duration::parse_duration(value) {
+                resolved.search_result_cache_ttl_ms =
+                    u64::try_from(nanoseconds / 1_000_000).unwrap_or(0);
+            }
+        }
+        "db.copper.memory.index.bm25.max" => {
+            if let Ok(parsed) = value.parse::<i64>() {
+                resolved.bm25_memory_max_bytes = parsed;
+            }
+        }
+        "db.copper.memory.index.vector.max" => {
+            if let Ok(parsed) = value.parse::<i64>() {
+                resolved.vector_memory_max_bytes = parsed;
+            }
+        }
+        "db.copper.memory.index.metadata.max" => {
+            if let Ok(parsed) = value.parse::<i64>() {
+                resolved.metadata_memory_max_bytes = parsed;
+            }
+        }
+        "db.copper.index.bm25.storage" => resolved.bm25_storage_mode = value.to_ascii_lowercase(),
+        "db.copper.index.vector.storage" => {
+            resolved.vector_storage_mode = value.to_ascii_lowercase()
+        }
         _ => {}
     }
     resolved
         .effective
-        .insert(key.to_ascii_uppercase(), value.to_owned());
+        .insert(setting.key.to_owned(), value.to_owned());
 }
 
 fn parse_csv(value: &str) -> Vec<String> {
@@ -1966,7 +2671,7 @@ auth:
     }
 
     #[test]
-    fn resolve_per_database_config_applies_overrides_then_cli() {
+    fn resolve_per_database_config_applies_cli_then_database_overrides() {
         let mut cfg = Config::default();
         cfg.cli_overrides
             .insert("COPPERDB_SEARCH_VECTOR_ENABLED".into(), "false".into());
@@ -1975,41 +2680,96 @@ auth:
             ("COPPERDB_SEARCH_VECTOR_ENABLED".into(), "true".into()),
             ("COPPERDB_SEARCH_VECTOR_WARMING".into(), "startup".into()),
             ("COPPERDB_EMBEDDING_DIMENSIONS".into(), "2048".into()),
-            ("COPPERDB_EMBEDDING_WARMING".into(), "startup".into()),
-            (
-                "COPPERDB_EMBEDDING_WARMUP_INTERVAL_MS".into(),
-                "10000".into(),
-            ),
-            ("COPPERDB_EMBEDDING_CACHE_CAPACITY".into(), "128".into()),
-            ("COPPERDB_EMBEDDING_WORKERS".into(), "0".into()),
-            ("COPPERDB_EMBEDDING_MAX_ATTEMPTS".into(), "0".into()),
-            ("COPPERDB_EMBEDDING_RETRY_BACKOFF_MS".into(), "12".into()),
-            ("COPPERDB_EMBEDDING_SHUTDOWN_TIMEOUT_MS".into(), "42".into()),
+            ("COPPERDB_EMBEDDING_WARMUP_INTERVAL".into(), "10s".into()),
+            ("COPPERDB_EMBEDDING_CACHE_SIZE".into(), "128".into()),
+            ("COPPERDB_EMBED_WORKER_NUM_WORKERS".into(), "0".into()),
         ]);
 
         let resolved = resolve_per_database_config(&cfg, &overrides).unwrap();
 
-        assert!(!resolved.vector_enabled);
+        assert!(resolved.vector_enabled);
         assert_eq!(resolved.vector_warming, "startup");
         assert_eq!(resolved.embedding_dimensions, 2048);
-        assert_eq!(resolved.embedding_warming, "startup");
         assert_eq!(resolved.embedding_warmup_interval_ms, 10000);
         assert_eq!(resolved.embedding_cache_capacity, 128);
         assert_eq!(resolved.embedding_workers, 1);
-        assert_eq!(resolved.embedding_max_attempts, 1);
-        assert_eq!(resolved.embedding_retry_backoff_ms, 12);
-        assert_eq!(resolved.embedding_shutdown_timeout_ms, 42);
         assert_eq!(
             resolved
                 .effective
-                .get("COPPERDB_SEARCH_VECTOR_ENABLED")
+                .get("db.copper.search.vector.enabled")
                 .unwrap(),
-            "false"
+            "true"
         );
     }
 
     #[test]
-    fn global_inference_switches_override_database_and_cli_opt_in() {
+    fn resolve_per_database_index_capacity_policy() {
+        let overrides = BTreeMap::from([
+            ("COPPERDB_SEARCH_BM25_ENGINE".into(), "V1".into()),
+            ("db.copper.memory.index.bm25.max".into(), "1m".into()),
+            ("db.copper.memory.index.vector.max".into(), "2m".into()),
+            ("db.copper.memory.index.metadata.max".into(), "3m".into()),
+            ("db.copper.index.bm25.storage".into(), "memory".into()),
+            ("db.copper.index.vector.storage".into(), "disk".into()),
+        ]);
+
+        let resolved = resolve_per_database_config(&Config::default(), &overrides).unwrap();
+
+        assert_eq!(resolved.bm25_engine, "v1");
+        assert_eq!(resolved.bm25_memory_max_bytes, 1 << 20);
+        assert_eq!(resolved.vector_memory_max_bytes, 2 << 20);
+        assert_eq!(resolved.metadata_memory_max_bytes, 3 << 20);
+        assert_eq!(resolved.bm25_storage_mode, "memory");
+        assert_eq!(resolved.vector_storage_mode, "disk");
+    }
+
+    #[test]
+    fn database_query_cache_overrides_process_policy() {
+        let mut config = Config::default();
+        config.search.query_cache_max_entries = 25;
+        config.search.query_cache_ttl_ms = 2_000;
+
+        let inherited = resolve_per_database_config(&config, &BTreeMap::new()).unwrap();
+        assert_eq!(inherited.query_cache_max_entries, 25);
+        assert_eq!(inherited.query_cache_ttl_ms, 2_000);
+        assert_eq!(inherited.effective["db.copper.query_cache.ttl"], "2000");
+
+        let overridden = resolve_per_database_config(
+            &config,
+            &BTreeMap::from([
+                ("db.copper.query_cache.max_entries".into(), "2500".into()),
+                ("db.copper.query_cache.ttl".into(), "1800000".into()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(overridden.query_cache_max_entries, 2_500);
+        assert_eq!(overridden.query_cache_ttl_ms, 1_800_000);
+    }
+
+    #[test]
+    fn resolver_ignores_invalid_direct_overrides() {
+        let mut config = Config::default();
+        config.embedding.dimensions = 0;
+        config.search.min_similarity = 0.55;
+        let resolved = resolve_per_database_config(
+            &config,
+            &BTreeMap::from([
+                ("NOT_ALLOWED".into(), "ignored".into()),
+                ("COPPERDB_EMBEDDING_DIMENSIONS".into(), "-5".into()),
+                ("COPPERDB_SEARCH_BM25_ENGINE".into(), "V1".into()),
+                ("COPPERDB_SEARCH_MIN_SIMILARITY".into(), "bad".into()),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(resolved.embedding_dimensions, 1_024);
+        assert_eq!(resolved.search_min_similarity, 0.55);
+        assert_eq!(resolved.bm25_engine, "v1");
+        assert!(!resolved.effective.contains_key("NOT_ALLOWED"));
+    }
+
+    #[test]
+    fn database_inference_switches_are_explicit_opt_in() {
         let mut config = Config::default();
         config
             .cli_overrides
@@ -2024,10 +2784,292 @@ auth:
 
         let resolved = resolve_per_database_config(&config, &overrides).unwrap();
 
-        assert!(!resolved.auto_links_enabled);
-        assert!(!resolved.auto_tlp_enabled);
-        assert_eq!(resolved.effective["COPPERDB_AUTO_LINKS_ENABLED"], "false");
-        assert_eq!(resolved.effective["COPPERDB_AUTO_TLP_ENABLED"], "false");
+        assert!(resolved.auto_links_enabled);
+        assert!(resolved.auto_tlp_enabled);
+        assert_eq!(resolved.effective["db.copper.auto.links.enabled"], "true");
+        assert_eq!(resolved.effective["db.copper.auto.tlp.enabled"], "true");
+    }
+
+    #[test]
+    fn resolver_projects_external_reranker_settings() {
+        let resolved = resolve_per_database_config(
+            &Config::default(),
+            &BTreeMap::from([
+                ("COPPERDB_SEARCH_RERANK_ENABLED".into(), "true".into()),
+                ("COPPERDB_SEARCH_RERANK_PROVIDER".into(), "ollama".into()),
+                ("COPPERDB_SEARCH_RERANK_MODEL".into(), "reranker".into()),
+                (
+                    "COPPERDB_SEARCH_RERANK_API_URL".into(),
+                    "http://localhost:11434/rerank".into(),
+                ),
+                ("COPPERDB_SEARCH_RERANK_API_KEY".into(), "secret".into()),
+            ]),
+        )
+        .unwrap();
+
+        assert!(resolved.rerank_enabled);
+        assert_eq!(resolved.rerank_provider, "ollama");
+        assert_eq!(resolved.rerank_model, "reranker");
+        assert_eq!(
+            resolved.rerank_api_url.as_deref(),
+            Some("http://localhost:11434/rerank")
+        );
+        assert_eq!(resolved.rerank_api_key, "secret");
+    }
+
+    #[test]
+    fn canonical_database_setting_wins_alias_and_cli() {
+        let mut config = Config::default();
+        config
+            .cli_overrides
+            .insert("COPPERDB_SEARCH_BM25_ENABLED".into(), "false".into());
+        let overrides = BTreeMap::from([
+            ("COPPERDB_SEARCH_BM25_ENABLED".into(), "false".into()),
+            ("db.copper.search.bm25.enabled".into(), "true".into()),
+        ]);
+
+        let resolved = resolve_per_database_config(&config, &overrides).unwrap();
+
+        assert!(resolved.bm25_enabled);
+        assert_eq!(resolved.effective["db.copper.search.bm25.enabled"], "true");
+        assert!(
+            !resolved
+                .effective
+                .contains_key("COPPERDB_SEARCH_BM25_ENABLED")
+        );
+    }
+
+    #[test]
+    fn aliases_are_exact_and_unknown_names_are_not_inferred() {
+        assert_eq!(
+            canonical_setting_name(" COPPERDB_SEARCH_VECTOR_ENABLED "),
+            "db.copper.search.vector.enabled"
+        );
+        assert_eq!(
+            canonical_setting_name("copperdb_search_vector_enabled"),
+            "copperdb_search_vector_enabled"
+        );
+        assert_eq!(
+            canonical_setting_name("COPPERDB_NOT_A_REGISTERED_SETTING"),
+            "COPPERDB_NOT_A_REGISTERED_SETTING"
+        );
+        assert!(lookup_setting("server.db.query_cache_size").is_none());
+    }
+
+    #[test]
+    fn typed_values_normalize_strictly() {
+        assert_eq!(
+            normalize_setting_value("COPPERDB_SEARCH_VECTOR_ENABLED", " T ").unwrap(),
+            "true"
+        );
+        assert_eq!(
+            normalize_setting_value("db.copper.search.vector.warming", " STARTUP ").unwrap(),
+            "startup"
+        );
+        assert_eq!(
+            normalize_setting_value("db.copper.embedding.dimensions", "001024").unwrap(),
+            "1024"
+        );
+        for value in ["yes", "no", "1.5", "NaN", "+Inf", "-1"] {
+            assert!(normalize_setting_value("db.copper.embedding.dimensions", value).is_err());
+        }
+        for value in ["NaN", "+Inf", "-1"] {
+            assert!(normalize_setting_value("db.copper.search.min.similarity", value).is_err());
+        }
+        assert_eq!(
+            normalize_setting_value("db.copper.search.min.similarity", "0.7").unwrap(),
+            "0.7"
+        );
+    }
+
+    #[test]
+    fn byte_sizes_match_upstream_contract() {
+        for (input, expected) in [
+            ("0", 0),
+            ("512", 512),
+            ("1k", 1 << 10),
+            ("2M", 2 << 20),
+            ("3 g ", 3 << 30),
+            ("1t", 1 << 40),
+        ] {
+            assert_eq!(parse_byte_size(input), Some(expected), "{input}");
+        }
+        for input in ["", "-1", "1kb", "1.5m", "999999999999999999999t"] {
+            assert_eq!(parse_byte_size(input), None, "{input}");
+        }
+    }
+
+    #[test]
+    fn go_durations_normalize_and_reject_negative_values() {
+        for (input, expected) in [
+            ("0", "0s"),
+            ("250ms", "250ms"),
+            ("1.5s", "1.5s"),
+            ("1h45m", "1h45m0s"),
+        ] {
+            assert_eq!(
+                normalize_duration(input).as_deref(),
+                Some(expected),
+                "{input}"
+            );
+        }
+        for input in ["", "-1s", "1d", "1"] {
+            assert_eq!(normalize_duration(input), None, "{input}");
+        }
+    }
+
+    #[test]
+    fn setting_activation_metadata_is_consistent() {
+        let mut aliases = std::collections::HashSet::new();
+        let mut canonical_keys = std::collections::HashSet::new();
+        for setting in settings() {
+            assert_eq!(
+                setting.dynamic,
+                setting.restart_level == "none",
+                "{}",
+                setting.key
+            );
+            assert_eq!(
+                setting.dynamic,
+                setting.hot_reload.is_some(),
+                "{}",
+                setting.key
+            );
+            assert!(
+                canonical_keys.insert(setting.key),
+                "duplicate key {}",
+                setting.key
+            );
+            if let Some(alias) = setting.environment_variable {
+                assert!(aliases.insert(alias), "duplicate alias {alias}");
+                assert_eq!(canonical_setting_name(alias), setting.key);
+                assert!(setting.key.contains('.'), "{}", setting.key);
+                assert!(!setting.key.contains("COPPERDB_"), "{}", setting.key);
+            }
+        }
+    }
+
+    #[test]
+    fn settings_registry_matches_upstream_scope_contract() {
+        assert_eq!(settings().len(), 72);
+        assert_eq!(allowed_per_database_config_keys().len(), 67);
+
+        let physical_keys: Vec<_> = settings()
+            .iter()
+            .filter(|setting| setting.scope == "physical-engine")
+            .map(|setting| setting.key)
+            .collect();
+        assert_eq!(
+            physical_keys,
+            [
+                "db.copper.memory.storage.mode",
+                "db.copper.memory.storage.node_cache.max_entries",
+                "db.copper.memory.storage.edge_type_cache.max_entries",
+                "db.copper.recovery.batch.max_bytes",
+                "db.copper.recovery.memory.max",
+            ]
+        );
+        for key in physical_keys {
+            assert!(lookup_setting(key).is_some(), "{key}");
+            assert!(!is_allowed_per_database_config_key(key), "{key}");
+        }
+        assert!(
+            allowed_per_database_config_keys()
+                .iter()
+                .all(|setting| setting.scope == "database")
+        );
+    }
+
+    #[test]
+    fn sensitive_setting_metadata_is_redacted() {
+        let redacted: Vec<_> = settings()
+            .iter()
+            .filter(|setting| setting.redacted)
+            .map(|setting| (setting.key, setting.environment_variable))
+            .collect();
+        assert_eq!(
+            redacted,
+            [
+                (
+                    "db.copper.embedding.api.key",
+                    Some("COPPERDB_EMBEDDING_API_KEY")
+                ),
+                (
+                    "db.copper.search.rerank.api.key",
+                    Some("COPPERDB_SEARCH_RERANK_API_KEY")
+                ),
+            ]
+        );
+        assert!(settings().iter().all(|setting| !setting.deprecated));
+    }
+
+    #[test]
+    fn query_cache_ttl_is_integer_milliseconds() {
+        let setting = lookup_setting("db.copper.query_cache.ttl").unwrap();
+        assert_eq!(setting.value_type, "number");
+        assert_eq!(setting.default_value, "300000");
+        assert!(setting.description.contains("milliseconds"));
+        assert!(!setting.dynamic);
+        assert_eq!(setting.restart_level, "process");
+        assert_eq!(setting.hot_reload, None);
+        assert_eq!(
+            normalize_setting_value("db.copper.query_cache.ttl", "1800000").unwrap(),
+            "1800000"
+        );
+        for invalid in ["30m", "2s", "1.5", "-1"] {
+            assert!(
+                normalize_setting_value("db.copper.query_cache.ttl", invalid).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn effective_map_uses_only_canonical_keys_and_registry_defaults() {
+        let mut config = Config::default();
+        config
+            .cli_overrides
+            .insert("db.copper.memory.storage.mode".into(), "low".into());
+        let resolved = resolve_per_database_config(&config, &BTreeMap::new()).unwrap();
+
+        assert!(resolved.effective.keys().all(|key| key.contains('.')));
+        assert!(
+            resolved
+                .effective
+                .keys()
+                .all(|key| !key.starts_with("COPPERDB_"))
+        );
+        assert_eq!(
+            resolved.effective["db.copper.query_cache.max_entries"],
+            "1000"
+        );
+        assert_eq!(resolved.effective["db.copper.query_cache.ttl"], "300000");
+        assert_eq!(
+            resolved.effective["db.copper.query_plan_cache.max_entries"],
+            "500"
+        );
+        assert_eq!(
+            resolved.effective["db.copper.search_result_cache.ttl"],
+            "5m"
+        );
+        assert_eq!(resolved.effective["db.memory.transaction.total.max"], "0");
+        assert!(
+            !resolved
+                .effective
+                .contains_key("db.copper.memory.storage.mode")
+        );
+        for removed in [
+            "db.copper.embedding.warming",
+            "db.copper.embedding.warmup.interval_ms",
+            "db.copper.embedding.cache.max_entries",
+            "db.copper.embedding.workers",
+            "db.copper.embedding.max_attempts",
+            "db.copper.embedding.retry_backoff_ms",
+            "db.copper.embedding.shutdown_timeout_ms",
+        ] {
+            assert!(!resolved.effective.contains_key(removed), "{removed}");
+            assert!(lookup_setting(removed).is_none(), "{removed}");
+        }
     }
 
     #[test]

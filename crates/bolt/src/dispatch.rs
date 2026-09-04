@@ -1,9 +1,9 @@
 //! Bolt message dispatch — decode PackStream structs into Bolt messages
 //! and route them through the session state machine.
 
+use crate::BoltError;
 use crate::messages::BoltMessage;
 use crate::packstream::Value;
-use crate::BoltError;
 use std::collections::HashMap;
 
 /// Decode a PackStream struct into a BoltMessage.
@@ -56,26 +56,26 @@ fn decode_run(fields: &[Value]) -> Result<BoltMessage, BoltError> {
 fn decode_pull(fields: &[Value]) -> Result<BoltMessage, BoltError> {
     // Bolt 4.x: PULL has two struct fields (n: Integer, qid: Integer)
     // Bolt 5.x: PULL has one struct field (extra: Map with "n" and "qid")
-    if fields.len() == 1 {
-        if let Value::Map(pairs) = &fields[0] {
-            let n = pairs
-                .iter()
-                .find(|(k, _)| k == "n")
-                .map(|(_, v)| match v {
-                    Value::Integer(n) => *n,
-                    _ => -1,
-                })
-                .unwrap_or(-1);
-            let qid = pairs
-                .iter()
-                .find(|(k, _)| k == "qid")
-                .map(|(_, v)| match v {
-                    Value::Integer(q) => *q,
-                    _ => -1,
-                })
-                .unwrap_or(-1);
-            return Ok(BoltMessage::Pull { n, qid });
-        }
+    if fields.len() == 1
+        && let Value::Map(pairs) = &fields[0]
+    {
+        let n = pairs
+            .iter()
+            .find(|(k, _)| k == "n")
+            .map(|(_, v)| match v {
+                Value::Integer(n) => *n,
+                _ => -1,
+            })
+            .unwrap_or(-1);
+        let qid = pairs
+            .iter()
+            .find(|(k, _)| k == "qid")
+            .map(|(_, v)| match v {
+                Value::Integer(q) => *q,
+                _ => -1,
+            })
+            .unwrap_or(-1);
+        return Ok(BoltMessage::Pull { n, qid });
     }
     let n = extract_integer(fields.first(), "PULL.n")?;
     let qid = extract_integer(fields.get(1), "PULL.qid")?;
@@ -84,26 +84,26 @@ fn decode_pull(fields: &[Value]) -> Result<BoltMessage, BoltError> {
 
 fn decode_discard(fields: &[Value]) -> Result<BoltMessage, BoltError> {
     // Same dual-format as PULL
-    if fields.len() == 1 {
-        if let Value::Map(pairs) = &fields[0] {
-            let n = pairs
-                .iter()
-                .find(|(k, _)| k == "n")
-                .map(|(_, v)| match v {
-                    Value::Integer(n) => *n,
-                    _ => -1,
-                })
-                .unwrap_or(-1);
-            let qid = pairs
-                .iter()
-                .find(|(k, _)| k == "qid")
-                .map(|(_, v)| match v {
-                    Value::Integer(q) => *q,
-                    _ => -1,
-                })
-                .unwrap_or(-1);
-            return Ok(BoltMessage::Discard { n, qid });
-        }
+    if fields.len() == 1
+        && let Value::Map(pairs) = &fields[0]
+    {
+        let n = pairs
+            .iter()
+            .find(|(k, _)| k == "n")
+            .map(|(_, v)| match v {
+                Value::Integer(n) => *n,
+                _ => -1,
+            })
+            .unwrap_or(-1);
+        let qid = pairs
+            .iter()
+            .find(|(k, _)| k == "qid")
+            .map(|(_, v)| match v {
+                Value::Integer(q) => *q,
+                _ => -1,
+            })
+            .unwrap_or(-1);
+        return Ok(BoltMessage::Discard { n, qid });
     }
     let n = extract_integer(fields.first(), "DISCARD.n")?;
     let qid = extract_integer(fields.get(1), "DISCARD.qid")?;
@@ -178,7 +178,7 @@ fn extract_string_map(
                     _ => {
                         return Err(BoltError::ProtocolViolation(format!(
                             "{field}.{k}: expected string"
-                        )))
+                        )));
                     }
                 };
                 out.insert(k.clone(), s);
@@ -228,7 +228,7 @@ fn extract_string_list(value: Option<&Value>, field: &str) -> Result<Vec<String>
                     _ => {
                         return Err(BoltError::ProtocolViolation(format!(
                             "{field}: expected list of strings"
-                        )))
+                        )));
                     }
                 }
             }

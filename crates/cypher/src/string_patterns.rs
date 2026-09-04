@@ -145,11 +145,7 @@ fn extract_int_after_keyword(s: &str, keyword: &str) -> Option<usize> {
             break;
         }
     }
-    if found_digit {
-        Some(result)
-    } else {
-        None
-    }
+    if found_digit { Some(result) } else { None }
 }
 
 fn extract_str_after_keyword<'a>(s: &'a str, keyword: &str) -> Option<&'a str> {

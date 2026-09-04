@@ -5,8 +5,8 @@ use copperdb_util::RequestContext;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    adamic_adar, common_neighbors, jaccard, preferential_attachment, resource_allocation,
-    GraphSnapshot, LinkPredictError, Prediction,
+    GraphSnapshot, LinkPredictError, Prediction, adamic_adar, common_neighbors, jaccard,
+    preferential_attachment, resource_allocation,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,11 +240,7 @@ mod tests {
             _source_id: &str,
             target_id: &str,
         ) -> f64 {
-            if target_id == "diana" {
-                0.9
-            } else {
-                0.2
-            }
+            if target_id == "diana" { 0.9 } else { 0.2 }
         }
     }
 
@@ -272,11 +268,13 @@ mod tests {
             .unwrap();
         assert_eq!(predictions[0].target_id, "diana");
         assert_eq!(predictions[0].semantic_score, 0.9);
-        assert!(predictions
-            .iter()
-            .all(|prediction| prediction.target_id != "alice"
-                && prediction.target_id != "bob"
-                && prediction.target_id != "charlie"));
+        assert!(
+            predictions
+                .iter()
+                .all(|prediction| prediction.target_id != "alice"
+                    && prediction.target_id != "bob"
+                    && prediction.target_id != "charlie")
+        );
     }
 
     #[test]
@@ -339,10 +337,12 @@ mod tests {
             normalize_scores: true,
             min_threshold: 0.0,
         });
-        assert!(ensemble
-            .predict(&RequestContext::detached(), &graph, "alice", 0)
-            .unwrap()
-            .is_empty());
+        assert!(
+            ensemble
+                .predict(&RequestContext::detached(), &graph, "alice", 0)
+                .unwrap()
+                .is_empty()
+        );
 
         let fallback = HybridScorer::new(HybridConfig {
             topology_algorithm: TopologyAlgorithm::Ensemble,
@@ -356,8 +356,10 @@ mod tests {
             .predict(&RequestContext::detached(), &graph, "alice", 10)
             .unwrap();
         assert_eq!(predictions, expected);
-        assert!(predictions
-            .iter()
-            .all(|prediction| prediction.topology_method == TopologyAlgorithm::AdamicAdar));
+        assert!(
+            predictions
+                .iter()
+                .all(|prediction| prediction.topology_method == TopologyAlgorithm::AdamicAdar)
+        );
     }
 }

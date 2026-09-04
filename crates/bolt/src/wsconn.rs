@@ -1,8 +1,8 @@
 //! WebSocket transport helpers for Bolt. Uses tokio-tungstenite directly.
 
 use std::io;
-use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Debug, Default)]
 pub struct BoltChunkDecoder {

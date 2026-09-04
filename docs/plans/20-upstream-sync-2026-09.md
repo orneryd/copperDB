@@ -1,6 +1,6 @@
 # 20: Upstream Sync, September 2026
 
-Status: planned. Priority: P1/P2. Owners: `config`, `multidb`, `storage`, `search`, `vectorspace`, `cypher`, `eval`, `engine`, `server`, `bolt`, `auth`, `security`, `inference`, `admin`, `otel`.
+Status: complete. Priority: P1/P2. Owners: `config`, `multidb`, `storage`, `search`, `vectorspace`, `cypher`, `eval`, `engine`, `server`, `bolt`, `auth`, `security`, `inference`, `admin`, `otel`.
 
 ## Objective
 
@@ -136,6 +136,13 @@ npm --prefix ui run build
 ```
 
 Also run Rust and UI dependency advisory checks, localization/catalog generator clean-tree checks, ledger coverage validation, headless route tests, trusted/untrusted proxy cookie tests, and durable bootstrap restart tests. Performance-motivated divergence is allowed only with identical public behavior and recorded apples-to-apples benchmark evidence. GraphQL feature expansion remains deferred to Plan 22, but all shared routing, localization, error, authorization, settings, and limit behavior affected by this range is mandatory in Plan 20. Plan 23 owns container and release-policy validation after Plan 21.
+
+## Completion Evidence
+
+- The generated disposition ledger covers all 619 endpoint paths and all 44 commits. It records the `.agents/memory.instruction.md` add/delete cycle as a separate transient audit row and contains no incomplete category or disposition.
+- Workspace tests, all-target compilation, warning-denied Clippy, benchmark compilation, localization drift checks, and the locked UI production build pass.
+- Rust dependency remediation removes the unused `rsa` backend and advances patched Crossbeam, HTTP/2, Quinn, Rustls WebPKI, AWS, cryptography, storage, and search releases. `scripts/check-rust-advisories.sh` denies all new advisories and warnings while narrowly acknowledging four compiled-only advisories in AWS Smithy's legacy Hyper 0.14 compatibility connector and Tantivy 0.26.1's unpatched `lru 0.16` pin; CopperDB's KMS client selects the modern AWS-LC default HTTPS transport.
+- Local GGUF reranking matches the pinned llama.cpp encoder ABI and has deterministic unit coverage. A real-model smoke run requires `lib/llama/libllama.dylib`, which is not present in this source checkout and is therefore a release-artifact validation owned by Plan 23.
 
 ## Definition Of Done
 

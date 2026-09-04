@@ -12,7 +12,7 @@ use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tonic::{Request, Response, Status};
 
-use copperdb_localization::{parse_accept_language, LanguageTag, Manager, Message};
+use copperdb_localization::{LanguageTag, Manager, Message, parse_accept_language};
 use copperdb_replication::{Command, ReplicaTransport, ReplicationError};
 use copperdb_search::{
     HydrationTransport, RankedSearchTransport, RrfHydrationRecord, RrfSearchBatch, SearchError,

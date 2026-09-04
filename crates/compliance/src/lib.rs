@@ -126,10 +126,9 @@ impl ComplianceManager {
             .read()
             .expect("compliance policy cache lock poisoned")
             .as_ref()
+            && *cached_generation == generation
         {
-            if *cached_generation == generation {
-                return Ok(policies.clone());
-            }
+            return Ok(policies.clone());
         }
         let mut policies = Vec::new();
         for node in self.storage.get_nodes_by_label(POLICY_LABEL)? {
@@ -163,13 +162,13 @@ impl ComplianceManager {
                 property: governed,
                 allowed_roles,
             } = &policy.control
+                && governed == property
+                && !role_allowed(roles, allowed_roles)
             {
-                if governed == property && !role_allowed(roles, allowed_roles) {
-                    return Err(ComplianceError::PolicyViolation {
-                        policy: policy.id.clone(),
-                        message: format!("access to property '{property}' is restricted"),
-                    });
-                }
+                return Err(ComplianceError::PolicyViolation {
+                    policy: policy.id.clone(),
+                    message: format!("access to property '{property}' is restricted"),
+                });
             }
         }
         Ok(())
@@ -195,13 +194,13 @@ impl ComplianceManager {
                 label: governed,
                 allowed_roles,
             } = &policy.control
+                && governed == label
+                && !role_allowed(roles, allowed_roles)
             {
-                if governed == label && !role_allowed(roles, allowed_roles) {
-                    return Err(ComplianceError::PolicyViolation {
-                        policy: policy.id.clone(),
-                        message: format!("access to label '{label}' is restricted"),
-                    });
-                }
+                return Err(ComplianceError::PolicyViolation {
+                    policy: policy.id.clone(),
+                    message: format!("access to label '{label}' is restricted"),
+                });
             }
         }
         Ok(())
@@ -475,9 +474,11 @@ mod tests {
             ))
             .unwrap();
 
-        assert!(manager
-            .check_label_access("Patient", &["reader".into()])
-            .is_err());
+        assert!(
+            manager
+                .check_label_access("Patient", &["reader".into()])
+                .is_err()
+        );
         manager
             .check_label_access("Patient", &["doctor".into()])
             .unwrap();

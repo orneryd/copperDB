@@ -1,5 +1,5 @@
 use self::eval_engine_policy::{
-    edge_vector_for_property, vector_from_node, ProcedureGraphServices,
+    ProcedureGraphServices, edge_vector_for_property, vector_from_node,
 };
 use std::cell::RefCell;
 
@@ -289,10 +289,10 @@ impl EvalEngine {
         for matched_row in &matched_rows {
             Self::check_current_request_context()?;
             // Evaluate predicate if present
-            if let Some(ref pred) = comp.predicate {
-                if !eval_predicate(pred, matched_row, params)? {
-                    continue;
-                }
+            if let Some(ref pred) = comp.predicate
+                && !eval_predicate(pred, matched_row, params)?
+            {
+                continue;
             }
             // Evaluate projection expression
             let value = self.evaluate_expression(&comp.expression, matched_row, params)?;
@@ -350,10 +350,9 @@ impl EvalEngine {
             .lock()
             .expect("knowledge-policy resolver cache lock poisoned")
             .as_ref()
+            && *cached_generation == generation
         {
-            if *cached_generation == generation {
-                return Ok(Arc::clone(resolver));
-            }
+            return Ok(Arc::clone(resolver));
         }
         let bundles = build_bundles_by_name(&self.storage.load_decay_profile_schemas()?)
             .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
@@ -476,10 +475,10 @@ impl EvalEngine {
 
         let generation = self.storage.index_schema_generation();
         let key = (generation, query_text.to_string());
-        if let Ok(cache) = self.fulltext_query_cache.lock() {
-            if let Some(query) = cache.get(&key) {
-                return Ok(query.clone());
-            }
+        if let Ok(cache) = self.fulltext_query_cache.lock()
+            && let Some(query) = cache.get(&key)
+        {
+            return Ok(query.clone());
         }
 
         let query = copperdb_search::lucene::parse_fulltext_query(query_text)
@@ -1473,23 +1472,22 @@ impl EvalEngine {
 
         let mut node_ids = Vec::with_capacity(pattern.nodes.len());
         for node_pattern in &pattern.nodes {
-            if let Some(variable) = &node_pattern.variable {
-                if let Some(properties) = bound_row_object_props(row, variable) {
-                    let expected =
-                        evaluate_pattern_properties(&node_pattern.properties, row, params)?;
-                    if !node_matches_pattern(&properties, &node_pattern.labels, &expected) {
-                        return Err(EvalError::ExecutionError(format!(
-                            "transaction CREATE variable '{variable}' does not match the requested node pattern"
-                        )));
-                    }
-                    let id = node_id(&properties).ok_or_else(|| {
-                        EvalError::ExecutionError(format!(
-                            "transaction CREATE variable '{variable}' is missing _id"
-                        ))
-                    })?;
-                    node_ids.push(id.to_string());
-                    continue;
+            if let Some(variable) = &node_pattern.variable
+                && let Some(properties) = bound_row_object_props(row, variable)
+            {
+                let expected = evaluate_pattern_properties(&node_pattern.properties, row, params)?;
+                if !node_matches_pattern(&properties, &node_pattern.labels, &expected) {
+                    return Err(EvalError::ExecutionError(format!(
+                        "transaction CREATE variable '{variable}' does not match the requested node pattern"
+                    )));
                 }
+                let id = node_id(&properties).ok_or_else(|| {
+                    EvalError::ExecutionError(format!(
+                        "transaction CREATE variable '{variable}' is missing _id"
+                    ))
+                })?;
+                node_ids.push(id.to_string());
+                continue;
             }
 
             let label = node_pattern
@@ -1850,36 +1848,36 @@ impl EvalEngine {
 
         while let Some((current_id, depth, path_edges)) = frontier.pop_front() {
             Self::check_current_request_context()?;
-            if depth >= min_hops {
-                if let Some(end) = transaction.get_node_record(&current_id)? {
-                    let end_properties = node_record_to_props(&end);
-                    if node_matches_pattern(&end_properties, &end_pattern.labels, &expected_end)
-                        && bound_node_matches_row(
-                            &row,
-                            end_pattern.variable.as_deref(),
-                            &end_properties,
-                        )
-                    {
-                        let mut matched = row.clone();
-                        if let Some(variable) = &edge_pattern.variable {
-                            matched.insert(
-                                variable.clone(),
-                                Value::Array(
-                                    path_edges
-                                        .iter()
-                                        .map(edge_record_to_value)
-                                        .collect::<Result<Vec<_>, _>>()?,
-                                ),
-                            );
-                        }
-                        if let Some(variable) = &end_pattern.variable {
-                            matched.insert(
-                                variable.clone(),
-                                Value::Object(end_properties.into_iter().collect()),
-                            );
-                        }
-                        matches.push((matched, end.id));
+            if depth >= min_hops
+                && let Some(end) = transaction.get_node_record(&current_id)?
+            {
+                let end_properties = node_record_to_props(&end);
+                if node_matches_pattern(&end_properties, &end_pattern.labels, &expected_end)
+                    && bound_node_matches_row(
+                        &row,
+                        end_pattern.variable.as_deref(),
+                        &end_properties,
+                    )
+                {
+                    let mut matched = row.clone();
+                    if let Some(variable) = &edge_pattern.variable {
+                        matched.insert(
+                            variable.clone(),
+                            Value::Array(
+                                path_edges
+                                    .iter()
+                                    .map(edge_record_to_value)
+                                    .collect::<Result<Vec<_>, _>>()?,
+                            ),
+                        );
                     }
+                    if let Some(variable) = &end_pattern.variable {
+                        matched.insert(
+                            variable.clone(),
+                            Value::Object(end_properties.into_iter().collect()),
+                        );
+                    }
+                    matches.push((matched, end.id));
                 }
             }
             if depth >= max_hops {
@@ -2661,6 +2659,11 @@ impl EvalEngine {
                         })
                         .collect();
                 }
+                Clause::ShowSettings(_) => {
+                    return Err(EvalError::ExecutionError(
+                        "SHOW SETTINGS must be executed by the database engine".to_string(),
+                    ));
+                }
 
                 Clause::CreateIndex(create) => {
                     let catalog = IndexCatalog::new(self.storage.as_ref());
@@ -3408,11 +3411,11 @@ impl EvalEngine {
                             callback_error = Some(EvalError::from(error));
                             return Err(copperdb_storage::StorageError::IterationStopped);
                         }
-                        if let Some(vector) = vector_from_node(&node, property) {
-                            if let Err(error) = vector_indexes.upsert(index_name, node.id, vector) {
-                                callback_error = Some(EvalError::ExecutionError(error.to_string()));
-                                return Err(copperdb_storage::StorageError::IterationStopped);
-                            }
+                        if let Some(vector) = vector_from_node(&node, property)
+                            && let Err(error) = vector_indexes.upsert(index_name, node.id, vector)
+                        {
+                            callback_error = Some(EvalError::ExecutionError(error.to_string()));
+                            return Err(copperdb_storage::StorageError::IterationStopped);
                         }
                         Ok(())
                     },
@@ -3433,11 +3436,11 @@ impl EvalEngine {
                             callback_error = Some(EvalError::from(error));
                             return Err(copperdb_storage::StorageError::IterationStopped);
                         }
-                        if let Some(vector) = edge_vector_for_property(&edge, property) {
-                            if let Err(error) = vector_indexes.upsert(index_name, edge.id, vector) {
-                                callback_error = Some(EvalError::ExecutionError(error.to_string()));
-                                return Err(copperdb_storage::StorageError::IterationStopped);
-                            }
+                        if let Some(vector) = edge_vector_for_property(&edge, property)
+                            && let Err(error) = vector_indexes.upsert(index_name, edge.id, vector)
+                        {
+                            callback_error = Some(EvalError::ExecutionError(error.to_string()));
+                            return Err(copperdb_storage::StorageError::IterationStopped);
                         }
                         Ok(())
                     },
@@ -3575,18 +3578,17 @@ impl EvalEngine {
                     _ => {}
                 }
 
-                if let Some(shape_match) = compound_match {
-                    if self.can_execute_compound_fast_path(query, shape_match) {
-                        if let Some(result) = self.execute_compound_fast_path(query, shape_match)? {
-                            return Ok(result);
-                        }
-                    }
+                if let Some(shape_match) = compound_match
+                    && self.can_execute_compound_fast_path(query, shape_match)
+                    && let Some(result) = self.execute_compound_fast_path(query, shape_match)?
+                {
+                    return Ok(result);
                 }
 
-                if let Some(clauses) = pipeline_clauses {
-                    if self.can_execute_pipeline_route(query, clauses) {
-                        return self.execute_pipeline_routed(query, params, clauses);
-                    }
+                if let Some(clauses) = pipeline_clauses
+                    && self.can_execute_pipeline_route(query, clauses)
+                {
+                    return self.execute_pipeline_routed(query, params, clauses);
                 }
 
                 // Route shortestPath() / allShortestPaths() to a dedicated BFS handler
@@ -4371,10 +4373,10 @@ impl EvalEngine {
             dequeue_count += 1;
 
             // If we found paths at a shallower depth, stop
-            if let Some(fd) = found_depth {
-                if depth >= fd {
-                    continue;
-                }
+            if let Some(fd) = found_depth
+                && depth >= fd
+            {
+                continue;
             }
 
             if depth >= max_hops {
@@ -4393,10 +4395,10 @@ impl EvalEngine {
                 };
 
                 let next_depth = depth + 1;
-                if let Some(&prev_depth) = visited.get(&next_id) {
-                    if prev_depth < next_depth {
-                        continue;
-                    }
+                if let Some(&prev_depth) = visited.get(&next_id)
+                    && prev_depth < next_depth
+                {
+                    continue;
                 }
                 visited.insert(next_id.clone(), next_depth);
 
@@ -4495,10 +4497,10 @@ impl EvalEngine {
         let mut rows = Vec::new();
 
         for path in &paths {
-            if let Some(limit) = limit_val {
-                if rows.len() >= limit.max(0) as usize {
-                    break;
-                }
+            if let Some(limit) = limit_val
+                && rows.len() >= limit.max(0) as usize
+            {
+                break;
             }
 
             // Build node + edge values for the path
@@ -4598,56 +4600,54 @@ impl EvalEngine {
             }
             // [n IN nodes(p) | n.prop] → list comprehension
             Expression::ListComprehension(lc) => {
-                if let Expression::FunctionCall { name, .. } = lc.list.as_ref() {
-                    if name.eq_ignore_ascii_case("nodes") {
-                        // Lazy materialization: extract only the needed property
-                        // from each node directly, avoiding full node-value clone
-                        // and expression-evaluation overhead per iteration.
-                        let projections: Vec<&str> =
-                            extract_list_comprehension_properties(&lc.expression);
-                        let mut result = Vec::with_capacity(node_vals.len());
-                        for node_val in node_vals {
-                            // Check predicate (WHERE clause) — rare path, still uses row
-                            if let Some(ref pred) = lc.predicate {
-                                let mut inner_row = row.clone();
-                                inner_row.insert(lc.variable.clone(), node_val.clone());
-                                let pred_val =
-                                    self.evaluate_expression(pred, &inner_row, params)?;
-                                let is_truthy =
-                                    !matches!(&pred_val, Value::Null | Value::Bool(false))
-                                        && !matches!(&pred_val,
-                                            Value::Number(n) if n.as_f64() == Some(0.0)
-                                        )
-                                        && !matches!(&pred_val,
-                                            Value::String(s) if s.is_empty()
-                                        )
-                                        && !matches!(&pred_val,
-                                            Value::Array(a) if a.is_empty()
-                                        );
-                                if !is_truthy {
-                                    continue;
-                                }
-                            }
-                            if projections.len() == 1 {
-                                // Fast path: single property extraction without cloning
-                                if let Value::Object(ref props) = node_val {
-                                    result.push(
-                                        props.get(projections[0]).cloned().unwrap_or(Value::Null),
-                                    );
-                                } else {
-                                    result.push(Value::Null);
-                                }
-                            } else {
-                                // Fallback: use expression evaluation
-                                let mut inner_row = row.clone();
-                                inner_row.insert(lc.variable.clone(), node_val.clone());
-                                let val =
-                                    self.evaluate_expression(&lc.expression, &inner_row, params)?;
-                                result.push(val);
+                if let Expression::FunctionCall { name, .. } = lc.list.as_ref()
+                    && name.eq_ignore_ascii_case("nodes")
+                {
+                    // Lazy materialization: extract only the needed property
+                    // from each node directly, avoiding full node-value clone
+                    // and expression-evaluation overhead per iteration.
+                    let projections: Vec<&str> =
+                        extract_list_comprehension_properties(&lc.expression);
+                    let mut result = Vec::with_capacity(node_vals.len());
+                    for node_val in node_vals {
+                        // Check predicate (WHERE clause) — rare path, still uses row
+                        if let Some(ref pred) = lc.predicate {
+                            let mut inner_row = row.clone();
+                            inner_row.insert(lc.variable.clone(), node_val.clone());
+                            let pred_val = self.evaluate_expression(pred, &inner_row, params)?;
+                            let is_truthy = !matches!(&pred_val, Value::Null | Value::Bool(false))
+                                && !matches!(&pred_val,
+                                    Value::Number(n) if n.as_f64() == Some(0.0)
+                                )
+                                && !matches!(&pred_val,
+                                    Value::String(s) if s.is_empty()
+                                )
+                                && !matches!(&pred_val,
+                                    Value::Array(a) if a.is_empty()
+                                );
+                            if !is_truthy {
+                                continue;
                             }
                         }
-                        return Ok(Value::Array(result));
+                        if projections.len() == 1 {
+                            // Fast path: single property extraction without cloning
+                            if let Value::Object(props) = node_val {
+                                result.push(
+                                    props.get(projections[0]).cloned().unwrap_or(Value::Null),
+                                );
+                            } else {
+                                result.push(Value::Null);
+                            }
+                        } else {
+                            // Fallback: use expression evaluation
+                            let mut inner_row = row.clone();
+                            inner_row.insert(lc.variable.clone(), node_val.clone());
+                            let val =
+                                self.evaluate_expression(&lc.expression, &inner_row, params)?;
+                            result.push(val);
+                        }
                     }
+                    return Ok(Value::Array(result));
                 }
                 // Fall through to generic evaluation
                 Ok(Value::Null)
@@ -5715,37 +5715,37 @@ impl EvalEngine {
                     }
                     SetItem::MapAssignment { variable, value } => {
                         let new_val = self.evaluate_expression(value, row, params)?;
-                        if let Value::Object(map) = &new_val {
-                            if let Some(Value::Object(props)) = row.get_mut(variable) {
-                                for (k, v) in map {
-                                    props.insert(k.clone(), v.clone());
-                                }
-                                stats.properties_set += map.len();
-                                let persisted_props: HashMap<String, Value> =
-                                    props.clone().into_iter().collect();
-                                self.persist_bound_props(&persisted_props)?;
+                        if let Value::Object(map) = &new_val
+                            && let Some(Value::Object(props)) = row.get_mut(variable)
+                        {
+                            for (k, v) in map {
+                                props.insert(k.clone(), v.clone());
                             }
+                            stats.properties_set += map.len();
+                            let persisted_props: HashMap<String, Value> =
+                                props.clone().into_iter().collect();
+                            self.persist_bound_props(&persisted_props)?;
                         }
                     }
                     SetItem::MapMerge { variable, value } => {
                         let new_val = self.evaluate_expression(value, row, params)?;
-                        if let Value::Object(map) = &new_val {
-                            if let Some(Value::Object(props)) = row.get_mut(variable) {
-                                let mut merged = 0usize;
-                                for (k, v) in map {
-                                    // Nil/null values must not clobber existing properties
-                                    // (NornicDB parity: applySetMapMergeToNode skips nil).
-                                    if matches!(v, Value::Null) {
-                                        continue;
-                                    }
-                                    props.insert(k.clone(), v.clone());
-                                    merged += 1;
+                        if let Value::Object(map) = &new_val
+                            && let Some(Value::Object(props)) = row.get_mut(variable)
+                        {
+                            let mut merged = 0usize;
+                            for (k, v) in map {
+                                // Nil/null values must not clobber existing properties
+                                // (NornicDB parity: applySetMapMergeToNode skips nil).
+                                if matches!(v, Value::Null) {
+                                    continue;
                                 }
-                                stats.properties_set += merged;
-                                let persisted_props: HashMap<String, Value> =
-                                    props.clone().into_iter().collect();
-                                self.persist_bound_props(&persisted_props)?;
+                                props.insert(k.clone(), v.clone());
+                                merged += 1;
                             }
+                            stats.properties_set += merged;
+                            let persisted_props: HashMap<String, Value> =
+                                props.clone().into_iter().collect();
+                            self.persist_bound_props(&persisted_props)?;
                         }
                     }
                     SetItem::Label { variable, label } => {
@@ -5935,13 +5935,13 @@ fn maintain_vector_indexes_for_node(
                 }
             }
             None => {
-                if let Err(error) = vector_indexes.remove(&definition.name, &node.id) {
-                    if !matches!(
+                if let Err(error) = vector_indexes.remove(&definition.name, &node.id)
+                    && !matches!(
                         error,
                         copperdb_vectorspace::VectorSpaceError::VectorNotFound(_)
-                    ) {
-                        tracing::warn!(index = %definition.name, node = %node.id, %error, "failed to remove stale vector index entry");
-                    }
+                    )
+                {
+                    tracing::warn!(index = %definition.name, node = %node.id, %error, "failed to remove stale vector index entry");
                 }
             }
         }
@@ -5965,13 +5965,13 @@ fn remove_node_from_vector_indexes(
             && definition.entity_type == copperdb_storage::IndexEntityType::Node
             && vector_indexes.status(&definition.name).is_ok()
     }) {
-        if let Err(error) = vector_indexes.remove(&definition.name, id) {
-            if !matches!(
+        if let Err(error) = vector_indexes.remove(&definition.name, id)
+            && !matches!(
                 error,
                 copperdb_vectorspace::VectorSpaceError::VectorNotFound(_)
-            ) {
-                tracing::warn!(index = %definition.name, node = %id, %error, "failed to remove deleted vector index entry");
-            }
+            )
+        {
+            tracing::warn!(index = %definition.name, node = %id, %error, "failed to remove deleted vector index entry");
         }
     }
 }
@@ -6006,13 +6006,13 @@ fn maintain_vector_indexes_for_edge(
                 }
             }
             None => {
-                if let Err(error) = vector_indexes.remove(&definition.name, &edge.id) {
-                    if !matches!(
+                if let Err(error) = vector_indexes.remove(&definition.name, &edge.id)
+                    && !matches!(
                         error,
                         copperdb_vectorspace::VectorSpaceError::VectorNotFound(_)
-                    ) {
-                        tracing::warn!(index = %definition.name, edge = %edge.id, %error, "failed to remove stale vector index entry");
-                    }
+                    )
+                {
+                    tracing::warn!(index = %definition.name, edge = %edge.id, %error, "failed to remove stale vector index entry");
                 }
             }
         }
@@ -6036,13 +6036,13 @@ fn remove_edge_from_vector_indexes(
             && definition.entity_type == copperdb_storage::IndexEntityType::Relationship
             && vector_indexes.status(&definition.name).is_ok()
     }) {
-        if let Err(error) = vector_indexes.remove(&definition.name, id) {
-            if !matches!(
+        if let Err(error) = vector_indexes.remove(&definition.name, id)
+            && !matches!(
                 error,
                 copperdb_vectorspace::VectorSpaceError::VectorNotFound(_)
-            ) {
-                tracing::warn!(index = %definition.name, edge = %id, %error, "failed to remove deleted vector index entry");
-            }
+            )
+        {
+            tracing::warn!(index = %definition.name, edge = %id, %error, "failed to remove deleted vector index entry");
         }
     }
 }
@@ -6103,10 +6103,10 @@ impl EvalEngine {
                         row.insert(var.clone(), node_val.clone());
                     }
                     bind_single_node_path_variable(&mut row, pattern, node_val);
-                    if let Some(expression) = where_expression {
-                        if !self.eval_where_predicate(expression, &row, params)? {
-                            continue;
-                        }
+                    if let Some(expression) = where_expression
+                        && !self.eval_where_predicate(expression, &row, params)?
+                    {
+                        continue;
                     }
                     found_match = true;
                     new_rows.push(row);
@@ -6341,13 +6341,13 @@ impl EvalEngine {
                         continue;
                     };
                     for prop in &c.properties {
-                        if let Some(val) = props.get(prop) {
-                            if !Self::value_matches_type(val, type_name) {
-                                return Err(EvalError::ExecutionError(format!(
-                                    "Property `{}` must be of type `{}` on node with label `{}`",
-                                    prop, type_name, c.label
-                                )));
-                            }
+                        if let Some(val) = props.get(prop)
+                            && !Self::value_matches_type(val, type_name)
+                        {
+                            return Err(EvalError::ExecutionError(format!(
+                                "Property `{}` must be of type `{}` on node with label `{}`",
+                                prop, type_name, c.label
+                            )));
                         }
                     }
                 }
@@ -6469,13 +6469,13 @@ impl EvalEngine {
                         continue;
                     };
                     for prop in &c.properties {
-                        if let Some(val) = props.get(prop) {
-                            if !Self::value_matches_type(val, type_name) {
-                                return Err(EvalError::ExecutionError(format!(
-                                    "Property `{}` must be of type `{}` on relationship with type `{}`",
-                                    prop, type_name, rel_type
-                                )));
-                            }
+                        if let Some(val) = props.get(prop)
+                            && !Self::value_matches_type(val, type_name)
+                        {
+                            return Err(EvalError::ExecutionError(format!(
+                                "Property `{}` must be of type `{}` on relationship with type `{}`",
+                                prop, type_name, rel_type
+                            )));
                         }
                     }
                 }
@@ -6911,10 +6911,10 @@ impl EvalEngine {
                             params,
                             stats,
                         )?;
-                        if let Some(var) = &node_pat.variable {
-                            if let Some(updated) = row.get(var) {
-                                node_val = updated.clone();
-                            }
+                        if let Some(var) = &node_pat.variable
+                            && let Some(updated) = row.get(var)
+                        {
+                            node_val = updated.clone();
                         }
                     }
                     if let Some(var) = &node_pat.variable {
@@ -6928,45 +6928,45 @@ impl EvalEngine {
                     evaluate_pattern_properties(&node_pat.properties, base_row, params)?;
                 let catalog = IndexCatalog::new(self.storage.as_ref());
 
-                let node_val = if let Some(cached_val) =
-                    self.find_in_merge_cache(labels, &merge_props)
-                {
-                    cached_val
-                } else {
-                    if catalog.has_preferred_node_lookup_index(labels, &merge_props)? {
-                        self.hot_path_trace.mark_merge_schema_lookup();
+                let node_val =
+                    if let Some(cached_val) = self.find_in_merge_cache(labels, &merge_props) {
+                        cached_val
                     } else {
-                        self.hot_path_trace.mark_merge_scan_fallback();
-                    }
-                    let mut found_node: Option<Value> = None;
-                    for props in self.lookup_matching_node_props(labels, &merge_props)? {
-                        if !node_matches_pattern(&props, labels, &merge_props) {
-                            continue;
+                        if catalog.has_preferred_node_lookup_index(labels, &merge_props)? {
+                            self.hot_path_trace.mark_merge_schema_lookup();
+                        } else {
+                            self.hot_path_trace.mark_merge_scan_fallback();
                         }
-                        found_node = Some(
-                            serde_json::to_value(&props)
-                                .map_err(|e| EvalError::SerializationError(e.to_string()))?,
-                        );
-                        break;
-                    }
-
-                    if let Some(existing) = found_node {
-                        self.cache_merge_node(labels, &merge_props, &existing);
-                        // ON MATCH SET items: apply to matched row, re-extract updated value
-                        let mut matched_val = existing;
-                        if !merge.on_match.is_empty() {
-                            let mut match_row = base_row.clone();
-                            if let Some(var) = &node_pat.variable {
-                                match_row.insert(var.clone(), matched_val.clone());
+                        let mut found_node: Option<Value> = None;
+                        for props in self.lookup_matching_node_props(labels, &merge_props)? {
+                            if !node_matches_pattern(&props, labels, &merge_props) {
+                                continue;
                             }
-                            self.execute_set_clause(
-                                std::slice::from_mut(&mut match_row),
-                                &merge.on_match,
-                                params,
-                                stats,
-                            )?;
-                            if let Some(var) = &node_pat.variable {
-                                if let Some(Value::Object(updated_props)) = match_row.get(var) {
+                            found_node = Some(
+                                serde_json::to_value(&props)
+                                    .map_err(|e| EvalError::SerializationError(e.to_string()))?,
+                            );
+                            break;
+                        }
+
+                        if let Some(existing) = found_node {
+                            self.cache_merge_node(labels, &merge_props, &existing);
+                            // ON MATCH SET items: apply to matched row, re-extract updated value
+                            let mut matched_val = existing;
+                            if !merge.on_match.is_empty() {
+                                let mut match_row = base_row.clone();
+                                if let Some(var) = &node_pat.variable {
+                                    match_row.insert(var.clone(), matched_val.clone());
+                                }
+                                self.execute_set_clause(
+                                    std::slice::from_mut(&mut match_row),
+                                    &merge.on_match,
+                                    params,
+                                    stats,
+                                )?;
+                                if let Some(var) = &node_pat.variable
+                                    && let Some(Value::Object(updated_props)) = match_row.get(var)
+                                {
                                     let persisted: HashMap<String, Value> =
                                         updated_props.clone().into_iter().collect();
                                     self.persist_node_props(&persisted)?;
@@ -6975,43 +6975,43 @@ impl EvalEngine {
                                     matched_val = serialized;
                                 }
                             }
-                        }
-                        matched_val
-                    } else {
-                        let id = Uuid::new_v4().to_string();
-                        let key = format!("{label}:{id}");
-                        let mut props = merge_props.clone();
-                        props.insert("_id".to_string(), Value::String(key.clone()));
-                        props.insert(
-                            "_labels".to_string(),
-                            Value::Array(
-                                labels
-                                    .iter()
-                                    .map(|entry| Value::String(entry.clone()))
-                                    .collect(),
-                            ),
-                        );
+                            matched_val
+                        } else {
+                            let id = Uuid::new_v4().to_string();
+                            let key = format!("{label}:{id}");
+                            let mut props = merge_props.clone();
+                            props.insert("_id".to_string(), Value::String(key.clone()));
+                            props.insert(
+                                "_labels".to_string(),
+                                Value::Array(
+                                    labels
+                                        .iter()
+                                        .map(|entry| Value::String(entry.clone()))
+                                        .collect(),
+                                ),
+                            );
 
-                        // ON CREATE SET items — defer constraint check and persistence
-                        // until after SET has run, since SET may add required properties.
-                        if !merge.on_create.is_empty() {
-                            stats.nodes_created += 1;
-                            stats.properties_set += node_pat.properties.len();
-                            let mut created = serde_json::to_value(&props)
-                                .map_err(|e| EvalError::SerializationError(e.to_string()))?;
+                            // ON CREATE SET items — defer constraint check and persistence
+                            // until after SET has run, since SET may add required properties.
+                            if !merge.on_create.is_empty() {
+                                stats.nodes_created += 1;
+                                stats.properties_set += node_pat.properties.len();
+                                let mut created = serde_json::to_value(&props)
+                                    .map_err(|e| EvalError::SerializationError(e.to_string()))?;
 
-                            let mut create_row = base_row.clone();
-                            if let Some(var) = &node_pat.variable {
-                                create_row.insert(var.clone(), created.clone());
-                            }
-                            self.execute_set_clause(
-                                std::slice::from_mut(&mut create_row),
-                                &merge.on_create,
-                                params,
-                                stats,
-                            )?;
-                            if let Some(var) = &node_pat.variable {
-                                if let Some(Value::Object(updated_props)) = create_row.get(var) {
+                                let mut create_row = base_row.clone();
+                                if let Some(var) = &node_pat.variable {
+                                    create_row.insert(var.clone(), created.clone());
+                                }
+                                self.execute_set_clause(
+                                    std::slice::from_mut(&mut create_row),
+                                    &merge.on_create,
+                                    params,
+                                    stats,
+                                )?;
+                                if let Some(var) = &node_pat.variable
+                                    && let Some(Value::Object(updated_props)) = create_row.get(var)
+                                {
                                     let persisted: HashMap<String, Value> =
                                         updated_props.clone().into_iter().collect();
                                     // Validate constraints after ON CREATE SET
@@ -7019,25 +7019,24 @@ impl EvalEngine {
                                     self.persist_node_props(&persisted)?;
                                     created = Value::Object(updated_props.clone());
                                 }
-                            }
-                            if node_pat.variable.is_none() {
+                                if node_pat.variable.is_none() {
+                                    self.check_node_constraints(labels, &props)?;
+                                    self.persist_node_props(&props)?;
+                                }
+                                self.cache_merge_node(labels, &merge_props, &created);
+                                created
+                            } else {
                                 self.check_node_constraints(labels, &props)?;
                                 self.persist_node_props(&props)?;
+                                stats.nodes_created += 1;
+                                stats.properties_set += node_pat.properties.len();
+                                let created = serde_json::to_value(&props)
+                                    .map_err(|e| EvalError::SerializationError(e.to_string()))?;
+                                self.cache_merge_node(labels, &merge_props, &created);
+                                created
                             }
-                            self.cache_merge_node(labels, &merge_props, &created);
-                            created
-                        } else {
-                            self.check_node_constraints(labels, &props)?;
-                            self.persist_node_props(&props)?;
-                            stats.nodes_created += 1;
-                            stats.properties_set += node_pat.properties.len();
-                            let created = serde_json::to_value(&props)
-                                .map_err(|e| EvalError::SerializationError(e.to_string()))?;
-                            self.cache_merge_node(labels, &merge_props, &created);
-                            created
                         }
-                    }
-                };
+                    };
 
                 let mut row = base_row.clone();
                 if let Some(var) = &node_pat.variable {
@@ -7150,17 +7149,17 @@ impl EvalEngine {
                         stats,
                     )?;
                     // After ON CREATE SET, validate constraints on the updated properties
-                    if let Some(var) = &edge_pat.variable {
-                        if let Some(Value::Object(props)) = row.get(var) {
-                            let updated_props: HashMap<String, Value> =
-                                props.clone().into_iter().collect();
-                            self.check_relationship_constraints(
-                                &edge_type_for_check,
-                                &updated_props,
-                                &start_id_for_check,
-                                &end_id_for_check,
-                            )?;
-                        }
+                    if let Some(var) = &edge_pat.variable
+                        && let Some(Value::Object(props)) = row.get(var)
+                    {
+                        let updated_props: HashMap<String, Value> =
+                            props.clone().into_iter().collect();
+                        self.check_relationship_constraints(
+                            &edge_type_for_check,
+                            &updated_props,
+                            &start_id_for_check,
+                            &end_id_for_check,
+                        )?;
                     }
                 } else if !is_new && !merge.on_match.is_empty() {
                     self.execute_set_clause(
@@ -7349,10 +7348,10 @@ impl EvalEngine {
             if let Some(path_var) = &pattern.path_variable {
                 final_row.insert(path_var.clone(), path_value(node_values, edge_values));
             }
-            if let Some(expression) = where_expression {
-                if !self.eval_where_predicate(expression, &final_row, params)? {
-                    return Ok(());
-                }
+            if let Some(expression) = where_expression
+                && !self.eval_where_predicate(expression, &final_row, params)?
+            {
+                return Ok(());
             }
             rows.push(RelationshipMatchRow {
                 row: final_row,
@@ -7534,48 +7533,46 @@ impl EvalEngine {
                 } else {
                     self.node_props_by_id(&current_id)?
                 };
-                if let Some(end_props) = end_props {
-                    if node_matches_pattern(&end_props, &end_pattern.labels, &expected_end_props)
-                        && bound_node_matches_row(row, end_pattern.variable.as_deref(), &end_props)
-                    {
-                        let end_value = if depth == 0 {
-                            current_value.clone()
-                        } else {
-                            serde_json::to_value(&end_props)
-                                .map_err(|e| EvalError::SerializationError(e.to_string()))?
-                        };
-                        let node_values_tail = if depth == 0 {
-                            Vec::new()
-                        } else {
-                            path_node_ids
-                                .iter()
-                                .skip(1)
-                                .map(|node_id| {
-                                    let props =
-                                        self.node_props_by_id(node_id)?.ok_or_else(|| {
-                                            EvalError::ExecutionError(format!(
-                                                "path node '{}' disappeared during traversal",
-                                                node_id
-                                            ))
-                                        })?;
-                                    serde_json::to_value(&props)
-                                        .map_err(|e| EvalError::SerializationError(e.to_string()))
-                                })
-                                .collect::<Result<Vec<_>, _>>()?
-                        };
-                        let edge_values = path_edges
+                if let Some(end_props) = end_props
+                    && node_matches_pattern(&end_props, &end_pattern.labels, &expected_end_props)
+                    && bound_node_matches_row(row, end_pattern.variable.as_deref(), &end_props)
+                {
+                    let end_value = if depth == 0 {
+                        current_value.clone()
+                    } else {
+                        serde_json::to_value(&end_props)
+                            .map_err(|e| EvalError::SerializationError(e.to_string()))?
+                    };
+                    let node_values_tail = if depth == 0 {
+                        Vec::new()
+                    } else {
+                        path_node_ids
                             .iter()
-                            .map(edge_record_to_value)
-                            .collect::<Result<Vec<_>, _>>()?;
-                        matches.push(RelationshipStepMatch {
-                            next_props: end_props,
-                            next_value: end_value,
-                            edge_binding_value: Value::Array(edge_values.clone()),
-                            node_values_tail,
-                            edge_values,
-                            hops: depth as usize,
-                        });
-                    }
+                            .skip(1)
+                            .map(|node_id| {
+                                let props = self.node_props_by_id(node_id)?.ok_or_else(|| {
+                                    EvalError::ExecutionError(format!(
+                                        "path node '{}' disappeared during traversal",
+                                        node_id
+                                    ))
+                                })?;
+                                serde_json::to_value(&props)
+                                    .map_err(|e| EvalError::SerializationError(e.to_string()))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+                    let edge_values = path_edges
+                        .iter()
+                        .map(edge_record_to_value)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    matches.push(RelationshipStepMatch {
+                        next_props: end_props,
+                        next_value: end_value,
+                        edge_binding_value: Value::Array(edge_values.clone()),
+                        node_values_tail,
+                        edge_values,
+                        hops: depth as usize,
+                    });
                 }
             }
 
@@ -7601,10 +7598,10 @@ impl EvalEngine {
                 };
                 let next_depth = depth + 1;
                 let visit_key = next_id.clone();
-                if let Some(&prev_depth) = visited.get(&visit_key) {
-                    if prev_depth < next_depth {
-                        continue;
-                    }
+                if let Some(&prev_depth) = visited.get(&visit_key)
+                    && prev_depth < next_depth
+                {
+                    continue;
                 }
                 visited.insert(visit_key, next_depth);
                 let mut next_node_ids = path_node_ids.clone();
@@ -7750,13 +7747,13 @@ impl EvalEngine {
         params: &HashMap<String, Value>,
     ) -> Result<Vec<HashMap<String, Value>>, EvalError> {
         let expected_props = evaluate_pattern_properties(&pattern.properties, row, params)?;
-        if let Some(variable) = &pattern.variable {
-            if let Some(bound_props) = bound_row_object_props(row, variable) {
-                if node_matches_pattern(&bound_props, &pattern.labels, &expected_props) {
-                    return Ok(vec![bound_props]);
-                }
-                return Ok(Vec::new());
+        if let Some(variable) = &pattern.variable
+            && let Some(bound_props) = bound_row_object_props(row, variable)
+        {
+            if node_matches_pattern(&bound_props, &pattern.labels, &expected_props) {
+                return Ok(vec![bound_props]);
             }
+            return Ok(Vec::new());
         }
 
         self.matching_node_props(pattern, row, params)
@@ -7770,13 +7767,13 @@ impl EvalEngine {
         where_expression: Option<&Expression>,
     ) -> Result<Vec<HashMap<String, Value>>, EvalError> {
         let expected_props = evaluate_pattern_properties(&pattern.properties, row, params)?;
-        if let Some(variable) = &pattern.variable {
-            if let Some(bound_props) = bound_row_object_props(row, variable) {
-                if node_matches_pattern(&bound_props, &pattern.labels, &expected_props) {
-                    return Ok(vec![bound_props]);
-                }
-                return Ok(Vec::new());
+        if let Some(variable) = &pattern.variable
+            && let Some(bound_props) = bound_row_object_props(row, variable)
+        {
+            if node_matches_pattern(&bound_props, &pattern.labels, &expected_props) {
+                return Ok(vec![bound_props]);
             }
+            return Ok(Vec::new());
         }
         self.matching_node_props_with_where(pattern, row, params, where_expression)
     }
@@ -7949,21 +7946,19 @@ fn extract_node_in_list_predicate(
             expressions.push(&operands.right);
             continue;
         }
-        if let Expression::InList { operands, .. } = expression {
-            if let Expression::PropertyAccess {
+        if let Expression::InList { operands, .. } = expression
+            && let Expression::PropertyAccess {
                 variable: property_variable,
                 property,
             } = &operands.left
-            {
-                if property_variable == variable {
-                    let value = copperdb_filter::eval_expression(&operands.right, row, params)?;
-                    if let Value::Array(values) = value {
-                        return Ok(Some(NodeInListPredicate {
-                            property: property.clone(),
-                            values,
-                        }));
-                    }
-                }
+            && property_variable == variable
+        {
+            let value = copperdb_filter::eval_expression(&operands.right, row, params)?;
+            if let Value::Array(values) = value {
+                return Ok(Some(NodeInListPredicate {
+                    property: property.clone(),
+                    values,
+                }));
             }
         }
     }
@@ -7993,34 +7988,32 @@ fn extract_node_range_predicate(
                 variable: left_variable,
                 property,
             } = &operands.left
+                && left_variable == variable
             {
-                if left_variable == variable {
-                    let value = copperdb_filter::eval_expression(&operands.right, row, params)?;
-                    return Ok(
-                        is_range_comparable_value(&value).then(|| NodeRangePredicate {
-                            property: property.clone(),
-                            comparison,
-                            value,
-                        }),
-                    );
-                }
+                let value = copperdb_filter::eval_expression(&operands.right, row, params)?;
+                return Ok(
+                    is_range_comparable_value(&value).then(|| NodeRangePredicate {
+                        property: property.clone(),
+                        comparison,
+                        value,
+                    }),
+                );
             }
 
             if let Expression::PropertyAccess {
                 variable: right_variable,
                 property,
             } = &operands.right
+                && right_variable == variable
             {
-                if right_variable == variable {
-                    let value = copperdb_filter::eval_expression(&operands.left, row, params)?;
-                    return Ok(
-                        is_range_comparable_value(&value).then(|| NodeRangePredicate {
-                            property: property.clone(),
-                            comparison: invert_range_comparison(comparison),
-                            value,
-                        }),
-                    );
-                }
+                let value = copperdb_filter::eval_expression(&operands.left, row, params)?;
+                return Ok(
+                    is_range_comparable_value(&value).then(|| NodeRangePredicate {
+                        property: property.clone(),
+                        comparison: invert_range_comparison(comparison),
+                        value,
+                    }),
+                );
             }
 
             Ok(None)

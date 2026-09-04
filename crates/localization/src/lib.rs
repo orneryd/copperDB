@@ -2,7 +2,7 @@
 
 rust_i18n::i18n!("locales", fallback = "en-US");
 
-use fluent_langneg::{negotiate_languages, NegotiationStrategy};
+use fluent_langneg::{NegotiationStrategy, negotiate_languages};
 use icu_locid::{LanguageIdentifier, Locale};
 use icu_plurals::{PluralCategory, PluralRules};
 use std::borrow::Cow;
@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::env;
 use std::error::Error;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const ENV_LANGUAGE: &str = "COPPERDB_LANGUAGE";
 pub const AUTO_LANGUAGE: &str = "auto";
@@ -1183,11 +1183,13 @@ mod tests {
         );
         assert_eq!(error.code(), "storage.unavailable");
         assert_eq!(error.to_string(), "storage unavailable");
-        assert!(error
-            .source()
-            .unwrap()
-            .downcast_ref::<DiskError>()
-            .is_some());
+        assert!(
+            error
+                .source()
+                .unwrap()
+                .downcast_ref::<DiskError>()
+                .is_some()
+        );
     }
 
     #[test]
@@ -1242,9 +1244,11 @@ mod tests {
 
         let mut duplicate = CATALOG_INVENTORY.to_vec();
         duplicate.push(CATALOG_INVENTORY[0]);
-        assert!(validate_catalog_inventory(&duplicate)
-            .unwrap_err()
-            .contains("duplicate catalog entry"));
+        assert!(
+            validate_catalog_inventory(&duplicate)
+                .unwrap_err()
+                .contains("duplicate catalog entry")
+        );
 
         let missing = CATALOG_INVENTORY
             .iter()

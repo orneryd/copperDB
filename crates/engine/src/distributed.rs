@@ -752,10 +752,10 @@ impl CopperDb {
                                 }
                                 if matched_nodes.is_empty() {
                                     let mut row = base_row.clone();
-                                    if let Some(variable) = variable {
-                                        if !row.contains_key(variable) {
-                                            row.insert(variable.clone(), Value::Null);
-                                        }
+                                    if let Some(variable) = variable
+                                        && !row.contains_key(variable)
+                                    {
+                                        row.insert(variable.clone(), Value::Null);
                                     }
                                     next_rows.push(row);
                                     continue;

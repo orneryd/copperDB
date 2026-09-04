@@ -2,14 +2,14 @@ use std::collections::BTreeMap;
 
 use copperdb_engine::{CopperDb, DatabaseConfig};
 use copperdb_search::{
-    merge_rrf_search_batches, merge_rrf_search_hits, RrfConfig, RrfSearchBatch, RrfSearchHit,
-    SearchQuery,
+    RrfConfig, RrfSearchBatch, RrfSearchHit, SearchQuery, merge_rrf_search_batches,
+    merge_rrf_search_hits,
 };
 use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind, NodeRecord, StorageEngine};
 use copperdb_topology::{FabricGlobalId, PlacementKey};
 use copperdb_util::RequestContext;
 use criterion::{
-    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
+    BatchSize, BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main,
 };
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -199,8 +199,8 @@ impl Workload {
         );
 
         eprintln!(
-            "search profile RRF hybrid: nodes={NODE_COUNT}, dimensions={DIMENSIONS}, limit={LIMIT}, response_cache=disabled, storage={}"
-            , db.storage_engine().backend_name()
+            "search profile RRF hybrid: nodes={NODE_COUNT}, dimensions={DIMENSIONS}, limit={LIMIT}, response_cache=disabled, storage={}",
+            db.storage_engine().backend_name()
         );
         Self {
             db,

@@ -44,12 +44,12 @@ pub use crate::embedding_runtime::{
 };
 use crate::vector_indexes::VectorIndexManager;
 use copperdb_audit::{AuditConfig, AuditLog, Event, EventType};
-use copperdb_cache::{is_cacheable_read_query, QueryCache, QueryResultCache};
+use copperdb_cache::{QueryCache, QueryResultCache, is_cacheable_read_query};
 use copperdb_compliance::{ComplianceManager, ComplianceReporter};
 use copperdb_cypher::{
-    can_execute_as_pipeline, detect_query_pattern, match_compound_query_shape, Clause,
-    EdgeDirection, Expression, LiteralValue, Parser, Pattern, QueryType, ReturnItem, SetItem,
-    WhereClause, WithClause,
+    Clause, EdgeDirection, Expression, LiteralValue, Parser, Pattern, QueryType, ReturnItem,
+    SetItem, WhereClause, WithClause, can_execute_as_pipeline, detect_query_pattern,
+    match_compound_query_shape,
 };
 use copperdb_eval::{
     DeniedImportFileService, EvalEngine, ImportFileService, ProcedureMode, ProcedureRegistrar,
@@ -57,16 +57,17 @@ use copperdb_eval::{
     RestrictedImportFileService, RootedImportFileService,
 };
 use copperdb_fabric::{
-    merge_fabric_aggregates, merge_fabric_paths, merge_fabric_rows, FabricAggregateOptions,
-    FabricMergedPaths, FabricMergedRows, FabricPathBatch, FabricPathMergeOptions, FabricReadPlan,
-    FabricReadRequest, FabricRowBatch, FabricRowMergeOptions, FabricTopology,
+    FabricAggregateOptions, FabricMergedPaths, FabricMergedRows, FabricPathBatch,
+    FabricPathMergeOptions, FabricReadPlan, FabricReadRequest, FabricRowBatch,
+    FabricRowMergeOptions, FabricTopology, merge_fabric_aggregates, merge_fabric_paths,
+    merge_fabric_rows,
 };
 use copperdb_filter::{
-    eval_expression, eval_predicate, FunctionExecutionContext, FunctionRegistrar,
-    FunctionRegistryBuilder,
+    FunctionExecutionContext, FunctionRegistrar, FunctionRegistryBuilder, eval_expression,
+    eval_predicate,
 };
 use copperdb_inference::SuggestionRepository;
-use copperdb_kms::{new_provider, ProviderFactoryConfig};
+use copperdb_kms::{ProviderFactoryConfig, new_provider};
 use copperdb_plugin::ResolvedPackageSet;
 use copperdb_replication::{
     CassandraCoordinator, Command, DistributedReadOutcome, DistributedWriteOutcome,
@@ -74,12 +75,13 @@ use copperdb_replication::{
     ScheduledRepairWorker,
 };
 use copperdb_search::{
-    collect_fabric_hydration_records_with_context,
+    CrossEncoderConfig, CrossEncoderReranker, FabricHydrationRequest, FabricRankedSearchExecution,
+    GgufRerankScorer, HydrationTransport, LocalReranker, LocalRerankerConfig,
+    RankedSearchTransport, Reranker, RrfConfig, RrfHydratedSearchOutcome, RrfHydrationRecord,
+    RrfSearchBatch, RrfSearchHit, RrfSearchOutcome, RrfSearchPolicy, SearchQuery, SearchResult,
+    apply_reranker_to_hydrated_outcome, collect_fabric_hydration_records_with_context,
     collect_planned_fabric_ranked_batches_with_context, execute_planned_fabric_ranked_search,
-    hydrate_rrf_search_outcome, merge_rrf_search_batches, FabricHydrationRequest,
-    FabricRankedSearchExecution, HydrationTransport, RankedSearchTransport, RrfConfig,
-    RrfHydratedSearchOutcome, RrfHydrationRecord, RrfSearchBatch, RrfSearchHit, RrfSearchOutcome,
-    RrfSearchPolicy, SearchQuery, SearchResult,
+    hydrate_rrf_search_outcome, merge_rrf_search_batches,
 };
 use copperdb_storage::{
     EdgeRecord, IndexEntityType, IndexKind, KnowledgePolicyAccessMetadata, NodeRecord,
@@ -95,7 +97,7 @@ use copperdb_util::RequestCancelled;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use thiserror::Error;
 
@@ -297,6 +299,7 @@ pub struct DatabaseConfig {
     /// Fsync the CopperDB WAL and Fjall batch before acknowledging writes.
     pub sync_writes: bool,
     pub runtime_config: copperdb_config::EffectiveDatabaseConfig,
+    pub configured_settings: BTreeMap<String, String>,
     pub storage_encryption_master_key: Option<Vec<u8>>,
     pub storage_encryption_key_uri: String,
     pub distributed_repair_queue_dir: Option<String>,
@@ -323,6 +326,7 @@ impl Default for DatabaseConfig {
             log_queries: false,
             sync_writes: false,
             runtime_config,
+            configured_settings: BTreeMap::new(),
             storage_encryption_master_key: None,
             storage_encryption_key_uri: "kms://local/storage".into(),
             distributed_repair_queue_dir: None,
@@ -445,9 +449,11 @@ impl From<QueryStats> for ResultStats {
 /// The primary embedded database engine.
 pub struct CopperDb {
     config: DatabaseConfig,
+    settings_snapshot: RwLock<SettingsSnapshot>,
     storage: Arc<StorageEngine>,
     vector_indexes: Arc<VectorIndexManager>,
     embedding_runtime: Arc<EmbeddingRuntime>,
+    reranker: Option<Arc<dyn Reranker>>,
     eval: EvalEngine,
     tx_manager: Arc<TransactionManager>,
     query_cache: Arc<QueryCache<copperdb_cypher::Query>>,
@@ -458,6 +464,12 @@ pub struct CopperDb {
     inference_runtime: Option<Arc<inference_runtime::InferenceRuntime>>,
     _inference_dispatcher: Option<inference_runtime::InferenceDispatcher>,
     compliance: Arc<ComplianceManager>,
+}
+
+#[derive(Debug, Clone)]
+struct SettingsSnapshot {
+    configured: BTreeMap<String, String>,
+    active: BTreeMap<String, String>,
 }
 
 mod copperdb;

@@ -40,6 +40,7 @@ pub enum Clause {
     CreateConstraint(CreateConstraintClause),
     DropConstraint(DropConstraintClause),
     ShowConstraints(ShowConstraintsClause),
+    ShowSettings(ShowSettingsClause),
     CreateIndex(CreateIndexClause),
     DropIndex(DropIndexClause),
     ShowIndexes(ShowIndexesClause),
@@ -189,6 +190,11 @@ pub struct DropConstraintClause {
 
 #[derive(Debug, Clone)]
 pub struct ShowConstraintsClause;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShowSettingsClause {
+    pub names: Vec<String>,
+}
 
 #[derive(Debug, Clone)]
 pub struct CreateIndexClause {

@@ -17,8 +17,10 @@ tokio.workspace = true
 tracing.workspace = true
 tantivy.workspace = true
 regex.workspace = true
+reqwest.workspace = true
 copperdb-storage = { workspace = true }
 copperdb-indexing = { workspace = true }
+copperdb-localllm = { workspace = true }
 copperdb-math = { workspace = true }
 copperdb-topology = { workspace = true }
 copperdb-util = { workspace = true }

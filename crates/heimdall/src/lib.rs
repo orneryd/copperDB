@@ -5,9 +5,9 @@
 //! Monitors query patterns, detects anomalies, and triggers responses.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use thiserror::Error;
 
@@ -272,7 +272,7 @@ impl RateLimiter {
 mod tests {
     use super::*;
     use copperdb_plugin::{
-        resolve_packages, ActionQueryResult, ActionQueryService, PackageRuntime, PackageSpec,
+        ActionQueryResult, ActionQueryService, PackageRuntime, PackageSpec, resolve_packages,
     };
     use copperdb_util::RequestContext;
     use std::sync::Mutex;

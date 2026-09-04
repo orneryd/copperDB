@@ -9,8 +9,8 @@ pub use action::{
 };
 pub use event::{
     DatabaseEvent, DatabaseEventFuture, DatabaseEventHandler, DatabaseEventHookDescriptor,
-    DatabaseEventRuntime, DatabaseEventType, EventHookMetrics, EVENT_HOOK_CAPACITY,
-    EVENT_INGRESS_CAPACITY,
+    DatabaseEventRuntime, DatabaseEventType, EVENT_HOOK_CAPACITY, EVENT_INGRESS_CAPACITY,
+    EventHookMetrics,
 };
 
 use async_trait::async_trait;
@@ -28,8 +28,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::Mutex;
@@ -1153,14 +1153,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["example.base", "example.consumer"]
         );
-        assert!(resolved
-            .function_registry()
-            .get("example.base.value")
-            .is_some());
-        assert!(resolved
-            .procedure_registry()
-            .get("example.consumer.run")
-            .is_some());
+        assert!(
+            resolved
+                .function_registry()
+                .get("example.base.value")
+                .is_some()
+        );
+        assert!(
+            resolved
+                .procedure_registry()
+                .get("example.consumer.run")
+                .is_some()
+        );
     }
 
     #[test]
@@ -1533,11 +1537,13 @@ mod tests {
             ]
         );
         runtime.shutdown().await.unwrap();
-        assert!(!events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|event| event.contains("create:example.dependent")));
+        assert!(
+            !events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| event.contains("create:example.dependent"))
+        );
     }
 
     #[tokio::test]

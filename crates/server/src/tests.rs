@@ -198,10 +198,12 @@ async fn mcp_run_cypher_requires_admin_access() {
     let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(payload["error"].is_null(), "{payload}");
     assert!(payload["result"]["isError"].is_null(), "{payload}");
-    assert!(payload["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("Rows: 1"));
+    assert!(
+        payload["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Rows: 1")
+    );
 }
 
 #[tokio::test]
@@ -922,10 +924,12 @@ async fn mcp_http_rejects_incompatible_accept_without_dispatch() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
-    assert!(axum::body::to_bytes(response.into_body(), 1024)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1048,10 +1052,12 @@ async fn mcp_http_notifications_execute_without_response_bodies() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
-    assert!(axum::body::to_bytes(response.into_body(), 1024)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     let response = app
         .oneshot(
@@ -1076,10 +1082,12 @@ async fn mcp_http_notifications_execute_without_response_bodies() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
-    assert!(axum::body::to_bytes(response.into_body(), 1024)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     let result = open_engine(&state, database)
         .unwrap()
@@ -1107,10 +1115,12 @@ async fn mcp_http_notifications_execute_without_response_bodies() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
-    assert!(axum::body::to_bytes(response.into_body(), 1024)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1259,10 +1269,12 @@ async fn mcp_http_batches_preserve_order_and_omit_notifications() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
-    assert!(axum::body::to_bytes(response.into_body(), 1024)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1359,11 +1371,13 @@ async fn runtime_configuration_loads_apoc_only_when_enabled() {
 
     assert_eq!(state.packages.packages().len(), 1);
     assert_eq!(state.packages.packages()[0].id, copperdb_apoc::PACKAGE_ID);
-    assert!(state
-        .packages
-        .function_registry()
-        .get("apoc.create.uuid")
-        .is_some());
+    assert!(
+        state
+            .packages
+            .function_registry()
+            .get("apoc.create.uuid")
+            .is_some()
+    );
     assert_eq!(
         state
             .package_runtime
@@ -1443,9 +1457,11 @@ async fn apoc_remote_load_requires_explicit_network_grant() {
 
     let error = state.configure_runtime(Arc::new(config)).await.unwrap_err();
 
-    assert!(error
-        .to_string()
-        .contains("package copperdb.apoc was not granted capability Network"));
+    assert!(
+        error
+            .to_string()
+            .contains("package copperdb.apoc was not granted capability Network")
+    );
 }
 
 #[tokio::test]
@@ -1476,9 +1492,11 @@ async fn apoc_remote_load_rejects_allowlisted_non_public_addresses() {
         )
         .unwrap_err();
 
-    assert!(error
-        .to_string()
-        .contains("APOC remote URL host resolves to a disallowed address"));
+    assert!(
+        error
+            .to_string()
+            .contains("APOC remote URL host resolves to a disallowed address")
+    );
     state.shutdown_packages().await.unwrap();
 }
 
@@ -1507,9 +1525,11 @@ async fn apoc_import_json_requires_explicit_graph_write_grant() {
     );
     let error = state.configure_runtime(Arc::new(config)).await.unwrap_err();
 
-    assert!(error
-        .to_string()
-        .contains("package copperdb.apoc was not granted capability QueryWrite"));
+    assert!(
+        error
+            .to_string()
+            .contains("package copperdb.apoc was not granted capability QueryWrite")
+    );
 }
 
 #[tokio::test]
@@ -1732,11 +1752,13 @@ async fn bolt_tcp_executes_loaded_apoc_function() {
 #[tokio::test]
 async fn runtime_configuration_loads_heimdall_only_when_enabled() {
     let mut state = AppState::default();
-    assert!(state
-        .packages
-        .action_registry()
-        .get(copperdb_heimdall::QUERY_ACTION)
-        .is_none());
+    assert!(
+        state
+            .packages
+            .action_registry()
+            .get(copperdb_heimdall::QUERY_ACTION)
+            .is_none()
+    );
 
     let mut config = RuntimeConfig::default();
     config.packages.enabled = vec![copperdb_heimdall::PACKAGE_ID.into()];
@@ -1863,7 +1885,7 @@ async fn runtime_configuration_rejects_undeclared_package_settings() {
 
 #[test]
 fn http_trace_context_excludes_baggage_and_credentials() {
-    use axum::http::{header, HeaderValue};
+    use axum::http::{HeaderValue, header};
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -1966,7 +1988,7 @@ fn encode_bolt_chunks(message: &[u8]) -> Vec<u8> {
 
 #[tokio::test]
 async fn request_context_middleware_owns_http_request_cancellation() {
-    use axum::{body::Body, http::Request, routing::get, Extension, Router};
+    use axum::{Extension, Router, body::Body, http::Request, routing::get};
     use tower::ServiceExt;
 
     let captured = Arc::new(Mutex::new(None));
@@ -2001,7 +2023,7 @@ async fn request_context_middleware_owns_http_request_cancellation() {
 
 #[tokio::test]
 async fn request_context_middleware_cancels_dropped_http_request() {
-    use axum::{body::Body, http::Request, routing::get, Extension, Router};
+    use axum::{Extension, Router, body::Body, http::Request, routing::get};
     use tower::ServiceExt;
 
     let (context_tx, context_rx) = tokio::sync::oneshot::channel();
@@ -2126,7 +2148,7 @@ async fn transaction_handler_maps_engine_cancellation_to_upstream_timeout_respon
 
 #[tokio::test]
 async fn request_context_middleware_returns_timeout_and_cancels_context() {
-    use axum::{body::Body, http::Request, routing::get, Extension, Router};
+    use axum::{Extension, Router, body::Body, http::Request, routing::get};
     use tower::ServiceExt;
 
     let (context_tx, context_rx) = tokio::sync::oneshot::channel();
@@ -3698,16 +3720,18 @@ fn distributed_write_transport_builds_with_generated_cluster_auth() {
         })
         .unwrap();
 
-    assert!(build_local_replica_transport(
-        &state,
-        &engine,
-        &placement,
-        ConsistencyLevel::Quorum,
-        None,
-        None,
-        true,
-    )
-    .is_ok());
+    assert!(
+        build_local_replica_transport(
+            &state,
+            &engine,
+            &placement,
+            ConsistencyLevel::Quorum,
+            None,
+            None,
+            true,
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -3759,16 +3783,18 @@ fn distributed_read_transport_builds_with_forwarded_caller_auth() {
         })
         .unwrap();
 
-    assert!(build_local_replica_transport(
-        &state,
-        &engine,
-        &placement,
-        ConsistencyLevel::Quorum,
-        None,
-        Some("viewer-token"),
-        false,
-    )
-    .is_ok());
+    assert!(
+        build_local_replica_transport(
+            &state,
+            &engine,
+            &placement,
+            ConsistencyLevel::Quorum,
+            None,
+            Some("viewer-token"),
+            false,
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -3970,7 +3996,7 @@ async fn liveness_and_readiness_probes_are_public_and_report_database_availabili
 #[tokio::test]
 async fn observability_router_negotiates_metrics_and_reports_version() {
     use axum::body::Body;
-    use axum::http::{header, Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use tower::ServiceExt;
 
     let telemetry = Arc::new(Telemetry::new());
@@ -4002,10 +4028,12 @@ async fn observability_router_negotiates_metrics_and_reports_version() {
         .await
         .unwrap();
     assert_eq!(prometheus.status(), StatusCode::OK);
-    assert!(prometheus.headers()[header::CONTENT_TYPE]
-        .to_str()
-        .unwrap()
-        .starts_with("text/plain"));
+    assert!(
+        prometheus.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain")
+    );
     let body = axum::body::to_bytes(prometheus.into_body(), 1024 * 1024)
         .await
         .unwrap();
@@ -4024,10 +4052,12 @@ async fn observability_router_negotiates_metrics_and_reports_version() {
         )
         .await
         .unwrap();
-    assert!(openmetrics.headers()[header::CONTENT_TYPE]
-        .to_str()
-        .unwrap()
-        .starts_with("application/openmetrics-text"));
+    assert!(
+        openmetrics.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("application/openmetrics-text")
+    );
     let body = axum::body::to_bytes(openmetrics.into_body(), 1024 * 1024)
         .await
         .unwrap();
@@ -4097,7 +4127,7 @@ async fn root_advertises_buildinfo_server_announcement() {
 #[tokio::test]
 async fn database_config_admin_rejects_invalid_override_keys() {
     use axum::body::Body;
-    use axum::http::{header, Method, Request, StatusCode};
+    use axum::http::{Method, Request, StatusCode, header};
     use tower::ServiceExt;
 
     let db_manager = Arc::new(DatabaseManager::new());
@@ -4134,9 +4164,395 @@ async fn database_config_admin_rejects_invalid_override_keys() {
 }
 
 #[tokio::test]
+async fn database_config_admin_reports_redacted_runtime_state() {
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode, header};
+    use tower::ServiceExt;
+
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager.create("clinic", "./data/clinic").unwrap();
+    let mut state = AppState {
+        db_name: "clinic".into(),
+        db_manager,
+        ..Default::default()
+    };
+    state.auth.security_enabled = false;
+    let state = Arc::new(state);
+    let app = build_router(Arc::clone(&state));
+
+    let keys = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/admin/databases/config/keys")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(keys.status(), StatusCode::OK);
+    let keys: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(keys.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(keys.as_array().unwrap().len(), 67);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/admin/databases/clinic/config")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "overrides": {
+                            "COPPERDB_EMBEDDING_API_KEY": "secret-value",
+                            "db.copper.embedding.enabled": "true",
+                            "db.copper.search.bm25.enabled": "true"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        body["configured"]["db.copper.embedding.api.key"],
+        "<REDACTED>"
+    );
+    assert_eq!(
+        body["effective"]["db.copper.embedding.api.key"],
+        "<REDACTED>"
+    );
+    assert_eq!(body["configured"]["db.copper.embedding.enabled"], "true");
+    assert_eq!(body["effective"]["db.copper.embedding.enabled"], "false");
+    assert_eq!(body["effective"]["db.copper.search.bm25.enabled"], "true");
+    assert_eq!(body["pendingRestart"], true);
+    assert_eq!(body["rebuildTriggered"], true);
+    assert!(
+        body["overrides"]
+            .get("COPPERDB_EMBEDDING_API_KEY")
+            .is_none()
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/admin/databases/clinic/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["effective"]["db.copper.embedding.enabled"], "false");
+    assert_eq!(body["pendingRestart"], true);
+
+    let reopened = open_engine(&state, "clinic").unwrap();
+    let settings = reopened
+        .execute(
+            "SHOW SETTINGS db.copper.embedding.enabled, db.copper.search.bm25.enabled",
+            HashMap::new(),
+        )
+        .unwrap();
+    let embedding = settings
+        .rows
+        .iter()
+        .find(|row| row["name"] == Value::String("db.copper.embedding.enabled".into()))
+        .unwrap();
+    let bm25 = settings
+        .rows
+        .iter()
+        .find(|row| row["name"] == Value::String("db.copper.search.bm25.enabled".into()))
+        .unwrap();
+    assert_eq!(embedding["value"], Value::String("false".into()));
+    assert_eq!(embedding["isExplicitlySet"], Value::Bool(true));
+    assert_eq!(bm25["value"], Value::String("true".into()));
+}
+
+#[tokio::test]
+async fn database_config_admin_updates_search_cache_without_rebuild() {
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode, header};
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager
+        .create("clinic", temp.path().join("clinic").to_string_lossy())
+        .unwrap();
+    let mut state = AppState {
+        db_name: "clinic".into(),
+        db_manager,
+        ..Default::default()
+    };
+    state.auth.security_enabled = false;
+    let state = Arc::new(state);
+    let original_engine = open_engine(&state, "clinic").unwrap();
+    assert_eq!(original_engine.ranked_search_cache_stats().max_size, 1_000);
+    let app = build_router(Arc::clone(&state));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/admin/databases/clinic/config")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "overrides": {
+                            "db.copper.search_result_cache.max_entries": "7",
+                            "db.copper.search_result_cache.ttl": "2m"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["pendingRestart"], false);
+    assert_eq!(body["rebuildTriggered"], false);
+
+    let cached_engine = state.engine_cache.read().get("clinic").cloned().unwrap();
+    assert!(Arc::ptr_eq(&original_engine, &cached_engine));
+    assert_eq!(cached_engine.ranked_search_cache_stats().max_size, 7);
+    assert!(cached_engine.ranked_search_cache_stats().enabled);
+
+    let settings = cached_engine
+        .execute(
+            "SHOW SETTINGS db.copper.search_result_cache.max_entries, db.copper.search_result_cache.ttl",
+            HashMap::new(),
+        )
+        .unwrap();
+    assert_eq!(settings.rows.len(), 2);
+    assert!(settings.rows.iter().all(|row| {
+        row.get("isExplicitlySet") == Some(&serde_json::Value::Bool(true))
+            && row.get("value") == row.get("startupValue")
+    }));
+    assert_eq!(settings.rows[0]["value"], "7");
+    assert_eq!(settings.rows[1]["value"], "2m0s");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/admin/databases/clinic/config")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "overrides": {
+                            "db.copper.search_result_cache.max_entries": "0",
+                            "db.copper.search_result_cache.ttl": "1m"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(Arc::ptr_eq(
+        &original_engine,
+        state.engine_cache.read().get("clinic").unwrap()
+    ));
+    let disabled = original_engine.ranked_search_cache_stats();
+    assert_eq!(disabled.max_size, 0);
+    assert!(!disabled.enabled);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/admin/databases/clinic/config")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::json!({"overrides": {}}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let reset = original_engine.ranked_search_cache_stats();
+    assert_eq!(reset.max_size, 1_000);
+    assert!(reset.enabled);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/admin/databases/clinic/config")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "overrides": {
+                            "db.copper.embedding.api.key": "new-secret"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(state.engine_cache.read().get("clinic").is_none());
+
+    let settings = original_engine
+        .execute("SHOW SETTING db.copper.embedding.api.key", HashMap::new())
+        .unwrap();
+    assert_eq!(settings.rows.len(), 1);
+    assert_eq!(settings.rows[0]["value"], "<REDACTED>");
+    assert_eq!(settings.rows[0]["startupValue"], "<REDACTED>");
+    assert_eq!(settings.rows[0]["isExplicitlySet"], true);
+}
+
+#[test]
+fn open_engine_passes_canonical_configured_settings_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let db_manager = Arc::new(DatabaseManager::new());
+    db_manager
+        .create("clinic", temp.path().join("clinic").to_string_lossy())
+        .unwrap();
+    db_manager
+        .set_config_overrides(
+            "clinic",
+            BTreeMap::from([(
+                "db.copper.search_result_cache.max_entries".into(),
+                "17".into(),
+            )]),
+        )
+        .unwrap();
+    let state = AppState {
+        db_name: "clinic".into(),
+        db_manager,
+        ..Default::default()
+    };
+
+    let engine = open_engine(&state, "clinic").unwrap();
+    let result = engine
+        .execute(
+            "SHOW SETTING db.copper.search_result_cache.max_entries",
+            HashMap::new(),
+        )
+        .unwrap();
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0]["value"], "17");
+    assert_eq!(result.rows[0]["startupValue"], "17");
+    assert_eq!(result.rows[0]["isExplicitlySet"], true);
+}
+
+#[tokio::test]
+async fn database_restart_promotes_pending_settings_to_active() {
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode, header};
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let catalog_path = temp.path().join("catalog");
+    let database_path = temp.path().join("clinic");
+    let manager = Arc::new(DatabaseManager::open(&catalog_path).unwrap());
+    manager
+        .create("clinic", database_path.to_string_lossy())
+        .unwrap();
+    let mut initial_state = AppState {
+        db_name: "clinic".into(),
+        db_manager: manager,
+        ..Default::default()
+    };
+    initial_state.auth.security_enabled = false;
+    let initial_state = Arc::new(initial_state);
+    let initial_engine = open_engine(&initial_state, "clinic").unwrap();
+    let app = build_router(Arc::clone(&initial_state));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/admin/databases/clinic/config")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "overrides": {"db.copper.query_cache.max_entries": "7"}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["configured"]["db.copper.query_cache.max_entries"], "7");
+    assert_eq!(
+        body["effective"]["db.copper.query_cache.max_entries"],
+        "1000"
+    );
+    assert_eq!(body["pendingRestart"], true);
+    let active_before_restart = initial_engine
+        .execute(
+            "SHOW SETTING db.copper.query_cache.max_entries",
+            HashMap::new(),
+        )
+        .unwrap();
+    assert_eq!(active_before_restart.rows[0]["value"], "1000");
+    assert_eq!(active_before_restart.rows[0]["startupValue"], "1000");
+    drop(initial_engine);
+    drop(initial_state);
+
+    let reopened_manager = Arc::new(DatabaseManager::open(&catalog_path).unwrap());
+    let reopened_state = AppState {
+        db_name: "clinic".into(),
+        db_manager: reopened_manager,
+        ..Default::default()
+    };
+    let reopened_engine = open_engine(&reopened_state, "clinic").unwrap();
+    let settings = reopened_engine
+        .execute(
+            "SHOW SETTING db.copper.query_cache.max_entries",
+            HashMap::new(),
+        )
+        .unwrap();
+    assert_eq!(settings.rows[0]["value"], "7");
+    assert_eq!(settings.rows[0]["startupValue"], "7");
+    assert_eq!(settings.rows[0]["isExplicitlySet"], true);
+}
+
+#[tokio::test]
 async fn auth_token_uses_durable_authenticator_for_cookie_access() {
     use axum::body::Body;
-    use axum::http::{header, Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use tower::ServiceExt;
 
     let auth_path = unique_auth_path();
@@ -4211,7 +4627,7 @@ async fn auth_token_uses_durable_authenticator_for_cookie_access() {
 #[tokio::test]
 async fn write_query_requires_write_privilege_from_durable_roles() {
     use axum::body::Body;
-    use axum::http::{header, Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use tower::ServiceExt;
 
     let auth_path = unique_auth_path();
@@ -4272,7 +4688,7 @@ async fn write_query_requires_write_privilege_from_durable_roles() {
 async fn neo4j_commit_can_opt_into_distributed_engine_routing() {
     use async_trait::async_trait;
     use axum::body::Body;
-    use axum::http::{header, Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use copperdb_nornicgrpc::{
         GrpcError, NornicReplicaService, RemoteReplicaApplyRequest, RemoteReplicaClient,
         RemoteReplicaReadRequest,
@@ -4477,7 +4893,7 @@ async fn neo4j_commit_can_opt_into_distributed_engine_routing() {
 #[tokio::test]
 async fn neo4j_commit_can_opt_into_distributed_graph_read_routing() {
     use axum::body::Body;
-    use axum::http::{header, Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use copperdb_nornicgrpc::{
         NornicReplicaService, RemoteGraphNodesByPropertyRequest, RemoteReplicaClient,
         TonicRemoteReplicaClient,
@@ -4794,7 +5210,7 @@ async fn neo4j_commit_can_opt_into_distributed_graph_read_routing() {
 #[tokio::test]
 async fn fabric_admin_api_registers_lists_and_plans_database() {
     use axum::body::Body;
-    use axum::http::{header, Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use copperdb_topology::{
         FabricPartitionPolicy, FabricShard, MeshPeer, NodeCapability, PlacementRecord,
     };
@@ -4974,7 +5390,7 @@ async fn fabric_admin_api_registers_lists_and_plans_database() {
 #[tokio::test]
 async fn fabric_admin_api_executes_ranked_search_over_grpc_transports() {
     use axum::body::Body;
-    use axum::http::{header, Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use copperdb_nornicgrpc::{
         GrpcError, NornicReplicaService, RemoteHydrationClient, RemoteHydrationRequest,
         RemoteRankedSearchClient, RemoteRankedSearchRequest, RemoteReplicaApplyRequest,
@@ -5240,12 +5656,14 @@ async fn fabric_admin_api_executes_ranked_search_over_grpc_transports() {
         decoded.hydrated.results[0].entity.as_ref().unwrap()["name"],
         "Alice"
     );
-    assert!(decoded.hydrated.results[0]
-        .entity
-        .as_ref()
-        .unwrap()
-        .get("secret")
-        .is_none());
+    assert!(
+        decoded.hydrated.results[0]
+            .entity
+            .as_ref()
+            .unwrap()
+            .get("secret")
+            .is_none()
+    );
 
     server.abort();
 }
@@ -5254,8 +5672,8 @@ async fn fabric_admin_api_executes_ranked_search_over_grpc_transports() {
 async fn engine_backed_ranked_search_rpc_handler_executes_local_fulltext_runtime() {
     use copperdb_nornicgrpc::proto::nornic_replica_server::NornicReplica;
     use copperdb_nornicgrpc::{
-        proto, RemoteHydrationRequest, RemoteRankedSearchRequest, RemoteReplicaApplyRequest,
-        RemoteReplicaClient, RemoteReplicaReadRequest,
+        RemoteHydrationRequest, RemoteRankedSearchRequest, RemoteReplicaApplyRequest,
+        RemoteReplicaClient, RemoteReplicaReadRequest, proto,
     };
     use copperdb_search::RrfHydrationRecord;
     use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind, NodeRecord};
@@ -5449,8 +5867,8 @@ async fn engine_backed_ranked_search_rpc_handler_executes_local_fulltext_runtime
 async fn engine_backed_ranked_search_rpc_handler_respects_bm25_gate() {
     use copperdb_nornicgrpc::proto::nornic_replica_server::NornicReplica;
     use copperdb_nornicgrpc::{
-        proto, RemoteRankedSearchRequest, RemoteReplicaApplyRequest, RemoteReplicaClient,
-        RemoteReplicaReadRequest,
+        RemoteRankedSearchRequest, RemoteReplicaApplyRequest, RemoteReplicaClient,
+        RemoteReplicaReadRequest, proto,
     };
     use copperdb_topology::PlacementKey;
     use tonic::{Code, Request};
@@ -5514,20 +5932,22 @@ async fn engine_backed_ranked_search_rpc_handler_respects_bm25_gate() {
         .unwrap_err();
 
     assert_eq!(error.code(), Code::Internal);
-    assert!(error
-        .message()
-        .contains("fulltext search is disabled for this database"));
+    assert!(
+        error
+            .message()
+            .contains("fulltext search is disabled for this database")
+    );
 }
 
 #[tokio::test]
 async fn engine_backed_ranked_search_requires_forwarded_caller_authorization() {
     use copperdb_nornicgrpc::proto::nornic_replica_server::NornicReplica;
     use copperdb_nornicgrpc::{
-        proto, RemoteRankedSearchRequest, RemoteReplicaApplyRequest, RemoteReplicaReadRequest,
+        RemoteRankedSearchRequest, RemoteReplicaApplyRequest, RemoteReplicaReadRequest, proto,
     };
     use copperdb_storage::{IndexDefinition, IndexEntityType, IndexKind, NodeRecord};
     use copperdb_topology::PlacementKey;
-    use tonic::{metadata::MetadataValue, Code, Request};
+    use tonic::{Code, Request, metadata::MetadataValue};
 
     struct NoopReplicaClient;
 
@@ -5694,7 +6114,7 @@ async fn engine_backed_ranked_search_requires_forwarded_caller_authorization() {
 #[tokio::test]
 async fn engine_backed_replica_rpc_handler_applies_and_reads_storage() {
     use copperdb_nornicgrpc::proto::nornic_replica_server::NornicReplica;
-    use copperdb_nornicgrpc::{proto, RemoteReplicaApplyRequest, RemoteReplicaReadRequest};
+    use copperdb_nornicgrpc::{RemoteReplicaApplyRequest, RemoteReplicaReadRequest, proto};
     use copperdb_replication::Command;
     use tonic::Request;
 
@@ -5752,7 +6172,7 @@ async fn engine_backed_replica_rpc_handler_applies_and_reads_storage() {
 #[tokio::test]
 async fn local_replica_service_bypasses_cluster_auth_when_security_disabled() {
     use copperdb_nornicgrpc::proto::nornic_replica_server::NornicReplica;
-    use copperdb_nornicgrpc::{proto, RemoteReplicaApplyRequest, RemoteReplicaReadRequest};
+    use copperdb_nornicgrpc::{RemoteReplicaApplyRequest, RemoteReplicaReadRequest, proto};
     use copperdb_replication::Command;
     use tonic::Request;
 
@@ -5811,7 +6231,7 @@ async fn local_replica_service_bypasses_cluster_auth_when_security_disabled() {
 #[tokio::test]
 async fn local_replica_service_requires_admin_jwt_when_security_enabled() {
     use copperdb_nornicgrpc::proto::nornic_replica_server::NornicReplica;
-    use copperdb_nornicgrpc::{proto, RemoteReplicaApplyRequest};
+    use copperdb_nornicgrpc::{RemoteReplicaApplyRequest, proto};
     use copperdb_replication::Command;
     use tonic::metadata::MetadataValue;
     use tonic::{Code, Request};
@@ -5969,7 +6389,7 @@ async fn fabric_admin_api_requires_auth_when_security_enabled() {
 #[tokio::test]
 async fn fabric_admin_api_filters_by_database_access_and_blocks_writes_for_viewers() {
     use axum::body::Body;
-    use axum::http::{header, Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use copperdb_topology::{
         FabricPartitionPolicy, FabricShard, MeshPeer, NodeCapability, PlacementRecord,
     };
@@ -6160,7 +6580,7 @@ async fn fabric_admin_api_filters_by_database_access_and_blocks_writes_for_viewe
 #[tokio::test]
 async fn fabric_ranked_search_respects_per_database_viewer_access() {
     use axum::body::Body;
-    use axum::http::{header, Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use copperdb_nornicgrpc::{
         GrpcError, NornicReplicaService, RemoteHydrationClient, RemoteHydrationRequest,
         RemoteRankedSearchClient, RemoteRankedSearchRequest, RemoteReplicaApplyRequest,
@@ -6488,7 +6908,7 @@ async fn fabric_ranked_search_respects_per_database_viewer_access() {
 #[tokio::test]
 async fn fabric_ranked_search_rejects_databases_without_search_opt_in() {
     use axum::body::Body;
-    use axum::http::{header, Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use copperdb_topology::{
         FabricPartitionPolicy, FabricShard, FabricShardKind, MeshPeer, NodeCapability,
         PlacementKey, PlacementRecord,
@@ -6585,16 +7005,18 @@ async fn fabric_ranked_search_rejects_databases_without_search_opt_in() {
         .await
         .unwrap();
     let decoded: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(decoded["error"]
-        .as_str()
-        .unwrap()
-        .contains("fulltext search is disabled for this database"));
+    assert!(
+        decoded["error"]
+            .as_str()
+            .unwrap()
+            .contains("fulltext search is disabled for this database")
+    );
 }
 
 #[tokio::test]
 async fn fabric_ranked_search_respects_cli_vector_kill_switch() {
     use axum::body::Body;
-    use axum::http::{header, Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use copperdb_topology::{
         FabricPartitionPolicy, FabricShard, FabricShardKind, MeshPeer, NodeCapability,
         PlacementKey, PlacementRecord,
@@ -6705,16 +7127,18 @@ async fn fabric_ranked_search_respects_cli_vector_kill_switch() {
         .await
         .unwrap();
     let decoded: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(decoded["error"]
-        .as_str()
-        .unwrap()
-        .contains("vector search is disabled for this database"));
+    assert!(
+        decoded["error"]
+            .as_str()
+            .unwrap()
+            .contains("vector search is disabled for this database")
+    );
 }
 
 #[tokio::test]
 async fn retention_admin_routes_require_auth_when_security_enabled() {
     use axum::body::Body;
-    use axum::http::{header, Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use tower::ServiceExt;
 
     let auth_path = unique_auth_path();
@@ -6770,7 +7194,7 @@ async fn retention_admin_routes_require_auth_when_security_enabled() {
 #[tokio::test]
 async fn retention_admin_routes_allow_viewer_reads_and_deny_writes() {
     use axum::body::Body;
-    use axum::http::{header, Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use tower::ServiceExt;
 
     let auth_path = unique_auth_path();
@@ -6974,7 +7398,7 @@ async fn test_discovery_returns_neo4j_required_fields() {
 #[tokio::test]
 async fn test_embedded_ui_served_when_static_directory_has_no_index() {
     use axum::body::Body;
-    use axum::http::{header, Request};
+    use axum::http::{Request, header};
     use tower::ServiceExt;
 
     // A custom directory takes precedence per file, then embedded assets fill misses.
@@ -7010,7 +7434,7 @@ async fn test_embedded_ui_served_when_static_directory_has_no_index() {
 #[tokio::test]
 async fn test_headless_mode_always_serves_discovery() {
     use axum::body::Body;
-    use axum::http::{header, Request};
+    use axum::http::{Request, header};
     use tower::ServiceExt;
 
     let mut state = AppState::default();
@@ -7421,7 +7845,7 @@ fn demo_small_galaxy() -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
 #[tokio::test]
 async fn demo_e2e_seed_query_and_persistence() {
     use axum::body::Body;
-    use axum::http::{header, Method, Request, StatusCode};
+    use axum::http::{Method, Request, StatusCode, header};
     use tower::ServiceExt;
 
     let temp_dir = tempfile::tempdir().unwrap();
@@ -7993,7 +8417,7 @@ async fn demo_e2e_seed_query_and_persistence() {
 #[tokio::test]
 async fn demo_shortest_path_e2e_warms_result_cache() {
     use axum::body::Body;
-    use axum::http::{header, Method, Request, StatusCode};
+    use axum::http::{Method, Request, StatusCode, header};
     use copperdb_storage::{EdgeRecord, IndexDefinition, IndexEntityType, IndexKind, NodeRecord};
     use tower::ServiceExt;
 
@@ -8161,7 +8585,7 @@ async fn demo_shortest_path_e2e_warms_result_cache() {
 #[tokio::test]
 async fn e2e_database_create_show_and_persist() {
     use axum::body::Body;
-    use axum::http::{header, Method, Request, StatusCode};
+    use axum::http::{Method, Request, StatusCode, header};
     use tower::ServiceExt;
 
     let temp_dir = tempfile::tempdir().unwrap();
@@ -8566,10 +8990,12 @@ fn appstate_bolt_executor_retains_storage_context_until_commit() {
         .unwrap();
     let transaction_id = uuid::Uuid::parse_str(&transaction.id).unwrap();
 
-    assert!(executor
-        .storage_transactions
-        .lock()
-        .contains_key(&transaction_id));
+    assert!(
+        executor
+            .storage_transactions
+            .lock()
+            .contains_key(&transaction_id)
+    );
     executor.commit_transaction(&transaction).unwrap();
     assert!(executor.storage_transactions.lock().is_empty());
 }
@@ -9010,10 +9436,12 @@ fn appstate_bolt_executor_reads_schema_catalogs_inside_explicit_transactions() {
             None,
         )
         .unwrap();
-    assert!(indexes
-        .rows
-        .iter()
-        .any(|row| row[0] == serde_json::json!("tx_catalog_idx")));
+    assert!(
+        indexes
+            .rows
+            .iter()
+            .any(|row| row[0] == serde_json::json!("tx_catalog_idx"))
+    );
     let constraints = executor
         .execute_in_transaction_with_context(
             &transaction,
@@ -9023,10 +9451,12 @@ fn appstate_bolt_executor_reads_schema_catalogs_inside_explicit_transactions() {
             None,
         )
         .unwrap();
-    assert!(constraints
-        .rows
-        .iter()
-        .any(|row| row[0] == serde_json::json!("tx_catalog_constraint")));
+    assert!(
+        constraints
+            .rows
+            .iter()
+            .any(|row| row[0] == serde_json::json!("tx_catalog_constraint"))
+    );
     executor.rollback_transaction(&transaction).unwrap();
 }
 
@@ -9057,10 +9487,12 @@ fn appstate_bolt_executor_schema_catalog_reads_are_pinned_at_begin() {
             None,
         )
         .unwrap();
-    assert!(!indexes
-        .rows
-        .iter()
-        .any(|row| row[0] == serde_json::json!("after_begin_idx")));
+    assert!(
+        !indexes
+            .rows
+            .iter()
+            .any(|row| row[0] == serde_json::json!("after_begin_idx"))
+    );
     executor.rollback_transaction(&transaction).unwrap();
 }
 
@@ -9092,26 +9524,32 @@ fn appstate_bolt_executor_stages_constraint_ddl_until_commit() {
             None,
         )
         .unwrap();
-    assert!(inside
-        .rows
-        .iter()
-        .any(|row| row[0] == serde_json::json!("tx_staged_constraint")));
+    assert!(
+        inside
+            .rows
+            .iter()
+            .any(|row| row[0] == serde_json::json!("tx_staged_constraint"))
+    );
     let outside = executor
         .execute_on_database(Some("copperdb"), "SHOW CONSTRAINTS", &empty)
         .unwrap();
-    assert!(!outside
-        .rows
-        .iter()
-        .any(|row| row[0] == serde_json::json!("tx_staged_constraint")));
+    assert!(
+        !outside
+            .rows
+            .iter()
+            .any(|row| row[0] == serde_json::json!("tx_staged_constraint"))
+    );
 
     executor.commit_transaction(&transaction).unwrap();
     let committed = executor
         .execute_on_database(Some("copperdb"), "SHOW CONSTRAINTS", &empty)
         .unwrap();
-    assert!(committed
-        .rows
-        .iter()
-        .any(|row| row[0] == serde_json::json!("tx_staged_constraint")));
+    assert!(
+        committed
+            .rows
+            .iter()
+            .any(|row| row[0] == serde_json::json!("tx_staged_constraint"))
+    );
 }
 
 #[test]
@@ -9138,10 +9576,12 @@ fn appstate_bolt_executor_rolls_back_staged_constraint_ddl() {
     let outside = executor
         .execute_on_database(Some("copperdb"), "SHOW CONSTRAINTS", &empty)
         .unwrap();
-    assert!(!outside
-        .rows
-        .iter()
-        .any(|row| row[0] == serde_json::json!("tx_rolled_back_constraint")));
+    assert!(
+        !outside
+            .rows
+            .iter()
+            .any(|row| row[0] == serde_json::json!("tx_rolled_back_constraint"))
+    );
 }
 
 #[test]
@@ -9172,26 +9612,32 @@ fn appstate_bolt_executor_stages_index_ddl_until_commit() {
             None,
         )
         .unwrap();
-    assert!(inside
-        .rows
-        .iter()
-        .any(|row| row[0] == serde_json::json!("tx_staged_index")));
+    assert!(
+        inside
+            .rows
+            .iter()
+            .any(|row| row[0] == serde_json::json!("tx_staged_index"))
+    );
     let outside = executor
         .execute_on_database(Some("copperdb"), "SHOW INDEXES", &empty)
         .unwrap();
-    assert!(!outside
-        .rows
-        .iter()
-        .any(|row| row[0] == serde_json::json!("tx_staged_index")));
+    assert!(
+        !outside
+            .rows
+            .iter()
+            .any(|row| row[0] == serde_json::json!("tx_staged_index"))
+    );
 
     executor.commit_transaction(&transaction).unwrap();
     let committed = executor
         .execute_on_database(Some("copperdb"), "SHOW INDEXES", &empty)
         .unwrap();
-    assert!(committed
-        .rows
-        .iter()
-        .any(|row| row[0] == serde_json::json!("tx_staged_index")));
+    assert!(
+        committed
+            .rows
+            .iter()
+            .any(|row| row[0] == serde_json::json!("tx_staged_index"))
+    );
 }
 
 #[test]
@@ -9218,10 +9664,12 @@ fn appstate_bolt_executor_rolls_back_staged_index_ddl() {
     let outside = executor
         .execute_on_database(Some("copperdb"), "SHOW INDEXES", &empty)
         .unwrap();
-    assert!(!outside
-        .rows
-        .iter()
-        .any(|row| row[0] == serde_json::json!("tx_rolled_back_index")));
+    assert!(
+        !outside
+            .rows
+            .iter()
+            .any(|row| row[0] == serde_json::json!("tx_rolled_back_index"))
+    );
 }
 
 #[test]
@@ -9252,26 +9700,32 @@ fn appstate_bolt_executor_stages_knowledge_policy_ddl_until_commit() {
             None,
         )
         .unwrap();
-    assert!(inside
-        .rows
-        .iter()
-        .any(|row| row[1] == serde_json::json!("tx_slow_decay")));
+    assert!(
+        inside
+            .rows
+            .iter()
+            .any(|row| row[1] == serde_json::json!("tx_slow_decay"))
+    );
     let outside = executor
         .execute_on_database(Some("copperdb"), "SHOW DECAY PROFILES", &empty)
         .unwrap();
-    assert!(!outside
-        .rows
-        .iter()
-        .any(|row| row[1] == serde_json::json!("tx_slow_decay")));
+    assert!(
+        !outside
+            .rows
+            .iter()
+            .any(|row| row[1] == serde_json::json!("tx_slow_decay"))
+    );
 
     executor.commit_transaction(&transaction).unwrap();
     let committed = executor
         .execute_on_database(Some("copperdb"), "SHOW DECAY PROFILES", &empty)
         .unwrap();
-    assert!(committed
-        .rows
-        .iter()
-        .any(|row| row[1] == serde_json::json!("tx_slow_decay")));
+    assert!(
+        committed
+            .rows
+            .iter()
+            .any(|row| row[1] == serde_json::json!("tx_slow_decay"))
+    );
 }
 
 #[test]
@@ -9298,10 +9752,12 @@ fn appstate_bolt_executor_rolls_back_staged_knowledge_policy_ddl() {
     let outside = executor
         .execute_on_database(Some("copperdb"), "SHOW DECAY PROFILES", &empty)
         .unwrap();
-    assert!(!outside
-        .rows
-        .iter()
-        .any(|row| row[1] == serde_json::json!("tx_rolled_back_decay")));
+    assert!(
+        !outside
+            .rows
+            .iter()
+            .any(|row| row[1] == serde_json::json!("tx_rolled_back_decay"))
+    );
 }
 
 #[test]

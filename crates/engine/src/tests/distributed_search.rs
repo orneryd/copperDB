@@ -797,12 +797,14 @@ async fn engine_executes_fabric_ranked_search_with_transport() {
         execution.hydrated.results[0].entity.as_ref().unwrap()["name"],
         "Alice"
     );
-    assert!(execution.hydrated.results[0]
-        .entity
-        .as_ref()
-        .unwrap()
-        .get("secret")
-        .is_none());
+    assert!(
+        execution.hydrated.results[0]
+            .entity
+            .as_ref()
+            .unwrap()
+            .get("secret")
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -873,9 +875,11 @@ async fn engine_blocks_ranked_search_when_database_search_is_disabled() {
         .unwrap_err();
 
     assert!(matches!(error, CopperDbError::Config(_)));
-    assert!(error
-        .to_string()
-        .contains("fulltext search is disabled for this database"));
+    assert!(
+        error
+            .to_string()
+            .contains("fulltext search is disabled for this database")
+    );
 }
 
 #[tokio::test]
@@ -947,9 +951,11 @@ async fn engine_blocks_semantic_and_hybrid_search_when_vector_search_is_disabled
         .unwrap_err();
 
     assert!(matches!(semantic_error, CopperDbError::Config(_)));
-    assert!(semantic_error
-        .to_string()
-        .contains("vector search is disabled for this database"));
+    assert!(
+        semantic_error
+            .to_string()
+            .contains("vector search is disabled for this database")
+    );
 
     let hybrid_error = db
         .execute_fabric_ranked_search_with_transport(
@@ -1095,12 +1101,13 @@ async fn engine_replays_durable_repairs_through_replica_transport() {
 
     assert_eq!(report.attempted, 1);
     assert_eq!(report.completed, 1);
-    assert!(db
-        .open_repair_queue()
-        .unwrap()
-        .pending()
-        .unwrap()
-        .is_empty());
+    assert!(
+        db.open_repair_queue()
+            .unwrap()
+            .pending()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         repaired_storage.get(b"repair-replay"),
         Some(b"through-engine".to_vec())

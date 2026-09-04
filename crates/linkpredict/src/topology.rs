@@ -175,12 +175,14 @@ mod tests {
         ];
         for predictions in algorithms {
             assert!(!predictions.is_empty());
-            assert!(predictions
-                .iter()
-                .all(|prediction| prediction.target_id != "alice"
-                    && prediction.target_id != "bob"
-                    && prediction.target_id != "charlie"
-                    && (0.0..=1.0).contains(&prediction.score)));
+            assert!(
+                predictions
+                    .iter()
+                    .all(|prediction| prediction.target_id != "alice"
+                        && prediction.target_id != "bob"
+                        && prediction.target_id != "charlie"
+                        && (0.0..=1.0).contains(&prediction.score))
+            );
         }
     }
 

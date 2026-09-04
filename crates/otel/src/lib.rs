@@ -3,14 +3,14 @@
 mod catalog;
 
 pub use catalog::{
-    EnumSpec, MetricSpec, ENUM_CATALOG, METRIC_CATALOG, NORNICDB_MAIN_REF,
+    ENUM_CATALOG, EnumSpec, METRIC_CATALOG, MetricSpec, NORNICDB_MAIN_REF,
     NORNICDB_OBSERVABILITY_PATH,
 };
 
 use std::collections::{BTreeMap, HashMap};
-use std::panic::{catch_unwind, UnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::panic::{UnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -19,15 +19,15 @@ use thiserror::Error;
 
 use copperdb_localization::{DiagnosticEvent, LanguageTag, Manager, RenderError, RenderedMessage};
 use copperdb_util::RequestCancellationReason;
+use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider as _;
-use opentelemetry::KeyValue;
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{
     BatchConfigBuilder, BatchSpanProcessor, Sampler, SdkTracer, SdkTracerProvider,
 };
-use opentelemetry_sdk::Resource;
 
 pub const REDACTED_PLACEHOLDER: &str = "<REDACTED>";
 pub const DEFAULT_REDACT_KEYS: &[&str] = &[
@@ -1004,14 +1004,14 @@ fn validate_labels(name: &str, labels: &[(&str, &str)]) -> Result<SampleKey, Tel
     }
 
     for (label, value) in &map {
-        if let Some(allowed) = allowed_label_values(name, label) {
-            if !allowed.contains(&value.as_str()) {
-                return Err(TelemetryError::InvalidLabelValue {
-                    metric: name.into(),
-                    label: label.clone(),
-                    value: value.clone(),
-                });
-            }
+        if let Some(allowed) = allowed_label_values(name, label)
+            && !allowed.contains(&value.as_str())
+        {
+            return Err(TelemetryError::InvalidLabelValue {
+                metric: name.into(),
+                label: label.clone(),
+                value: value.clone(),
+            });
         }
     }
 
@@ -1113,34 +1113,46 @@ pub fn classify_cypher_op_type(query: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use copperdb_localization::{messages, DiagnosticEvent, LanguageTag, Manager, Value};
+    use copperdb_localization::{DiagnosticEvent, LanguageTag, Manager, Value, messages};
+    use opentelemetry::Context;
     use opentelemetry::trace::{
         Span as _, SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
         Tracer as _,
     };
-    use opentelemetry::Context;
 
     #[test]
     fn catalog_is_copied_from_nornicdb_observability() {
         assert!(METRIC_CATALOG.len() >= 70);
-        assert!(METRIC_CATALOG
-            .iter()
-            .any(|m| m.name == "nornicdb_auth_attempts_total"));
-        assert!(METRIC_CATALOG
-            .iter()
-            .any(|m| m.name == "nornicdb_http_requests_total"));
-        assert!(METRIC_CATALOG
-            .iter()
-            .any(|m| m.name == "nornicdb_replication_last_contact_seconds"));
-        assert!(METRIC_CATALOG
-            .iter()
-            .any(|m| m.name == "nornicdb_knowledge_policy_decay_score"));
-        assert!(ENUM_CATALOG
-            .iter()
-            .any(|e| e.name == "AllowedCypherOpTypes"));
-        assert!(ENUM_CATALOG
-            .iter()
-            .any(|e| e.name == "AllowedStorageIndexes"));
+        assert!(
+            METRIC_CATALOG
+                .iter()
+                .any(|m| m.name == "nornicdb_auth_attempts_total")
+        );
+        assert!(
+            METRIC_CATALOG
+                .iter()
+                .any(|m| m.name == "nornicdb_http_requests_total")
+        );
+        assert!(
+            METRIC_CATALOG
+                .iter()
+                .any(|m| m.name == "nornicdb_replication_last_contact_seconds")
+        );
+        assert!(
+            METRIC_CATALOG
+                .iter()
+                .any(|m| m.name == "nornicdb_knowledge_policy_decay_score")
+        );
+        assert!(
+            ENUM_CATALOG
+                .iter()
+                .any(|e| e.name == "AllowedCypherOpTypes")
+        );
+        assert!(
+            ENUM_CATALOG
+                .iter()
+                .any(|e| e.name == "AllowedStorageIndexes")
+        );
     }
 
     #[test]
@@ -1219,10 +1231,12 @@ mod tests {
             .telemetry()
             .record_counter("nornicdb_bolt_websocket_oversized_total", &[])
             .unwrap();
-        assert!(provider
-            .telemetry()
-            .encode_openmetrics()
-            .contains("nornicdb_bolt_websocket_oversized_total 1"));
+        assert!(
+            provider
+                .telemetry()
+                .encode_openmetrics()
+                .contains("nornicdb_bolt_websocket_oversized_total 1")
+        );
         provider.shutdown(Duration::from_millis(1)).unwrap();
         provider.shutdown(Duration::from_millis(1)).unwrap();
     }
@@ -1255,10 +1269,12 @@ mod tests {
             .telemetry()
             .record_counter("nornicdb_bolt_websocket_oversized_total", &[])
             .unwrap();
-        assert!(provider
-            .telemetry()
-            .encode_openmetrics()
-            .contains("nornicdb_bolt_websocket_oversized_total 1"));
+        assert!(
+            provider
+                .telemetry()
+                .encode_openmetrics()
+                .contains("nornicdb_bolt_websocket_oversized_total 1")
+        );
         let shutdown_started = Instant::now();
         let _ = provider.shutdown(Duration::from_millis(25));
         assert!(shutdown_started.elapsed() < Duration::from_secs(1));
@@ -1358,12 +1374,14 @@ mod tests {
                 value: "tenant-supplied".into(),
             }
         );
-        assert!(telemetry
-            .record_counter(
-                "nornicdb_search_requests_total",
-                &[("mode", "semantic"), ("result", "success")],
-            )
-            .is_err());
+        assert!(
+            telemetry
+                .record_counter(
+                    "nornicdb_search_requests_total",
+                    &[("mode", "semantic"), ("result", "success")],
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -1498,9 +1516,11 @@ mod tests {
                 "# EOF\n",
             )
         );
-        assert!(!telemetry
-            .encode_openmetrics()
-            .contains("nornicdb_storage_wal_lag_bytes"));
+        assert!(
+            !telemetry
+                .encode_openmetrics()
+                .contains("nornicdb_storage_wal_lag_bytes")
+        );
     }
 
     #[test]

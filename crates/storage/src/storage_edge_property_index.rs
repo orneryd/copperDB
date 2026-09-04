@@ -259,10 +259,10 @@ impl StorageEngine {
             if self.has_index_tombstone(key_str) {
                 continue;
             }
-            if let Some(edge_id) = key_str.rsplit('/').next() {
-                if let Some(edge) = self.get_edge_record(edge_id)? {
-                    out.push(edge);
-                }
+            if let Some(edge_id) = key_str.rsplit('/').next()
+                && let Some(edge) = self.get_edge_record(edge_id)?
+            {
+                out.push(edge);
             }
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));

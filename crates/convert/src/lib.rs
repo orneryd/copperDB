@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -126,13 +126,13 @@ pub fn parse_neo4j_value(
             .split(options.vector_delimiter)
             .map(|part| parse_neo4j_float(part, "vector"))
             .collect::<Result<Vec<_>, _>>()?;
-        if let Some(dimensions) = column.vector_dimensions {
-            if values.len() != dimensions {
-                return Err(ConvertError::InvalidNeo4jValue {
-                    value_type: format!("vector[{dimensions}]"),
-                    value: raw.to_owned(),
-                });
-            }
+        if let Some(dimensions) = column.vector_dimensions
+            && values.len() != dimensions
+        {
+            return Err(ConvertError::InvalidNeo4jValue {
+                value_type: format!("vector[{dimensions}]"),
+                value: raw.to_owned(),
+            });
         }
         return Ok(Value::List(values.into_iter().map(Value::Float).collect()));
     }
@@ -207,7 +207,7 @@ fn parse_neo4j_column(field: &str, target: Neo4jHeaderTarget) -> Result<Neo4jCol
             _ => {
                 return Err(ConvertError::InvalidNeo4jHeader(format!(
                     "unsupported column token: {field}"
-                )))
+                )));
             }
         }
     } else if keyword_upper == "ID" {

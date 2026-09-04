@@ -8,27 +8,27 @@ use axum::Router;
 use clap::Parser;
 use copperdb_bolt::server::BoltServer;
 use copperdb_buildinfo::display_version;
-use copperdb_config::{load_with_precedence, ConfigOverrides};
+use copperdb_config::{ConfigOverrides, load_with_precedence};
 use copperdb_lifecycle::{BoxError, Component, Supervisor};
-use copperdb_localization::{resolve_process_preferences, ProcessPreferences};
+use copperdb_localization::{ProcessPreferences, resolve_process_preferences};
 use copperdb_multidb::DatabaseStatus;
 use copperdb_otel::{
-    install_global_telemetry, resolve_instance_id, Health, ObservabilityConfig, ServiceInfo,
-    TelemetryProvider,
+    Health, ObservabilityConfig, ServiceInfo, TelemetryProvider, install_global_telemetry,
+    resolve_instance_id,
 };
 use copperdb_server::{
-    build_local_nornic_replica_service, build_observability_router, build_router,
-    execute_local_mcp_request, AppState, AppStateBoltExecutor,
+    AppState, AppStateBoltExecutor, build_local_nornic_replica_service, build_observability_router,
+    build_router, execute_local_mcp_request,
 };
 use tokio::io::BufReader;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tracing::{info, warn};
+use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
 
 fn ensure_tls_crypto_provider() {
     static INSTALL: std::sync::Once = std::sync::Once::new();
@@ -607,9 +607,11 @@ mod tests {
 
         let error = component.start(CancellationToken::new()).await.unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("failed to bind telemetry listener"));
+        assert!(
+            error
+                .to_string()
+                .contains("failed to bind telemetry listener")
+        );
     }
 
     #[tokio::test]

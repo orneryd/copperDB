@@ -160,34 +160,32 @@ fn extract_relationship_range_predicate(
                 variable: left_variable,
                 property,
             } = &operands.left
+                && left_variable == variable
             {
-                if left_variable == variable {
-                    let value = eval_expression(&operands.right, row, params)?;
-                    return Ok(is_range_comparable_value(&value).then(|| {
-                        RelationshipRangePredicate {
-                            property: property.clone(),
-                            comparison,
-                            value,
-                        }
-                    }));
-                }
+                let value = eval_expression(&operands.right, row, params)?;
+                return Ok(
+                    is_range_comparable_value(&value).then(|| RelationshipRangePredicate {
+                        property: property.clone(),
+                        comparison,
+                        value,
+                    }),
+                );
             }
 
             if let Expression::PropertyAccess {
                 variable: right_variable,
                 property,
             } = &operands.right
+                && right_variable == variable
             {
-                if right_variable == variable {
-                    let value = eval_expression(&operands.left, row, params)?;
-                    return Ok(is_range_comparable_value(&value).then(|| {
-                        RelationshipRangePredicate {
-                            property: property.clone(),
-                            comparison: invert_range_comparison(comparison),
-                            value,
-                        }
-                    }));
-                }
+                let value = eval_expression(&operands.left, row, params)?;
+                return Ok(
+                    is_range_comparable_value(&value).then(|| RelationshipRangePredicate {
+                        property: property.clone(),
+                        comparison: invert_range_comparison(comparison),
+                        value,
+                    }),
+                );
             }
 
             Ok(None)

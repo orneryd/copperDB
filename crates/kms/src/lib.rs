@@ -4,8 +4,8 @@
 //! provider construction. Envelope encryption consumes the resulting DEKs.
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm, Key, Nonce,
+    aead::{Aead, KeyInit},
 };
 use getrandom::fill as fill_random;
 use hmac::{Hmac, Mac};
@@ -257,10 +257,11 @@ impl KeyProvider for LocalKms {
         opts: DecryptOptions,
     ) -> Result<Vec<u8>, KmsError> {
         self.ensure_open()?;
-        if let Some(key_uri) = opts.key_uri.as_deref() {
-            if !key_uri.is_empty() && key_uri != self.key_uri {
-                return Err(KmsError::KeyNotFound(key_uri.into()));
-            }
+        if let Some(key_uri) = opts.key_uri.as_deref()
+            && !key_uri.is_empty()
+            && key_uri != self.key_uri
+        {
+            return Err(KmsError::KeyNotFound(key_uri.into()));
         }
         let master_key = self.master_key.read().expect("kms lock poisoned").clone();
         let plaintext = unwrap_with_master(&master_key, encrypted_key)?;

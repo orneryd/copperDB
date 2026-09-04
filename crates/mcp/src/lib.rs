@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use thiserror::Error;
-use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
@@ -409,13 +409,13 @@ impl ToolRegistry {
                 let params = match &request.params {
                     Some(p) => p,
                     None => {
-                        return McpResponse::error(request.response_id(), -32602, "missing params")
+                        return McpResponse::error(request.response_id(), -32602, "missing params");
                     }
                 };
                 let call: ToolCallParams = match serde_json::from_value(params.clone()) {
                     Ok(c) => c,
                     Err(e) => {
-                        return McpResponse::error(request.response_id(), -32602, e.to_string())
+                        return McpResponse::error(request.response_id(), -32602, e.to_string());
                     }
                 };
                 let Some(tool) = self.tools.get(&call.name) else {
@@ -465,7 +465,7 @@ impl ToolRegistry {
                                 -32602,
                                 "Invalid params",
                                 Some(serde_json::json!({"detail": error.to_string()})),
-                            )
+                            );
                         }
                     },
                     None => InitializeParams::default(),
@@ -888,9 +888,11 @@ impl ToolHandler for StoreHandler {
 
 fn store_labels(labels: Vec<String>, node_type: Option<String>) -> Result<Vec<String>, String> {
     let labels = if labels.is_empty() {
-        vec![node_type
-            .filter(|label| !label.is_empty())
-            .unwrap_or_else(|| "Memory".into())]
+        vec![
+            node_type
+                .filter(|label| !label.is_empty())
+                .unwrap_or_else(|| "Memory".into()),
+        ]
     } else {
         labels
     };
@@ -1285,9 +1287,11 @@ impl ToolHandler for LinkHandler {
             ("strength".into(), serde_json::json!(arguments.strength)),
             (
                 "created_at".into(),
-                serde_json::json!(OffsetDateTime::now_utc()
-                    .format(&Rfc3339)
-                    .map_err(|error| error.to_string())?),
+                serde_json::json!(
+                    OffsetDateTime::now_utc()
+                        .format(&Rfc3339)
+                        .map_err(|error| error.to_string())?
+                ),
             ),
         ]);
         properties.extend(arguments.metadata);
@@ -2139,10 +2143,12 @@ mod tests {
                 tool.input_schema["properties"]["database"]["type"],
                 "string"
             );
-            assert!(tool.input_schema["properties"]["database"]["description"]
-                .as_str()
-                .unwrap()
-                .contains("configured default database"));
+            assert!(
+                tool.input_schema["properties"]["database"]["description"]
+                    .as_str()
+                    .unwrap()
+                    .contains("configured default database")
+            );
         }
     }
 
@@ -2213,9 +2219,11 @@ mod tests {
             node.properties["tags"],
             serde_json::json!(["alpha", "beta"])
         );
-        assert!(node.properties["created_at"]
-            .as_str()
-            .is_some_and(|created_at| created_at.contains('T') && created_at.ends_with('Z')));
+        assert!(
+            node.properties["created_at"]
+                .as_str()
+                .is_some_and(|created_at| created_at.contains('T') && created_at.ends_with('Z'))
+        );
         for reserved in ["embedding", "embeddings", "vector"] {
             assert!(!node.properties.contains_key(reserved));
         }
@@ -2338,9 +2346,11 @@ mod tests {
         assert_eq!(by_id["nodes"][0]["title"], "Recent Memory");
         assert_eq!(by_id["nodes"][0]["content"], "Recent Memory content");
         assert!(by_id["nodes"][0]["properties"].get("embedding").is_none());
-        assert!(by_id["nodes"][0]["properties"]
-            .get("embedding_model")
-            .is_none());
+        assert!(
+            by_id["nodes"][0]["properties"]
+                .get("embedding_model")
+                .is_none()
+        );
         assert!(by_id["nodes"][0]["properties"].get("large").is_none());
 
         let filtered = registry
@@ -2447,9 +2457,11 @@ mod tests {
         assert_eq!(result["results"][0]["title"], "Graph Databases");
         assert!(result["results"][0]["content_preview"].is_string());
         assert!(result["results"][0]["similarity"].as_f64().unwrap() > 0.0);
-        assert!(result["results"][0]["properties"]
-            .get("embedding")
-            .is_none());
+        assert!(
+            result["results"][0]["properties"]
+                .get("embedding")
+                .is_none()
+        );
         let events = engine.audit_log().events().unwrap();
         assert_eq!(events.last().unwrap().event_type.as_str(), "DATA_READ");
         assert_eq!(events.last().unwrap().action.as_deref(), Some("DISCOVER"));
@@ -2561,11 +2573,13 @@ mod tests {
                 })),
             ))
             .await;
-        assert!(whitespace_relation
-            .error
-            .unwrap()
-            .message
-            .contains("invalid relation"));
+        assert!(
+            whitespace_relation
+                .error
+                .unwrap()
+                .message
+                .contains("invalid relation")
+        );
         let events = engine.audit_log().events().unwrap();
         assert_eq!(events.last().unwrap().event_type.as_str(), "DATA_READ");
         assert_eq!(events.last().unwrap().action.as_deref(), Some("MATCH"));
@@ -2628,9 +2642,11 @@ mod tests {
         assert_eq!(dependencies.len(), 1);
         assert_eq!(dependencies[0].start_node, main_id);
         assert_eq!(dependencies[0].end_node, dependency_id);
-        assert!(!dependencies
-            .iter()
-            .any(|edge| { edge.start_node == dependency_id && edge.end_node == main_id }));
+        assert!(
+            !dependencies
+                .iter()
+                .any(|edge| { edge.start_node == dependency_id && edge.end_node == main_id })
+        );
 
         let unblocked_request = McpRequest::new(
             42,
@@ -2749,11 +2765,13 @@ mod tests {
             .await;
         assert!(deleted.error.is_none(), "{:?}", deleted.error);
         assert_eq!(deleted.result.unwrap()["next_action"], "Deleted 1 task(s).");
-        assert!(engine
-            .storage()
-            .get_edges_by_type("DEPENDS_ON")
-            .unwrap()
-            .is_empty());
+        assert!(
+            engine
+                .storage()
+                .get_edges_by_type("DEPENDS_ON")
+                .unwrap()
+                .is_empty()
+        );
 
         let invalid_status = registry
             .dispatch(&McpRequest::new(
@@ -2807,18 +2825,26 @@ mod tests {
         );
         assert!(engine.audit_log().verify_chain().unwrap().valid);
         let events = engine.audit_log().events().unwrap();
-        assert!(events
-            .iter()
-            .any(|event| event.action.as_deref() == Some("CREATE")));
-        assert!(events
-            .iter()
-            .any(|event| event.action.as_deref() == Some("UPDATE")));
-        assert!(events
-            .iter()
-            .any(|event| event.action.as_deref() == Some("DELETE")));
-        assert!(events
-            .iter()
-            .any(|event| event.event_type.as_str() == "DATA_READ"));
+        assert!(
+            events
+                .iter()
+                .any(|event| event.action.as_deref() == Some("CREATE"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.action.as_deref() == Some("UPDATE"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.action.as_deref() == Some("DELETE"))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type.as_str() == "DATA_READ")
+        );
     }
 
     #[tokio::test]
@@ -3135,10 +3161,12 @@ mod tests {
         assert!(response.error.is_none(), "{:?}", response.error);
         let result = response.result.unwrap();
         assert!(result.get("isError").is_none(), "{result}");
-        assert!(result["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("Rows: 1"));
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Rows: 1")
+        );
     }
 
     #[tokio::test]

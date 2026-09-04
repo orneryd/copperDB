@@ -7,8 +7,8 @@ mod topology;
 pub use graph::{AdjacencyStream, GraphBuildConfig, GraphBuildStats, GraphSnapshot};
 pub use hybrid::{HybridConfig, HybridPrediction, HybridScorer, SemanticScorer, TopologyAlgorithm};
 pub use topology::{
-    adamic_adar, common_neighbors, jaccard, preferential_attachment, resource_allocation,
-    Prediction,
+    Prediction, adamic_adar, common_neighbors, jaccard, preferential_attachment,
+    resource_allocation,
 };
 
 use thiserror::Error;

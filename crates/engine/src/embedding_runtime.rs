@@ -743,7 +743,7 @@ fn embed_claimed_node(
                 context.failed,
                 context.last_error,
                 error.to_string(),
-            ))
+            ));
         }
     };
     let Some(embedding) = embeddings.into_iter().next() else {
@@ -1159,10 +1159,12 @@ mod tests {
         assert_eq!(status.worker_count, 0);
         assert!(status.backend.is_none());
         assert!(status.model_load_duration_ms.is_none());
-        assert!(status
-            .last_error
-            .unwrap()
-            .contains("unsupported embedding provider"));
+        assert!(
+            status
+                .last_error
+                .unwrap()
+                .contains("unsupported embedding provider")
+        );
     }
 
     #[test]
@@ -1183,10 +1185,12 @@ mod tests {
         assert!(runtime.drain_one().is_err());
         let status = runtime.status().unwrap();
         assert_eq!(status.state, EmbeddingRuntimeState::Failed);
-        assert!(status
-            .last_error
-            .unwrap()
-            .contains("unsupported embedding provider"));
+        assert!(
+            status
+                .last_error
+                .unwrap()
+                .contains("unsupported embedding provider")
+        );
     }
 
     #[test]

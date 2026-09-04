@@ -1,4 +1,4 @@
-use crate::keyword_scan::{keyword_index_from, KeywordScanOpts};
+use crate::keyword_scan::{KeywordScanOpts, keyword_index_from};
 use crate::string_patterns::find_keyword_index;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,8 +163,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_rejects_comma_match_then_create() {
-        let query =
-            "MATCH (o:OriginalText {id:'o1'}), (t:TranslatedText {id:'t1'}) CREATE (o)-[:TRANSLATES_TO]->(t)";
+        let query = "MATCH (o:OriginalText {id:'o1'}), (t:TranslatedText {id:'t1'}) CREATE (o)-[:TRANSLATES_TO]->(t)";
         let (_, ok) = can_execute_as_pipeline(query);
         assert!(!ok);
     }

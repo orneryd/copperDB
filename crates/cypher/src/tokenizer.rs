@@ -1,4 +1,4 @@
-use crate::{keyword_scan::is_ascii_space, CypherError};
+use crate::{CypherError, keyword_scan::is_ascii_space};
 
 #[inline]
 fn is_single_char_token(byte: u8) -> bool {

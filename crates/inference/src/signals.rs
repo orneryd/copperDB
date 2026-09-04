@@ -162,7 +162,7 @@ impl SignalEngine {
             let results = match search.search(request_context, embedding, top_k) {
                 Ok(results) => results,
                 Err(InferenceError::RequestCancelled) => {
-                    return Err(InferenceError::RequestCancelled)
+                    return Err(InferenceError::RequestCancelled);
                 }
                 Err(_) => continue,
             };
@@ -347,16 +347,18 @@ impl SignalEngine {
 }
 
 fn canonical_result_id(id: &str) -> String {
-    if let Some((base, suffix)) = id.rsplit_once("-chunk-") {
-        if !base.is_empty() && suffix.parse::<usize>().is_ok() {
-            return base.into();
-        }
+    if let Some((base, suffix)) = id.rsplit_once("-chunk-")
+        && !base.is_empty()
+        && suffix.parse::<usize>().is_ok()
+    {
+        return base.into();
     }
     for marker in ["-named-", "-prop-"] {
-        if let Some((base, suffix)) = id.rsplit_once(marker) {
-            if !base.is_empty() && !suffix.is_empty() {
-                return base.into();
-            }
+        if let Some((base, suffix)) = id.rsplit_once(marker)
+            && !base.is_empty()
+            && !suffix.is_empty()
+        {
+            return base.into();
         }
     }
     id.into()
@@ -460,10 +462,12 @@ mod tests {
     fn co_access_and_temporal_are_clock_controlled() {
         let engine = SignalEngine::new(SignalConfig::default());
         let context = RequestContext::detached();
-        assert!(engine
-            .on_access_at(&context, "a", 1_000)
-            .unwrap()
-            .is_empty());
+        assert!(
+            engine
+                .on_access_at(&context, "a", 1_000)
+                .unwrap()
+                .is_empty()
+        );
         let first = engine.on_access_at(&context, "b", 2_000).unwrap();
         assert_eq!(first[0].method, SuggestionMethod::Temporal);
         engine.on_access_at(&context, "a", 3_000).unwrap();

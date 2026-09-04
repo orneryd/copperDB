@@ -208,10 +208,12 @@ mod tests {
 
         assert_eq!(response.errors.len(), 1);
         assert_eq!(response.errors[0].message, "request cancelled");
-        assert!(engine
-            .lock()
-            .get_node_record("cancelled")
-            .unwrap()
-            .is_none());
+        assert!(
+            engine
+                .lock()
+                .get_node_record("cancelled")
+                .unwrap()
+                .is_none()
+        );
     }
 }

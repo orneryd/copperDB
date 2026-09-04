@@ -8,10 +8,10 @@
 use copperdb_storage::{NodeRecord, StorageEngine, StorageError};
 use getrandom::fill as fill_random;
 use hmac::{Hmac, KeyInit, Mac};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -943,12 +943,12 @@ impl PrivilegesStore {
         let mut read = false;
         let mut write = false;
         for role in roles {
-            if let Some(per_db) = matrix.get(&normalize_name(role)) {
-                if let Some(privilege) = per_db.get(database) {
-                    matched = true;
-                    read |= privilege.read;
-                    write |= privilege.write;
-                }
+            if let Some(per_db) = matrix.get(&normalize_name(role))
+                && let Some(privilege) = per_db.get(database)
+            {
+                matched = true;
+                read |= privilege.read;
+                write |= privilege.write;
             }
         }
         if matched {
@@ -1546,10 +1546,11 @@ mod tests {
         auth.entitlements
             .set(ROLE_VIEWER, vec![Permission::Read, Permission::Schema])
             .unwrap();
-        assert!(auth
-            .entitlements
-            .permissions_for_role(ROLE_VIEWER)
-            .contains(&Permission::Schema));
+        assert!(
+            auth.entitlements
+                .permissions_for_role(ROLE_VIEWER)
+                .contains(&Permission::Schema)
+        );
 
         let reloaded = Authenticator::new(
             AuthConfig {
@@ -1559,10 +1560,12 @@ mod tests {
             storage,
         )
         .unwrap();
-        assert!(reloaded
-            .entitlements
-            .permissions_for_role(ROLE_VIEWER)
-            .contains(&Permission::Schema));
+        assert!(
+            reloaded
+                .entitlements
+                .permissions_for_role(ROLE_VIEWER)
+                .contains(&Permission::Schema)
+        );
     }
 
     #[test]

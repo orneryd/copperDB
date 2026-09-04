@@ -1082,10 +1082,12 @@ mod tests {
                 evaluate_fulltext_query(&query, &FulltextDocument::default()).unwrap(),
                 None
             );
-            assert!(query
-                .expand_candidate_terms(&["alpha".into()])
-                .unwrap()
-                .is_empty());
+            assert!(
+                query
+                    .expand_candidate_terms(&["alpha".into()])
+                    .unwrap()
+                    .is_empty()
+            );
         }
     }
 

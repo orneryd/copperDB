@@ -78,14 +78,14 @@ impl<V: Clone> QueryCache<V> {
         }
 
         if let Some(entry) = inner.map.get(&key) {
-            if let Some(ttl) = inner.ttl {
-                if entry.inserted_at.elapsed() > ttl {
-                    inner.map.remove(&key);
-                    inner.order.retain(|k| *k != key);
-                    self.evictions.fetch_add(1, Ordering::Relaxed);
-                    self.misses.fetch_add(1, Ordering::Relaxed);
-                    return None;
-                }
+            if let Some(ttl) = inner.ttl
+                && entry.inserted_at.elapsed() > ttl
+            {
+                inner.map.remove(&key);
+                inner.order.retain(|k| *k != key);
+                self.evictions.fetch_add(1, Ordering::Relaxed);
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                return None;
             }
             let value = entry.value.clone();
             // Move to front of LRU
@@ -107,11 +107,11 @@ impl<V: Clone> QueryCache<V> {
 
         if inner.map.contains_key(&key) {
             inner.order.retain(|k| *k != key);
-        } else if inner.map.len() >= inner.max_size {
-            if let Some(evict_key) = inner.order.pop_back() {
-                inner.map.remove(&evict_key);
-                self.evictions.fetch_add(1, Ordering::Relaxed);
-            }
+        } else if inner.map.len() >= inner.max_size
+            && let Some(evict_key) = inner.order.pop_back()
+        {
+            inner.map.remove(&evict_key);
+            self.evictions.fetch_add(1, Ordering::Relaxed);
         }
         inner.map.insert(
             key,
@@ -145,6 +145,26 @@ impl<V: Clone> QueryCache<V> {
         if !enabled {
             inner.map.clear();
             inner.order.clear();
+        }
+    }
+
+    /// Atomically replace capacity and TTL, evicting excess entries immediately.
+    pub fn set_policy(&self, max_size: usize, ttl: Option<Duration>) {
+        let mut inner = self.inner.lock();
+        inner.ttl = ttl;
+        inner.enabled = max_size > 0;
+        inner.max_size = max_size;
+        if !inner.enabled {
+            inner.map.clear();
+            inner.order.clear();
+            return;
+        }
+        while inner.map.len() > inner.max_size {
+            let Some(evict_key) = inner.order.pop_back() else {
+                break;
+            };
+            inner.map.remove(&evict_key);
+            self.evictions.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -491,6 +511,24 @@ mod tests {
         cache.set_enabled(true);
         cache.put(2, 2);
         assert_eq!(cache.get(2), Some(2));
+    }
+
+    #[test]
+    fn test_set_policy_shrinks_and_zero_disables() {
+        let cache = QueryCache::new(3, None);
+        cache.put(1, "one");
+        cache.put(2, "two");
+        cache.put(3, "three");
+
+        cache.set_policy(1, Some(Duration::from_secs(30)));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.stats().max_size, 1);
+        assert!(cache.is_enabled());
+
+        cache.set_policy(0, Some(Duration::from_secs(60)));
+        assert!(cache.is_empty());
+        assert_eq!(cache.stats().max_size, 0);
+        assert!(!cache.is_enabled());
     }
 
     #[test]

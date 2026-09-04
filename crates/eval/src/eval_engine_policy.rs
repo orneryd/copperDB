@@ -1581,13 +1581,13 @@ impl EvalEngine {
             .map_err(|e| EvalError::ExecutionError(format!("failed to load index options: {e}")))?;
 
         // Validate query vector dimensions if specified in options
-        if let Some(expected_dims) = resolve_vector_dimensions(&index_options) {
-            if query_vector.len() as u64 != expected_dims {
-                return Err(EvalError::ExecutionError(format!(
-                    "vector index {index_name} expects {expected_dims} dimensions, got {}",
-                    query_vector.len()
-                )));
-            }
+        if let Some(expected_dims) = resolve_vector_dimensions(&index_options)
+            && query_vector.len() as u64 != expected_dims
+        {
+            return Err(EvalError::ExecutionError(format!(
+                "vector index {index_name} expects {expected_dims} dimensions, got {}",
+                query_vector.len()
+            )));
         }
 
         let (matches, _) = (self.vector_index_query)(

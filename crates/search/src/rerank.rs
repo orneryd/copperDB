@@ -1,9 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
+mod cross_encoder;
 mod local;
 mod mmr;
 
-pub use local::{LocalReranker, LocalRerankerConfig, RerankScorer};
+pub use cross_encoder::{CrossEncoderConfig, CrossEncoderReranker};
+pub use local::{GgufRerankScorer, LocalReranker, LocalRerankerConfig, RerankScorer};
 pub use mmr::{CandidateEmbeddingSource, MmrReranker};
 
 use copperdb_util::RequestContext;
@@ -128,7 +130,7 @@ pub fn apply_reranker_to_hydrated_outcome(
                     applied: false,
                     results: pass_through(&candidates),
                 },
-            )
+            );
         }
     };
 

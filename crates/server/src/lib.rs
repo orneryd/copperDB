@@ -6,13 +6,13 @@
 
 use async_graphql_axum::GraphQLRequest;
 use axum::{
+    Extension, Json, Router,
     body::Body,
-    extract::{rejection::JsonRejection, DefaultBodyLimit, MatchedPath, Path, Query, State},
-    http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode},
+    extract::{DefaultBodyLimit, MatchedPath, Path, Query, State, rejection::JsonRejection},
+    http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{any, delete, get, post, post_service},
-    Extension, Json, Router,
 };
 use copperdb_auth::{
     AuthConfig, AuthError, Authenticator, Claims, DatabaseAccessMode, Permission,
@@ -22,17 +22,17 @@ use copperdb_bolt::server::{
     BoltAuthProvider, BoltExecutionError, BoltPrincipal, BoltQueryResult, BoltResultStats,
     BoltRuntimeCounters, BoltTransaction, BoltTransactionError, QueryExecutor,
 };
-use copperdb_buildinfo::{display_version, server_announcement, version, BUILD_INFO};
-use copperdb_config::Config as RuntimeConfig;
+use copperdb_buildinfo::{BUILD_INFO, display_version, server_announcement, version};
+use copperdb_config::{Config as RuntimeConfig, lookup_setting};
 use copperdb_engine::{
-    query_procedure_mode, CopperDb as GraphEngine, DatabaseConfig as EngineConfig,
-    QueryProcedureMode, ResultStats,
+    CopperDb as GraphEngine, DatabaseConfig as EngineConfig, QueryProcedureMode, ResultStats,
+    query_procedure_mode,
 };
 use copperdb_envutil::{get as env_get, get_bool_loose, parse_duration};
 use copperdb_fabric::{FabricReadRequest, FabricReadScope};
 use copperdb_graphql::GraphQlSchema;
 use copperdb_localization::{
-    messages as localized_messages, parse_accept_language, LanguageTag, Manager,
+    LanguageTag, Manager, messages as localized_messages, parse_accept_language,
 };
 use copperdb_multidb::{DatabaseManager, DatabaseStatus, MultiDbError};
 use copperdb_nornicgrpc::{
@@ -43,12 +43,12 @@ use copperdb_nornicgrpc::{
     TonicRemoteReplicaClient,
 };
 use copperdb_otel::{
-    classify_cypher_op_type, CancellationProtocol, CancellationStage, Health, Telemetry,
+    CancellationProtocol, CancellationStage, Health, Telemetry, classify_cypher_op_type,
 };
 use copperdb_plugin::{
-    resolve_packages, ActionCallContext, ActionError, ActionQueryResult, ActionQueryService,
-    DatabaseEvent, DatabaseEventType, PackageFactory, PackageRuntime, PackageSpec,
-    ResolvedPackageSet,
+    ActionCallContext, ActionError, ActionQueryResult, ActionQueryService, DatabaseEvent,
+    DatabaseEventType, PackageFactory, PackageRuntime, PackageSpec, ResolvedPackageSet,
+    resolve_packages,
 };
 use copperdb_replication::{Command, ReplicaTransport, ReplicationStorage, StorageEngineAdapter};
 use copperdb_retention::{
@@ -56,14 +56,14 @@ use copperdb_retention::{
     RetentionSweepConfig,
 };
 use copperdb_search::{
-    collect_fabric_hydration_records_with_context,
+    FabricHydrationRequest, HydrationTransport, RankedSearchTransport, RrfConfig, RrfSearchPolicy,
+    SearchQuery, collect_fabric_hydration_records_with_context,
     collect_planned_fabric_ranked_batches_with_context, execute_planned_fabric_ranked_search,
-    merge_rrf_search_batches, FabricHydrationRequest, HydrationTransport, RankedSearchTransport,
-    RrfConfig, RrfSearchPolicy, SearchQuery,
+    merge_rrf_search_batches,
 };
 use copperdb_security::{
-    validate_http_origin, RequestTarget, RequestViolation, SecurityConfig, SecurityMiddleware,
-    SecurityRequest,
+    RequestTarget, RequestViolation, SecurityConfig, SecurityMiddleware, SecurityRequest,
+    validate_http_origin,
 };
 use copperdb_storage::{StorageEngine, StorageError, StorageTransaction};
 
@@ -78,10 +78,10 @@ use opentelemetry::propagation::Extractor;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tracing::Instrument;
@@ -239,6 +239,9 @@ pub struct AppState {
     /// from disk triggers LSM-tree recovery (WAL replay, manifest rebuild)
     /// which can take 400–600 ms.  Caching avoids this cost per query.
     pub engine_cache: Arc<RwLock<HashMap<String, Arc<GraphEngine>>>>,
+    /// Active setting values and restart-required changes, keyed by database.
+    database_config_active: Arc<RwLock<HashMap<String, BTreeMap<String, String>>>>,
+    database_config_pending: Arc<RwLock<HashMap<String, HashSet<String>>>>,
     /// Process-wide package registries resolved before any database is opened.
     pub packages: Arc<ResolvedPackageSet>,
     /// Started package instances retained for health and reverse shutdown.
@@ -289,14 +292,13 @@ impl McpSessionStore {
     fn create_at(&self, now: Instant) -> String {
         let mut sessions = self.sessions.lock();
         sessions.retain(|_, expires_at| *expires_at > now);
-        if sessions.len() >= self.max_sessions {
-            if let Some(session_id) = sessions
+        if sessions.len() >= self.max_sessions
+            && let Some(session_id) = sessions
                 .iter()
                 .min_by_key(|(_, expires_at)| **expires_at)
                 .map(|(session_id, _)| session_id.clone())
-            {
-                sessions.remove(&session_id);
-            }
+        {
+            sessions.remove(&session_id);
         }
         let session_id = uuid::Uuid::new_v4().to_string();
         sessions.insert(session_id.clone(), now + self.ttl);
@@ -816,6 +818,8 @@ impl AppState {
             distributed_cypher_enabled: get_bool_loose("COPPERDB_DISTRIBUTED_CYPHER", false),
             graphql_schema: copperdb_graphql::build_default_schema(),
             engine_cache: Arc::new(RwLock::new(HashMap::new())),
+            database_config_active: Arc::new(RwLock::new(HashMap::new())),
+            database_config_pending: Arc::new(RwLock::new(HashMap::new())),
             packages: Arc::new(resolve_packages([]).expect("empty package set is valid")),
             package_runtime: None,
         }
@@ -825,6 +829,9 @@ impl AppState {
         &mut self,
         runtime_config: Arc<RuntimeConfig>,
     ) -> Result<(), ServerError> {
+        self.db_manager
+            .seed_config_defaults(&runtime_config.databases)
+            .map_err(|error| ServerError::Engine(error.to_string()))?;
         for package_id in runtime_config
             .packages
             .configuration
@@ -848,7 +855,7 @@ impl AppState {
                 _ => {
                     return Err(ServerError::Engine(format!(
                         "unknown configured package: {package_id}"
-                    )))
+                    )));
                 }
             }
             specs.push(
@@ -1222,6 +1229,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/db/{database}/tx/commit", post(neo4j_tx_commit_handler))
         .route("/db/{database}/search", post(database_search_handler))
         .route("/copperdb/search", post(copperdb_search_handler))
+        .route(
+            "/admin/databases/config/keys",
+            get(database_config_keys_handler),
+        )
         .route(
             "/admin/databases/{database}/config",
             get(get_database_config_handler).put(update_database_config_handler),
@@ -1745,10 +1756,10 @@ fn static_root(state: &AppState) -> Option<PathBuf> {
 /// Returns true when the UI can actually be served (index.html exists).
 /// Checks static_dir first, then embedded assets (matching NornicDB's embed.FS).
 fn ui_available(state: &AppState) -> bool {
-    if let Some(root) = static_root(state) {
-        if root.join("index.html").exists() {
-            return true;
-        }
+    if let Some(root) = static_root(state)
+        && root.join("index.html").exists()
+    {
+        return true;
     }
     ui_assets::embedded_ui_available()
 }
@@ -1803,10 +1814,10 @@ fn serve_ui_index(state: &AppState) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    if let Some(bytes) = read_static_file(state, "index.html") {
-        if let Ok(contents) = String::from_utf8(bytes) {
-            return Html(rewrite_index_html(state, contents)).into_response();
-        }
+    if let Some(bytes) = read_static_file(state, "index.html")
+        && let Ok(contents) = String::from_utf8(bytes)
+    {
+        return Html(rewrite_index_html(state, contents)).into_response();
     }
 
     StatusCode::SERVICE_UNAVAILABLE.into_response()
@@ -2103,22 +2114,22 @@ async fn auth_token_handler(
     Json(request): Json<AuthTokenRequest>,
 ) -> impl IntoResponse {
     let started = std::time::Instant::now();
-    if let Some(grant_type) = &request.grant_type {
-        if grant_type != "password" {
-            let _ = state.telemetry.record_counter(
-                "nornicdb_auth_attempts_total",
-                &[("result", "denied"), ("protocol", "http")],
-            );
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"message": localized_display(
-                    &state,
-                    &headers,
-                    &"unsupported grant_type",
-                )})),
-            )
-                .into_response();
-        }
+    if let Some(grant_type) = &request.grant_type
+        && grant_type != "password"
+    {
+        let _ = state.telemetry.record_counter(
+            "nornicdb_auth_attempts_total",
+            &[("result", "denied"), ("protocol", "http")],
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"message": localized_display(
+                &state,
+                &headers,
+                &"unsupported grant_type",
+            )})),
+        )
+            .into_response();
     }
 
     let authenticator = match state.auth.open_authenticator() {
@@ -2738,6 +2749,8 @@ async fn search_handler(
                 .into_response();
         }
     };
+    let outcome =
+        engine.rerank_search_outcome(&request_context, &request.query, outcome, candidate_limit);
     drop(search_span_guard);
     let search_elapsed = search_started.elapsed();
     let search_time_ms = search_elapsed.as_millis() as u64;
@@ -2905,12 +2918,35 @@ async fn get_database_config_handler(
         return StatusCode::NOT_FOUND.into_response();
     }
 
+    let overrides = state.db_manager.get_config_overrides(&database);
+    let resolved = match state
+        .db_manager
+        .effective_config(&database, state.runtime_config.as_ref())
+    {
+        Ok(resolved) => resolved,
+        Err(error) => return database_config_error_response(error),
+    };
+    let (effective, pending_restart) =
+        database_config_runtime_state(&state, &database, &resolved.effective);
+    let configured = redact_database_settings(&overrides);
     Json(serde_json::json!({
         "database": database,
-        "overrides": state.db_manager.get_config_overrides(&database),
-        "allowedKeys": state.db_manager.allowed_config_keys(),
+        "overrides": configured,
+        "configured": redact_database_settings(&overrides),
+        "effective": redact_database_settings(&effective),
+        "pendingRestart": pending_restart,
     }))
     .into_response()
+}
+
+async fn database_config_keys_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(status) = authorize_database_access(&state, &headers, "system", false) {
+        return status.into_response();
+    }
+    Json(state.db_manager.allowed_config_keys()).into_response()
 }
 
 async fn update_database_config_handler(
@@ -2923,16 +2959,73 @@ async fn update_database_config_handler(
         return status.into_response();
     }
 
+    if state.db_manager.get(&database).is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let previous = match state
+        .db_manager
+        .effective_config(&database, state.runtime_config.as_ref())
+    {
+        Ok(resolved) => resolved,
+        Err(error) => return database_config_error_response(error),
+    };
+
     match state
         .db_manager
         .set_config_overrides(&database, request.overrides)
     {
-        Ok(()) => Json(serde_json::json!({
-            "database": database,
-            "overrides": state.db_manager.get_config_overrides(&database),
-            "allowedKeys": state.db_manager.allowed_config_keys(),
-        }))
-        .into_response(),
+        Ok(()) => {
+            let next = match state
+                .db_manager
+                .effective_config(&database, state.runtime_config.as_ref())
+            {
+                Ok(resolved) => resolved,
+                Err(error) => return database_config_error_response(error),
+            };
+            let changed = changed_database_settings(&previous.effective, &next.effective);
+            let search_cache_changed = changed.iter().any(|key| {
+                lookup_setting(key)
+                    .is_some_and(|setting| setting.hot_reload == Some("search-cache"))
+            });
+            let rebuild_triggered = changed.iter().any(|key| {
+                lookup_setting(key)
+                    .is_some_and(|setting| setting.hot_reload == Some("search-rebuild"))
+            });
+            let cached_engine = state.engine_cache.read().get(&database).cloned();
+            let overrides = state.db_manager.get_config_overrides(&database);
+            if let Some(engine) = &cached_engine {
+                engine.update_configured_settings(overrides.clone());
+            }
+            if search_cache_changed && let Some(engine) = &cached_engine {
+                engine.set_ranked_search_cache_policy(
+                    next.search_result_cache_max_entries,
+                    Duration::from_millis(next.search_result_cache_ttl_ms),
+                );
+            }
+            if rebuild_triggered {
+                state.engine_cache.write().remove(&database);
+            }
+            let (effective, pending_restart) = update_database_config_runtime_state(
+                &state,
+                &database,
+                &previous.effective,
+                &next.effective,
+                &changed,
+            );
+            if let Some(engine) = cached_engine {
+                engine.update_active_settings(effective.clone());
+            }
+            let configured = redact_database_settings(&overrides);
+            Json(serde_json::json!({
+                "database": database,
+                "overrides": configured,
+                "configured": redact_database_settings(&overrides),
+                "effective": redact_database_settings(&effective),
+                "pendingRestart": pending_restart,
+                "rebuildTriggered": rebuild_triggered,
+            }))
+            .into_response()
+        }
         Err(MultiDbError::NotFound(_)) => StatusCode::NOT_FOUND.into_response(),
         Err(MultiDbError::InvalidConfig(error)) => (
             StatusCode::BAD_REQUEST,
@@ -2960,11 +3053,16 @@ async fn get_effective_database_config_handler(
         .db_manager
         .effective_config(&database, state.runtime_config.as_ref())
     {
-        Ok(config) => Json(serde_json::json!({
-            "database": database,
-            "effective": config,
-        }))
-        .into_response(),
+        Ok(config) => {
+            let (effective, pending_restart) =
+                database_config_runtime_state(&state, &database, &config.effective);
+            Json(serde_json::json!({
+                "database": database,
+                "effective": redact_database_settings(&effective),
+                "pendingRestart": pending_restart,
+            }))
+            .into_response()
+        }
         Err(MultiDbError::NotFound(_)) => StatusCode::NOT_FOUND.into_response(),
         Err(MultiDbError::InvalidConfig(error)) => (
             StatusCode::BAD_REQUEST,
@@ -2972,6 +3070,102 @@ async fn get_effective_database_config_handler(
         )
             .into_response(),
         Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+fn redact_database_settings(values: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    values
+        .iter()
+        .map(|(key, value)| {
+            let value = if lookup_setting(key).is_some_and(|setting| setting.redacted) {
+                "<REDACTED>".to_owned()
+            } else {
+                value.clone()
+            };
+            (key.clone(), value)
+        })
+        .collect()
+}
+
+fn database_config_runtime_state(
+    state: &AppState,
+    database: &str,
+    resolved: &BTreeMap<String, String>,
+) -> (BTreeMap<String, String>, bool) {
+    let effective = state
+        .database_config_active
+        .write()
+        .entry(database.to_owned())
+        .or_insert_with(|| resolved.clone())
+        .clone();
+    let pending_restart = state
+        .database_config_pending
+        .read()
+        .get(database)
+        .is_some_and(|keys| !keys.is_empty());
+    (effective, pending_restart)
+}
+
+fn changed_database_settings(
+    previous: &BTreeMap<String, String>,
+    next: &BTreeMap<String, String>,
+) -> Vec<String> {
+    copperdb_config::settings()
+        .iter()
+        .filter(|setting| previous.get(setting.key) != next.get(setting.key))
+        .map(|setting| setting.key.to_owned())
+        .collect()
+}
+
+fn update_database_config_runtime_state(
+    state: &AppState,
+    database: &str,
+    previous: &BTreeMap<String, String>,
+    next: &BTreeMap<String, String>,
+    changed: &[String],
+) -> (BTreeMap<String, String>, bool) {
+    let mut active_by_database = state.database_config_active.write();
+    let active = active_by_database
+        .entry(database.to_owned())
+        .or_insert_with(|| previous.clone());
+    let mut pending_by_database = state.database_config_pending.write();
+    let pending = pending_by_database.entry(database.to_owned()).or_default();
+    for key in changed {
+        let Some(setting) = lookup_setting(key) else {
+            continue;
+        };
+        if setting.restart_level == "none" {
+            if let Some(value) = next.get(key) {
+                active.insert(key.clone(), value.clone());
+            }
+            pending.remove(key);
+        } else if active.get(key) == next.get(key) {
+            pending.remove(key);
+        } else {
+            pending.insert(key.clone());
+        }
+    }
+    let effective = active.clone();
+    let pending_restart = !pending.is_empty();
+    if !pending_restart {
+        pending_by_database.remove(database);
+    }
+    (effective, pending_restart)
+}
+
+fn database_config_error_response(error: MultiDbError) -> Response {
+    match error {
+        MultiDbError::NotFound(_) => StatusCode::NOT_FOUND.into_response(),
+        MultiDbError::InvalidConfig(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error})),
+        )
+            .into_response(),
+        error => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": error.to_string()})),
         )
@@ -2998,12 +3192,10 @@ async fn neo4j_tx_commit_handler(
         .statements
         .iter()
         .any(|statement| statement_requires_admin(&statement.statement))
+        && let Some(claims) = claims.as_ref()
+        && let Err(status) = ensure_admin_access(&state, claims)
     {
-        if let Some(claims) = claims.as_ref() {
-            if let Err(status) = ensure_admin_access(&state, claims) {
-                return status.into_response();
-            }
-        }
+        return status.into_response();
     }
     let roles = roles_for_claims(claims.as_ref());
     let distributed = distributed_cypher_requested(&state, &headers);
@@ -3827,10 +4019,20 @@ fn open_engine(state: &AppState, database: &str) -> Result<Arc<GraphEngine>, Str
         .db_manager
         .get(database)
         .ok_or_else(|| format!("database not found: {database}"))?;
-    let runtime_config = state
+    let configured_runtime = state
         .db_manager
         .effective_config(database, state.runtime_config.as_ref())
         .map_err(|error| error.to_string())?;
+    let active_settings = state.database_config_active.read().get(database).cloned();
+    let runtime_config = match active_settings {
+        Some(active) => {
+            copperdb_config::resolve_per_database_config(state.runtime_config.as_ref(), &active)
+                .map_err(|error| error.to_string())?
+        }
+        None => configured_runtime,
+    };
+    let active_snapshot = runtime_config.effective.clone();
+    let configured_settings = state.db_manager.get_config_overrides(database);
     let apoc_import_granted = state
         .runtime_config
         .packages
@@ -3885,6 +4087,7 @@ fn open_engine(state: &AppState, database: &str) -> Result<Arc<GraphEngine>, Str
         log_queries: false,
         sync_writes: state.runtime_config.storage.sync_writes,
         runtime_config,
+        configured_settings,
         package_import_file_root,
         package_remote_url_allowlist,
         package_graph_write_enabled,
@@ -3901,6 +4104,11 @@ fn open_engine(state: &AppState, database: &str) -> Result<Arc<GraphEngine>, Str
     }
     let mut cache = state.engine_cache.write();
     cache.insert(database.to_string(), Arc::clone(&engine));
+    state
+        .database_config_active
+        .write()
+        .entry(database.to_owned())
+        .or_insert(active_snapshot);
     Ok(engine)
 }
 
@@ -4166,13 +4374,13 @@ async fn list_fabric_databases(State(state): State<Arc<AppState>>, headers: Head
     };
     let mut databases = Vec::new();
     for database in state.db_manager.list() {
-        if let Some(claims) = claims.as_ref() {
-            if let Err(status) = ensure_database_access(&state, claims, &database.name, false) {
-                if status == StatusCode::FORBIDDEN {
-                    continue;
-                }
-                return status.into_response();
+        if let Some(claims) = claims.as_ref()
+            && let Err(status) = ensure_database_access(&state, claims, &database.name, false)
+        {
+            if status == StatusCode::FORBIDDEN {
+                continue;
             }
+            return status.into_response();
         }
         match open_engine(&state, &database.name).and_then(|engine| {
             engine
@@ -4583,6 +4791,26 @@ async fn execute_fabric_ranked_search_admin_service(
                 .into_response();
         }
     };
+    if matches!(
+        request.query,
+        SearchQuery::Semantic { .. } | SearchQuery::Hybrid { .. }
+    ) && state
+        .runtime_config
+        .cli_overrides
+        .get("COPPERDB_SEARCH_VECTOR_ENABLED")
+        .is_some_and(|value| {
+            copperdb_config::normalize_setting_value("COPPERDB_SEARCH_VECTOR_ENABLED", value)
+                .is_ok_and(|value| value == "false")
+        })
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "vector search is disabled for this database"
+            })),
+        )
+            .into_response();
+    }
     execute_fabric_ranked_search_admin_impl(
         state,
         tenant,
@@ -4625,7 +4853,14 @@ async fn execute_fabric_ranked_search_admin_impl(
                 .into_response();
         }
     };
-    let (_fabric, search_plans, hydration_coordinators, ranked_transport, hydration_transport) = {
+    let (
+        engine,
+        _fabric,
+        search_plans,
+        hydration_coordinators,
+        ranked_transport,
+        hydration_transport,
+    ) = {
         let engine = match open_engine(&state, &database) {
             Ok(engine) => engine,
             Err(error) => {
@@ -4685,12 +4920,18 @@ async fn execute_fabric_ranked_search_admin_impl(
                 }
             };
         (
+            engine,
             fabric,
             search_plans,
             hydration_coordinators,
             ranked_transport,
             hydration_transport,
         )
+    };
+    let rerank_request = match &request.query {
+        SearchQuery::FullText { query, limit, .. } => Some((query.clone(), *limit)),
+        SearchQuery::Hybrid { text, k, .. } => Some((text.clone(), *k)),
+        SearchQuery::Semantic { .. } => None,
     };
     let collected = match collect_planned_fabric_ranked_batches_with_context(
         &request_context,
@@ -4745,6 +4986,14 @@ async fn execute_fabric_ranked_search_admin_impl(
         request.config,
         request.policy,
     );
+    if let Some((query, top_k)) = rerank_request {
+        execution.hydrated = engine.rerank_hydrated_search_outcome(
+            &request_context,
+            &query,
+            execution.hydrated,
+            top_k,
+        );
+    }
     execution.responded_nodes = collected.responded_nodes;
     execution.failed_nodes = collected.failed_nodes;
     for node_id in hydration.responded_nodes {
@@ -5095,7 +5344,7 @@ async fn mcp_handler(
                 StatusCode::PAYLOAD_TOO_LARGE | StatusCode::UNSUPPORTED_MEDIA_TYPE
             ) =>
         {
-            return rejection.into_response()
+            return rejection.into_response();
         }
         Err(rejection) => {
             let preferences = headers
@@ -5190,7 +5439,7 @@ async fn mcp_handler(
                 "Invalid Request",
                 Some(serde_json::json!({"detail": error.to_string()})),
             ))
-            .into_response()
+            .into_response();
         }
     };
     let is_initialize = request.method == "initialize";
@@ -5340,15 +5589,14 @@ async fn execute_mcp_request(
                 Err(_) if is_notification => return Ok(None),
                 Err(status) => return Err(status),
             };
-        if access.requires_admin() {
-            if let Some(claims) = claims.as_ref() {
-                if let Err(status) = ensure_admin_access(&state, claims) {
-                    if is_notification {
-                        return Ok(None);
-                    }
-                    return Err(status);
-                }
+        if access.requires_admin()
+            && let Some(claims) = claims.as_ref()
+            && let Err(status) = ensure_admin_access(&state, claims)
+        {
+            if is_notification {
+                return Ok(None);
             }
+            return Err(status);
         }
         let engine = match open_engine(&state, &database) {
             Ok(engine) => engine,

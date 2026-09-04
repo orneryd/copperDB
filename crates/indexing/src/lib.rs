@@ -103,10 +103,10 @@ impl<'a> IndexCatalog<'a> {
             // requested properties, unioning across all (label, prop) indexes.
             // This turns graphify's `MATCH (a {id:$src}),(b {id:$tgt})` into O(1)
             // lookups instead of a full node scan.
-            if !properties.is_empty() {
-                if let Some(nodes) = self.lookup_labelless_by_any_property_index(properties)? {
-                    return Ok(nodes);
-                }
+            if !properties.is_empty()
+                && let Some(nodes) = self.lookup_labelless_by_any_property_index(properties)?
+            {
+                return Ok(nodes);
             }
             let mut nodes = self.storage.all_node_records()?;
             nodes.retain(|node| node_matches_properties(node, properties));
@@ -360,10 +360,8 @@ impl<'a> IndexCatalog<'a> {
                     break;
                 }
             }
-            if in_all {
-                if let Some(node) = self.storage.get_node_record(node_id)? {
-                    result.push(node);
-                }
+            if in_all && let Some(node) = self.storage.get_node_record(node_id)? {
+                result.push(node);
             }
         }
 
@@ -1612,8 +1610,8 @@ mod tests {
     }
 
     #[test]
-    fn lookup_nodes_by_range_uses_non_leading_composite_temporal_index_when_exact_prefix_is_available(
-    ) {
+    fn lookup_nodes_by_range_uses_non_leading_composite_temporal_index_when_exact_prefix_is_available()
+     {
         let (_temp_dir, storage) =
             open_test_storage("catalog-lookup-nodes-by-non-leading-composite-temporal-range");
         let catalog = IndexCatalog::new(&storage);
@@ -1685,8 +1683,8 @@ mod tests {
     }
 
     #[test]
-    fn lookup_edges_by_range_uses_composite_relationship_range_index_when_exact_suffix_is_available(
-    ) {
+    fn lookup_edges_by_range_uses_composite_relationship_range_index_when_exact_suffix_is_available()
+     {
         let (_temp_dir, storage) = open_test_storage("catalog-lookup-edges-by-composite-range");
         let catalog = IndexCatalog::new(&storage);
 
@@ -1806,8 +1804,8 @@ mod tests {
     }
 
     #[test]
-    fn lookup_edges_by_range_uses_non_leading_composite_relationship_range_index_when_exact_prefix_is_available(
-    ) {
+    fn lookup_edges_by_range_uses_non_leading_composite_relationship_range_index_when_exact_prefix_is_available()
+     {
         let (_temp_dir, storage) =
             open_test_storage("catalog-lookup-edges-by-non-leading-composite-range");
         let catalog = IndexCatalog::new(&storage);
@@ -2014,8 +2012,8 @@ mod tests {
     }
 
     #[test]
-    fn lookup_edges_by_range_uses_non_leading_composite_temporal_relationship_index_when_exact_prefix_is_available(
-    ) {
+    fn lookup_edges_by_range_uses_non_leading_composite_temporal_relationship_index_when_exact_prefix_is_available()
+     {
         let (_temp_dir, storage) =
             open_test_storage("catalog-lookup-edges-by-non-leading-composite-temporal-range");
         let catalog = IndexCatalog::new(&storage);
@@ -2168,8 +2166,8 @@ mod tests {
     }
 
     #[test]
-    fn preferred_relationship_range_index_definition_prefers_more_exact_prefix_for_non_leading_range(
-    ) {
+    fn preferred_relationship_range_index_definition_prefers_more_exact_prefix_for_non_leading_range()
+     {
         let (_temp_dir, storage) =
             open_test_storage("catalog-preferred-edge-non-leading-range-prefix");
         let catalog = IndexCatalog::new(&storage);
@@ -2218,8 +2216,8 @@ mod tests {
     }
 
     #[test]
-    fn preferred_relationship_range_index_definition_prefers_more_exact_fields_when_prefix_is_equal(
-    ) {
+    fn preferred_relationship_range_index_definition_prefers_more_exact_fields_when_prefix_is_equal()
+     {
         let (_temp_dir, storage) =
             open_test_storage("catalog-preferred-edge-non-leading-range-specificity");
         let catalog = IndexCatalog::new(&storage);

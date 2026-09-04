@@ -1,5 +1,5 @@
 use super::*;
-use copperdb_auth::{Privilege, Role, User, ROLE_ADMIN};
+use copperdb_auth::{Privilege, ROLE_ADMIN, Role, User};
 use copperdb_inference::{
     Evidence, HeimdallReviewState, InferenceError, Provenance, ProviderReview, ReviewProvider,
     Suggestion,

@@ -736,25 +736,24 @@ pub fn build_binding_table(
     promotion_policies: &HashMap<String, PromotionPolicyDef>,
 ) -> Result<BindingTable, KnowledgePolicyError> {
     for binding in bindings {
-        if !binding.no_decay {
-            if let Some(profile_ref) = &binding.profile_ref {
-                if !bundles.contains_key(profile_ref) {
-                    return Err(KnowledgePolicyError::UnknownDecayProfile {
-                        binding: binding.name.clone(),
-                        profile: profile_ref.clone(),
-                    });
-                }
-            }
+        if !binding.no_decay
+            && let Some(profile_ref) = &binding.profile_ref
+            && !bundles.contains_key(profile_ref)
+        {
+            return Err(KnowledgePolicyError::UnknownDecayProfile {
+                binding: binding.name.clone(),
+                profile: profile_ref.clone(),
+            });
         }
 
         for rule in &binding.property_rules {
-            if let Some(profile_ref) = &rule.profile_ref {
-                if !bundles.contains_key(profile_ref) {
-                    return Err(KnowledgePolicyError::UnknownPropertyProfile {
-                        binding: binding.name.clone(),
-                        profile: profile_ref.clone(),
-                    });
-                }
+            if let Some(profile_ref) = &rule.profile_ref
+                && !bundles.contains_key(profile_ref)
+            {
+                return Err(KnowledgePolicyError::UnknownPropertyProfile {
+                    binding: binding.name.clone(),
+                    profile: profile_ref.clone(),
+                });
             }
         }
     }
@@ -1005,11 +1004,7 @@ fn compute_decay_score(binding: &CompiledBinding, age_millis: i64) -> f64 {
         DecayFunction::None => 1.0,
     };
 
-    if inverted {
-        1.0 - raw_score
-    } else {
-        raw_score
-    }
+    if inverted { 1.0 - raw_score } else { raw_score }
 }
 
 fn binding_label_key(labels: &[String]) -> String {

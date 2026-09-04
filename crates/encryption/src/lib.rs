@@ -5,8 +5,8 @@
 //! and stores the KMS metadata required to decrypt it later.
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, Payload},
     Aes256Gcm, Key, Nonce,
+    aead::{Aead, KeyInit, Payload},
 };
 use copperdb_kms::{AuditEvent, DataKey, DecryptOptions, KeyGenOptions, KeyProvider, KmsError};
 use getrandom::fill as fill_random;

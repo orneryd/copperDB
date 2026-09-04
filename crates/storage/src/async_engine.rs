@@ -8,8 +8,8 @@ use copperdb_util::RequestCancellation;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 

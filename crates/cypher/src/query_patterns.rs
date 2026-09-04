@@ -128,14 +128,14 @@ pub fn detect_query_pattern(query: &str) -> PatternInfo {
     let upper = query.to_ascii_uppercase();
 
     // Mutual relationship: (a)-[:T]->(b)-[:T]->(a)
-    if info.pattern == QueryPattern::Generic {
-        if let Some(detected) = detect_mutual_relationship(query) {
-            info.pattern = QueryPattern::MutualRelationship;
-            info.start_var = detected.start_var;
-            info.end_var = detected.end_var;
-            info.rel_type = detected.rel_type;
-            return info;
-        }
+    if info.pattern == QueryPattern::Generic
+        && let Some(detected) = detect_mutual_relationship(query)
+    {
+        info.pattern = QueryPattern::MutualRelationship;
+        info.start_var = detected.start_var;
+        info.end_var = detected.end_var;
+        info.rel_type = detected.rel_type;
+        return info;
     }
 
     // Incoming / outgoing count aggregation (narrow shape only)
@@ -167,15 +167,15 @@ pub fn detect_query_pattern(query: &str) -> PatternInfo {
         }
     }
 
-    if info.pattern == QueryPattern::Generic {
-        if let Some(detected) = detect_edge_property_agg(query) {
-            info.pattern = QueryPattern::EdgePropertyAgg;
-            info.rel_type = detected.rel_type;
-            info.rel_var = detected.rel_var;
-            info.agg_functions = detected.agg_functions;
-            info.agg_property = detected.agg_property;
-            return info;
-        }
+    if info.pattern == QueryPattern::Generic
+        && let Some(detected) = detect_edge_property_agg(query)
+    {
+        info.pattern = QueryPattern::EdgePropertyAgg;
+        info.rel_type = detected.rel_type;
+        info.rel_var = detected.rel_var;
+        info.agg_functions = detected.agg_functions;
+        info.agg_property = detected.agg_property;
+        return info;
     }
 
     if info.pattern == QueryPattern::Generic && detect_simple_match_limit(query) {
@@ -184,11 +184,12 @@ pub fn detect_query_pattern(query: &str) -> PatternInfo {
     }
 
     // Large result set (LIMIT > 100)
-    if let Some(limit) = info.limit {
-        if limit > 100 && upper.contains("MATCH") {
-            info.pattern = QueryPattern::LargeResultSet;
-            return info;
-        }
+    if let Some(limit) = info.limit
+        && limit > 100
+        && upper.contains("MATCH")
+    {
+        info.pattern = QueryPattern::LargeResultSet;
+        return info;
     }
 
     info
@@ -768,7 +769,7 @@ fn extract_match_clause(query: &str) -> Option<&str> {
 /// `WITH` occurrence: if that token is `STARTS` or `ENDS` the `WITH` is treated
 /// as an operator suffix, not a clause boundary.
 fn contains_clause_level_with(query: &str) -> bool {
-    use crate::keyword_scan::{keyword_index_from, KeywordScanOpts};
+    use crate::keyword_scan::{KeywordScanOpts, keyword_index_from};
     let opts = KeywordScanOpts::default();
     let qb = query.as_bytes();
     let mut from = 0;
@@ -894,8 +895,7 @@ mod tests {
 
     #[test]
     fn test_edge_property_agg_pattern() {
-        let query =
-            "MATCH (c:Customer)-[r:REVIEWED]->(p:Product) RETURN p.name, avg(r.rating) AS avg_rating";
+        let query = "MATCH (c:Customer)-[r:REVIEWED]->(p:Product) RETURN p.name, avg(r.rating) AS avg_rating";
         let info = detect_query_pattern(query);
         assert_eq!(info.pattern, QueryPattern::EdgePropertyAgg);
         assert_eq!(info.rel_type, "REVIEWED");

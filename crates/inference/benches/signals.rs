@@ -4,7 +4,7 @@ use copperdb_inference::{
     ExistingEdge, InferenceError, SignalConfig, SignalEngine, SimilarityResult, SimilaritySearch,
 };
 use copperdb_util::RequestContext;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
 struct Search;
 

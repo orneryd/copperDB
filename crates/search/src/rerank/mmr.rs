@@ -3,7 +3,7 @@ use std::sync::Arc;
 use copperdb_math::cosine_similarity;
 use copperdb_util::RequestContext;
 
-use super::{pass_through, RerankCandidate, RerankResult, Reranker};
+use super::{RerankCandidate, RerankResult, Reranker, pass_through};
 use crate::SearchError;
 
 pub trait CandidateEmbeddingSource: Send + Sync {

@@ -40,26 +40,43 @@ pub use ast::*;
 pub use compound_query_shape_matcher::{
     match_compound_prop_create_delete_return_count_rel_shape, match_compound_query_shape,
 };
+use copperdb_localization::{Message, StableLocalizedDiagnostic};
 pub use executor::{Executor, QueryResult};
 use parse_context::ParseContext;
 pub use parser::Parser;
 use parser_support::{parse_bool_token, trim_quotes};
 pub use pipeline_probe::{
-    can_execute_as_pipeline, pending_pipeline_execution_todo, PipelineClause, PipelineClauseKind,
+    PipelineClause, PipelineClauseKind, can_execute_as_pipeline, pending_pipeline_execution_todo,
 };
-pub use query_patterns::{detect_query_pattern, PatternInfo, QueryPattern};
+pub use query_patterns::{PatternInfo, QueryPattern, detect_query_pattern};
 use serde_json::Value;
 pub use shape_matcher::{
-    pending_shape_execution_todo, ShapeCaptures, ShapeKind, ShapeMatch, ShapeProbe, ShapeValue,
+    ShapeCaptures, ShapeKind, ShapeMatch, ShapeProbe, ShapeValue, pending_shape_execution_todo,
 };
 pub use syntax_ir::{
-    parse_syntax, SyntaxClause, SyntaxClauseContent, SyntaxClauseKind, SyntaxExprKind,
-    SyntaxExprRef, SyntaxNode, SyntaxOrderItem, SyntaxPattern, SyntaxQuery, SyntaxRelationship,
-    SyntaxReturnItem, SyntaxSetItem,
+    SyntaxClause, SyntaxClauseContent, SyntaxClauseKind, SyntaxExprKind, SyntaxExprRef, SyntaxNode,
+    SyntaxOrderItem, SyntaxPattern, SyntaxQuery, SyntaxRelationship, SyntaxReturnItem,
+    SyntaxSetItem, parse_syntax,
 };
 use thiserror::Error;
 pub use tokenizer::tokenize;
-use copperdb_localization::{Message, StableLocalizedDiagnostic};
+
+fn push_show_setting_name(
+    names: &mut Vec<String>,
+    raw_name: &mut String,
+) -> Result<(), CypherError> {
+    let name = raw_name
+        .trim()
+        .trim_matches(|character| matches!(character, '`' | '\'' | '"'));
+    if name.is_empty() {
+        return Err(CypherError::ParseError(
+            "SHOW SETTINGS requires a setting name after each comma".into(),
+        ));
+    }
+    names.push(name.to_owned());
+    raw_name.clear();
+    Ok(())
+}
 
 #[derive(Debug, Error)]
 pub enum CypherError {
@@ -918,6 +935,44 @@ impl<'a> ParseContext<'a> {
         Ok(ShowConstraintsClause)
     }
 
+    fn parse_show_settings(&mut self) -> Result<ShowSettingsClause, CypherError> {
+        const UNSUPPORTED_COMPOSITION: [&str; 6] =
+            ["YIELD", "WHERE", "RETURN", "ORDER", "SKIP", "LIMIT"];
+
+        let mut names = Vec::new();
+        let mut name = String::new();
+        let mut ended_with_comma = false;
+        while let Some(token) = self.advance() {
+            if UNSUPPORTED_COMPOSITION
+                .iter()
+                .any(|keyword| token.eq_ignore_ascii_case(keyword))
+                && !name.ends_with('.')
+                && self.peek() != Some(".")
+            {
+                return Err(CypherError::ParseError(format!(
+                    "SHOW SETTINGS {} composition is unsupported",
+                    token.to_ascii_uppercase()
+                )));
+            }
+            if token == ";" && self.peek().is_none() {
+                break;
+            }
+            if token == "," {
+                push_show_setting_name(&mut names, &mut name)?;
+                ended_with_comma = true;
+            } else {
+                name.push_str(token);
+                ended_with_comma = false;
+            }
+        }
+        if !name.is_empty() || ended_with_comma {
+            push_show_setting_name(&mut names, &mut name)?;
+        }
+        names.sort();
+        names.dedup();
+        Ok(ShowSettingsClause { names })
+    }
+
     fn parse_create_index(&mut self, kind: IndexKind) -> Result<CreateIndexClause, CypherError> {
         let name = self.advance_identifier()?;
         let if_not_exists = self.consume_if_not_exists()?;
@@ -1704,7 +1759,9 @@ mod tests {
         let tokens = tokenize("MATCH (a)-[r]->(b)").unwrap();
         assert_eq!(
             tokens,
-            vec!["MATCH", "(", "a", ")", "-", "[", "r", "]", "-", ">", "(", "b", ")"]
+            vec![
+                "MATCH", "(", "a", ")", "-", "[", "r", "]", "-", ">", "(", "b", ")"
+            ]
         );
     }
 
@@ -2228,6 +2285,54 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_show_settings_names_and_quotes() {
+        let query = Parser::new()
+            .parse(
+                "SHOW SETTING `db.copper.memory.storage.mode`, \
+                 'db.copper.query_plan_cache.max_entries', \
+                 \"db.memory.transaction.total.max\", \
+                 db.copper.memory.storage.mode",
+            )
+            .unwrap();
+        let Clause::ShowSettings(clause) = query.clauses.first().expect("clause missing") else {
+            panic!("expected SHOW SETTINGS clause");
+        };
+        assert_eq!(
+            clause.names,
+            vec![
+                "db.copper.memory.storage.mode",
+                "db.copper.query_plan_cache.max_entries",
+                "db.memory.transaction.total.max",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_show_settings_all_and_rejects_composition() {
+        let query = Parser::new().parse("SHOW SETTINGS").unwrap();
+        let Clause::ShowSettings(clause) = query.clauses.first().expect("clause missing") else {
+            panic!("expected SHOW SETTINGS clause");
+        };
+        assert!(clause.names.is_empty());
+
+        for keyword in ["YIELD", "WHERE", "RETURN", "ORDER", "SKIP", "LIMIT"] {
+            let error = Parser::new()
+                .parse(&format!("SHOW SETTINGS {keyword} name"))
+                .expect_err("composition must be rejected");
+            assert!(error.to_string().contains("composition is unsupported"));
+        }
+        assert!(Parser::new().parse("SHOW SETTINGS db.copper.foo,").is_err());
+
+        let query = Parser::new()
+            .parse("SHOW SETTINGS db.copper.yield.mode")
+            .unwrap();
+        let Clause::ShowSettings(clause) = &query.clauses[0] else {
+            panic!("expected SHOW SETTINGS clause");
+        };
+        assert_eq!(clause.names, ["db.copper.yield.mode"]);
+    }
+
+    #[test]
     fn test_parse_create_index() {
         let p = Parser::new();
         let q = p
@@ -2448,9 +2553,10 @@ mod tests {
         let err = p
             .parse("CREATE RANGE INDEX follows_weight_idx FOR ()-[r:FOLLOWS]-() ON (x.weight)")
             .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("index variable mismatch: expected 'r', got 'x'"));
+        assert!(
+            err.to_string()
+                .contains("index variable mismatch: expected 'r', got 'x'")
+        );
     }
 
     #[test]

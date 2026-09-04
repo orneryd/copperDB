@@ -685,12 +685,12 @@ impl TopologyRegistry {
                 "peer node id must not be empty".into(),
             ));
         }
-        if let Some(profile) = &peer.hyperscaler_profile {
-            if !self.hyperscaler_profiles.contains_key(profile) {
-                return Err(TopologyError::MissingPeer(format!(
-                    "hyperscaler profile {profile}"
-                )));
-            }
+        if let Some(profile) = &peer.hyperscaler_profile
+            && !self.hyperscaler_profiles.contains_key(profile)
+        {
+            return Err(TopologyError::MissingPeer(format!(
+                "hyperscaler profile {profile}"
+            )));
         }
         self.peers.insert(peer.node_id.clone(), peer);
         Ok(())
@@ -702,12 +702,12 @@ impl TopologyRegistry {
                 return Err(TopologyError::MissingPeer(peer_id));
             }
         }
-        if let Some(profile) = &placement.hyperscaler_profile {
-            if !self.hyperscaler_profiles.contains_key(profile) {
-                return Err(TopologyError::InvalidTopology(format!(
-                    "placement references unknown hyperscaler profile {profile}"
-                )));
-            }
+        if let Some(profile) = &placement.hyperscaler_profile
+            && !self.hyperscaler_profiles.contains_key(profile)
+        {
+            return Err(TopologyError::InvalidTopology(format!(
+                "placement references unknown hyperscaler profile {profile}"
+            )));
         }
         self.placements.insert(placement.key.clone(), placement);
         Ok(())

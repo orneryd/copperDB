@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use copperdb_audit::{AuditLog, Event, EventType};
 use copperdb_auth::{Permission, User};
 use copperdb_storage::{EdgeAdjacencyDirection, EdgeRecord, NodeRecord, StorageEngine};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -240,16 +240,16 @@ impl SuggestionRepository {
                 .get(&suggestion_id)?
                 .ok_or(InferenceError::SuggestionNotFound(suggestion_id));
         }
-        if let Some(existing) = self.get(&suggestion_id)? {
-            if matches!(
+        if let Some(existing) = self.get(&suggestion_id)?
+            && matches!(
                 existing.status,
                 SuggestionStatus::Approved
                     | SuggestionStatus::Rejected
                     | SuggestionStatus::Materialized
                     | SuggestionStatus::Cancelled
-            ) {
-                return Ok(existing);
-            }
+            )
+        {
+            return Ok(existing);
         }
         let mut transaction = self.storage.begin_transaction().map_err(storage_error)?;
         if transaction
@@ -547,10 +547,10 @@ impl SuggestionRepository {
         for attempt in 0..3 {
             match self.materialize_once(suggestion_id, policy, actor) {
                 Err(InferenceError::DecisionConflict) if attempt < 2 => {
-                    if let Some(materialized) = self.get(suggestion_id)? {
-                        if materialized.status == SuggestionStatus::Materialized {
-                            return Ok(materialized);
-                        }
+                    if let Some(materialized) = self.get(suggestion_id)?
+                        && materialized.status == SuggestionStatus::Materialized
+                    {
+                        return Ok(materialized);
                     }
                     continue;
                 }
@@ -850,7 +850,7 @@ fn now_unix_ms() -> i64 {
 mod tests {
     use super::*;
     use copperdb_audit::AuditConfig;
-    use copperdb_auth::{Privilege, Role, ROLE_ADMIN};
+    use copperdb_auth::{Privilege, ROLE_ADMIN, Role};
     use std::collections::HashMap;
     use std::sync::Barrier;
     use std::thread;
@@ -941,10 +941,12 @@ mod tests {
             .unwrap();
         assert_eq!(pending.status, SuggestionStatus::PendingReview);
         assert_eq!(pending.evidence_count, 3);
-        assert!(storage
-            .get_node_record(&format!("{EVIDENCE_PREFIX}{}:e3", pending.id))
-            .unwrap()
-            .is_some());
+        assert!(
+            storage
+                .get_node_record(&format!("{EVIDENCE_PREFIX}{}:e3", pending.id))
+                .unwrap()
+                .is_some()
+        );
         let duplicate = repository
             .record_evidence(evidence("e3", "s2", base + 2))
             .unwrap();

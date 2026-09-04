@@ -1,7 +1,7 @@
 use crate::{
+    CypherError, Expression, ParseContext, Query, SyntaxClause, SyntaxExprRef, SyntaxQuery,
     keyword_scan::starts_with_keyword_fold, parse_syntax, syntax_ir::parse_expression_text,
-    tokenize, CypherError, Expression, ParseContext, Query, SyntaxClause, SyntaxExprRef,
-    SyntaxQuery,
+    tokenize,
 };
 
 pub struct Parser;

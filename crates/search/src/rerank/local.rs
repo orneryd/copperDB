@@ -1,9 +1,10 @@
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
+use copperdb_localllm::{GgufConfig, LocalRerankerModel};
 use copperdb_util::RequestContext;
 
-use super::{pass_through, RerankCandidate, RerankResult, Reranker};
+use super::{RerankCandidate, RerankResult, Reranker, pass_through};
 use crate::SearchError;
 
 pub trait RerankScorer: Send + Sync + 'static {
@@ -13,6 +14,37 @@ pub trait RerankScorer: Send + Sync + 'static {
         query: &str,
         document: &str,
     ) -> Result<f64, SearchError>;
+}
+
+pub struct GgufRerankScorer {
+    model: LocalRerankerModel,
+}
+
+impl GgufRerankScorer {
+    pub fn load(model_path: impl Into<std::path::PathBuf>) -> Result<Self, SearchError> {
+        LocalRerankerModel::load(GgufConfig::with_model(model_path))
+            .map(|model| Self { model })
+            .map_err(|error| SearchError::Transport(error.to_string()))
+    }
+
+    pub fn backend(&self) -> &'static str {
+        self.model.backend().as_str()
+    }
+}
+
+impl RerankScorer for GgufRerankScorer {
+    fn score(
+        &self,
+        request_context: &RequestContext,
+        query: &str,
+        document: &str,
+    ) -> Result<f64, SearchError> {
+        request_context.check_active()?;
+        self.model
+            .score(query, document)
+            .map(f64::from)
+            .map_err(|error| SearchError::Transport(error.to_string()))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

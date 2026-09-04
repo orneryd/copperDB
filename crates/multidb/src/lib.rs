@@ -11,8 +11,10 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use copperdb_config::{
-    allowed_per_database_config_keys, resolve_per_database_config, validate_per_database_overrides,
     Config as GlobalConfig, EffectiveDatabaseConfig, PerDatabaseConfigKey,
+    allowed_per_database_config_keys, canonicalize_per_database_overrides,
+    is_allowed_per_database_config_key, normalize_per_database_overrides, normalize_setting_value,
+    resolve_per_database_config,
 };
 use copperdb_storage::{NodeRecord, StorageEngine};
 
@@ -103,7 +105,12 @@ impl DatabaseManager {
             manager.databases.insert(database.name.clone(), database);
         }
         for node in catalog.get_nodes_by_label(DATABASE_CONFIG_LABEL)? {
-            let (name, overrides) = database_config_from_node(&node)?;
+            let Ok((name, overrides)) = database_config_from_node(&node) else {
+                continue;
+            };
+            let Ok(overrides) = normalize_per_database_overrides(&overrides) else {
+                continue;
+            };
             manager.config_overrides.insert(name, overrides);
         }
         manager.seed_builtin_databases();
@@ -195,13 +202,40 @@ impl DatabaseManager {
         if !self.databases.contains_key(name) {
             return Err(MultiDbError::NotFound(name.to_owned()));
         }
-        validate_per_database_overrides(&overrides)
+        let overrides = normalize_per_database_overrides(&overrides)
             .map_err(|error| MultiDbError::InvalidConfig(error.to_string()))?;
         self.persist_database_config(name, &overrides)?;
         if overrides.is_empty() {
             self.config_overrides.remove(name);
         } else {
             self.config_overrides.insert(name.to_owned(), overrides);
+        }
+        Ok(())
+    }
+
+    pub fn seed_config_defaults(
+        &self,
+        defaults: &BTreeMap<String, BTreeMap<String, String>>,
+    ) -> Result<(), MultiDbError> {
+        for (name, configured) in defaults {
+            let name = name.trim();
+            if name.is_empty() || configured.is_empty() {
+                continue;
+            }
+            let mut merged = self.get_config_overrides(name);
+            let initial_len = merged.len();
+            for (key, value) in canonicalize_per_database_overrides(configured) {
+                if !is_allowed_per_database_config_key(&key) {
+                    continue;
+                }
+                let value = normalize_setting_value(&key, &value)
+                    .map_err(|error| MultiDbError::InvalidConfig(error.to_string()))?;
+                merged.entry(key).or_insert(value);
+            }
+            if merged.len() != initial_len {
+                self.persist_database_config(name, &merged)?;
+                self.config_overrides.insert(name.to_owned(), merged);
+            }
         }
         Ok(())
     }
@@ -435,20 +469,124 @@ mod tests {
         let reloaded = DatabaseManager::open(&catalog_path).unwrap();
         let overrides = reloaded.get_config_overrides("clinic");
         assert_eq!(
-            overrides.get("COPPERDB_SEARCH_BM25_ENABLED").unwrap(),
+            overrides.get("db.copper.search.bm25.enabled").unwrap(),
             "true"
         );
+        assert!(!overrides.contains_key("COPPERDB_SEARCH_BM25_ENABLED"));
         let allowed_keys = reloaded.allowed_config_keys();
-        assert!(allowed_keys
-            .iter()
-            .any(|metadata| metadata.key == "COPPERDB_SEARCH_BM25_ENABLED"));
-        assert!(allowed_keys
-            .iter()
-            .any(|metadata| metadata.key == "COPPERDB_SEARCH_VECTOR_ENABLED"));
+        assert!(
+            allowed_keys
+                .iter()
+                .any(|metadata| metadata.key == "db.copper.search.bm25.enabled")
+        );
+        assert!(
+            allowed_keys
+                .iter()
+                .any(|metadata| metadata.key == "db.copper.search.vector.enabled")
+        );
     }
 
     #[test]
-    fn effective_config_uses_global_defaults_and_cli_precedence() {
+    fn catalog_load_skips_malformed_database_config_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog_path = dir.path().join("catalog");
+        let storage = StorageEngine::open_metadata(&catalog_path).unwrap();
+        let catalog = storage.for_namespace("multidb");
+        catalog
+            .put_node_record(
+                &database_config_to_node(
+                    "valid",
+                    &BTreeMap::from([("COPPERDB_SEARCH_MIN_SIMILARITY".into(), "0.7".into())]),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mut malformed = database_config_to_node("malformed", &BTreeMap::new()).unwrap();
+        malformed
+            .properties
+            .remove(DATABASE_CONFIG_PAYLOAD_PROPERTY);
+        catalog.put_node_record(&malformed).unwrap();
+        catalog
+            .put_node_record(
+                &database_config_to_node(
+                    "invalid",
+                    &BTreeMap::from([("COPPERDB_UNKNOWN".into(), "true".into())]),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        storage.flush().unwrap();
+        drop(storage);
+
+        let reloaded = DatabaseManager::open(&catalog_path).unwrap();
+        assert_eq!(
+            reloaded.get_config_overrides("valid"),
+            BTreeMap::from([("db.copper.search.min.similarity".into(), "0.7".into())])
+        );
+        assert!(reloaded.get_config_overrides("malformed").is_empty());
+        assert!(reloaded.get_config_overrides("invalid").is_empty());
+    }
+
+    #[test]
+    fn config_defaults_seed_once_and_preserve_admin_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog_path = dir.path().join("catalog");
+        let manager = DatabaseManager::open(&catalog_path).unwrap();
+        manager.create("analytics", "./data/analytics").unwrap();
+        manager
+            .seed_config_defaults(&BTreeMap::from([(
+                "analytics".into(),
+                BTreeMap::from([
+                    ("COPPERDB_SEARCH_BM25_ENABLED".into(), "false".into()),
+                    ("db.memory.transaction.total.max".into(), "2m".into()),
+                    ("COPPERDB_UNKNOWN".into(), "ignored".into()),
+                ]),
+            )]))
+            .unwrap();
+        assert_eq!(
+            manager.get_config_overrides("analytics"),
+            BTreeMap::from([
+                ("db.copper.search.bm25.enabled".into(), "false".into()),
+                ("db.memory.transaction.total.max".into(), "2097152".into()),
+            ])
+        );
+        manager
+            .set_config_overrides(
+                "analytics",
+                BTreeMap::from([("COPPERDB_SEARCH_BM25_ENABLED".into(), "true".into())]),
+            )
+            .unwrap();
+        manager
+            .seed_config_defaults(&BTreeMap::from([(
+                "analytics".into(),
+                BTreeMap::from([
+                    ("COPPERDB_SEARCH_BM25_ENABLED".into(), "false".into()),
+                    ("COPPERDB_SEARCH_VECTOR_WARMING".into(), "lazy".into()),
+                ]),
+            )]))
+            .unwrap();
+        drop(manager);
+
+        let reloaded = DatabaseManager::open(&catalog_path).unwrap();
+        let configured = reloaded.get_config_overrides("analytics");
+        assert_eq!(configured["db.copper.search.bm25.enabled"], "true");
+        assert_eq!(configured["db.copper.search.vector.warming"], "lazy");
+        assert!(
+            reloaded
+                .seed_config_defaults(&BTreeMap::from([(
+                    "broken".into(),
+                    BTreeMap::from([(
+                        "db.copper.search.vector.warming".into(),
+                        "eventually".into(),
+                    )]),
+                )]))
+                .is_err()
+        );
+        assert!(reloaded.get_config_overrides("broken").is_empty());
+    }
+
+    #[test]
+    fn effective_config_uses_database_override_precedence() {
         let manager = DatabaseManager::new();
         manager.create("clinic", "./data/clinic").unwrap();
         manager
@@ -464,7 +602,7 @@ mod tests {
             .insert("COPPERDB_SEARCH_VECTOR_ENABLED".into(), "false".into());
 
         let effective = manager.effective_config("clinic", &global).unwrap();
-        assert!(!effective.vector_enabled);
+        assert!(effective.vector_enabled);
     }
 
     #[test]

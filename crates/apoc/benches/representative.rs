@@ -4,8 +4,8 @@ use std::sync::Arc;
 use copperdb_engine::{CopperDb, DatabaseConfig};
 use copperdb_plugin::resolve_packages;
 use copperdb_storage::{EdgeRecord, NodeRecord, StorageEngine};
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use serde_json::{json, Value};
+use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use serde_json::{Value, json};
 
 const FIXTURE_SIZE: usize = 1_000;
 const TRAVERSAL_NODE_COUNT: usize = 65;

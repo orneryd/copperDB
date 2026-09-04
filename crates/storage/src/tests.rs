@@ -1,7 +1,7 @@
 use super::*;
 use copperdb_kms::{LocalKms, LocalKmsConfig};
 use copperdb_util::RequestCancellation;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,6 +38,172 @@ fn sample_edge(id: &str, t: &str, start: &str, end: &str) -> EdgeRecord {
         created_at_unix_ms: 123,
         updated_at_unix_ms: 456,
     }
+}
+
+fn capacity_node(id: &str, text: &str) -> NodeRecord {
+    let mut node = sample_node(id, &[]);
+    node.properties = BTreeMap::from([("text".into(), json!(text))]);
+    node
+}
+
+#[test]
+fn index_capacity_rejects_before_mutation_and_releases_on_delete() {
+    let storage = StorageEngine::open_memory().unwrap();
+    storage
+        .set_index_capacity_policy(IndexCapacityPolicy {
+            bm25_memory_max_bytes: 4,
+            ..Default::default()
+        })
+        .unwrap();
+
+    storage
+        .put_node_record(&capacity_node("first", "four"))
+        .unwrap();
+    let error = storage
+        .put_node_record(&capacity_node("second", "five!"))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        StorageError::IndexMemoryBudgetExceeded {
+            resource: "bm25",
+            required: 9,
+            limit: 4,
+        }
+    ));
+    assert!(storage.get_node_record("second").unwrap().is_none());
+
+    let replacement_error = storage
+        .put_node_record(&capacity_node("first", "five!"))
+        .unwrap_err();
+    assert!(matches!(
+        replacement_error,
+        StorageError::IndexMemoryBudgetExceeded {
+            resource: "bm25",
+            required: 5,
+            limit: 4,
+        }
+    ));
+    assert_eq!(
+        storage
+            .get_node_record("first")
+            .unwrap()
+            .unwrap()
+            .properties["text"],
+        "four"
+    );
+
+    storage.delete_node_record("first").unwrap();
+    storage
+        .put_node_record(&capacity_node("second", "four"))
+        .unwrap();
+}
+
+#[test]
+fn index_capacity_accounts_vectors_metadata_and_disk_mode() {
+    let memory = StorageEngine::open_memory().unwrap();
+    memory
+        .set_index_capacity_policy(IndexCapacityPolicy {
+            vector_memory_max_bytes: 16,
+            vector_dimensions: 3,
+            vector_storage_mode: "memory".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let mut vector_node = capacity_node("vector", "");
+    vector_node
+        .named_embeddings
+        .insert("default".into(), vec![1.0, 2.0, 3.0]);
+    assert!(matches!(
+        memory.put_node_record(&vector_node),
+        Err(StorageError::IndexMemoryBudgetExceeded {
+            resource: "vector",
+            required: 24,
+            limit: 16,
+        })
+    ));
+
+    let disk = StorageEngine::open_memory().unwrap();
+    disk.set_index_capacity_policy(IndexCapacityPolicy {
+        vector_memory_max_bytes: 1,
+        vector_dimensions: 3,
+        vector_storage_mode: "disk".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    disk.put_node_record(&vector_node).unwrap();
+
+    let metadata = StorageEngine::open_memory().unwrap();
+    metadata
+        .set_index_capacity_policy(IndexCapacityPolicy {
+            metadata_memory_max_bytes: 1,
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(matches!(
+        metadata.put_node_record(&capacity_node("metadata", "")),
+        Err(StorageError::IndexMemoryBudgetExceeded {
+            resource: "vector metadata",
+            limit: 1,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn installing_index_capacity_policy_validates_existing_records() {
+    let storage = StorageEngine::open_memory().unwrap();
+    storage
+        .put_node_record(&capacity_node("existing", "larger than four bytes"))
+        .unwrap();
+
+    assert!(matches!(
+        storage.set_index_capacity_policy(IndexCapacityPolicy {
+            bm25_memory_max_bytes: 4,
+            ..Default::default()
+        }),
+        Err(StorageError::IndexMemoryBudgetExceeded {
+            resource: "bm25",
+            limit: 4,
+            ..
+        })
+    ));
+    assert_eq!(
+        storage.index_capacity_policy(),
+        IndexCapacityPolicy::default()
+    );
+}
+
+#[test]
+fn index_capacity_covers_relationship_vectors_and_releases_on_delete() {
+    let storage = StorageEngine::open_memory().unwrap();
+    storage
+        .set_index_capacity_policy(IndexCapacityPolicy {
+            vector_memory_max_bytes: 12,
+            vector_dimensions: 3,
+            ..Default::default()
+        })
+        .unwrap();
+    let mut first = sample_edge("first", "RELATED", "a", "b");
+    first
+        .properties
+        .insert("embedding".into(), json!([1.0, 2.0, 3.0]));
+    storage.put_edge_record(&first).unwrap();
+
+    let mut second = first.clone();
+    second.id = "second".into();
+    assert!(matches!(
+        storage.put_edge_record(&second),
+        Err(StorageError::IndexMemoryBudgetExceeded {
+            resource: "vector",
+            required: 24,
+            limit: 12,
+        })
+    ));
+    assert!(storage.get_edge_record("second").unwrap().is_none());
+
+    storage.delete_edge_record("first").unwrap();
+    storage.delete_edge_record("first").unwrap();
+    storage.put_edge_record(&second).unwrap();
 }
 
 #[test]
@@ -513,20 +679,24 @@ fn edge_record_indexes_are_maintained_and_updated() {
             .unwrap(),
         vec![edge.clone()]
     );
-    assert!(engine
-        .get_edges_from_node_by_type("db1:n1", "MENTORS")
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_edges_from_node_by_type("db1:n1", "MENTORS")
+            .unwrap()
+            .is_empty()
+    );
 
     edge.edge_type = "MENTORS".to_string();
     edge.properties.insert("years".to_string(), json!(5));
     engine.put_edge_record(&edge).unwrap();
 
     assert!(engine.get_edges_by_type("KNOWS").unwrap().is_empty());
-    assert!(engine
-        .get_edges_from_node_by_type("db1:n1", "KNOWS")
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_edges_from_node_by_type("db1:n1", "KNOWS")
+            .unwrap()
+            .is_empty()
+    );
     let mentors = engine.get_edges_by_type("MENTORS").unwrap();
     assert_eq!(mentors.len(), 1);
     assert_eq!(mentors[0].properties.get("years"), Some(&json!(5)));
@@ -580,10 +750,12 @@ fn adjacent_edge_queries_respect_direction_and_type_filters() {
             .unwrap(),
         vec![knows_out, knows_in]
     );
-    assert!(engine
-        .get_adjacent_edges("db1:n1", EdgeAdjacencyDirection::Both, Some("LIKES"))
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_adjacent_edges("db1:n1", EdgeAdjacencyDirection::Both, Some("LIKES"))
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -896,10 +1068,12 @@ fn namespace_constraint_ddl_rejects_existing_duplicates_without_persisting() {
         result,
         Err(StorageError::UniqueConstraintViolation { .. })
     ));
-    assert!(engine
-        .load_constraints_for_namespace("alpha")
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .load_constraints_for_namespace("alpha")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1618,19 +1792,22 @@ fn namespaced_storage_engine_delegates_mvcc_visible_reads_and_lifecycle_controls
             .collect::<Vec<_>>(),
         vec!["n1".to_string()]
     );
-    assert!(tenant_b
-        .get_edges_by_type_visible_at(&snapshot, "KNOWS")
-        .unwrap()
-        .is_empty());
+    assert!(
+        tenant_b
+            .get_edges_by_type_visible_at(&snapshot, "KNOWS")
+            .unwrap()
+            .is_empty()
+    );
 
     tenant_a.pause_lifecycle();
     assert!(tenant_a.lifecycle_status().paused);
     tenant_a.set_lifecycle_schedule_ms(12_000);
     assert_eq!(tenant_a.lifecycle_status().schedule_interval_ms, 12_000);
     let debt = tenant_a.top_lifecycle_debt_keys(8);
-    assert!(debt
-        .iter()
-        .all(|entry| !entry.logical_key.contains("tenant_a:")));
+    assert!(
+        debt.iter()
+            .all(|entry| !entry.logical_key.contains("tenant_a:"))
+    );
     let pruned = tenant_a.prune_mvcc_versions(MvccPruneOptions {
         max_versions_per_key: Some(1),
     });
@@ -1673,10 +1850,12 @@ fn storage_engine_rebuild_mvcc_repairs_raw_storage_drift_and_blocks_active_reade
     assert!(engine.get_node_record("n1").unwrap().is_none());
 
     let stale_snapshot = engine.begin_mvcc_snapshot();
-    assert!(engine
-        .get_node_record_visible_at(&stale_snapshot, "n1")
-        .unwrap()
-        .is_some());
+    assert!(
+        engine
+            .get_node_record_visible_at(&stale_snapshot, "n1")
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(
         engine
             .get_nodes_by_label_visible_at(&stale_snapshot, "Person")
@@ -1689,14 +1868,18 @@ fn storage_engine_rebuild_mvcc_repairs_raw_storage_drift_and_blocks_active_reade
 
     engine.rebuild_mvcc_from_current_state().unwrap();
     let repaired_snapshot = engine.begin_mvcc_snapshot();
-    assert!(engine
-        .get_node_record_visible_at(&repaired_snapshot, "n1")
-        .unwrap()
-        .is_none());
-    assert!(engine
-        .get_nodes_by_label_visible_at(&repaired_snapshot, "Person")
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_node_record_visible_at(&repaired_snapshot, "n1")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        engine
+            .get_nodes_by_label_visible_at(&repaired_snapshot, "Person")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1865,10 +2048,12 @@ fn storage_transaction_drops_index_catalog_and_derived_entries_together() {
     transaction.commit().unwrap();
 
     assert!(engine.load_index_definitions().unwrap().is_empty());
-    assert!(engine
-        .get_nodes_by_property("Person", "email", &json!("a@example.com"))
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_nodes_by_property("Person", "email", &json!("a@example.com"))
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1931,10 +2116,12 @@ fn storage_transaction_commits_knowledge_policy_catalog_atomically() {
     transaction.put_decay_profile(profile.clone()).unwrap();
     transaction.put_decay_binding(binding.clone()).unwrap();
     assert!(engine.load_decay_profile_schemas().unwrap().is_empty());
-    assert!(engine
-        .load_decay_profile_binding_schemas()
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .load_decay_profile_binding_schemas()
+            .unwrap()
+            .is_empty()
+    );
     transaction.commit().unwrap();
 
     assert_eq!(engine.load_decay_profile_schemas().unwrap(), vec![profile]);
@@ -2018,24 +2205,32 @@ fn storage_transaction_persists_its_mvcc_boundary_across_reopen() {
     };
 
     let reopened = StorageEngine::open(test_dir.path()).unwrap();
-    assert!(reopened
-        .get_node_record_visible_at(&before_commit, "source")
-        .unwrap()
-        .is_none());
-    assert!(reopened
-        .get_edge_record_visible_at(&before_commit, "edge")
-        .unwrap()
-        .is_none());
+    assert!(
+        reopened
+            .get_node_record_visible_at(&before_commit, "source")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        reopened
+            .get_edge_record_visible_at(&before_commit, "edge")
+            .unwrap()
+            .is_none()
+    );
 
     let after_commit = reopened.begin_mvcc_snapshot();
-    assert!(reopened
-        .get_node_record_visible_at(&after_commit, "source")
-        .unwrap()
-        .is_some());
-    assert!(reopened
-        .get_edge_record_visible_at(&after_commit, "edge")
-        .unwrap()
-        .is_some());
+    assert!(
+        reopened
+            .get_node_record_visible_at(&after_commit, "source")
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        reopened
+            .get_edge_record_visible_at(&after_commit, "edge")
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
@@ -2106,10 +2301,12 @@ fn bulk_edge_writes_are_mvcc_visible_and_wal_durable() {
         assert_eq!(engine.wal_stats().entries, 1);
         assert_eq!(engine.wal_applied_sequence().unwrap(), 1);
         assert_eq!(engine.begin_mvcc_snapshot().read_ts, before.read_ts + 1);
-        assert!(engine
-            .get_edge_record_visible_at(&before, "edge-1")
-            .unwrap()
-            .is_none());
+        assert!(
+            engine
+                .get_edge_record_visible_at(&before, "edge-1")
+                .unwrap()
+                .is_none()
+        );
         engine.begin_mvcc_snapshot()
     };
 
@@ -3159,10 +3356,12 @@ fn async_storage_engine_buffers_structured_node_writes_until_flush() {
         .put_node_record(&sample_node("n1", &["Person"]))
         .unwrap();
 
-    assert!(async_engine
-        .get_persisted_node_record("n1")
-        .unwrap()
-        .is_none());
+    assert!(
+        async_engine
+            .get_persisted_node_record("n1")
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         async_engine
             .get_node_record_latest_effective("n1")
@@ -3174,10 +3373,12 @@ fn async_storage_engine_buffers_structured_node_writes_until_flush() {
 
     let flushed = async_engine.flush().unwrap();
     assert_eq!(flushed.nodes_written, 1);
-    assert!(async_engine
-        .get_persisted_node_record("n1")
-        .unwrap()
-        .is_some());
+    assert!(
+        async_engine
+            .get_persisted_node_record("n1")
+            .unwrap()
+            .is_some()
+    );
     async_engine.close().unwrap();
 }
 
@@ -3391,10 +3592,12 @@ fn async_storage_engine_pending_embeddings_queue_tracks_mark_and_requeue() {
 
     async_engine.mark_node_embedded("n1");
     assert_eq!(async_engine.pending_embeddings_count(), 0);
-    assert!(async_engine
-        .find_node_needing_embedding()
-        .unwrap()
-        .is_none());
+    assert!(
+        async_engine
+            .find_node_needing_embedding()
+            .unwrap()
+            .is_none()
+    );
 
     async_engine.add_to_pending_embeddings("n1").unwrap();
     assert_eq!(async_engine.pending_embeddings_count(), 1);
@@ -3512,10 +3715,12 @@ fn async_storage_engine_add_to_pending_embeddings_skips_pending_delete() {
     async_engine.add_to_pending_embeddings("n1").unwrap();
 
     assert_eq!(async_engine.pending_embeddings_count(), 0);
-    assert!(async_engine
-        .find_node_needing_embedding()
-        .unwrap()
-        .is_none());
+    assert!(
+        async_engine
+            .find_node_needing_embedding()
+            .unwrap()
+            .is_none()
+    );
 
     async_engine.close().unwrap();
 }
@@ -3623,11 +3828,13 @@ fn storage_engine_pending_embedding_count_seeds_and_persists_transaction_updates
         transaction.delete_node_record("n1");
         transaction.commit().unwrap();
         assert_eq!(engine.pending_embeddings_count().unwrap(), 0);
-        assert!(engine
-            .meta
-            .fjall_get(META_PENDING_EMBEDDING_COUNT_KEY)
-            .unwrap()
-            .is_some());
+        assert!(
+            engine
+                .meta
+                .fjall_get(META_PENDING_EMBEDDING_COUNT_KEY)
+                .unwrap()
+                .is_some()
+        );
         engine.flush().unwrap();
     }
 
@@ -3766,11 +3973,13 @@ fn storage_engine_dead_letter_count_seeds_legacy_database_and_persists_zero() {
         assert_eq!(engine.embedding_dead_letter_count().unwrap(), 1);
         engine.add_to_pending_embeddings("n1").unwrap();
         assert_eq!(engine.embedding_dead_letter_count().unwrap(), 0);
-        assert!(engine
-            .meta
-            .fjall_get(META_EMBEDDING_DEAD_LETTER_COUNT_KEY)
-            .unwrap()
-            .is_some());
+        assert!(
+            engine
+                .meta
+                .fjall_get(META_EMBEDDING_DEAD_LETTER_COUNT_KEY)
+                .unwrap()
+                .is_some()
+        );
         engine.flush().unwrap();
     }
 
@@ -4160,17 +4369,21 @@ fn async_storage_engine_effective_label_reads_reflect_pending_updates_before_flu
         async_engine.pending_node_ids_for_label("Device"),
         vec!["n1".to_string()]
     );
-    assert!(async_engine
-        .get_nodes_by_label("Person")
-        .unwrap()
-        .is_empty());
+    assert!(
+        async_engine
+            .get_nodes_by_label("Person")
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(async_engine.get_nodes_by_label("Device").unwrap().len(), 1);
 
     async_engine.flush().unwrap();
-    assert!(async_engine
-        .get_persisted_nodes_by_label("Person")
-        .unwrap()
-        .is_empty());
+    assert!(
+        async_engine
+            .get_persisted_nodes_by_label("Person")
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         async_engine
             .get_persisted_nodes_by_label("Device")
@@ -4324,10 +4537,12 @@ fn async_storage_engine_effective_edge_type_reads_reflect_pending_updates_before
     assert_eq!(async_engine.get_edges_by_type("LIKES").unwrap().len(), 1);
 
     async_engine.flush().unwrap();
-    assert!(async_engine
-        .get_persisted_edges_by_type("KNOWS")
-        .unwrap()
-        .is_empty());
+    assert!(
+        async_engine
+            .get_persisted_edges_by_type("KNOWS")
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         async_engine
             .get_persisted_edges_by_type("LIKES")
@@ -4602,10 +4817,12 @@ fn async_storage_engine_typed_adjacency_reads_reflect_pending_edge_updates_befor
             .collect::<Vec<_>>(),
         vec!["e4".to_string()]
     );
-    assert!(async_engine
-        .get_edges_from_node_by_type("n1", "MENTORS")
-        .unwrap()
-        .is_empty());
+    assert!(
+        async_engine
+            .get_edges_from_node_by_type("n1", "MENTORS")
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         async_engine
             .get_edges_to_node_by_type("n1", "MENTORS")
@@ -5103,10 +5320,12 @@ fn async_storage_engine_hold_flush_blocks_background_auto_flush_until_release() 
 
     let guard = async_engine.hold_flush();
     thread::sleep(Duration::from_millis(40));
-    assert!(async_engine
-        .get_persisted_node_record("n1")
-        .unwrap()
-        .is_none());
+    assert!(
+        async_engine
+            .get_persisted_node_record("n1")
+            .unwrap()
+            .is_none()
+    );
     drop(guard);
 
     wait_until(
@@ -5157,27 +5376,35 @@ fn async_storage_engine_forces_node_flush_when_pending_cache_limit_is_reached() 
     async_engine
         .put_node_record(&sample_node("n1", &["Person"]))
         .unwrap();
-    assert!(async_engine
-        .get_persisted_node_record("n1")
-        .unwrap()
-        .is_none());
+    assert!(
+        async_engine
+            .get_persisted_node_record("n1")
+            .unwrap()
+            .is_none()
+    );
 
     async_engine
         .put_node_record(&sample_node("n2", &["Person"]))
         .unwrap();
 
-    assert!(async_engine
-        .get_persisted_node_record("n1")
-        .unwrap()
-        .is_some());
-    assert!(async_engine
-        .get_persisted_node_record("n2")
-        .unwrap()
-        .is_none());
-    assert!(async_engine
-        .get_node_record_latest_effective("n2")
-        .unwrap()
-        .is_some());
+    assert!(
+        async_engine
+            .get_persisted_node_record("n1")
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        async_engine
+            .get_persisted_node_record("n2")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        async_engine
+            .get_node_record_latest_effective("n2")
+            .unwrap()
+            .is_some()
+    );
     async_engine.close().unwrap();
 }
 
@@ -5195,27 +5422,35 @@ fn async_storage_engine_forces_edge_flush_when_pending_cache_limit_is_reached() 
     async_engine
         .put_edge_record(&sample_edge("e1", "KNOWS", "n1", "n2"))
         .unwrap();
-    assert!(async_engine
-        .get_persisted_edge_record("e1")
-        .unwrap()
-        .is_none());
+    assert!(
+        async_engine
+            .get_persisted_edge_record("e1")
+            .unwrap()
+            .is_none()
+    );
 
     async_engine
         .put_edge_record(&sample_edge("e2", "KNOWS", "n2", "n3"))
         .unwrap();
 
-    assert!(async_engine
-        .get_persisted_edge_record("e1")
-        .unwrap()
-        .is_some());
-    assert!(async_engine
-        .get_persisted_edge_record("e2")
-        .unwrap()
-        .is_none());
-    assert!(async_engine
-        .get_edge_record_latest_effective("e2")
-        .unwrap()
-        .is_some());
+    assert!(
+        async_engine
+            .get_persisted_edge_record("e1")
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        async_engine
+            .get_persisted_edge_record("e2")
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        async_engine
+            .get_edge_record_latest_effective("e2")
+            .unwrap()
+            .is_some()
+    );
     async_engine.close().unwrap();
 }
 
@@ -5577,19 +5812,21 @@ fn mvcc_prune_cleans_ghost_label_history_candidates_and_bounds_shared_scan_fanou
 
     let latest = mvcc.begin_snapshot();
     assert!(mvcc.get_nodes_by_label("Ghost").unwrap().is_empty());
-    assert!(mvcc
-        .get_nodes_by_label_visible_at(&latest, "Ghost")
-        .unwrap()
-        .is_empty());
+    assert!(
+        mvcc.get_nodes_by_label_visible_at(&latest, "Ghost")
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(mvcc.label_history_candidate_count("Ghost"), 24);
 
     let removed = mvcc.trigger_prune_now(0);
     assert!(removed >= 24);
     assert_eq!(mvcc.label_history_candidate_count("Ghost"), 0);
-    assert!(mvcc
-        .get_nodes_by_label_visible_at(&mvcc.begin_snapshot(), "Ghost")
-        .unwrap()
-        .is_empty());
+    assert!(
+        mvcc.get_nodes_by_label_visible_at(&mvcc.begin_snapshot(), "Ghost")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -5609,19 +5846,21 @@ fn mvcc_prune_cleans_ghost_edge_type_history_candidates_and_bounds_shared_scan_f
 
     let latest = mvcc.begin_snapshot();
     assert!(mvcc.get_edges_by_type("KNOWS").unwrap().is_empty());
-    assert!(mvcc
-        .get_edges_by_type_visible_at(&latest, "KNOWS")
-        .unwrap()
-        .is_empty());
+    assert!(
+        mvcc.get_edges_by_type_visible_at(&latest, "KNOWS")
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(mvcc.edge_type_history_candidate_count("KNOWS"), 24);
 
     let removed = mvcc.trigger_prune_now(0);
     assert!(removed >= 24);
     assert_eq!(mvcc.edge_type_history_candidate_count("KNOWS"), 0);
-    assert!(mvcc
-        .get_edges_by_type_visible_at(&mvcc.begin_snapshot(), "KNOWS")
-        .unwrap()
-        .is_empty());
+    assert!(
+        mvcc.get_edges_by_type_visible_at(&mvcc.begin_snapshot(), "KNOWS")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -5739,10 +5978,11 @@ fn mvcc_indexed_visible_reads_follow_history_without_polluting_current_indexes()
             .collect::<Vec<_>>(),
         vec![("n1".to_string(), Some(json!("v1")))]
     );
-    assert!(mvcc
-        .get_nodes_by_label_visible_at(&before_change, "Device")
-        .unwrap()
-        .is_empty());
+    assert!(
+        mvcc.get_nodes_by_label_visible_at(&before_change, "Device")
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         mvcc.get_edges_by_type_visible_at(&before_change, "KNOWS")
             .unwrap()
@@ -5751,10 +5991,11 @@ fn mvcc_indexed_visible_reads_follow_history_without_polluting_current_indexes()
             .collect::<Vec<_>>(),
         vec!["e1".to_string()]
     );
-    assert!(mvcc
-        .get_edges_by_type_visible_at(&before_change, "SEES")
-        .unwrap()
-        .is_empty());
+    assert!(
+        mvcc.get_edges_by_type_visible_at(&before_change, "SEES")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -5790,11 +6031,13 @@ fn namespaced_mvcc_store_delegates_lifecycle_controls_and_visible_reads() {
             .collect::<Vec<_>>(),
         vec!["n1".to_string()]
     );
-    assert!(tenant_b
-        .get_nodes_by_label_visible_at(&snapshot, "Person")
-        .unwrap()
-        .into_iter()
-        .all(|node| node.id == "n1"));
+    assert!(
+        tenant_b
+            .get_nodes_by_label_visible_at(&snapshot, "Person")
+            .unwrap()
+            .into_iter()
+            .all(|node| node.id == "n1")
+    );
     assert_eq!(
         tenant_a
             .get_edges_by_type_visible_at(&snapshot, "KNOWS")
@@ -5813,13 +6056,15 @@ fn namespaced_mvcc_store_delegates_lifecycle_controls_and_visible_reads() {
     assert!(!tenant_a.lifecycle_status().paused);
 
     let debt = tenant_a.top_lifecycle_debt_keys(4);
-    assert!(debt
-        .iter()
-        .all(|entry| entry.logical_key.starts_with("node:")
-            || entry.logical_key.starts_with("edge:")));
-    assert!(debt
-        .iter()
-        .all(|entry| !entry.logical_key.contains("tenant_a:")));
+    assert!(
+        debt.iter()
+            .all(|entry| entry.logical_key.starts_with("node:")
+                || entry.logical_key.starts_with("edge:"))
+    );
+    assert!(
+        debt.iter()
+            .all(|entry| !entry.logical_key.contains("tenant_a:"))
+    );
 
     let pruned = tenant_a.prune_mvcc_versions(MvccPruneOptions {
         max_versions_per_key: Some(1),
@@ -6251,10 +6496,14 @@ fn schema_unique_constraints_serialize_only_colliding_values() {
         .map(|thread| thread.join().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-    assert!(results
-        .iter()
-        .filter(|result| result.is_err())
-        .all(|result| { matches!(result, Err(StorageError::UniqueConstraintViolation { .. })) }));
+    assert!(
+        results
+            .iter()
+            .filter(|result| result.is_err())
+            .all(|result| {
+                matches!(result, Err(StorageError::UniqueConstraintViolation { .. }))
+            })
+    );
 
     let typed_string = BTreeMap::from([("email".to_string(), json!("1"))]);
     let typed_number = BTreeMap::from([("email".to_string(), json!(1))]);
@@ -6693,14 +6942,18 @@ fn metadata_only_index_definitions_do_not_build_exact_property_lookup_state() {
     assert_eq!(indexes[1].name, "person_bio_fulltext_idx");
     assert_eq!(indexes[1].kind, IndexKind::FullText);
 
-    assert!(engine
-        .get_nodes_by_property("Person", "bio", &json!("Rust graph database engineer"))
-        .unwrap()
-        .is_empty());
-    assert!(engine
-        .get_edges_by_property("KNOWS", "embedding", &json!([0.1, 0.2, 0.3]))
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_nodes_by_property("Person", "bio", &json!("Rust graph database engineer"))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        engine
+            .get_edges_by_property("KNOWS", "embedding", &json!([0.1, 0.2, 0.3]))
+            .unwrap()
+            .is_empty()
+    );
 
     alice
         .properties
@@ -6711,14 +6964,18 @@ fn metadata_only_index_definitions_do_not_build_exact_property_lookup_state() {
         .insert("embedding".to_string(), json!([0.4, 0.5, 0.6]));
     engine.put_edge_record(&edge).unwrap();
 
-    assert!(engine
-        .get_nodes_by_property("Person", "bio", &json!("Updated searchable biography"))
-        .unwrap()
-        .is_empty());
-    assert!(engine
-        .get_edges_by_property("KNOWS", "embedding", &json!([0.4, 0.5, 0.6]))
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_nodes_by_property("Person", "bio", &json!("Updated searchable biography"))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        engine
+            .get_edges_by_property("KNOWS", "embedding", &json!([0.4, 0.5, 0.6]))
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -6734,10 +6991,12 @@ fn fulltext_index_rebuilds_and_tracks_mutations() {
     engine.put_node_record(&alice).unwrap();
     engine.put_node_record(&bob).unwrap();
 
-    assert!(engine
-        .search_fulltext_nodes_by_properties("Person", &["bio".into()], "graph engineer", 10,)
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .search_fulltext_nodes_by_properties("Person", &["bio".into()], "graph engineer", 10,)
+            .unwrap()
+            .is_empty()
+    );
 
     engine
         .persist_index_definition(&IndexDefinition {
@@ -6774,10 +7033,12 @@ fn fulltext_index_rebuilds_and_tracks_mutations() {
         .insert("bio".into(), json!("Updated biography about storage"));
     engine.put_node_record(&alice).unwrap();
 
-    assert!(engine
-        .search_fulltext_nodes_by_properties("Person", &["bio".into()], "graph engineer", 10)
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .search_fulltext_nodes_by_properties("Person", &["bio".into()], "graph engineer", 10)
+            .unwrap()
+            .is_empty()
+    );
     let updated = engine
         .search_fulltext_nodes_by_properties("Person", &["bio".into()], "updated biography", 10)
         .unwrap();
@@ -6786,10 +7047,12 @@ fn fulltext_index_rebuilds_and_tracks_mutations() {
     assert!(updated[0].1 > 0.0);
 
     engine.delete_node_record("db:n1").unwrap();
-    assert!(engine
-        .search_fulltext_nodes_by_properties("Person", &["bio".into()], "updated biography", 10)
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .search_fulltext_nodes_by_properties("Person", &["bio".into()], "updated biography", 10)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -7026,14 +7289,16 @@ fn relationship_fulltext_index_rebuilds_and_tracks_mutations() {
     edge.properties
         .insert("fact".into(), json!("Redis cache replication"));
     engine.put_edge_record(&edge).unwrap();
-    assert!(engine
-        .search_fulltext_relationships_by_properties(
-            "RELATES",
-            &["fact".into()],
-            &["cloudtrail".into()],
-        )
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .search_fulltext_relationships_by_properties(
+                "RELATES",
+                &["fact".into()],
+                &["cloudtrail".into()],
+            )
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         engine
             .search_fulltext_relationships_by_properties(
@@ -7072,10 +7337,12 @@ fn node_property_index_rebuilds_and_tracks_mutations() {
     engine.put_node_record(&alice).unwrap();
     engine.put_node_record(&bob).unwrap();
 
-    assert!(engine
-        .get_nodes_by_property("Person", "email", &json!("alice@example.com"))
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_nodes_by_property("Person", "email", &json!("alice@example.com"))
+            .unwrap()
+            .is_empty()
+    );
 
     engine
         .persist_index_definition(&IndexDefinition {
@@ -7097,10 +7364,12 @@ fn node_property_index_rebuilds_and_tracks_mutations() {
         .properties
         .insert("email".into(), json!("alice@new.test"));
     engine.put_node_record(&alice).unwrap();
-    assert!(engine
-        .get_nodes_by_property("Person", "email", &json!("alice@example.com"))
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_nodes_by_property("Person", "email", &json!("alice@example.com"))
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         engine
             .get_nodes_by_property("Person", "email", &json!("alice@new.test"))
@@ -7110,16 +7379,20 @@ fn node_property_index_rebuilds_and_tracks_mutations() {
     );
 
     engine.delete_node_record("db:n1").unwrap();
-    assert!(engine
-        .get_nodes_by_property("Person", "email", &json!("alice@new.test"))
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_nodes_by_property("Person", "email", &json!("alice@new.test"))
+            .unwrap()
+            .is_empty()
+    );
 
     engine.delete_index_definition("person_email_idx").unwrap();
-    assert!(engine
-        .get_nodes_by_property("Person", "email", &json!("bob@example.com"))
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_nodes_by_property("Person", "email", &json!("bob@example.com"))
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -7152,10 +7425,12 @@ fn composite_node_property_index_rebuilds_and_tracks_mutations() {
         ("email".to_string(), json!("alice@example.com")),
         ("country".to_string(), json!("US")),
     ]);
-    assert!(engine
-        .get_nodes_by_properties("Person", &composite_properties, &lookup)
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_nodes_by_properties("Person", &composite_properties, &lookup)
+            .unwrap()
+            .is_empty()
+    );
 
     engine
         .persist_index_definition(&IndexDefinition {
@@ -7177,10 +7452,12 @@ fn composite_node_property_index_rebuilds_and_tracks_mutations() {
 
     alice_us.properties.insert("country".into(), json!("GB"));
     engine.put_node_record(&alice_us).unwrap();
-    assert!(engine
-        .get_nodes_by_properties("Person", &composite_properties, &lookup)
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_nodes_by_properties("Person", &composite_properties, &lookup)
+            .unwrap()
+            .is_empty()
+    );
 
     let updated_lookup = std::collections::HashMap::from([
         ("email".to_string(), json!("alice@example.com")),
@@ -7198,25 +7475,29 @@ fn composite_node_property_index_rebuilds_and_tracks_mutations() {
     );
 
     engine.delete_node_record("db:n1").unwrap();
-    assert!(engine
-        .get_nodes_by_properties("Person", &composite_properties, &updated_lookup)
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_nodes_by_properties("Person", &composite_properties, &updated_lookup)
+            .unwrap()
+            .is_empty()
+    );
 
     engine
         .delete_index_definition("person_email_country_idx")
         .unwrap();
-    assert!(engine
-        .get_nodes_by_properties(
-            "Person",
-            &composite_properties,
-            &std::collections::HashMap::from([
-                ("email".to_string(), json!("bob@example.com")),
-                ("country".to_string(), json!("US")),
-            ])
-        )
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_nodes_by_properties(
+                "Person",
+                &composite_properties,
+                &std::collections::HashMap::from([
+                    ("email".to_string(), json!("bob@example.com")),
+                    ("country".to_string(), json!("US")),
+                ])
+            )
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -7310,15 +7591,17 @@ fn node_property_range_index_filters_numeric_and_string_values() {
         vec!["db:n2", "db:n3"]
     );
 
-    assert!(engine
-        .get_nodes_by_property_range(
-            "Person",
-            "missing",
-            RangeIndexComparison::GreaterThan,
-            &json!(1)
-        )
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_nodes_by_property_range(
+                "Person",
+                "missing",
+                RangeIndexComparison::GreaterThan,
+                &json!(1)
+            )
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -7503,10 +7786,12 @@ fn relationship_property_index_rebuilds_and_tracks_mutations() {
     let mut edge = sample_edge("db:e1", "KNOWS", "db:n1", "db:n2");
     engine.put_edge_record(&edge).unwrap();
 
-    assert!(engine
-        .get_edges_by_property("KNOWS", "weight", &json!(0.9))
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_edges_by_property("KNOWS", "weight", &json!(0.9))
+            .unwrap()
+            .is_empty()
+    );
 
     engine
         .persist_index_definition(&IndexDefinition {
@@ -7530,10 +7815,12 @@ fn relationship_property_index_rebuilds_and_tracks_mutations() {
 
     edge.properties.insert("weight".to_string(), json!(1.5));
     engine.put_edge_record(&edge).unwrap();
-    assert!(engine
-        .get_edges_by_property("KNOWS", "weight", &json!(0.9))
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_edges_by_property("KNOWS", "weight", &json!(0.9))
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         engine
             .get_edges_by_property("KNOWS", "weight", &json!(1.5))
@@ -7545,16 +7832,20 @@ fn relationship_property_index_rebuilds_and_tracks_mutations() {
     );
 
     engine.delete_edge_record("db:e1").unwrap();
-    assert!(engine
-        .get_edges_by_property("KNOWS", "weight", &json!(1.5))
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_edges_by_property("KNOWS", "weight", &json!(1.5))
+            .unwrap()
+            .is_empty()
+    );
 
     engine.delete_index_definition("knows_weight_idx").unwrap();
-    assert!(engine
-        .get_edges_by_property("KNOWS", "weight", &json!(1.5))
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_edges_by_property("KNOWS", "weight", &json!(1.5))
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -7573,10 +7864,12 @@ fn composite_relationship_property_index_rebuilds_and_tracks_mutations() {
         ("weight".to_string(), json!(0.9)),
         ("years".to_string(), json!(5)),
     ]);
-    assert!(engine
-        .get_edges_by_properties("KNOWS", &composite_properties, &lookup)
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_edges_by_properties("KNOWS", &composite_properties, &lookup)
+            .unwrap()
+            .is_empty()
+    );
 
     engine
         .persist_index_definition(&IndexDefinition {
@@ -7600,10 +7893,12 @@ fn composite_relationship_property_index_rebuilds_and_tracks_mutations() {
 
     edge_one.properties.insert("years".to_string(), json!(8));
     engine.put_edge_record(&edge_one).unwrap();
-    assert!(engine
-        .get_edges_by_properties("KNOWS", &composite_properties, &lookup)
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_edges_by_properties("KNOWS", &composite_properties, &lookup)
+            .unwrap()
+            .is_empty()
+    );
 
     let updated_lookup = std::collections::HashMap::from([
         ("weight".to_string(), json!(0.9)),
@@ -7620,25 +7915,29 @@ fn composite_relationship_property_index_rebuilds_and_tracks_mutations() {
     );
 
     engine.delete_edge_record("db:e1").unwrap();
-    assert!(engine
-        .get_edges_by_properties("KNOWS", &composite_properties, &updated_lookup)
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_edges_by_properties("KNOWS", &composite_properties, &updated_lookup)
+            .unwrap()
+            .is_empty()
+    );
 
     engine
         .delete_index_definition("knows_weight_years_idx")
         .unwrap();
-    assert!(engine
-        .get_edges_by_properties(
-            "KNOWS",
-            &composite_properties,
-            &std::collections::HashMap::from([
-                ("weight".to_string(), json!(0.9)),
-                ("years".to_string(), json!(3)),
-            ]),
-        )
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_edges_by_properties(
+                "KNOWS",
+                &composite_properties,
+                &std::collections::HashMap::from([
+                    ("weight".to_string(), json!(0.9)),
+                    ("years".to_string(), json!(3)),
+                ]),
+            )
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -8102,10 +8401,12 @@ fn knowledge_policy_decay_binding_schema_roundtrip_and_reference_guards() {
         .delete_decay_profile_schema("slow_decay", false)
         .unwrap();
 
-    assert!(engine
-        .load_decay_profile_binding_schemas()
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .load_decay_profile_binding_schemas()
+            .unwrap()
+            .is_empty()
+    );
     assert!(engine.load_decay_profile_schemas().unwrap().is_empty());
 }
 
@@ -8130,10 +8431,12 @@ fn knowledge_policy_access_metadata_roundtrip() {
     engine
         .delete_knowledge_policy_access_metadata("memory:1")
         .unwrap();
-    assert!(engine
-        .get_knowledge_policy_access_metadata("memory:1")
-        .unwrap()
-        .is_none());
+    assert!(
+        engine
+            .get_knowledge_policy_access_metadata("memory:1")
+            .unwrap()
+            .is_none()
+    );
 }
 
 // ── Deindex queue with index tombstones ──────────────────────────────────────
@@ -8479,10 +8782,12 @@ fn batch_write_updates_and_deletes_records_with_their_indexes() {
     assert!(engine.get_nodes_by_label("Old").unwrap().is_empty());
     assert_eq!(engine.get_nodes_by_label("New").unwrap().len(), 1);
     assert!(engine.get_edge_record("edge").unwrap().is_none());
-    assert!(engine
-        .get_adjacent_edges("source", EdgeAdjacencyDirection::Outgoing, None)
-        .unwrap()
-        .is_empty());
+    assert!(
+        engine
+            .get_adjacent_edges("source", EdgeAdjacencyDirection::Outgoing, None)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -8518,10 +8823,12 @@ fn batch_write_rolls_back_on_error() {
     });
 
     assert!(result.is_err());
-    assert!(engine
-        .get_node_record("should-not-exist")
-        .unwrap()
-        .is_none());
+    assert!(
+        engine
+            .get_node_record("should-not-exist")
+            .unwrap()
+            .is_none()
+    );
 }
 
 // ── Storage event notifier ─────────────────────────────────────────────────

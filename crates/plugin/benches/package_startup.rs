@@ -2,10 +2,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use copperdb_plugin::{
-    DatabaseEvent, DatabaseEventRuntime, DatabaseEventType, PackageDefinition, PackageDescriptor,
-    PackageFactory, PackageRuntime, PackageSpec, StaticPackageFactory, EVENT_INGRESS_CAPACITY,
+    DatabaseEvent, DatabaseEventRuntime, DatabaseEventType, EVENT_INGRESS_CAPACITY,
+    PackageDefinition, PackageDescriptor, PackageFactory, PackageRuntime, PackageSpec,
+    StaticPackageFactory,
 };
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use semver::Version;
 
 const PACKAGE_ID: &str = "benchmark.static";

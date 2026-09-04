@@ -988,10 +988,12 @@ mod tests {
             import_files: &import_files,
             ..denied_context
         };
-        assert!(load_json(&trailing_context, &[json!("records.json")])
-            .unwrap_err()
-            .to_string()
-            .starts_with("failed to load JSON:"));
+        assert!(
+            load_json(&trailing_context, &[json!("records.json")])
+                .unwrap_err()
+                .to_string()
+                .starts_with("failed to load JSON:")
+        );
     }
 
     #[test]
@@ -1160,23 +1162,29 @@ mod tests {
             )
             .unwrap();
         assert_eq!(inside.rows[0]["count"], json!(2));
-        assert!(database
-            .storage()
-            .get_node_record("tx-n1")
-            .unwrap()
-            .is_none());
+        assert!(
+            database
+                .storage()
+                .get_node_record("tx-n1")
+                .unwrap()
+                .is_none()
+        );
 
         transaction.rollback();
-        assert!(database
-            .storage()
-            .get_node_record("tx-n1")
-            .unwrap()
-            .is_none());
-        assert!(database
-            .storage()
-            .get_edge_record("tx-e1")
-            .unwrap()
-            .is_none());
+        assert!(
+            database
+                .storage()
+                .get_node_record("tx-n1")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            database
+                .storage()
+                .get_edge_record("tx-e1")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1355,8 +1363,10 @@ mod tests {
         let arity_error = database
             .execute("CALL apoc.path.subgraphNodes()", HashMap::new())
             .unwrap_err();
-        assert!(arity_error
-            .to_string()
-            .contains("expects one or two arguments"));
+        assert!(
+            arity_error
+                .to_string()
+                .contains("expects one or two arguments")
+        );
     }
 }

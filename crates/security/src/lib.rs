@@ -106,13 +106,13 @@ impl SecurityMiddleware {
             })?;
         }
 
-        if let Some(value) = request.header("authorization") {
-            if let Some(token) = bearer_or_basic_token(value) {
-                validate_token(token).map_err(|source| RequestViolation {
-                    target: RequestTarget::Authorization,
-                    source,
-                })?;
-            }
+        if let Some(value) = request.header("authorization")
+            && let Some(token) = bearer_or_basic_token(value)
+        {
+            validate_token(token).map_err(|source| RequestViolation {
+                target: RequestTarget::Authorization,
+                source,
+            })?;
         }
 
         if let Some(token) = request.query_param("token") {

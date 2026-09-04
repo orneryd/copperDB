@@ -103,7 +103,7 @@ where
     if max_tokens <= 0 {
         let trimmed = text.trim();
         return Ok(vec![
-            if trimmed.is_empty() { text } else { trimmed }.to_string()
+            if trimmed.is_empty() { text } else { trimmed }.to_string(),
         ]);
     }
 
@@ -117,7 +117,7 @@ where
     if total_tokens <= max_tokens {
         let trimmed = text.trim();
         return Ok(vec![
-            if trimmed.is_empty() { text } else { trimmed }.to_string()
+            if trimmed.is_empty() { text } else { trimmed }.to_string(),
         ]);
     }
 
@@ -160,7 +160,7 @@ where
     if chunks.is_empty() {
         let trimmed = text.trim();
         return Ok(vec![
-            if trimmed.is_empty() { text } else { trimmed }.to_string()
+            if trimmed.is_empty() { text } else { trimmed }.to_string(),
         ]);
     }
     Ok(chunks)
@@ -336,9 +336,10 @@ mod tests {
             }
         })
         .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("counter failed inside overlap calculation"));
+        assert!(
+            err.to_string()
+                .contains("counter failed inside overlap calculation")
+        );
     }
 
     #[test]

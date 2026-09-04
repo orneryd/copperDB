@@ -12,8 +12,8 @@ use std::{
 };
 
 use copperdb_convert::{
-    parse_neo4j_header, parse_neo4j_value, Neo4jColumn, Neo4jColumnKind, Neo4jHeaderTarget,
-    Neo4jValueOptions, Value,
+    Neo4jColumn, Neo4jColumnKind, Neo4jHeaderTarget, Neo4jValueOptions, Value, parse_neo4j_header,
+    parse_neo4j_value,
 };
 use copperdb_storage::{
     EdgeRecord, NodeEmbeddingMetadata, NodeRecord, StorageEngine, StorageError,
@@ -1859,7 +1859,7 @@ mod tests {
 
     #[test]
     fn preflight_reads_gzip_csv_headers() {
-        use flate2::{write::GzEncoder, Compression};
+        use flate2::{Compression, write::GzEncoder};
         use std::io::Write;
 
         let directory = tempdir().unwrap();
@@ -1881,7 +1881,7 @@ mod tests {
     #[test]
     fn preflight_reads_single_safe_zip_csv_header() {
         use std::io::Write;
-        use zip::{write::SimpleFileOptions, ZipWriter};
+        use zip::{ZipWriter, write::SimpleFileOptions};
 
         let directory = tempdir().unwrap();
         let source = directory.path().join("nodes.zip");

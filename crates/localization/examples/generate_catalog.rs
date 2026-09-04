@@ -299,9 +299,11 @@ fn generate(upstream: &Path, workspace: &Path, crate_dir: &Path, check: bool) ->
             .expect("read procedure metadata"),
     )
     .expect("parse procedure metadata");
-    assert!(procedures
-        .windows(2)
-        .all(|pair| pair[0].name < pair[1].name));
+    assert!(
+        procedures
+            .windows(2)
+            .all(|pair| pair[0].name < pair[1].name)
+    );
 
     let mut output = String::from(
         "// Code generated from NornicDB 21b998cb by examples/generate_catalog.rs; DO NOT EDIT.\n\n",

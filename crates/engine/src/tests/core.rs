@@ -87,7 +87,7 @@ fn from_storage_accepts_function_and_procedure_registrars() {
 
 #[test]
 fn from_storage_accepts_transactionally_resolved_packages() {
-    use copperdb_plugin::{resolve_packages, PackageDefinition, PackageDescriptor};
+    use copperdb_plugin::{PackageDefinition, PackageDescriptor, resolve_packages};
     use semver::Version;
 
     let definition = PackageDefinition::new(PackageDescriptor::new(
@@ -144,20 +144,24 @@ fn from_storage_accepts_transactionally_resolved_packages() {
             HashMap::new(),
         )
         .unwrap();
-    assert!(functions
-        .rows
-        .iter()
-        .any(|row| row["name"] == Value::String("example.packageScalar".into())));
+    assert!(
+        functions
+            .rows
+            .iter()
+            .any(|row| row["name"] == Value::String("example.packageScalar".into()))
+    );
     let procedures = db
         .execute(
             "CALL dbms.procedures() YIELD name RETURN name",
             HashMap::new(),
         )
         .unwrap();
-    assert!(procedures
-        .rows
-        .iter()
-        .any(|row| row["name"] == Value::String("example.packageProcedure".into())));
+    assert!(
+        procedures
+            .rows
+            .iter()
+            .any(|row| row["name"] == Value::String("example.packageProcedure".into()))
+    );
 }
 
 #[test]
@@ -443,9 +447,11 @@ fn test_local_fulltext_search_respects_bm25_toggle() {
         .unwrap_err();
 
     assert!(matches!(error, CopperDbError::Config(_)));
-    assert!(error
-        .to_string()
-        .contains("fulltext search is disabled for this database"));
+    assert!(
+        error
+            .to_string()
+            .contains("fulltext search is disabled for this database")
+    );
 }
 
 #[test]
@@ -860,11 +866,12 @@ fn test_execute_routes_with_limit_compound_query_through_fast_path() {
 
     assert_eq!(result.stats.relationships_created, 1);
     assert_eq!(result.stats.relationships_deleted, 1);
-    assert!(db
-        .storage()
-        .get_edges_by_type("TEMP_REL")
-        .unwrap()
-        .is_empty());
+    assert!(
+        db.storage()
+            .get_edges_by_type("TEMP_REL")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -884,11 +891,12 @@ fn test_execute_routes_with_limit_zero_compound_query_is_noop() {
 
     assert_eq!(result.stats.relationships_created, 0);
     assert_eq!(result.stats.relationships_deleted, 0);
-    assert!(db
-        .storage()
-        .get_edges_by_type("TEMP_REL")
-        .unwrap()
-        .is_empty());
+    assert!(
+        db.storage()
+            .get_edges_by_type("TEMP_REL")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -906,11 +914,12 @@ fn test_execute_routes_property_match_compound_miss_is_clean() {
 
     assert_eq!(result.stats.relationships_created, 0);
     assert_eq!(result.stats.relationships_deleted, 0);
-    assert!(db
-        .storage()
-        .get_edges_by_type("TEMP_KNOWS")
-        .unwrap()
-        .is_empty());
+    assert!(
+        db.storage()
+            .get_edges_by_type("TEMP_KNOWS")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -936,11 +945,12 @@ fn test_execute_routes_property_match_compound_fast_path() {
 
     assert_eq!(result.stats.relationships_created, 1);
     assert_eq!(result.stats.relationships_deleted, 1);
-    assert!(db
-        .storage()
-        .get_edges_by_type("TEMP_KNOWS")
-        .unwrap()
-        .is_empty());
+    assert!(
+        db.storage()
+            .get_edges_by_type("TEMP_KNOWS")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -965,11 +975,12 @@ fn test_execute_routes_property_match_compound_return_count_fast_path() {
     );
     assert_eq!(result.stats.relationships_created, 1);
     assert_eq!(result.stats.relationships_deleted, 1);
-    assert!(db
-        .storage()
-        .get_edges_by_type("TEMP_KNOWS")
-        .unwrap()
-        .is_empty());
+    assert!(
+        db.storage()
+            .get_edges_by_type("TEMP_KNOWS")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1042,11 +1053,12 @@ fn test_storage_mvcc_visible_reads_are_reachable_from_copperdb() {
     updated.updated_at_unix_ms += 1;
     db.storage().put_node_record(&updated).unwrap();
 
-    assert!(db
-        .storage()
-        .get_nodes_by_label("Person")
-        .unwrap()
-        .is_empty());
+    assert!(
+        db.storage()
+            .get_nodes_by_label("Person")
+            .unwrap()
+            .is_empty()
+    );
     let visible_then = db
         .storage()
         .get_nodes_by_label_visible_at(&snapshot, "Person")
@@ -1086,11 +1098,12 @@ fn test_storage_mvcc_rebuild_is_reachable_from_copperdb() {
     db.storage().rebuild_mvcc_from_current_state().unwrap();
 
     let repaired_snapshot = db.storage().begin_mvcc_snapshot();
-    assert!(db
-        .storage()
-        .get_nodes_by_label_visible_at(&repaired_snapshot, "Person")
-        .unwrap()
-        .is_empty());
+    assert!(
+        db.storage()
+            .get_nodes_by_label_visible_at(&repaired_snapshot, "Person")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1129,11 +1142,12 @@ fn test_storage_mvcc_prune_versions_is_reachable_from_copperdb() {
     });
     assert!(removed > 0);
     let latest = db.storage().begin_mvcc_snapshot();
-    assert!(db
-        .storage()
-        .get_nodes_by_label_visible_at(&latest, "Person")
-        .unwrap()
-        .is_empty());
+    assert!(
+        db.storage()
+            .get_nodes_by_label_visible_at(&latest, "Person")
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         db.storage()
             .get_nodes_by_label_visible_at(&latest, "Device")
@@ -1456,6 +1470,51 @@ fn engine_invalidates_cached_read_results_after_graph_mutation() {
 }
 
 #[test]
+fn query_cache_policy_is_isolated_per_database_engine() {
+    let global = copperdb_config::Config::default();
+    let disabled_runtime = copperdb_config::resolve_per_database_config(
+        &global,
+        &BTreeMap::from([("db.copper.query_cache.max_entries".into(), "0".into())]),
+    )
+    .unwrap();
+    let bounded_runtime = copperdb_config::resolve_per_database_config(
+        &global,
+        &BTreeMap::from([
+            ("db.copper.query_cache.max_entries".into(), "3".into()),
+            ("db.copper.query_cache.ttl".into(), "250".into()),
+        ]),
+    )
+    .unwrap();
+
+    let disabled = CopperDb::from_storage(
+        Arc::new(StorageEngine::open_temporary().unwrap()),
+        DatabaseConfig {
+            default_database: "disabled-cache".into(),
+            runtime_config: disabled_runtime,
+            ..DatabaseConfig::default()
+        },
+    )
+    .unwrap();
+    let bounded = CopperDb::from_storage(
+        Arc::new(StorageEngine::open_temporary().unwrap()),
+        DatabaseConfig {
+            default_database: "bounded-cache".into(),
+            runtime_config: bounded_runtime,
+            ..DatabaseConfig::default()
+        },
+    )
+    .unwrap();
+
+    assert!(!disabled.cypher_plan_cache_stats().enabled);
+    assert!(!disabled.cypher_result_cache_stats().enabled);
+    assert_eq!(bounded.cypher_plan_cache_stats().max_size, 3);
+    assert_eq!(bounded.cypher_result_cache_stats().max_size, 3);
+    assert!(bounded.cypher_plan_cache_stats().enabled);
+    assert!(bounded.cypher_result_cache_stats().enabled);
+    assert!(!disabled.cypher_plan_cache_stats().enabled);
+}
+
+#[test]
 fn engine_records_failed_query_audit_events() {
     let db = CopperDb::open_temporary().unwrap();
     let err = db
@@ -1527,10 +1586,11 @@ fn engine_enforces_durable_compliance_label_and_property_policies() {
         ("name".into(), serde_json::json!("Alice")),
         ("ssn".into(), serde_json::json!("111")),
     ]);
-    assert!(db
-        .filter_readable_node_properties(&["Patient".into()], &properties, &reader_roles)
-        .unwrap()
-        .is_none());
+    assert!(
+        db.filter_readable_node_properties(&["Patient".into()], &properties, &reader_roles)
+            .unwrap()
+            .is_none()
+    );
     let readable = db
         .filter_readable_node_properties(&["Memory".into()], &properties, &reader_roles)
         .unwrap()
@@ -2143,12 +2203,14 @@ fn engine_persists_and_plans_fabric_database_shards() {
         hydrated.results[0].entity.as_ref().unwrap()["name"],
         "Alice"
     );
-    assert!(hydrated.results[0]
-        .entity
-        .as_ref()
-        .unwrap()
-        .get("secret")
-        .is_none());
+    assert!(
+        hydrated.results[0]
+            .entity
+            .as_ref()
+            .unwrap()
+            .get("secret")
+            .is_none()
+    );
 
     let executed = db
         .execute_fabric_ranked_search(

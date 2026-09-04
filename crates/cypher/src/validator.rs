@@ -1,4 +1,4 @@
-use crate::{parse_context::ParseContext, parser_support::is_keyword, CypherError, Query};
+use crate::{CypherError, Query, parse_context::ParseContext, parser_support::is_keyword};
 
 impl<'a> ParseContext<'a> {
     pub(crate) fn validate_query(&mut self) -> Result<(), CypherError> {
@@ -363,10 +363,13 @@ impl<'a> ParseContext<'a> {
     }
 
     fn validate_node_inner(&mut self) -> Result<(), CypherError> {
-        if let Some(token) = self.peek() {
-            if token != ")" && token != ":" && token != "{" && !is_keyword(token) {
-                self.advance();
-            }
+        if let Some(token) = self.peek()
+            && token != ")"
+            && token != ":"
+            && token != "{"
+            && !is_keyword(token)
+        {
+            self.advance();
         }
 
         while self.peek() == Some(":") {
@@ -432,10 +435,13 @@ impl<'a> ParseContext<'a> {
     }
 
     fn validate_edge_inner(&mut self) -> Result<(), CypherError> {
-        if let Some(token) = self.peek() {
-            if token != "]" && token != ":" && token != "*" && token != "{" {
-                self.advance();
-            }
+        if let Some(token) = self.peek()
+            && token != "]"
+            && token != ":"
+            && token != "*"
+            && token != "{"
+        {
+            self.advance();
         }
 
         if self.peek() == Some(":") {
@@ -451,19 +457,19 @@ impl<'a> ParseContext<'a> {
                     if self.peek() == Some(".") {
                         self.advance();
                         self.expect(".")?;
-                        if let Some(max_token) = self.peek() {
-                            if max_token.parse::<u32>().is_ok() {
-                                self.advance();
-                            }
+                        if let Some(max_token) = self.peek()
+                            && max_token.parse::<u32>().is_ok()
+                        {
+                            self.advance();
                         }
                     }
                 } else if token == "." {
                     self.advance();
                     self.expect(".")?;
-                    if let Some(max_token) = self.peek() {
-                        if max_token.parse::<u32>().is_ok() {
-                            self.advance();
-                        }
+                    if let Some(max_token) = self.peek()
+                        && max_token.parse::<u32>().is_ok()
+                    {
+                        self.advance();
                     }
                 }
             }

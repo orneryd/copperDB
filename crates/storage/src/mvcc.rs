@@ -2,8 +2,8 @@ use crate::{EdgeRecord, NodeRecord, StorageError};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const DEFAULT_LIFECYCLE_SCHEDULE_MS: u64 = 60_000;
 
@@ -1300,12 +1300,11 @@ fn retained_node_labels(state: &MvccKeyState) -> Option<BTreeSet<String>> {
         labels.extend(node.labels);
     }
     let head = state.head.as_ref()?;
-    if !head.tombstoned {
-        if let Some(raw) = head.current_value.as_deref() {
-            if let Ok(node) = decode_node_record(raw) {
-                labels.extend(node.labels);
-            }
-        }
+    if !head.tombstoned
+        && let Some(raw) = head.current_value.as_deref()
+        && let Ok(node) = decode_node_record(raw)
+    {
+        labels.extend(node.labels);
     }
     Some(labels)
 }
@@ -1322,12 +1321,11 @@ fn retained_edge_types(state: &MvccKeyState) -> Option<BTreeSet<String>> {
         edge_types.insert(edge.edge_type);
     }
     let head = state.head.as_ref()?;
-    if !head.tombstoned {
-        if let Some(raw) = head.current_value.as_deref() {
-            if let Ok(edge) = decode_edge_record(raw) {
-                edge_types.insert(edge.edge_type);
-            }
-        }
+    if !head.tombstoned
+        && let Some(raw) = head.current_value.as_deref()
+        && let Ok(edge) = decode_edge_record(raw)
+    {
+        edge_types.insert(edge.edge_type);
     }
     Some(edge_types)
 }

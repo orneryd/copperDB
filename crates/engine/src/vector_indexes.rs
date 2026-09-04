@@ -110,16 +110,15 @@ impl VectorIndexManager {
                         for node in storage.all_node_records()? {
                             let matches_label = binding.label.is_empty()
                                 || node.labels.iter().any(|label| label == &binding.label);
-                            if matches_label {
-                                if let Some(vector) =
+                            if matches_label
+                                && let Some(vector) =
                                     node_vector_for_property(&node, &binding.property)
-                                {
-                                    let entry = (node.id, vector);
-                                    if seed_ids.contains(&entry.0) {
-                                        seeded_vectors.push(entry);
-                                    } else {
-                                        other_vectors.push(entry);
-                                    }
+                            {
+                                let entry = (node.id, vector);
+                                if seed_ids.contains(&entry.0) {
+                                    seeded_vectors.push(entry);
+                                } else {
+                                    other_vectors.push(entry);
                                 }
                             }
                         }
@@ -429,21 +428,21 @@ impl VectorIndexManager {
             }
         };
         for store in old_stores.into_values() {
-            if let Err(error) = std::fs::remove_file(store.path()) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(path = %store.path().display(), %error, "failed to discard stale vector file store");
-                }
+            if let Err(error) = std::fs::remove_file(store.path())
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(path = %store.path().display(), %error, "failed to discard stale vector file store");
             }
         }
 
         let mut stores = BTreeMap::new();
         for binding in bindings {
             let path = vector_file_store_path(directory, &binding.name);
-            if let Err(error) = std::fs::remove_file(&path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(index = %binding.name, path = %path.display(), %error, "failed to reset vector file store before rebuild");
-                    continue;
-                }
+            if let Err(error) = std::fs::remove_file(&path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(index = %binding.name, path = %path.display(), %error, "failed to reset vector file store before rebuild");
+                continue;
             }
             let mut store = match VectorFileStore::open(&path, binding.dimensions) {
                 Ok(store) => store,

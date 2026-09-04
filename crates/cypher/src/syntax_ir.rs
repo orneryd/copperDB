@@ -1,5 +1,5 @@
 use crate::{
-    string_patterns::find_keyword_index, CypherError, EdgeDirection, Expression, QueryType,
+    CypherError, EdgeDirection, Expression, QueryType, string_patterns::find_keyword_index,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,12 +439,11 @@ fn split_into_clauses(cypher: &str) -> Result<Vec<SyntaxClause<'_>>, CypherError
             && bracket_depth == 0
             && brace_depth == 0
             && is_boundary_start(bytes, idx)
+            && let Some(keyword) = candidate_keyword(cypher, idx)
         {
-            if let Some(keyword) = candidate_keyword(cypher, idx) {
-                boundaries.push((idx, keyword.kind, keyword.text));
-                idx += keyword.text.len();
-                continue;
-            }
+            boundaries.push((idx, keyword.kind, keyword.text));
+            idx += keyword.text.len();
+            continue;
         }
 
         idx += 1;
@@ -911,15 +910,15 @@ fn classify_expression(text: &str) -> SyntaxExprRef<'_> {
             property: None,
         };
     }
-    if let Some(parameter) = raw_text.strip_prefix('$') {
-        if is_identifier(parameter) {
-            return SyntaxExprRef {
-                kind: SyntaxExprKind::Parameter,
-                raw_text,
-                variable: Some(parameter),
-                property: None,
-            };
-        }
+    if let Some(parameter) = raw_text.strip_prefix('$')
+        && is_identifier(parameter)
+    {
+        return SyntaxExprRef {
+            kind: SyntaxExprKind::Parameter,
+            raw_text,
+            variable: Some(parameter),
+            property: None,
+        };
     }
     if let Some(dot_idx) = raw_text.find('.') {
         let variable = raw_text[..dot_idx].trim();
@@ -1186,7 +1185,7 @@ pub(crate) fn parse_expression_text(text: &str) -> Result<Expression, CypherErro
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_expression_text, parse_syntax, SyntaxClauseContent, SyntaxClauseKind, SyntaxExprKind,
+        SyntaxClauseContent, SyntaxClauseKind, SyntaxExprKind, parse_expression_text, parse_syntax,
     };
 
     #[test]

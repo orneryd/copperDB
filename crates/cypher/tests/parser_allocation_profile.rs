@@ -329,6 +329,7 @@ fn profile_query_shape(query: &Query) -> QueryShapeStats {
             | Clause::CreateConstraint(_)
             | Clause::DropConstraint(_)
             | Clause::ShowConstraints(_)
+            | Clause::ShowSettings(_)
             | Clause::CreateIndex(_)
             | Clause::DropIndex(_)
             | Clause::ShowIndexes(_)

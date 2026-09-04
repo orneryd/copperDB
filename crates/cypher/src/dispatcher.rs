@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::{
-    parse_context::ParseContext, parser_support::dominant_query_type, Clause, CypherError,
-    Expression, Query, ReturnClause, ReturnItem, SubqueryBlock, SubqueryClause,
+    Clause, CypherError, Expression, Query, ReturnClause, ReturnItem, SubqueryBlock,
+    SubqueryClause, parse_context::ParseContext, parser_support::dominant_query_type,
 };
 
 impl<'a> ParseContext<'a> {
@@ -337,6 +337,9 @@ impl<'a> ParseContext<'a> {
                     if self.peek_is("CONSTRAINTS") {
                         self.advance();
                         clauses.push(Clause::ShowConstraints(self.parse_show_constraints()?));
+                    } else if self.peek_is("SETTING") || self.peek_is("SETTINGS") {
+                        self.advance();
+                        clauses.push(Clause::ShowSettings(self.parse_show_settings()?));
                     } else if self.peek_is("RANGE") {
                         self.advance();
                         self.expect("INDEXES")?;
