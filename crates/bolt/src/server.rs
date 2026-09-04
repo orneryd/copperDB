@@ -1740,8 +1740,11 @@ async fn process_message_with_telemetry(
                 ));
             };
             let end = cursor.index + cursor_limit(n, cursor.result.rows.len() - cursor.index);
-            let rows = if pull {
-                cursor.result.rows[cursor.index..end].to_vec()
+            let mut responses = if pull {
+                cursor.result.rows[cursor.index..end]
+                    .iter()
+                    .map(|row| dispatch::encode_record(row))
+                    .collect()
             } else {
                 Vec::new()
             };
@@ -1756,10 +1759,6 @@ async fn process_message_with_telemetry(
                     session.last_qid = session.cursors.keys().max().copied();
                 }
             }
-            let mut responses: Vec<Vec<u8>> = rows
-                .into_iter()
-                .map(|row| dispatch::encode_message(&BoltMessage::Record { data: row }))
-                .collect();
             responses.extend(cursor_summary(
                 session,
                 database.as_deref(),

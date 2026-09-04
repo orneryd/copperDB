@@ -284,6 +284,10 @@ pub fn value_to_json(value: &Value) -> serde_json::Value {
 /// Encode a BoltMessage into PackStream for writing to the wire.
 pub fn encode_message(msg: &BoltMessage) -> Vec<u8> {
     use bytes::BytesMut;
+    if let BoltMessage::Record { data } = msg {
+        return encode_record(data);
+    }
+
     let mut buf = BytesMut::with_capacity(256);
     match msg {
         BoltMessage::Success { metadata } => {
@@ -297,17 +301,22 @@ pub fn encode_message(msg: &BoltMessage) -> Vec<u8> {
         BoltMessage::Ignored => {
             crate::packstream::encode_struct_header(&mut buf, 0, 0x7E);
         }
-        BoltMessage::Record { data } => {
-            crate::packstream::encode_struct_header(&mut buf, 1, 0x71);
-            crate::packstream::encode_list_header(&mut buf, data.len());
-            for field in data {
-                encode_json_value(&mut buf, field);
-            }
-        }
+        BoltMessage::Record { .. } => unreachable!("records are encoded above"),
         _ => {
             // Other message types aren't sent from server to client
             crate::packstream::encode_struct_header(&mut buf, 0, 0x7E);
         }
+    }
+    buf.to_vec()
+}
+
+pub fn encode_record(data: &[serde_json::Value]) -> Vec<u8> {
+    use bytes::BytesMut;
+    let mut buf = BytesMut::with_capacity(256);
+    crate::packstream::encode_struct_header(&mut buf, 1, 0x71);
+    crate::packstream::encode_list_header(&mut buf, data.len());
+    for field in data {
+        encode_json_value(&mut buf, field);
     }
     buf.to_vec()
 }

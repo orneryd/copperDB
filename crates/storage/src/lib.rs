@@ -3373,13 +3373,13 @@ impl StorageEngine {
         E: From<StorageError>,
     {
         let _observation = StorageOperationObservation::new("put");
+        let mut writer = BatchWriter {
+            engine: self,
+            ops: Vec::new(),
+        };
+        f(&mut writer)?;
         let notifications = {
             let _commit_guard = self.batch_commit_lock.lock();
-            let mut writer = BatchWriter {
-                engine: self,
-                ops: Vec::new(),
-            };
-            f(&mut writer)?;
             writer.commit_locked(None)?
         };
         notifications.dispatch(self);
