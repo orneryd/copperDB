@@ -1,0 +1,62 @@
+[nornicdb] seeding Northwind (categories=96 suppliers=144 customers=1200 products=48000 orders=48000, seed=42)
+  .. wrote 5000 / 48000 rows
+  .. wrote 10000 / 48000 rows
+  .. wrote 15000 / 48000 rows
+  .. wrote 20000 / 48000 rows
+  .. wrote 25000 / 48000 rows
+  .. wrote 30000 / 48000 rows
+  .. wrote 35000 / 48000 rows
+  .. wrote 40000 / 48000 rows
+  .. wrote 45000 / 48000 rows
+  .. wrote 48000 / 48000 rows
+  .. wrote 5000 / 48000 rows
+  .. wrote 10000 / 48000 rows
+  .. wrote 15000 / 48000 rows
+  .. wrote 20000 / 48000 rows
+  .. wrote 25000 / 48000 rows
+  .. wrote 30000 / 48000 rows
+  .. wrote 35000 / 48000 rows
+  .. wrote 40000 / 48000 rows
+  .. wrote 45000 / 48000 rows
+  .. wrote 48000 / 48000 rows
+  .. wrote 5000 / 168050 rows
+  .. wrote 10000 / 168050 rows
+  .. wrote 15000 / 168050 rows
+  .. wrote 20000 / 168050 rows
+  .. wrote 25000 / 168050 rows
+  .. wrote 30000 / 168050 rows
+  .. wrote 35000 / 168050 rows
+  .. wrote 40000 / 168050 rows
+  .. wrote 45000 / 168050 rows
+  .. wrote 50000 / 168050 rows
+  .. wrote 55000 / 168050 rows
+  .. wrote 60000 / 168050 rows
+  .. wrote 65000 / 168050 rows
+  .. wrote 70000 / 168050 rows
+  .. wrote 75000 / 168050 rows
+  .. wrote 80000 / 168050 rows
+  .. wrote 85000 / 168050 rows
+  .. wrote 90000 / 168050 rows
+  .. wrote 95000 / 168050 rows
+  .. wrote 100000 / 168050 rows
+  .. wrote 105000 / 168050 rows
+  .. wrote 110000 / 168050 rows
+  .. wrote 115000 / 168050 rows
+  .. wrote 120000 / 168050 rows
+  .. wrote 125000 / 168050 rows
+  .. wrote 130000 / 168050 rows
+  .. wrote 135000 / 168050 rows
+  .. wrote 140000 / 168050 rows
+  .. wrote 145000 / 168050 rows
+  .. wrote 150000 / 168050 rows
+  .. wrote 155000 / 168050 rows
+  .. wrote 160000 / 168050 rows
+  .. wrote 165000 / 168050 rows
+  .. wrote 168050 / 168050 rows
+[nornicdb] seeded in 9776.5ms (97440 nodes, 312050 rels, ~35.4 MiB payload)
+[nornicdb] seed verified: categories=96 suppliers=144 customers=1200 products=48000 orders=48000 part_of=48000 supplies=48000 purchased=48000 orders_edges=168050
+[nornicdb] products_per_category              mean=   0.12ms p95=   0.13ms ops/s=  6707.1 rows=96
+[nornicdb] customer_category_distinct_orders  mean=   0.11ms p95=   0.14ms ops/s=  8744.4 rows=10
+[nornicdb] optional_match_orders_count        mean=   0.18ms p95=   0.19ms ops/s=  4757.9 rows=100
+[nornicdb] revenue_by_product                 mean=   0.14ms p95=   0.15ms ops/s=  6976.9 rows=10
+[nornicdb] wrote /Users/timothysweet/src/copperDB/docs/performance/1.1.0-northwind-results/run-20260906_091158/nornicdb.results.json

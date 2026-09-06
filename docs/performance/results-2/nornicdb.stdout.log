@@ -1,0 +1,44 @@
+{"time":"2026-09-06T09:14:24.361411-07:00","level":"INFO","msg":"storage migration check","component":"storage","engine":"badger","on_disk_version":0,"binary_version":2,"upgrade_authorized":false,"service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.361706-07:00","level":"INFO","msg":"storage is empty; skipping upgrade gate","component":"storage","engine":"badger","on_disk_version":0,"service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.361762-07:00","level":"INFO","msg":"storage upgrade plan","component":"storage","engine":"badger","from_version":0,"to_version":2,"data_dir_bytes_before":806354994,"service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.36177-07:00","level":"INFO","msg":"running migration arm v0→v1","component":"storage","engine":"badger","service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.361818-07:00","level":"INFO","msg":"migration arm v0→v1 complete","component":"storage","engine":"badger","duration_ms":0,"service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.361824-07:00","level":"INFO","msg":"running migration arm v1→v2","component":"storage","engine":"badger","service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.361842-07:00","level":"INFO","msg":"starting v1→v2 storage upgrade","component":"storage","engine":"badger","batch_size":500,"service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.361884-07:00","level":"INFO","msg":"v1→v2 nodes pass complete","component":"storage","engine":"badger","scanned":0,"converted":0,"duration_ms":0,"service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.36191-07:00","level":"INFO","msg":"v1→v2 edges pass complete","component":"storage","engine":"badger","scanned":0,"converted":0,"duration_ms":0,"service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.361941-07:00","level":"INFO","msg":"v1→v2 secondary index rebuild complete","component":"storage","engine":"badger","label_entries":0,"outgoing_entries":0,"incoming_entries":0,"edge_type_entries":0,"duration_ms":0,"service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.361958-07:00","level":"INFO","msg":"v1→v2 storage upgrade complete","component":"storage","engine":"badger","nodes_converted":0,"edges_converted":0,"duration_ms":0,"service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.361964-07:00","level":"INFO","msg":"migration arm v1→v2 complete","component":"storage","engine":"badger","duration_ms":0,"service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.362006-07:00","level":"INFO","msg":"storage upgrade summary","component":"storage","engine":"badger","final_version":2,"total_duration_ms":0,"data_dir_bytes_before":806354994,"data_dir_bytes_after":806354994,"data_dir_bytes_delta":0,"lsm_bytes":0,"vlog_bytes":0,"service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.362031-07:00","level":"INFO","msg":"post-migration DB reopen starting","component":"storage","engine":"badger","service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.376542-07:00","level":"INFO","msg":"post-migration DB reopen complete","component":"storage","engine":"badger","service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.376599-07:00","level":"INFO","msg":"post-migration compaction starting","component":"storage","engine":"badger","lsm_workers":12,"service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.376614-07:00","level":"INFO","msg":"post-migration LSM flatten done","component":"storage","engine":"badger","duration_ms":0,"service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.37662-07:00","level":"INFO","msg":"post-migration value-log GC done","component":"storage","engine":"badger","rewrites":0,"duration_ms":0,"service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+🗜️  WAL auto-compaction enabled (snapshot interval: 5m0s)
+📂 Using persistent storage at /Users/timothysweet/src/copperDB/target/northwind-benchmark/nornicdb (WAL + async writes, flush: 50ms, node cache: 50000, edge cache: 100000)
+📦 Wrapped storage with namespace 'nornic' (all operations are namespaced)
+   [Plugin Debug] Loading plugins from: /Users/timothysweet/src/copperDB/plugins (resolved from ./plugins)
+   [Plugin Debug] Directory does not exist: /Users/timothysweet/src/copperDB/plugins
+2026/09/06 09:14:24 🔍 Search services enabled (per-database init, 1024-dimension vector index)
+2026/09/06 09:14:24 INFO 📇 Search: BM25 engine selected: v2 event_id=search.bm25_engine.selected component=search bm25_engine=v2
+2026/09/06 09:14:24 🕰️ Rebuilding temporal indexes before serving traffic...
+2026/09/06 09:14:24 🧾 Rebuilding MVCC heads before serving traffic...
+2026/09/06 09:14:24 🔄 MVCC lifecycle manager enabled (cycle=30s)
+🚀 GPU acceleration enabled for search services (all databases)
+{"time":"2026-09-06T09:14:24.424581-07:00","level":"WARN","msg":"remote credential encryption key fallback in use","component":"server","event_id":"server.remote_credentials.key_fallback","fallback":"jwt_signing_secret","remediation":"set NORNICDB_REMOTE_CREDENTIALS_KEY for stronger key separation","service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.425012-07:00","level":"INFO","msg":"heimdall AI assistant disabled","component":"server","event_id":"server.heimdall.disabled","subsystem":"heimdall","override_env":"NORNICDB_HEIMDALL_ENABLED","service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.425024-07:00","level":"INFO","msg":"search rerank disabled","component":"server","event_id":"server.search_rerank.disabled","subsystem":"search_rerank","override_env":"NORNICDB_SEARCH_RERANK_ENABLED","service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.425032-07:00","level":"WARN","msg":"authentication disabled","component":"server","event_id":"server.auth.disabled","service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.425456-07:00","level":"INFO","msg":"INFO observability: service.instance.id=\"louise.local\" (resolved from hostname)","event_id":"observability.resource.instance_id_resolved","component":"observability","service_instance_id":"louise.local","source":"hostname","service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+2026/09/06 09:14:24 🔍 Search disabled for database nornic — skipping BM25 + vector index build
+2026/09/06 09:14:24 INFO INFO observability: service.instance.id="louise.local" (resolved from hostname) event_id=observability.resource.instance_id_resolved component=observability service_instance_id=louise.local source=hostname
+2026/09/06 09:14:24 INFO observability: instance_id=louise.local (source=hostname)
+{"time":"2026-09-06T09:14:24.426266-07:00","level":"INFO","msg":"resolved tenant labels enabled","event_id":"observability.tenant_labels.resolved","component":"observability","enabled":false,"reason":"not_k8s_service_host_absent","service_host_present":false,"token_file_present":"<REDACTED>","service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+2026/09/06 09:14:24 ℹ️  Search disabled for all 1 database(s) — no indexes built
+{"time":"2026-09-06T09:14:24.427719-07:00","level":"INFO","msg":"UI browser enabled","component":"server","event_id":"server.ui.enabled","route":"/","service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.42798-07:00","level":"INFO","msg":"graphql API enabled","component":"server","event_id":"server.graphql.enabled","route":"/graphql","service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.428002-07:00","level":"INFO","msg":"HTTP/2 enabled","component":"server","event_id":"server.http2.enabled","mode":"h2c_cleartext","compat":"http/1.1","service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.428946-07:00","level":"INFO","msg":"bolt server listening","component":"bolt","event_id":"bolt.server.listening","host":"localhost","port":17687,"service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
+{"time":"2026-09-06T09:14:24.702428-07:00","level":"WARN","msg":"transport sniff failed","component":"bolt","event_id":"bolt.transport.sniff_failed","remote":"127.0.0.1:58311","error":"EOF","service":"nornicdb","version":"1.2.3","node_id":"louise.local"}
