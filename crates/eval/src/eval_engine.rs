@@ -5282,13 +5282,27 @@ impl EvalEngine {
         let mut counts: HashMap<String, i64> = HashMap::new();
         let resolver = self.knowledge_policy_resolver()?;
 
+        let counted_node_ids = edges
+            .iter()
+            .map(|edge| {
+                if incoming {
+                    edge.start_node.clone()
+                } else {
+                    edge.end_node.clone()
+                }
+            })
+            .collect::<HashSet<_>>();
+        let counted_nodes = self
+            .storage
+            .get_node_records_by_ids(counted_node_ids.into_iter())?;
+
         for edge in edges {
             let (group_node_id, counted_node_id) = if incoming {
                 (&edge.end_node, &edge.start_node)
             } else {
                 (&edge.start_node, &edge.end_node)
             };
-            let Some(counted_node) = self.storage.get_node_record(counted_node_id)? else {
+            let Some(counted_node) = counted_nodes.get(counted_node_id) else {
                 continue;
             };
             if !counted_pattern.labels.iter().all(|label| {
@@ -5304,9 +5318,12 @@ impl EvalEngine {
             *counts.entry(group_node_id.clone()).or_insert(0) += 1;
         }
 
+        let group_nodes = self
+            .storage
+            .get_node_records_by_ids(counts.keys().cloned())?;
         let mut rows = Vec::new();
         for (node_id, count) in counts {
-            let Some(group_node) = self.storage.get_node_record(&node_id)? else {
+            let Some(group_node) = group_nodes.get(&node_id) else {
                 continue;
             };
             if !group_pattern.labels.iter().all(|label| {
@@ -5337,7 +5354,7 @@ impl EvalEngine {
         }
 
         if !ret.order_by.is_empty() {
-            sort_rows_by_return_order(&mut rows, ret);
+            sort_projected_rows_by_return_order(&mut rows, ret);
         } else if let Some(count_column) = first_count_column_name(&ret.items) {
             rows.sort_by(|left, right| {
                 compare_json(

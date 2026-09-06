@@ -1,32 +1,32 @@
-[2m2026-09-06T15:32:01.755378Z[0m [32m INFO[0m starting copperdb [3mversion[0m[2m=[0mv0.1.0
-[2m2026-09-06T15:32:01.755461Z[0m [33m WARN[0m authentication disabled by explicit --no-auth override
-[2m2026-09-06T15:32:01.831116Z[0m [32m INFO[0m Finished ingestion writer
-[2m2026-09-06T15:32:01.901165Z[0m [32m INFO[0m Finished ingestion writer
-[2m2026-09-06T15:32:01.949116Z[0m [32m INFO[0m Finished ingestion writer
-[2m2026-09-06T15:32:02.017233Z[0m [32m INFO[0m Finished ingestion writer
-[2m2026-09-06T15:32:02.110219Z[0m [32m INFO[0m Finished ingestion writer
-[2m2026-09-06T15:32:02.188136Z[0m [32m INFO[0m Finished ingestion writer
-[2m2026-09-06T15:32:02.238417Z[0m [32m INFO[0m Finished ingestion writer
-[2m2026-09-06T15:32:02.316426Z[0m [32m INFO[0m Finished ingestion writer
-[2m2026-09-06T15:32:02.510292Z[0m [32m INFO[0m Recovering LSM-tree at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/0
-[2m2026-09-06T15:32:02.510460Z[0m [32m INFO[0m Recovering current manifest at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/0/v6
-[2m2026-09-06T15:32:02.511217Z[0m [32m INFO[0m Recovering LSM-tree at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/1
-[2m2026-09-06T15:32:02.511245Z[0m [32m INFO[0m Recovering current manifest at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/1/v2
-[2m2026-09-06T15:32:02.511553Z[0m [32m INFO[0m Recovering LSM-tree at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/4
-[2m2026-09-06T15:32:02.511580Z[0m [32m INFO[0m Recovering current manifest at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/4/v2
-[2m2026-09-06T15:32:02.511949Z[0m [32m INFO[0m Recovering LSM-tree at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/3
-[2m2026-09-06T15:32:02.511971Z[0m [32m INFO[0m Recovering current manifest at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/3/v0
-[2m2026-09-06T15:32:02.512206Z[0m [32m INFO[0m Recovering LSM-tree at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/2
-[2m2026-09-06T15:32:02.512230Z[0m [32m INFO[0m Recovering current manifest at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/2/v2
-[2m2026-09-06T15:32:02.696163Z[0m [32m INFO[0m Finished ingestion writer
-[2m2026-09-06T15:32:02.774189Z[0m [32m INFO[0m Finished ingestion writer
-[2m2026-09-06T15:32:02.843256Z[0m [32m INFO[0m Finished ingestion writer
-[2m2026-09-06T15:32:02.944174Z[0m [32m INFO[0m Finished ingestion writer
-[2m2026-09-06T15:32:02.967860Z[0m [32m INFO[0m copperdb Bolt server listening [3mlisten_addr[0m[2m=[0m127.0.0.1:17688
-[2m2026-09-06T15:32:02.967933Z[0m [32m INFO[0m copperdb telemetry listener listening [3mlisten_addr[0m[2m=[0m127.0.0.1:9090
-[2m2026-09-06T15:32:02.967946Z[0m [32m INFO[0m copperdb HTTP server listening [3mlisten_addr[0m[2m=[0m127.0.0.1:17475
-[2m2026-09-06T15:32:02.992668Z[0m [33m WARN[0m bolt tcp failed [3mevent_id[0m[2m=[0m"bolt.log.message_handling_error" [3mpeer_addr[0m[2m=[0m127.0.0.1:57159 [3merror[0m[2m=[0mIO error: early eof
-[2m2026-09-06T15:32:03.065121Z[0m [32m INFO[0m [1mnornicdb.bolt.run[0m:[1mnornicdb.cypher.execute[0m: Finished ingestion writer [2m[3mdb.system[0m[2m=[0m"neo4j"[0m [2m[3mdb.operation.name[0m[2m=[0m"read"[0m
-[2m2026-09-06T15:32:03.140189Z[0m [32m INFO[0m [1mnornicdb.bolt.run[0m:[1mnornicdb.cypher.execute[0m: Finished ingestion writer [2m[3mdb.system[0m[2m=[0m"neo4j"[0m [2m[3mdb.operation.name[0m[2m=[0m"read"[0m
-[2m2026-09-06T15:32:03.195398Z[0m [32m INFO[0m [1mnornicdb.bolt.run[0m:[1mnornicdb.cypher.execute[0m: Finished ingestion writer [2m[3mdb.system[0m[2m=[0m"neo4j"[0m [2m[3mdb.operation.name[0m[2m=[0m"read"[0m
-[2m2026-09-06T15:32:03.283658Z[0m [32m INFO[0m [1mnornicdb.bolt.run[0m:[1mnornicdb.cypher.execute[0m: Finished ingestion writer [2m[3mdb.system[0m[2m=[0m"neo4j"[0m [2m[3mdb.operation.name[0m[2m=[0m"read"[0m
+[2m2026-09-06T15:46:51.940097Z[0m [32m INFO[0m starting copperdb [3mversion[0m[2m=[0mv0.1.0
+[2m2026-09-06T15:46:51.940194Z[0m [33m WARN[0m authentication disabled by explicit --no-auth override
+[2m2026-09-06T15:46:52.014066Z[0m [32m INFO[0m Finished ingestion writer
+[2m2026-09-06T15:46:52.085983Z[0m [32m INFO[0m Finished ingestion writer
+[2m2026-09-06T15:46:52.136938Z[0m [32m INFO[0m Finished ingestion writer
+[2m2026-09-06T15:46:52.214151Z[0m [32m INFO[0m Finished ingestion writer
+[2m2026-09-06T15:46:52.307028Z[0m [32m INFO[0m Finished ingestion writer
+[2m2026-09-06T15:46:52.379053Z[0m [32m INFO[0m Finished ingestion writer
+[2m2026-09-06T15:46:52.433214Z[0m [32m INFO[0m Finished ingestion writer
+[2m2026-09-06T15:46:52.518193Z[0m [32m INFO[0m Finished ingestion writer
+[2m2026-09-06T15:46:52.698464Z[0m [32m INFO[0m Recovering LSM-tree at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/0
+[2m2026-09-06T15:46:52.698545Z[0m [32m INFO[0m Recovering current manifest at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/0/v6
+[2m2026-09-06T15:46:52.699508Z[0m [32m INFO[0m Recovering LSM-tree at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/1
+[2m2026-09-06T15:46:52.699539Z[0m [32m INFO[0m Recovering current manifest at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/1/v2
+[2m2026-09-06T15:46:52.699816Z[0m [32m INFO[0m Recovering LSM-tree at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/4
+[2m2026-09-06T15:46:52.699842Z[0m [32m INFO[0m Recovering current manifest at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/4/v2
+[2m2026-09-06T15:46:52.700239Z[0m [32m INFO[0m Recovering LSM-tree at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/3
+[2m2026-09-06T15:46:52.700260Z[0m [32m INFO[0m Recovering current manifest at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/3/v0
+[2m2026-09-06T15:46:52.700480Z[0m [32m INFO[0m Recovering LSM-tree at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/2
+[2m2026-09-06T15:46:52.700501Z[0m [32m INFO[0m Recovering current manifest at /Users/timothysweet/src/copperDB/target/northwind-benchmark/copperdb-data/copperdb-multidb/keyspaces/2/v2
+[2m2026-09-06T15:46:52.916253Z[0m [32m INFO[0m Finished ingestion writer
+[2m2026-09-06T15:46:53.005535Z[0m [32m INFO[0m Finished ingestion writer
+[2m2026-09-06T15:46:53.087280Z[0m [32m INFO[0m Finished ingestion writer
+[2m2026-09-06T15:46:53.194324Z[0m [32m INFO[0m Finished ingestion writer
+[2m2026-09-06T15:46:53.221728Z[0m [32m INFO[0m copperdb Bolt server listening [3mlisten_addr[0m[2m=[0m127.0.0.1:17688
+[2m2026-09-06T15:46:53.221770Z[0m [32m INFO[0m copperdb telemetry listener listening [3mlisten_addr[0m[2m=[0m127.0.0.1:9090
+[2m2026-09-06T15:46:53.221771Z[0m [32m INFO[0m copperdb HTTP server listening [3mlisten_addr[0m[2m=[0m127.0.0.1:17475
+[2m2026-09-06T15:46:54.247483Z[0m [33m WARN[0m bolt tcp failed [3mevent_id[0m[2m=[0m"bolt.log.message_handling_error" [3mpeer_addr[0m[2m=[0m127.0.0.1:57633 [3merror[0m[2m=[0mIO error: early eof
+[2m2026-09-06T15:46:54.332720Z[0m [32m INFO[0m [1mnornicdb.bolt.run[0m:[1mnornicdb.cypher.execute[0m: Finished ingestion writer [2m[3mdb.system[0m[2m=[0m"neo4j"[0m [2m[3mdb.operation.name[0m[2m=[0m"read"[0m
+[2m2026-09-06T15:46:54.410820Z[0m [32m INFO[0m [1mnornicdb.bolt.run[0m:[1mnornicdb.cypher.execute[0m: Finished ingestion writer [2m[3mdb.system[0m[2m=[0m"neo4j"[0m [2m[3mdb.operation.name[0m[2m=[0m"read"[0m
+[2m2026-09-06T15:46:54.464628Z[0m [32m INFO[0m [1mnornicdb.bolt.run[0m:[1mnornicdb.cypher.execute[0m: Finished ingestion writer [2m[3mdb.system[0m[2m=[0m"neo4j"[0m [2m[3mdb.operation.name[0m[2m=[0m"read"[0m
+[2m2026-09-06T15:46:54.548731Z[0m [32m INFO[0m [1mnornicdb.bolt.run[0m:[1mnornicdb.cypher.execute[0m: Finished ingestion writer [2m[3mdb.system[0m[2m=[0m"neo4j"[0m [2m[3mdb.operation.name[0m[2m=[0m"read"[0m

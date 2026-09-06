@@ -3347,6 +3347,53 @@ impl StorageEngine {
         Ok(record)
     }
 
+    /// Fetch a deduplicated set of node records while holding the graph cache
+    /// lock only once for cache hits.
+    pub fn get_node_records_by_ids(
+        &self,
+        ids: impl IntoIterator<Item = String>,
+    ) -> Result<HashMap<String, NodeRecord>, StorageError> {
+        let _observation = StorageOperationObservation::new("get_batch");
+        let mut records = HashMap::new();
+        let mut missing_ids = Vec::new();
+        let mut seen_ids = HashSet::new();
+        {
+            let cache = self.graph_node_cache.lock();
+            for id in ids {
+                if !seen_ids.insert(id.clone()) {
+                    continue;
+                }
+                match cache.get(&id) {
+                    Some(Some(record)) => {
+                        records.insert(id, record);
+                    }
+                    Some(None) => {}
+                    None => missing_ids.push(id),
+                }
+            }
+        }
+
+        let mut loaded_records = Vec::with_capacity(missing_ids.len());
+        for id in missing_ids {
+            let record = match self.nodes.fjall_get(id.as_bytes())? {
+                Some(value) => compat_node_record_from_bytes(
+                    &id,
+                    self.decode_record_bytes(value.as_ref())?.as_slice(),
+                )?,
+                None => None,
+            };
+            if let Some(record) = record.as_ref() {
+                records.insert(id.clone(), record.clone());
+            }
+            loaded_records.push((id, record));
+        }
+        let mut cache = self.graph_node_cache.lock();
+        for (id, record) in loaded_records {
+            cache.insert(id, record);
+        }
+        Ok(records)
+    }
+
     pub fn delete_node_record(&self, id: &str) -> Result<(), StorageError> {
         self.batch_write(|batch| {
             batch.delete_node_record(id);

@@ -2,10 +2,10 @@
   "label": "copperdb",
   "uri": "bolt://127.0.0.1:17688",
   "database": "copperdb",
-  "started_at": "2026-09-06T08:32:03.00529-07:00",
-  "finished_at": "2026-09-06T08:32:25.304218-07:00",
-  "seed_duration_ms": 9387.362,
-  "total_benchmark_duration_ms": 3102.204,
+  "started_at": "2026-09-06T08:46:54.263705-07:00",
+  "finished_at": "2026-09-06T08:47:16.081757-07:00",
+  "seed_duration_ms": 9356.182,
+  "total_benchmark_duration_ms": 3062.842,
   "iterations_per_query": 10,
   "categories": 96,
   "suppliers": 144,
@@ -35,34 +35,50 @@
       "iterations": 10,
       "cypher": "\n\t\t\tMATCH (c:Category)\u003c-[:PART_OF]-(p:Product)\n\t\t\tRETURN c.categoryName AS categoryName, count(p) AS productCount\n\t\t\tORDER BY productCount DESC",
       "latencies_ms": [
-        0.206,
+        0.2,
+        0.202,
+        0.198,
+        0.192,
+        0.199,
+        0.191,
+        0.174,
         0.196,
-        0.207,
-        0.18,
-        0.168,
-        0.178,
-        0.172,
-        0.17,
-        0.168,
-        0.162
+        0.188,
+        0.17
       ],
-      "mean_ms": 0.18069999999999997,
-      "median_ms": 0.175,
-      "p95_ms": 0.20654999999999998,
-      "p99_ms": 0.20690999999999998,
-      "min_ms": 0.162,
-      "max_ms": 0.207,
-      "stddev_ms": 0.016452287919246297,
-      "ops_per_second": 4879.141232110018,
+      "mean_ms": 0.191,
+      "median_ms": 0.194,
+      "p95_ms": 0.2011,
+      "p99_ms": 0.20182,
+      "min_ms": 0.17,
+      "max_ms": 0.202,
+      "stddev_ms": 0.010954451150103326,
+      "ops_per_second": 4592.247459683512,
       "row_count": 96,
       "result_hash": "91e9f1f063680a6de80e8d7285769fd3831c5709688b1afaa85521c3d3b31c43",
       "first_rows": [
         {
-          "categoryName": "Category-4-small-batch",
+          "categoryName": "Category-40-fair-trade",
           "productCount": 500
         },
         {
-          "categoryName": "Category-2-roasted",
+          "categoryName": "Category-9-premium",
+          "productCount": 500
+        },
+        {
+          "categoryName": "Category-63-free-range",
+          "productCount": 500
+        },
+        {
+          "categoryName": "Category-33-premium",
+          "productCount": 500
+        },
+        {
+          "categoryName": "Category-28-small-batch",
+          "productCount": 500
+        },
+        {
+          "categoryName": "Category-56-free-range",
           "productCount": 500
         },
         {
@@ -70,71 +86,55 @@
           "productCount": 500
         },
         {
-          "categoryName": "Category-78-fair-trade",
+          "categoryName": "Category-86-grass-fed",
           "productCount": 500
         },
         {
-          "categoryName": "Category-88-artisanal",
+          "categoryName": "Category-31-grass-fed",
           "productCount": 500
         },
         {
-          "categoryName": "Category-91-fair-trade",
+          "categoryName": "Category-43-roasted",
           "productCount": 500
         },
         {
-          "categoryName": "Category-65-artisanal",
+          "categoryName": "Category-71-roasted",
           "productCount": 500
         },
         {
-          "categoryName": "Category-8-organic",
+          "categoryName": "Category-92-heritage",
           "productCount": 500
         },
         {
-          "categoryName": "Category-25-wild-caught",
+          "categoryName": "Category-87-stone-milled",
           "productCount": 500
         },
         {
-          "categoryName": "Category-55-premium",
+          "categoryName": "Category-81-aged",
           "productCount": 500
         },
         {
-          "categoryName": "Category-11-organic",
+          "categoryName": "Category-47-roasted",
           "productCount": 500
         },
         {
-          "categoryName": "Category-44-small-batch",
+          "categoryName": "Category-14-wild-caught",
           "productCount": 500
         },
         {
-          "categoryName": "Category-26-cold-pressed",
+          "categoryName": "Category-95-wild-caught",
           "productCount": 500
         },
         {
-          "categoryName": "Category-27-hand-picked",
+          "categoryName": "Category-3-cold-pressed",
           "productCount": 500
         },
         {
-          "categoryName": "Category-67-cold-pressed",
+          "categoryName": "Category-17-cold-pressed",
           "productCount": 500
         },
         {
-          "categoryName": "Category-51-small-batch",
-          "productCount": 500
-        },
-        {
-          "categoryName": "Category-72-stone-milled",
-          "productCount": 500
-        },
-        {
-          "categoryName": "Category-84-grass-fed",
-          "productCount": 500
-        },
-        {
-          "categoryName": "Category-61-artisanal",
-          "productCount": 500
-        },
-        {
-          "categoryName": "Category-1-hand-picked",
+          "categoryName": "Category-5-small-batch",
           "productCount": 500
         }
       ],
@@ -145,25 +145,25 @@
       "iterations": 10,
       "cypher": "\n\t\t\tMATCH (c:Customer)-[:PURCHASED]-\u003e(o:Order)-[:ORDERS]-\u003e(p:Product)-[:PART_OF]-\u003e(cat:Category)\n\t\t\tRETURN c.companyName AS companyName, cat.categoryName AS categoryName, count(DISTINCT o) AS orders\n\t\t\tORDER BY orders DESC, companyName ASC, categoryName ASC\n\t\t\tLIMIT 10",
       "latencies_ms": [
-        0.152,
-        0.135,
+        0.148,
+        0.14,
+        0.145,
+        0.122,
+        0.126,
         0.128,
-        0.124,
-        0.151,
-        0.137,
-        0.133,
+        0.121,
+        0.119,
         0.135,
-        0.123,
-        0.123
+        0.113
       ],
-      "mean_ms": 0.13410000000000002,
-      "median_ms": 0.134,
-      "p95_ms": 0.15155,
-      "p99_ms": 0.15191,
-      "min_ms": 0.123,
-      "max_ms": 0.152,
-      "stddev_ms": 0.010556198810809377,
-      "ops_per_second": 7248.125815867162,
+      "mean_ms": 0.12969999999999998,
+      "median_ms": 0.127,
+      "p95_ms": 0.14665,
+      "p99_ms": 0.14773,
+      "min_ms": 0.113,
+      "max_ms": 0.148,
+      "stddev_ms": 0.011776152927750971,
+      "ops_per_second": 7482.229704451926,
       "row_count": 10,
       "result_hash": "5da36214d5163220e30b2ea89cfe9f0d55b978d9e74ea1094b078271ac314be8",
       "first_rows": [
@@ -225,25 +225,25 @@
       "iterations": 10,
       "cypher": "\n\t\t\tMATCH (p:Product)\n\t\t\tOPTIONAL MATCH (p)\u003c-[r:ORDERS]-(o:Order)\n\t\t\tRETURN p.productName AS productName, count(o) AS orderCount\n\t\t\tORDER BY orderCount DESC, productName ASC\n\t\t\tLIMIT 100",
       "latencies_ms": [
-        0.197,
-        0.191,
-        0.189,
-        0.181,
+        0.195,
+        0.188,
         0.192,
-        0.172,
-        0.177,
-        0.166,
-        0.168,
-        0.196
+        0.176,
+        0.175,
+        0.191,
+        0.175,
+        0.164,
+        0.182,
+        0.17
       ],
-      "mean_ms": 0.18289999999999998,
-      "median_ms": 0.185,
-      "p95_ms": 0.19655,
-      "p99_ms": 0.19691,
-      "min_ms": 0.166,
-      "max_ms": 0.197,
-      "stddev_ms": 0.01164712649349854,
-      "ops_per_second": 4790.132327405545,
+      "mean_ms": 0.1808,
+      "median_ms": 0.179,
+      "p95_ms": 0.19365000000000002,
+      "p99_ms": 0.19473000000000001,
+      "min_ms": 0.164,
+      "max_ms": 0.195,
+      "stddev_ms": 0.010400854665736745,
+      "ops_per_second": 4855.743154494694,
       "row_count": 100,
       "result_hash": "8950fcdaab16eaeb0b647ca818401cdcae8271087add813303d2afca875a6065",
       "first_rows": [
@@ -335,31 +335,31 @@
       "iterations": 10,
       "cypher": "\n\t\t\tMATCH (p:Product)\u003c-[r:ORDERS]-(:Order)\n\t\t\tWITH p, sum(p.unitPrice * r.quantity) AS revenue\n\t\t\tRETURN p.productName AS productName, revenue\n\t\t\tORDER BY revenue DESC, productName ASC\n\t\t\tLIMIT 10",
       "latencies_ms": [
-        0.165,
-        0.161,
-        0.128,
-        0.141,
-        0.138,
-        0.13,
-        0.12,
-        0.122,
-        0.12,
-        0.115
+        0.127,
+        0.11,
+        0.105,
+        0.113,
+        0.107,
+        0.102,
+        0.106,
+        0.234,
+        0.129,
+        0.108
       ],
-      "mean_ms": 0.134,
-      "median_ms": 0.129,
-      "p95_ms": 0.1632,
-      "p99_ms": 0.16464,
-      "min_ms": 0.115,
-      "max_ms": 0.165,
-      "stddev_ms": 0.017333333333333336,
-      "ops_per_second": 7226.95828888754,
+      "mean_ms": 0.12410000000000002,
+      "median_ms": 0.109,
+      "p95_ms": 0.18674999999999997,
+      "p99_ms": 0.22455,
+      "min_ms": 0.102,
+      "max_ms": 0.234,
+      "stddev_ms": 0.03967212847551513,
+      "ops_per_second": 7725.491650288624,
       "row_count": 10,
       "result_hash": "60b64c678f4c01fdca98d0683c8ad0e700ba61be88091eb445c990f1b0fffc84",
       "first_rows": [
         {
           "productName": "artisanal preserve 27315",
-          "revenue": 34738.53
+          "revenue": 34738.530000000006
         },
         {
           "productName": "artisanal cheese 9341",
@@ -367,15 +367,15 @@
         },
         {
           "productName": "free-range honey 38500",
-          "revenue": 31387.96
+          "revenue": 31387.959999999995
         },
         {
           "productName": "roasted condiment 1530",
-          "revenue": 30462.1
+          "revenue": 30462.100000000002
         },
         {
           "productName": "heritage jerky 41096",
-          "revenue": 30170.879999999997
+          "revenue": 30170.88
         },
         {
           "productName": "fair-trade jerky 47148",
@@ -391,16 +391,16 @@
         },
         {
           "productName": "stone-milled pasta 3570",
-          "revenue": 28132.559999999998
+          "revenue": 28132.56
         },
         {
           "productName": "stone-milled pasta 45022",
-          "revenue": 28117.499999999996
+          "revenue": 28117.499999999993
         }
       ],
       "correctness_ok": true
     }
   ],
-  "overall_mean_ms": 0.15792499999999998,
-  "overall_ops_per_second": 12.894058546762238
+  "overall_mean_ms": 0.15640000000000004,
+  "overall_ops_per_second": 13.059766060410558
 }

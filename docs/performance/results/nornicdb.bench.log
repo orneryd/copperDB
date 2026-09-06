@@ -53,10 +53,10 @@
   .. wrote 160000 / 168050 rows
   .. wrote 165000 / 168050 rows
   .. wrote 168050 / 168050 rows
-[nornicdb] seeded in 9705.7ms (97440 nodes, 312050 rels, ~35.4 MiB payload)
+[nornicdb] seeded in 9388.8ms (97440 nodes, 312050 rels, ~35.4 MiB payload)
 [nornicdb] seed verified: categories=96 suppliers=144 customers=1200 products=48000 orders=48000 part_of=48000 supplies=48000 purchased=48000 orders_edges=168050
-[nornicdb] products_per_category              mean=   0.13ms p95=   0.15ms ops/s=  6442.3 rows=96
-[nornicdb] customer_category_distinct_orders  mean=   0.15ms p95=   0.16ms ops/s=  6547.9 rows=10
-[nornicdb] optional_match_orders_count        mean=   0.17ms p95=   0.19ms ops/s=  5221.0 rows=100
-[nornicdb] revenue_by_product                 mean=   0.11ms p95=   0.13ms ops/s=  8882.0 rows=10
-[nornicdb] wrote /Users/timothysweet/src/copperDB/docs/performance/1.1.0-northwind-results/run-20260906_083114/nornicdb.results.json
+[nornicdb] products_per_category              mean=   0.18ms p95=   0.18ms ops/s=  4927.7 rows=96
+[nornicdb] customer_category_distinct_orders  mean=   0.14ms p95=   0.17ms ops/s=  6918.0 rows=10
+[nornicdb] optional_match_orders_count        mean=   0.19ms p95=   0.20ms ops/s=  4683.5 rows=100
+[nornicdb] revenue_by_product                 mean=   0.14ms p95=   0.15ms ops/s=  6901.7 rows=10
+[nornicdb] wrote /Users/timothysweet/src/copperDB/docs/performance/1.1.0-northwind-results/run-20260906_084552/nornicdb.results.json

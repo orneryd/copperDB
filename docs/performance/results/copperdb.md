@@ -1,6 +1,6 @@
 # CopperDB — Northwind Benchmark Report
 
-**Run:** `2026-09-06T08:32:03.00529-07:00` → `2026-09-06T08:32:25.304218-07:00`
+**Run:** `2026-09-06T08:46:54.263705-07:00` → `2026-09-06T08:47:16.081757-07:00`
 **Endpoint:** `bolt://127.0.0.1:17688` (database `copperdb`)
 
 ## Workload
@@ -12,21 +12,21 @@
 - Seed nodes: **97,440**
 - Seed relationships: **312,050**
 - Approx. seed payload (JSON-serialized): **35.4 MiB**
-- Seed duration: **9,387.36 ms**
+- Seed duration: **9,356.18 ms**
 - Iterations per query: **10**
 
 ## Query Latency
 
 | Query | Mean (ms) | Median (ms) | P95 (ms) | P99 (ms) | Min (ms) | Max (ms) | StdDev (ms) | Ops/sec |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `products_per_category` | 0.18 | 0.17 | 0.21 | 0.21 | 0.16 | 0.21 | 0.02 | 4,879.14 |
-| `customer_category_distinct_orders` | 0.13 | 0.13 | 0.15 | 0.15 | 0.12 | 0.15 | 0.01 | 7,248.13 |
-| `optional_match_orders_count` | 0.18 | 0.18 | 0.20 | 0.20 | 0.17 | 0.20 | 0.01 | 4,790.13 |
-| `revenue_by_product` | 0.13 | 0.13 | 0.16 | 0.16 | 0.12 | 0.17 | 0.02 | 7,226.96 |
+| `products_per_category` | 0.19 | 0.19 | 0.20 | 0.20 | 0.17 | 0.20 | 0.01 | 4,592.25 |
+| `customer_category_distinct_orders` | 0.13 | 0.13 | 0.15 | 0.15 | 0.11 | 0.15 | 0.01 | 7,482.23 |
+| `optional_match_orders_count` | 0.18 | 0.18 | 0.19 | 0.19 | 0.16 | 0.20 | 0.01 | 4,855.74 |
+| `revenue_by_product` | 0.12 | 0.11 | 0.19 | 0.22 | 0.10 | 0.23 | 0.04 | 7,725.49 |
 
 - **Overall mean latency:** 0.16 ms
-- **Overall throughput:** 12.89 ops/sec
-- **Total benchmark wall-clock (sampled):** 25.421 s
+- **Overall throughput:** 13.06 ops/sec
+- **Total benchmark wall-clock (sampled):** 25.995 s
 
 ## Correctness
 
@@ -57,33 +57,33 @@ Per-query result fingerprints (SHA-256 over canonicalised rows):
 
 ## Power Consumption
 
-- Samples collected: **23** (~1s each)
-- Sampled duration: **23.21 s**
-- Avg CPU power: **8,412.4 mW**
-- Avg GPU power: **23.7 mW**
-- Avg package power: **8,436.1 mW**
-- Estimated energy (benchmark window): **195.78 J**
+- Samples collected: **24** (~1s each)
+- Sampled duration: **24.22 s**
+- Avg CPU power: **7,503.1 mW**
+- Avg GPU power: **27.5 mW**
+- Avg package power: **7,530.6 mW**
+- Estimated energy (benchmark window): **182.42 J**
 
 ## Memory Pressure
 
 - Samples collected: **26** (~1s each)
-- Avg used (active + wired + compressor): **20.6 GiB**
-- Peak used: **21.1 GiB**
-- Avg free: **640.2 MiB**
-- Min free: **58.0 MiB**
-- Avg compressed (logical): **23.2 GiB**
-- Peak compressed: **23.4 GiB**
+- Avg used (active + wired + compressor): **20.2 GiB**
+- Peak used: **20.5 GiB**
+- Avg free: **570.6 MiB**
+- Min free: **56.3 MiB**
+- Avg compressed (logical): **21.5 GiB**
+- Peak compressed: **21.5 GiB**
 
 ## Storage
 
-- **Raw data files:** 156.0 MiB (163,594,240 bytes)
+- **Raw data files:** 156.0 MiB (163,586,048 bytes)
 - Indexes/stats: 4.0 KiB (4,096 bytes)
 - Write-ahead logs: 26.7 MiB (28,020,736 bytes)
 - Metadata/bookkeeping: 0 B (0 bytes)
 - Preallocated scratch (excluded): 4.0 KiB (4,096 bytes)
 - Unclassified (other): 0 B (0 bytes)
-- Full data directory `du`: 182.7 MiB (191,623,168 bytes)
-- Classified sum: 182.7 MiB (191,623,168 bytes, Δ vs du = +0 bytes)
+- Full data directory `du`: 182.7 MiB (191,614,976 bytes)
+- Classified sum: 182.7 MiB (191,614,976 bytes, Δ vs du = +0 bytes)
 
 _Raw-data size is the comparison headline. Preallocated scratch files and write-ahead logs are excluded from raw-data comparisons because they do not represent durable graph records._
 
