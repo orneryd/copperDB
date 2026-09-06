@@ -2,10 +2,10 @@
   "label": "nornicdb",
   "uri": "bolt://127.0.0.1:17687",
   "database": "nornic",
-  "started_at": "2026-09-04T00:51:33.679652-07:00",
-  "finished_at": "2026-09-04T00:51:49.165528-07:00",
-  "seed_duration_ms": 9304.863,
-  "total_benchmark_duration_ms": 3237.517,
+  "started_at": "2026-09-06T08:31:43.968391-07:00",
+  "finished_at": "2026-09-06T08:31:59.999294-07:00",
+  "seed_duration_ms": 9705.725,
+  "total_benchmark_duration_ms": 3333.129,
   "iterations_per_query": 10,
   "categories": 96,
   "suppliers": 144,
@@ -35,78 +35,50 @@
       "iterations": 10,
       "cypher": "\n\t\t\tMATCH (c:Category)\u003c-[:PART_OF]-(p:Product)\n\t\t\tRETURN c.categoryName AS categoryName, count(p) AS productCount\n\t\t\tORDER BY productCount DESC",
       "latencies_ms": [
-        0.198,
-        0.189,
-        0.188,
-        0.182,
-        0.177,
-        0.178,
-        0.168,
-        0.191,
-        0.169,
-        0.171
+        0.149,
+        0.137,
+        0.13,
+        0.137,
+        0.147,
+        0.125,
+        0.12,
+        0.126,
+        0.126,
+        0.128
       ],
-      "mean_ms": 0.18109999999999998,
-      "median_ms": 0.18,
-      "p95_ms": 0.19485,
-      "p99_ms": 0.19737000000000002,
-      "min_ms": 0.168,
-      "max_ms": 0.198,
-      "stddev_ms": 0.010224697767877758,
-      "ops_per_second": 4795.588058985733,
+      "mean_ms": 0.1325,
+      "median_ms": 0.129,
+      "p95_ms": 0.14809999999999998,
+      "p99_ms": 0.14881999999999998,
+      "min_ms": 0.12,
+      "max_ms": 0.149,
+      "stddev_ms": 0.009698224350650769,
+      "ops_per_second": 6442.261233693026,
       "row_count": 96,
       "result_hash": "91e9f1f063680a6de80e8d7285769fd3831c5709688b1afaa85521c3d3b31c43",
       "first_rows": [
         {
-          "categoryName": "Category-50-organic",
+          "categoryName": "Category-35-free-range",
           "productCount": 500
         },
         {
-          "categoryName": "Category-83-free-range",
+          "categoryName": "Category-90-aged",
           "productCount": 500
         },
         {
-          "categoryName": "Category-88-artisanal",
+          "categoryName": "Category-44-small-batch",
           "productCount": 500
         },
         {
-          "categoryName": "Category-23-organic",
+          "categoryName": "Category-56-free-range",
           "productCount": 500
         },
         {
-          "categoryName": "Category-49-heritage",
+          "categoryName": "Category-28-small-batch",
           "productCount": 500
         },
         {
-          "categoryName": "Category-79-organic",
-          "productCount": 500
-        },
-        {
-          "categoryName": "Category-4-small-batch",
-          "productCount": 500
-        },
-        {
-          "categoryName": "Category-8-organic",
-          "productCount": 500
-        },
-        {
-          "categoryName": "Category-42-hand-picked",
-          "productCount": 500
-        },
-        {
-          "categoryName": "Category-16-hand-picked",
-          "productCount": 500
-        },
-        {
-          "categoryName": "Category-27-hand-picked",
-          "productCount": 500
-        },
-        {
-          "categoryName": "Category-36-aged",
-          "productCount": 500
-        },
-        {
-          "categoryName": "Category-91-fair-trade",
+          "categoryName": "Category-20-aged",
           "productCount": 500
         },
         {
@@ -114,11 +86,31 @@
           "productCount": 500
         },
         {
+          "categoryName": "Category-64-aged",
+          "productCount": 500
+        },
+        {
+          "categoryName": "Category-68-small-batch",
+          "productCount": 500
+        },
+        {
+          "categoryName": "Category-85-premium",
+          "productCount": 500
+        },
+        {
+          "categoryName": "Category-91-fair-trade",
+          "productCount": 500
+        },
+        {
+          "categoryName": "Category-92-heritage",
+          "productCount": 500
+        },
+        {
           "categoryName": "Category-13-artisanal",
           "productCount": 500
         },
         {
-          "categoryName": "Category-15-fair-trade",
+          "categoryName": "Category-59-wild-caught",
           "productCount": 500
         },
         {
@@ -126,15 +118,23 @@
           "productCount": 500
         },
         {
-          "categoryName": "Category-19-fair-trade",
+          "categoryName": "Category-67-cold-pressed",
           "productCount": 500
         },
         {
-          "categoryName": "Category-72-stone-milled",
+          "categoryName": "Category-15-fair-trade",
           "productCount": 500
         },
         {
-          "categoryName": "Category-78-fair-trade",
+          "categoryName": "Category-70-cold-pressed",
+          "productCount": 500
+        },
+        {
+          "categoryName": "Category-37-aged",
+          "productCount": 500
+        },
+        {
+          "categoryName": "Category-69-cold-pressed",
           "productCount": 500
         }
       ],
@@ -145,25 +145,25 @@
       "iterations": 10,
       "cypher": "\n\t\t\tMATCH (c:Customer)-[:PURCHASED]-\u003e(o:Order)-[:ORDERS]-\u003e(p:Product)-[:PART_OF]-\u003e(cat:Category)\n\t\t\tRETURN c.companyName AS companyName, cat.categoryName AS categoryName, count(DISTINCT o) AS orders\n\t\t\tORDER BY orders DESC, companyName ASC, categoryName ASC\n\t\t\tLIMIT 10",
       "latencies_ms": [
-        0.151,
-        0.145,
         0.162,
-        0.137,
+        0.144,
         0.142,
-        0.168,
-        0.152,
-        0.157,
-        0.139,
-        0.14
+        0.153,
+        0.13,
+        0.146,
+        0.161,
+        0.16,
+        0.147,
+        0.145
       ],
-      "mean_ms": 0.1493,
-      "median_ms": 0.148,
-      "p95_ms": 0.1653,
-      "p99_ms": 0.16746,
-      "min_ms": 0.137,
-      "max_ms": 0.168,
-      "stddev_ms": 0.010520350648993492,
-      "ops_per_second": 6521.561914078422,
+      "mean_ms": 0.149,
+      "median_ms": 0.1465,
+      "p95_ms": 0.16155,
+      "p99_ms": 0.16191,
+      "min_ms": 0.13,
+      "max_ms": 0.162,
+      "stddev_ms": 0.010077477638553985,
+      "ops_per_second": 6547.896553711086,
       "row_count": 10,
       "result_hash": "5da36214d5163220e30b2ea89cfe9f0d55b978d9e74ea1094b078271ac314be8",
       "first_rows": [
@@ -225,25 +225,25 @@
       "iterations": 10,
       "cypher": "\n\t\t\tMATCH (p:Product)\n\t\t\tOPTIONAL MATCH (p)\u003c-[r:ORDERS]-(o:Order)\n\t\t\tRETURN p.productName AS productName, count(o) AS orderCount\n\t\t\tORDER BY orderCount DESC, productName ASC\n\t\t\tLIMIT 100",
       "latencies_ms": [
-        0.194,
-        0.191,
+        0.163,
+        0.137,
+        0.151,
+        0.145,
+        0.158,
+        0.178,
+        0.174,
         0.195,
-        0.191,
-        0.186,
-        0.183,
-        0.188,
         0.189,
-        0.187,
-        0.185
+        0.177
       ],
-      "mean_ms": 0.1889,
-      "median_ms": 0.1885,
-      "p95_ms": 0.19455,
-      "p99_ms": 0.19491,
-      "min_ms": 0.183,
+      "mean_ms": 0.16670000000000001,
+      "median_ms": 0.16849999999999998,
+      "p95_ms": 0.1923,
+      "p99_ms": 0.19446,
+      "min_ms": 0.137,
       "max_ms": 0.195,
-      "stddev_ms": 0.0038715486421959,
-      "ops_per_second": 4660.826961206073,
+      "stddev_ms": 0.019073250611494855,
+      "ops_per_second": 5221.024229207141,
       "row_count": 100,
       "result_hash": "8950fcdaab16eaeb0b647ca818401cdcae8271087add813303d2afca875a6065",
       "first_rows": [
@@ -335,25 +335,25 @@
       "iterations": 10,
       "cypher": "\n\t\t\tMATCH (p:Product)\u003c-[r:ORDERS]-(:Order)\n\t\t\tWITH p, sum(p.unitPrice * r.quantity) AS revenue\n\t\t\tRETURN p.productName AS productName, revenue\n\t\t\tORDER BY revenue DESC, productName ASC\n\t\t\tLIMIT 10",
       "latencies_ms": [
-        0.148,
-        0.143,
-        0.152,
-        0.163,
-        0.137,
-        0.125,
-        0.132,
-        0.122,
-        0.12,
-        0.131
+        0.128,
+        0.108,
+        0.101,
+        0.124,
+        0.119,
+        0.091,
+        0.089,
+        0.102,
+        0.097,
+        0.123
       ],
-      "mean_ms": 0.1373,
-      "median_ms": 0.1345,
-      "p95_ms": 0.15805,
-      "p99_ms": 0.16201000000000002,
-      "min_ms": 0.12,
-      "max_ms": 0.163,
-      "stddev_ms": 0.01404793381406833,
-      "ops_per_second": 7034.822370735139,
+      "mean_ms": 0.10819999999999999,
+      "median_ms": 0.105,
+      "p95_ms": 0.1262,
+      "p99_ms": 0.12764,
+      "min_ms": 0.089,
+      "max_ms": 0.128,
+      "stddev_ms": 0.014366627996854377,
+      "ops_per_second": 8881.980681692017,
       "row_count": 10,
       "result_hash": "60b64c678f4c01fdca98d0683c8ad0e700ba61be88091eb445c990f1b0fffc84",
       "first_rows": [
@@ -401,6 +401,6 @@
       "correctness_ok": true
     }
   ],
-  "overall_mean_ms": 0.16414999999999996,
-  "overall_ops_per_second": 12.355147478762273
+  "overall_mean_ms": 0.1391,
+  "overall_ops_per_second": 12.000735645095045
 }

@@ -1770,7 +1770,7 @@ impl CopperDb {
                 Some(hash),
                 elapsed_ms,
             )?;
-            tracing::info!(
+            tracing::debug!(
                 query_hash = hash,
                 phase_parse_cache_us = t_parse_cache.as_micros(),
                 phase_compliance_us = t_compliance.as_micros(),
@@ -1858,7 +1858,7 @@ impl CopperDb {
             + t_compliance.as_micros()
             + t_pattern.as_micros()
             + t_eval.as_micros();
-        tracing::info!(
+        tracing::debug!(
             query_hash = hash,
             phase_parse_cache_us = t_parse_cache.as_micros(),
             phase_compliance_us = t_compliance.as_micros(),

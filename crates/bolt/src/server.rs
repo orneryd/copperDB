@@ -21,7 +21,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::accept_async;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 const BOLT_RECEIVE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -793,7 +793,7 @@ async fn handle_tcp_session_with_timeout_and_counters(
         .peer_addr()
         .map(|a| a.to_string())
         .unwrap_or_default();
-    info!(event_id = "bolt.log.hello", %peer, transport = "tcp", "bolt tcp session started");
+    debug!(event_id = "bolt.log.hello", %peer, transport = "tcp", "bolt tcp session started");
     let mut preamble = [0u8; 20];
     stream.read_exact(&mut preamble).await?;
     if preamble[..4] != [0x60, 0x60, 0xB0, 0x17] {
@@ -802,7 +802,7 @@ async fn handle_tcp_session_with_timeout_and_counters(
         ));
     }
     stream.write_all(&[0x00, 0x00, 0x04, 0x04]).await?;
-    info!(event_id = "bolt.log.hello", %peer, transport = "tcp", protocol_version = "4.4", "bolt tcp version sent");
+    debug!(event_id = "bolt.log.hello", %peer, transport = "tcp", protocol_version = "4.4", "bolt tcp version sent");
 
     let mut session = BoltSession::new_with_preferences(
         options.auth_enabled,
@@ -881,7 +881,7 @@ async fn handle_tcp_session_with_timeout_and_counters(
             }
         }
         if !framed_responses.is_empty() {
-            info!(
+            debug!(
                 event_id = "bolt.log.run",
                 response_count,
                 response_bytes = framed_responses.len(),
@@ -959,7 +959,7 @@ where
         ));
     }
     // Respond with Bolt 4.4 (raw — handshake, not chunked)
-    info!(
+    debug!(
         event_id = "bolt.log.hello",
         transport = "websocket",
         protocol_version = "4.4",
@@ -968,7 +968,7 @@ where
     wsconn::write_ws_raw(ws, &[0x00, 0x00, 0x04, 0x04])
         .await
         .map_err(|e| BoltError::ProtocolViolation(format!("WS version response error: {e}")))?;
-    info!(
+    debug!(
         event_id = "bolt.log.hello",
         transport = "websocket",
         protocol_version = "4.4",
@@ -1039,7 +1039,7 @@ where
                 continue;
             }
             for response_bytes in responses {
-                info!(
+                debug!(
                     event_id = "bolt.log.run",
                     response_bytes = response_bytes.len(),
                     transport = "websocket",
@@ -1488,7 +1488,7 @@ async fn process_message_with_telemetry(
         }
     };
     let msg = dispatch::decode_message(sig, fields)?;
-    info!(
+    debug!(
         event_id = "bolt.log.run",
         signature = format!("0x{sig:02X}"),
         "bolt message received"
@@ -1522,7 +1522,7 @@ async fn process_message_with_telemetry(
                 ("hints".into(), serde_json::json!({})),
                 ("patch_bolt".into(), serde_json::json!(["utc"])),
             ]);
-            info!(
+            debug!(
                 event_id = "bolt.log.hello",
                 authenticated = session.authenticated,
                 "bolt HELLO succeeded"
@@ -1719,7 +1719,7 @@ async fn process_message_with_telemetry(
                         .iter()
                         .map(|c| serde_json::Value::String(c.clone()))
                         .collect();
-                    info!(event_id = "bolt.log.query", %query, fields = ?columns, "bolt RUN executed");
+                    debug!(event_id = "bolt.log.query", %query, fields = ?columns, "bolt RUN executed");
                     let mut metadata = HashMap::from([
                         ("fields".into(), serde_json::json!(fields_json)),
                         ("t_first".into(), serde_json::json!(0)),

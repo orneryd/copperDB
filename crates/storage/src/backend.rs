@@ -1,5 +1,8 @@
 use crate::{StorageError, StorageIterator};
-use fjall::{Database, Keyspace, KeyspaceCreateOptions};
+use fjall::{
+    CompressionType, Database, Keyspace, KeyspaceCreateOptions,
+    config::CompressionPolicy,
+};
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
 use std::fs;
@@ -242,11 +245,16 @@ impl FjallStorageBackend {
     }
 
     pub(crate) fn from_database(db: Database) -> Result<Self, StorageError> {
+        let graph_keyspace_options = || {
+            KeyspaceCreateOptions::default()
+                .data_block_compression_policy(CompressionPolicy::all(CompressionType::Lz4))
+                .index_block_compression_policy(CompressionPolicy::all(CompressionType::Lz4))
+        };
         Ok(Self {
-            meta: db.keyspace("meta", KeyspaceCreateOptions::default)?,
-            nodes: db.keyspace("nodes", KeyspaceCreateOptions::default)?,
-            edges: db.keyspace("edges", KeyspaceCreateOptions::default)?,
-            indexes: db.keyspace("indexes", KeyspaceCreateOptions::default)?,
+            meta: db.keyspace("meta", graph_keyspace_options)?,
+            nodes: db.keyspace("nodes", graph_keyspace_options)?,
+            edges: db.keyspace("edges", graph_keyspace_options)?,
+            indexes: db.keyspace("indexes", graph_keyspace_options)?,
             db,
         })
     }

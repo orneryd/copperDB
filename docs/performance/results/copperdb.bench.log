@@ -53,10 +53,10 @@
   .. wrote 160000 / 168050 rows
   .. wrote 165000 / 168050 rows
   .. wrote 168050 / 168050 rows
-[copperdb] seeded in 10832.5ms (97440 nodes, 312050 rels, ~35.4 MiB payload)
+[copperdb] seeded in 9387.4ms (97440 nodes, 312050 rels, ~35.4 MiB payload)
 [copperdb] seed verified: categories=96 suppliers=144 customers=1200 products=48000 orders=48000 part_of=48000 supplies=48000 purchased=48000 orders_edges=168050
-[copperdb] products_per_category              mean=   0.22ms p95=   0.25ms ops/s=  4130.1 rows=96
-[copperdb] customer_category_distinct_orders  mean=   0.16ms p95=   0.18ms ops/s=  6159.4 rows=10
-[copperdb] optional_match_orders_count        mean=   0.20ms p95=   0.21ms ops/s=  4400.6 rows=100
-[copperdb] revenue_by_product                 mean=   0.15ms p95=   0.16ms ops/s=  6545.9 rows=10
-[copperdb] wrote /Users/timothysweet/src/copperDB/docs/performance/1.1.0-northwind-results/run-20260904_005130/copperdb.results.json
+[copperdb] products_per_category              mean=   0.18ms p95=   0.21ms ops/s=  4879.1 rows=96
+[copperdb] customer_category_distinct_orders  mean=   0.13ms p95=   0.15ms ops/s=  7248.1 rows=10
+[copperdb] optional_match_orders_count        mean=   0.18ms p95=   0.20ms ops/s=  4790.1 rows=100
+[copperdb] revenue_by_product                 mean=   0.13ms p95=   0.16ms ops/s=  7227.0 rows=10
+[copperdb] wrote /Users/timothysweet/src/copperDB/docs/performance/1.1.0-northwind-results/run-20260906_083114/copperdb.results.json

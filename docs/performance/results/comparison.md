@@ -7,16 +7,16 @@
 
 | Metric | NornicDB | CopperDB | Delta | Ratio |
 |---|---:|---:|---:|---:|
-| Overall mean latency (ms) | 0.16 | 0.18 | -9.1% | 1.10× |
-| Overall throughput (ops/sec) | 12.36 | 13.28 | -6.9% | 0.93× |
-| Seed duration (ms) | 9,304.86 | 10,832.47 | -14.1% | 1.16× |
-| Avg CPU power (mW) | 9,286.67 | 8,549.07 | +8.6% | 0.92× |
-| Avg GPU power (mW) | 26.97 | 14.62 | +84.5% | 0.54× |
-| Avg package power (mW) | 9,313.65 | 8,563.69 | +8.8% | 0.92× |
-| Energy during benchmark (J) | 140.91 | 207.47 | -32.1% | 1.47× |
-| Benchmark wall-clock (s) | 17.46 | 26.02 | -32.9% | 1.49× |
-| Peak memory used (bytes) | 19.1 GiB | 19.3 GiB | -1.2% | 1.01× |
-| Raw data files (bytes) | 151,707,648 | 256,196,608 | -40.8% | 1.69× |
+| Overall mean latency (ms) | 0.14 | 0.16 | -11.9% | 1.14× |
+| Overall throughput (ops/sec) | 12.00 | 12.89 | -6.9% | 0.93× |
+| Seed duration (ms) | 9,705.73 | 9,387.36 | +3.4% | 0.97× |
+| Avg CPU power (mW) | 8,904.59 | 8,412.36 | +5.9% | 0.94× |
+| Avg GPU power (mW) | 41.32 | 23.74 | +74.1% | 0.57× |
+| Avg package power (mW) | 8,945.91 | 8,436.10 | +6.0% | 0.94× |
+| Energy during benchmark (J) | 144.40 | 195.78 | -26.2% | 1.36× |
+| Benchmark wall-clock (s) | 18.00 | 25.42 | -29.2% | 1.41× |
+| Peak memory used (bytes) | 21.0 GiB | 21.1 GiB | -0.1% | 1.00× |
+| Raw data files (bytes) | 151,785,472 | 163,594,240 | -7.2% | 1.08× |
 
 _Delta = (NornicDB − CopperDB) / CopperDB. Ratio compares CopperDB to NornicDB for metrics where lower is better (latency, energy, disk), and NornicDB to CopperDB for throughput (higher is better)._
 
@@ -24,10 +24,10 @@ _Delta = (NornicDB − CopperDB) / CopperDB. Ratio compares CopperDB to NornicDB
 
 | Query | NornicDB mean (ms) | CopperDB mean (ms) | Delta | NornicDB P95 | CopperDB P95 | NornicDB ops/s | CopperDB ops/s |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| `products_per_category` | 0.18 | 0.22 | -16.0% | 0.19 | 0.25 | 4,795.59 | 4,130.10 |
-| `customer_category_distinct_orders` | 0.15 | 0.16 | -5.9% | 0.17 | 0.18 | 6,521.56 | 6,159.37 |
-| `optional_match_orders_count` | 0.19 | 0.20 | -5.4% | 0.19 | 0.21 | 4,660.83 | 4,400.60 |
-| `revenue_by_product` | 0.14 | 0.15 | -7.4% | 0.16 | 0.16 | 7,034.82 | 6,545.93 |
+| `products_per_category` | 0.13 | 0.18 | -26.7% | 0.15 | 0.21 | 6,442.26 | 4,879.14 |
+| `customer_category_distinct_orders` | 0.15 | 0.13 | +11.1% | 0.16 | 0.15 | 6,547.90 | 7,248.13 |
+| `optional_match_orders_count` | 0.17 | 0.18 | -8.9% | 0.19 | 0.20 | 5,221.02 | 4,790.13 |
+| `revenue_by_product` | 0.11 | 0.13 | -19.3% | 0.13 | 0.16 | 8,881.98 | 7,226.96 |
 
 ## Correctness
 
@@ -66,27 +66,27 @@ Raw data files only (preallocated scratch, WAL, and indexes excluded from the he
 
 | Bucket | NornicDB | CopperDB |
 |---|---:|---:|
-| **Raw data** | 144.7 MiB (151,707,648 B) | 244.3 MiB (256,196,608 B) |
+| **Raw data** | 144.8 MiB (151,785,472 B) | 156.0 MiB (163,594,240 B) |
 | Indexes / stats | 0 B (0 B) | 4.0 KiB (4,096 B) |
-| Write-ahead logs | 260.0 KiB (266,240 B) | 596.7 MiB (625,680,384 B) |
+| Write-ahead logs | 260.0 KiB (266,240 B) | 26.7 MiB (28,020,736 B) |
 | Metadata | 8.0 KiB (8,192 B) | 0 B (0 B) |
 | _Scratch (excluded)_ | 1.0 MiB (1,048,576 B) | 4.0 KiB (4,096 B) |
 | _Unclassified_ | 0 B (0 B) | 0 B (0 B) |
-| Total `du` | 145.9 MiB | 841.0 MiB |
+| Total `du` | 146.0 MiB | 182.7 MiB |
 
-- **Raw data ratio:** 0.59× CopperDB (smaller)
-- Full-dir ratio (includes scratch/WAL): 0.17× CopperDB
+- **Raw data ratio:** 0.93× CopperDB (smaller)
+- Full-dir ratio (includes scratch/WAL): 0.80× CopperDB
 
 ## Power
 
 | | NornicDB | CopperDB |
 |---|---:|---:|
-| Samples | 15 | 24 |
-| Duration (s) | 15.13 | 24.23 |
-| CPU avg (mW) | 9,286.7 | 8,549.1 |
-| GPU avg (mW) | 27.0 | 14.6 |
-| Package avg (mW) | 9,313.6 | 8,563.7 |
-| Energy (J) | 140.91 | 207.47 |
+| Samples | 16 | 23 |
+| Duration (s) | 16.14 | 23.21 |
+| CPU avg (mW) | 8,904.6 | 8,412.4 |
+| GPU avg (mW) | 41.3 | 23.7 |
+| Package avg (mW) | 8,945.9 | 8,436.1 |
+| Energy (J) | 144.40 | 195.78 |
 
 ## Memory Pressure
 
@@ -95,12 +95,12 @@ System-wide memory during each engine's full lifecycle (startup → benchmark �
 | | NornicDB | CopperDB |
 |---|---:|---:|
 | Samples | 18 | 26 |
-| Avg used (active+wired+compressor) | 18.7 GiB | 19.0 GiB |
-| Peak used | 19.1 GiB | 19.3 GiB |
-| Avg free | 1.1 GiB | 659.4 MiB |
-| Min free | 515.6 MiB | 55.5 MiB |
-| Avg compressed (logical) | 17.4 GiB | 17.4 GiB |
-| Peak compressed | 17.4 GiB | 17.4 GiB |
+| Avg used (active+wired+compressor) | 20.7 GiB | 20.6 GiB |
+| Peak used | 21.0 GiB | 21.1 GiB |
+| Avg free | 447.8 MiB | 640.2 MiB |
+| Min free | 62.5 MiB | 58.0 MiB |
+| Avg compressed (logical) | 23.1 GiB | 23.2 GiB |
+| Peak compressed | 23.1 GiB | 23.4 GiB |
 
 ## Notes
 
