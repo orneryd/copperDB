@@ -2824,7 +2824,23 @@ impl StorageEngine {
                     Ok((logical_key, value.to_vec()))
                 })
                 .collect::<Result<Vec<_>, StorageError>>()?;
-            return self.mvcc.restore_persisted_entries(head.as_ref(), entries);
+            return self
+                .mvcc
+                .restore_persisted_entries(head.as_ref(), entries, |logical_key| {
+                    if let Some(id) = logical_key.strip_prefix("node:") {
+                        return self
+                            .get_node_record(id)?
+                            .map(|node| rmp_serde::to_vec(&node).map_err(StorageError::from))
+                            .transpose();
+                    }
+                    if let Some(id) = logical_key.strip_prefix("edge:") {
+                        return self
+                            .get_edge_record(id)?
+                            .map(|edge| rmp_serde::to_vec(&edge).map_err(StorageError::from))
+                            .transpose();
+                    }
+                    Ok(None)
+                });
         }
 
         match self.meta.fjall_get(META_MVCC_STATE_KEY)? {
@@ -3034,6 +3050,7 @@ impl StorageEngine {
     /// the frames already represented by the durable primary store.
     pub fn checkpoint_wal(&self) -> Result<(WALSnapshot, usize), StorageError> {
         let _commit_guard = self.batch_commit_lock.lock();
+        self.backend.checkpoint()?;
         let snapshot = WALSnapshot {
             compacted_through: self.wal_applied_sequence()?,
             created_at_unix_ms: now_unix_ms(),
@@ -6275,7 +6292,7 @@ impl StorageEngine {
 
     /// Flush all pending writes to disk.
     pub fn flush(&self) -> Result<(), StorageError> {
-        self.backend.flush()?;
+        self.checkpoint_wal()?;
         *self.size_on_disk_snapshot.lock() = None;
         Ok(())
     }
@@ -6914,7 +6931,7 @@ impl Drop for FlushGuard {
     fn drop(&mut self) {
         // Flush the configured backend. Failures are logged but do not panic — a flush
         // failure should not crash the server.
-        if let Err(e) = self.storage.backend.flush() {
+        if let Err(e) = self.storage.flush() {
             tracing::warn!(
                 event_id = "storage.log.flush_guard_failed",
                 error = %e,

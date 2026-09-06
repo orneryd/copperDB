@@ -138,6 +138,42 @@ struct PackageComponent {
     state: Arc<AppState>,
 }
 
+struct StorageComponent {
+    state: Arc<AppState>,
+}
+
+impl std::fmt::Debug for StorageComponent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("StorageComponent").finish()
+    }
+}
+
+#[async_trait]
+impl Component for StorageComponent {
+    fn name(&self) -> &str {
+        "storage"
+    }
+
+    async fn start(&self, token: CancellationToken) -> Result<(), BoxError> {
+        token.cancelled().await;
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> Result<(), BoxError> {
+        let engines = self
+            .state
+            .engine_cache
+            .read()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for engine in engines {
+            engine.storage_engine().flush()?;
+        }
+        Ok(())
+    }
+}
+
 impl std::fmt::Debug for PackageComponent {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.debug_struct("PackageComponent").finish()
@@ -451,6 +487,9 @@ async fn main() -> Result<()> {
 
     let app = build_router(Arc::clone(&state));
     let mut supervisor = Supervisor::new();
+    supervisor.register(StorageComponent {
+        state: Arc::clone(&state),
+    });
     supervisor.register(PackageComponent {
         state: Arc::clone(&state),
     });
@@ -508,13 +547,26 @@ async fn main() -> Result<()> {
     }
 
     supervisor
-        .run_until(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .run_until(wait_for_shutdown_signal())
         .await
         .map_err(|errors| anyhow::anyhow!("lifecycle supervision failed: {errors:?}"))?;
 
     Ok(())
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to register SIGTERM handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 async fn resolve_startup_config(cli: &Cli) -> Result<StartupConfig> {

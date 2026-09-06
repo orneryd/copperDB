@@ -26,6 +26,7 @@ REPORT_DIR="${REPORT_DIR:-${REPORT_ROOT}/${RUN_ID}}"
 WORK_DIR="${WORK_DIR:-${REPO_ROOT}/target/northwind-benchmark}"
 NORNIC_DATA_DIR="${NORNIC_DATA_DIR:-${WORK_DIR}/nornicdb}"
 COPPER_STORAGE_ROOT="${COPPER_STORAGE_ROOT:-${WORK_DIR}/copperdb-data}"
+COPPER_AUTH_STORAGE_ROOT="${COPPER_AUTH_STORAGE_ROOT:-${WORK_DIR}/copperdb-auth}"
 COPPER_DATABASE="${COPPER_DATABASE:-copperdb}"
 NORNIC_DATABASE="${NORNIC_DATABASE:-nornic}"
 NORNIC_BOLT_PORT="${NORNIC_BOLT_PORT:-17687}"
@@ -51,6 +52,7 @@ cleanup() {
   [[ -n "${SUDO_KEEPALIVE_PID}" ]] && kill "${SUDO_KEEPALIVE_PID}" 2>/dev/null || true
   wait "${NORNIC_PID}" 2>/dev/null || true
   wait "${COPPER_PID}" 2>/dev/null || true
+  rm -rf "${NORNIC_DATA_DIR}" "${COPPER_STORAGE_ROOT}" "${COPPER_AUTH_STORAGE_ROOT}"
   exit "${exit_code}"
 }
 trap cleanup EXIT INT TERM
@@ -80,7 +82,7 @@ elif [[ "${POWER_METRICS}" != "0" ]]; then
 fi
 
 mkdir -p "${WORK_DIR}" "${REPORT_DIR}"
-rm -rf "${NORNIC_DATA_DIR}" "${COPPER_STORAGE_ROOT}"
+rm -rf "${NORNIC_DATA_DIR}" "${COPPER_STORAGE_ROOT}" "${COPPER_AUTH_STORAGE_ROOT}"
 rm -f "${REPORT_DIR}"/{nornicdb,copperdb}.{results.json,powermetrics.plist,vmstat.log,disk_bytes.txt,disk_human.txt,data_dir.txt,wall_seconds.txt,stdout.log,stderr.log,bench.log,md} "${REPORT_DIR}/comparison.md"
 
 log "building immutable upstream Northwind workload"
@@ -144,6 +146,12 @@ stop_measurement() {
   VMSTAT_PID=""
 }
 
+record_file_inventory() {
+  local data_dir="$1"
+  local output_file="$2"
+  find "${data_dir}" -type f -exec stat -f '%z\t%b\t%N' {} + | sort -nr > "${output_file}"
+}
+
 run_workload() {
   local label="$1"
   local uri="$2"
@@ -198,13 +206,14 @@ run_nornic() {
   du -sk "${NORNIC_DATA_DIR}" | awk '{print $1 * 1024}' > "${REPORT_DIR}/nornicdb.disk_bytes.txt"
   du -sh "${NORNIC_DATA_DIR}" > "${REPORT_DIR}/nornicdb.disk_human.txt"
   printf '%s\n' "${NORNIC_DATA_DIR}" > "${REPORT_DIR}/nornicdb.data_dir.txt"
+  record_file_inventory "${NORNIC_DATA_DIR}" "${REPORT_DIR}/nornicdb.files.tsv"
 }
 
 run_copperdb() {
   log "starting CopperDB release binary"
   start_measurement copperdb
   local started_at="$(date +%s.%N)"
-  COPPERDB_AUTH_STORAGE_PATH="${WORK_DIR}/copperdb-auth" \
+  COPPERDB_AUTH_STORAGE_PATH="${COPPER_AUTH_STORAGE_ROOT}" \
     "${REPO_ROOT}/target/release/copperdb" --config "${WORK_DIR}/copperdb.toml" --no-auth --headless \
     --bolt-port "${COPPER_BOLT_PORT}" --http-port "${COPPER_HTTP_PORT}" --db-name "${COPPER_DATABASE}" \
     >"${REPORT_DIR}/copperdb.stdout.log" 2>"${REPORT_DIR}/copperdb.stderr.log" &
@@ -223,6 +232,7 @@ run_copperdb() {
   du -sk "${copper_data_dir}" | awk '{print $1 * 1024}' > "${REPORT_DIR}/copperdb.disk_bytes.txt"
   du -sh "${copper_data_dir}" > "${REPORT_DIR}/copperdb.disk_human.txt"
   printf '%s\n' "${copper_data_dir}" > "${REPORT_DIR}/copperdb.data_dir.txt"
+  record_file_inventory "${copper_data_dir}" "${REPORT_DIR}/copperdb.files.tsv"
 }
 
 run_nornic

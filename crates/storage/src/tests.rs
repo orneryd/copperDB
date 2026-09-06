@@ -28,6 +28,20 @@ fn sample_node(id: &str, labels: &[&str]) -> NodeRecord {
     }
 }
 
+fn count_files_with_extension(path: &std::path::Path, extension: &str) -> usize {
+    fs::read_dir(path)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            path.is_dir()
+                .then(|| count_files_with_extension(&path, extension))
+                .unwrap_or_else(|| {
+                    usize::from(path.extension().is_some_and(|current| current == extension))
+                })
+        })
+        .sum()
+}
+
 fn sample_edge(id: &str, t: &str, start: &str, end: &str) -> EdgeRecord {
     EdgeRecord {
         id: id.to_string(),
@@ -294,6 +308,10 @@ impl StorageBackend for CountingSizeBackend {
 
     fn flush(&self) -> Result<(), StorageError> {
         self.inner.flush()
+    }
+
+    fn checkpoint(&self) -> Result<(), StorageError> {
+        self.inner.checkpoint()
     }
 
     fn size_on_disk(&self) -> u64 {
@@ -2575,6 +2593,35 @@ fn storage_checkpoint_compacts_only_applied_frames_and_restores_unapplied_intent
 }
 
 #[test]
+fn storage_flush_checkpoints_fully_applied_wal_frames() {
+    let test_dir = tempfile::tempdir().unwrap();
+    let node = sample_node("durable", &["Node"]);
+    let engine = StorageEngine::open(test_dir.path()).unwrap();
+    engine.put_node_record(&node).unwrap();
+    assert_eq!(engine.wal_stats().entries, 1);
+
+    engine.flush().unwrap();
+    assert_eq!(engine.wal_stats().entries, 0);
+    assert_eq!(
+        engine.wal_checkpoint().unwrap().unwrap().compacted_through,
+        1
+    );
+    assert_eq!(count_files_with_extension(test_dir.path(), "jnl"), 1);
+    drop(engine);
+
+    let reopened = StorageEngine::open(test_dir.path()).unwrap();
+    assert_eq!(reopened.get_node_record(&node.id).unwrap(), Some(node));
+    assert_eq!(reopened.wal_stats().entries, 0);
+    let snapshot = reopened.begin_mvcc_snapshot();
+    assert_eq!(
+        reopened
+            .get_node_record_visible_at(&snapshot, "durable")
+            .unwrap(),
+        reopened.get_node_record("durable").unwrap()
+    );
+}
+
+#[test]
 fn storage_logical_snapshot_round_trips_mvcc_namespace_metadata_and_fresh_wal() {
     let source_dir = tempfile::tempdir().unwrap();
     let target_dir = tempfile::tempdir().unwrap();
@@ -3440,8 +3487,12 @@ fn async_storage_engine_flushes_mixed_records_in_one_wal_frame() {
     )
     .unwrap();
     let frames = wal.replay_transactions_after(0).unwrap();
-    assert_eq!(frames.len(), 1);
-    assert_eq!(frames[0].1.records.len(), 3);
+    assert!(frames.is_empty());
+
+    let reopened = StorageEngine::open(test_dir.path()).unwrap();
+    assert_eq!(reopened.get_node_record("source").unwrap(), Some(source));
+    assert_eq!(reopened.get_node_record("target").unwrap(), Some(target));
+    assert_eq!(reopened.get_edge_record("edge").unwrap(), Some(edge));
 }
 
 #[test]

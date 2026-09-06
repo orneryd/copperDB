@@ -323,7 +323,7 @@ impl StagedMvccRecordBatch {
     pub(crate) fn encoded_states(&self) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
         self.states
             .iter()
-            .map(|(key, state)| Ok((key.clone(), rmp_serde::to_vec(state)?)))
+            .map(|(key, state)| Ok((key.clone(), encode_persisted_mvcc_key_state(state)?)))
             .collect()
     }
 }
@@ -361,7 +361,7 @@ impl MvccStore {
         self.values
             .read()
             .iter()
-            .map(|(key, state)| Ok((key.clone(), rmp_serde::to_vec(state)?)))
+            .map(|(key, state)| Ok((key.clone(), encode_persisted_mvcc_key_state(state)?)))
             .collect()
     }
 
@@ -369,15 +369,29 @@ impl MvccStore {
         &self,
         encoded_head: &[u8],
         entries: I,
+        mut resolve_current_value: impl FnMut(&str) -> Result<Option<Vec<u8>>, StorageError>,
     ) -> Result<(), StorageError>
     where
         I: IntoIterator<Item = (String, Vec<u8>)>,
     {
         let head: PersistedMvccHead = rmp_serde::from_slice(encoded_head)?;
-        let values = entries
+        let mut values = entries
             .into_iter()
             .map(|(key, value)| Ok((key, rmp_serde::from_slice(&value)?)))
             .collect::<Result<BTreeMap<String, MvccKeyState>, StorageError>>()?;
+        for (logical_key, state) in &mut values {
+            let Some(head) = state.head.as_mut() else {
+                continue;
+            };
+            if !head.tombstoned && head.current_value.is_none() {
+                head.current_value = resolve_current_value(logical_key)?;
+                if head.current_value.is_none() {
+                    return Err(StorageError::NotFound(format!(
+                        "missing current MVCC payload for {logical_key}"
+                    )));
+                }
+            }
+        }
         let mut current_node_labels = BTreeMap::<String, BTreeSet<String>>::new();
         let mut node_label_history = BTreeMap::<String, BTreeSet<String>>::new();
         let mut current_edge_types = BTreeMap::<String, BTreeSet<String>>::new();
@@ -1443,6 +1457,14 @@ fn decode_node_record(raw: &[u8]) -> Result<NodeRecord, StorageError> {
 
 fn encode_edge_record(edge: &EdgeRecord) -> Result<Vec<u8>, StorageError> {
     Ok(rmp_serde::to_vec(edge)?)
+}
+
+fn encode_persisted_mvcc_key_state(state: &MvccKeyState) -> Result<Vec<u8>, StorageError> {
+    let mut persisted = state.clone();
+    if let Some(head) = persisted.head.as_mut() {
+        head.current_value = None;
+    }
+    Ok(rmp_serde::to_vec(&persisted)?)
 }
 
 fn decode_edge_record(raw: &[u8]) -> Result<EdgeRecord, StorageError> {

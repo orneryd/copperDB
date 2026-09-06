@@ -222,6 +222,7 @@ pub trait StorageBackend: Send + Sync {
     fn keyspace(&self, id: StorageKeyspaceId) -> StorageKeyspace;
     fn apply_batch(&self, operations: &[StorageBackendOperation]) -> Result<(), StorageError>;
     fn flush(&self) -> Result<(), StorageError>;
+    fn checkpoint(&self) -> Result<(), StorageError>;
     fn size_on_disk(&self) -> u64;
     fn name(&self) -> &'static str;
 }
@@ -287,6 +288,14 @@ impl StorageBackend for FjallStorageBackend {
         Ok(())
     }
 
+    fn checkpoint(&self) -> Result<(), StorageError> {
+        self.flush()?;
+        for keyspace in [&self.meta, &self.nodes, &self.edges, &self.indexes] {
+            keyspace.rotate_memtable_and_wait()?;
+        }
+        self.flush()
+    }
+
     fn size_on_disk(&self) -> u64 {
         self.db.disk_space().unwrap_or(0)
     }
@@ -348,6 +357,10 @@ impl StorageBackend for MemoryStorageBackend {
     }
 
     fn flush(&self) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    fn checkpoint(&self) -> Result<(), StorageError> {
         Ok(())
     }
 
