@@ -5292,9 +5292,7 @@ impl EvalEngine {
                 }
             })
             .collect::<HashSet<_>>();
-        let counted_nodes = self
-            .storage
-            .get_node_records_by_ids(counted_node_ids.into_iter())?;
+        let counted_nodes = self.storage.get_node_records_by_ids(counted_node_ids)?;
 
         for edge in edges {
             let (group_node_id, counted_node_id) = if incoming {
@@ -5310,11 +5308,11 @@ impl EvalEngine {
                     .labels
                     .iter()
                     .any(|candidate| candidate.eq_ignore_ascii_case(label))
-            }) || !self.node_visible_under_policy(&counted_node, &resolver)?
+            }) || !self.node_visible_under_policy(counted_node, &resolver)?
             {
                 continue;
             }
-            self.apply_on_access_for_node(&counted_node, &resolver)?;
+            self.apply_on_access_for_node(counted_node, &resolver)?;
             *counts.entry(group_node_id.clone()).or_insert(0) += 1;
         }
 
@@ -5331,12 +5329,12 @@ impl EvalEngine {
                     .labels
                     .iter()
                     .any(|candidate| candidate.eq_ignore_ascii_case(label))
-            }) || !self.node_visible_under_policy(&group_node, &resolver)?
+            }) || !self.node_visible_under_policy(group_node, &resolver)?
             {
                 continue;
             }
-            self.apply_on_access_for_node(&group_node, &resolver)?;
-            let group_props = node_record_to_props(&group_node);
+            self.apply_on_access_for_node(group_node, &resolver)?;
+            let group_props = node_record_to_props(group_node);
             let mut row = Row::new();
             for item in &ret.items {
                 row.insert(

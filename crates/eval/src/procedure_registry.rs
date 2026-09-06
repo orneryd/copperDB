@@ -1190,6 +1190,8 @@ pub(crate) enum BuiltinProcedure {
     FulltextQueryRelationships,
     VectorQueryNodes,
     VectorQueryRelationships,
+    DbRetrieve,
+    DbRRetrieve,
     SetNodeVectorProperty,
     SetRelationshipVectorProperty,
 }
@@ -1495,6 +1497,20 @@ fn build_builtin_registry() -> ProcedureRegistry {
             "Vector search on relationships",
             Read,
             B::VectorQueryRelationships,
+        ),
+        (
+            "db.retrieve",
+            "db.retrieve(request :: MAP) :: (node :: NODE, score :: FLOAT, rrf_score :: FLOAT, vector_rank :: INTEGER, bm25_rank :: INTEGER, search_method :: STRING, fallback_triggered :: BOOLEAN)",
+            "Hybrid retrieval over fulltext and vector indexes",
+            Read,
+            B::DbRetrieve,
+        ),
+        (
+            "db.rretrieve",
+            "db.rretrieve(request :: MAP) :: (node :: NODE, score :: FLOAT, rrf_score :: FLOAT, vector_rank :: INTEGER, bm25_rank :: INTEGER, search_method :: STRING, fallback_triggered :: BOOLEAN)",
+            "Hybrid retrieval with optional reranking",
+            Read,
+            B::DbRRetrieve,
         ),
         (
             "db.create.setNodeVectorProperty",

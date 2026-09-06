@@ -114,6 +114,12 @@ impl EvalEngine {
             BuiltinProcedure::VectorQueryRelationships => {
                 self.execute_vector_query_relationships_call(request_context, call, params)
             }
+            BuiltinProcedure::DbRetrieve => {
+                self.execute_db_retrieve_call(request_context, call, params, false)
+            }
+            BuiltinProcedure::DbRRetrieve => {
+                self.execute_db_retrieve_call(request_context, call, params, true)
+            }
             BuiltinProcedure::SetNodeVectorProperty => {
                 self.execute_set_node_vector_property(call, params, rows)
             }
@@ -1618,6 +1624,179 @@ impl EvalEngine {
         })
     }
 
+    fn execute_db_retrieve_call(
+        &self,
+        request_context: &copperdb_util::RequestContext,
+        call: &copperdb_cypher::CallClause,
+        params: &HashMap<String, Value>,
+        _rerank: bool,
+    ) -> Result<EvalResult, EvalError> {
+        if call.args.len() != 1 {
+            return Err(EvalError::ExecutionError(
+                "db.retrieve expects one request map".to_string(),
+            ));
+        }
+        let request = eval_expression(&call.args[0], &Row::new(), params)?;
+        let request = request.as_object().ok_or_else(|| {
+            EvalError::ExecutionError("db.retrieve request must be a map".to_string())
+        })?;
+        let query = request
+            .get("query")
+            .or_else(|| request.get("text"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|query| !query.is_empty())
+            .ok_or_else(|| EvalError::ExecutionError("db.retrieve query required".to_string()))?;
+        let strict = retrieval_bool(request, "failClosed", "fail_closed")?.unwrap_or(false);
+        validate_retrieval_options(request, strict)?;
+        let limit = retrieval_limit(request, strict)?;
+        let rrf_k = retrieval_number(request, "rrfK", "rrf_k", 60.0);
+        let vector_weight = retrieval_number(request, "vectorWeight", "vector_weight", 1.0);
+        let bm25_weight = retrieval_number(request, "bm25Weight", "bm25_weight", 1.0);
+        let min_rrf_score = retrieval_number(request, "minRRFScore", "min_rrf_score", 0.0);
+        let labels =
+            retrieval_strings(request, "labels").or_else(|| retrieval_strings(request, "types"));
+        let filters = retrieval_filters(request);
+        let embedding = request
+            .get("embedding")
+            .or_else(|| request.get("queryEmbedding"));
+        let embedding = match embedding {
+            Some(embedding) => retrieval_embedding(embedding, strict).map(|embedding| {
+                if embedding.is_empty() {
+                    None
+                } else {
+                    Some(embedding)
+                }
+            })?,
+            None if strict => {
+                return Err(EvalError::ExecutionError(
+                    "db.retrieve strictPolicy requires a valid embedding".to_string(),
+                ));
+            }
+            None => None,
+        };
+
+        let catalog = IndexCatalog::new(self.storage.as_ref());
+        let indexes = catalog.list()?;
+        let mut hits: BTreeMap<String, (NodeRecord, usize, usize, f64)> = BTreeMap::new();
+        for index in indexes {
+            if index.entity_type != copperdb_indexing::CatalogIndexEntityType::Node {
+                continue;
+            }
+            match index.kind {
+                copperdb_indexing::CatalogIndexKind::FullText => {
+                    for (position, (node, score)) in self
+                        .storage
+                        .search_fulltext_nodes_by_properties_with_cancellation(
+                            &index.label,
+                            &index.properties,
+                            query,
+                            limit,
+                            request_context.cancellation(),
+                        )?
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let rank = position + 1;
+                        if !retrieval_node_matches(&node, labels.as_deref(), &filters) {
+                            continue;
+                        }
+                        hits.entry(node.id.clone())
+                            .and_modify(|entry| {
+                                entry.2 = entry.2.max(rank);
+                                entry.3 = entry.3.max(score);
+                            })
+                            .or_insert((node, 0, rank, score));
+                    }
+                }
+                copperdb_indexing::CatalogIndexKind::Vector => {
+                    let Some(embedding) = embedding.as_ref() else {
+                        continue;
+                    };
+                    let (matches, _) = (self.vector_index_query)(
+                        request_context.cancellation(),
+                        &index.name,
+                        embedding,
+                        limit,
+                    )
+                    .map_err(|error| EvalError::ExecutionError(error.to_string()))?;
+                    for (position, (id, score)) in matches.into_iter().enumerate() {
+                        let Some(node) = self.storage.get_node_record(&id)? else {
+                            continue;
+                        };
+                        if !retrieval_node_matches(&node, labels.as_deref(), &filters) {
+                            continue;
+                        }
+                        let rank = position + 1;
+                        hits.entry(id)
+                            .and_modify(|entry| {
+                                entry.1 = entry.1.max(rank);
+                                entry.3 = entry.3.max(score as f64);
+                            })
+                            .or_insert((node, rank, 0, score as f64));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut hits = hits.into_values().collect::<Vec<_>>();
+        hits.sort_by(|left, right| {
+            let left_score = retrieval_rrf(left.1, left.2, rrf_k, vector_weight, bm25_weight);
+            let right_score = retrieval_rrf(right.1, right.2, rrf_k, vector_weight, bm25_weight);
+            right_score
+                .total_cmp(&left_score)
+                .then_with(|| left.0.id.cmp(&right.0.id))
+        });
+        hits.truncate(limit);
+        let rows = hits
+            .into_iter()
+            .filter(|(_, vector_rank, bm25_rank, _)| {
+                retrieval_rrf(*vector_rank, *bm25_rank, rrf_k, vector_weight, bm25_weight)
+                    >= min_rrf_score
+            })
+            .map(|(node, vector_rank, bm25_rank, score)| {
+                let rrf_score =
+                    retrieval_rrf(vector_rank, bm25_rank, rrf_k, vector_weight, bm25_weight);
+                let mut row = Row::new();
+                row.insert(
+                    "node".to_string(),
+                    Value::Object(node_record_to_props(&node).into_iter().collect()),
+                );
+                row.insert("score".to_string(), Value::from(score));
+                row.insert("rrf_score".to_string(), Value::from(rrf_score));
+                row.insert("vector_rank".to_string(), Value::from(vector_rank));
+                row.insert("bm25_rank".to_string(), Value::from(bm25_rank));
+                row.insert(
+                    "search_method".to_string(),
+                    Value::String(
+                        match (vector_rank > 0, bm25_rank > 0) {
+                            (true, true) => "rrf",
+                            (true, false) => "vector_only",
+                            (false, true) => "bm25_only",
+                            (false, false) => "fallback",
+                        }
+                        .to_string(),
+                    ),
+                );
+                row.insert("fallback_triggered".to_string(), Value::Bool(false));
+                row
+            })
+            .collect();
+        Ok(EvalResult {
+            columns: vec![
+                "node".to_string(),
+                "score".to_string(),
+                "rrf_score".to_string(),
+                "vector_rank".to_string(),
+                "bm25_rank".to_string(),
+                "search_method".to_string(),
+                "fallback_triggered".to_string(),
+            ],
+            rows,
+            stats: QueryStats::default(),
+        })
+    }
+
     fn execute_fulltext_query_nodes_call(
         &self,
         request_context: &copperdb_util::RequestContext,
@@ -2457,6 +2636,241 @@ fn call_arg_vector(value: &Value, arg_name: &str) -> Result<Vec<f32>, EvalError>
     }
 
     Ok(vector)
+}
+
+fn retrieval_bool(
+    request: &serde_json::Map<String, Value>,
+    camel_case: &str,
+    snake_case: &str,
+) -> Result<Option<bool>, EvalError> {
+    request
+        .get(camel_case)
+        .or_else(|| request.get(snake_case))
+        .map(|value| {
+            value.as_bool().ok_or_else(|| {
+                EvalError::ExecutionError(format!("db.retrieve {camel_case} must be a boolean"))
+            })
+        })
+        .transpose()
+}
+
+fn retrieval_embedding(value: &Value, strict: bool) -> Result<Vec<f32>, EvalError> {
+    let vector = value.as_array().and_then(|values| {
+        values
+            .iter()
+            .map(|value| value.as_f64())
+            .collect::<Option<Vec<_>>>()
+    });
+    let valid = vector.filter(|values| {
+        !values.is_empty()
+            && values.iter().all(|value| {
+                value.is_finite() && *value >= f32::MIN as f64 && *value <= f32::MAX as f64
+            })
+    });
+    match valid {
+        Some(values) => Ok(values.into_iter().map(|value| value as f32).collect()),
+        None if strict => Err(EvalError::ExecutionError(
+            "db.retrieve strictPolicy requires a non-empty finite numeric embedding".to_string(),
+        )),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn retrieval_limit(
+    request: &serde_json::Map<String, Value>,
+    strict: bool,
+) -> Result<usize, EvalError> {
+    match request
+        .get("limit")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+    {
+        Some(value) if (1..=10_000).contains(&value) => Ok(value),
+        Some(_) if strict => Err(EvalError::ExecutionError(
+            "db.retrieve strictPolicy limit must be an integer from 1 to 10000".to_string(),
+        )),
+        Some(_) => Ok(10),
+        None if request.contains_key("limit") && strict => Err(EvalError::ExecutionError(
+            "db.retrieve strictPolicy limit must be an integer from 1 to 10000".to_string(),
+        )),
+        None => Ok(10),
+    }
+}
+
+fn retrieval_number(
+    request: &serde_json::Map<String, Value>,
+    camel_case: &str,
+    snake_case: &str,
+    default: f64,
+) -> f64 {
+    request
+        .get(camel_case)
+        .or_else(|| request.get(snake_case))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or(default)
+}
+
+fn retrieval_strings(request: &serde_json::Map<String, Value>, key: &str) -> Option<Vec<String>> {
+    request.get(key).and_then(Value::as_array).map(|values| {
+        values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect()
+    })
+}
+
+fn retrieval_filters(request: &serde_json::Map<String, Value>) -> BTreeMap<String, Vec<String>> {
+    request
+        .get("filters")
+        .or_else(|| request.get("propertyFilters"))
+        .or_else(|| request.get("property_filters"))
+        .and_then(Value::as_object)
+        .map(|filters| {
+            filters
+                .iter()
+                .map(|(property, values)| {
+                    let values = values
+                        .as_array()
+                        .map(|values| values.iter().map(retrieval_filter_value).collect())
+                        .unwrap_or_else(|| vec![retrieval_filter_value(values)]);
+                    (property.clone(), values)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn retrieval_node_matches(
+    node: &NodeRecord,
+    labels: Option<&[String]>,
+    filters: &BTreeMap<String, Vec<String>>,
+) -> bool {
+    labels.is_none_or(|labels| {
+        labels.is_empty()
+            || labels.iter().any(|label| {
+                node.labels
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(label))
+            })
+    }) && filters.iter().all(|(property, values)| {
+        node.properties
+            .get(property)
+            .is_some_and(|value| match value {
+                Value::String(actual) => values.iter().any(|expected| actual == expected),
+                value => {
+                    let actual = value.to_string();
+                    values.contains(&actual)
+                }
+            })
+    })
+}
+
+fn retrieval_filter_value(value: &Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn validate_retrieval_options(
+    request: &serde_json::Map<String, Value>,
+    strict: bool,
+) -> Result<(), EvalError> {
+    for (camel_case, snake_case, minimum, maximum, exclusive_minimum) in [
+        ("rrfK", "rrf_k", 0.0, 10_000.0, true),
+        ("vectorWeight", "vector_weight", 0.0, 100.0, true),
+        ("bm25Weight", "bm25_weight", 0.0, 100.0, true),
+        ("minRRFScore", "min_rrf_score", 0.0, 1.0, false),
+        ("minSimilarity", "min_similarity", -1.0, 1.0, false),
+        (
+            "initialOverfetchRatio",
+            "initial_overfetch_ratio",
+            1.0,
+            100.0,
+            false,
+        ),
+        (
+            "maxOverfetchRatio",
+            "max_overfetch_ratio",
+            1.0,
+            100.0,
+            false,
+        ),
+        (
+            "overfetchGrowthFactor",
+            "overfetch_growth_factor",
+            1.0,
+            100.0,
+            true,
+        ),
+        (
+            "rerankMinScore",
+            "rerank_min_score",
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            false,
+        ),
+    ] {
+        if let Some(value) = request.get(camel_case).or_else(|| request.get(snake_case)) {
+            let valid = value.as_f64().is_some_and(|value| {
+                value.is_finite()
+                    && if exclusive_minimum {
+                        value > minimum
+                    } else {
+                        value >= minimum
+                    }
+                    && value <= maximum
+            });
+            if strict && !valid {
+                return Err(EvalError::ExecutionError(format!(
+                    "db.retrieve strictPolicy {camel_case} is invalid"
+                )));
+            }
+        }
+    }
+    if strict {
+        for (camel_case, snake_case) in [
+            ("adaptiveOverfetch", "adaptive_overfetch"),
+            ("fallbackEnabled", "fallback_enabled"),
+        ] {
+            let _ = retrieval_bool(request, camel_case, snake_case)?;
+        }
+        for (camel_case, snake_case) in [
+            ("candidateTarget", "candidate_target"),
+            ("maxCandidateLimit", "max_candidate_limit"),
+            ("rerankTopK", "rerank_top_k"),
+        ] {
+            if let Some(value) = request.get(camel_case).or_else(|| request.get(snake_case))
+                && !value
+                    .as_u64()
+                    .is_some_and(|value| (1..=10_000).contains(&value))
+            {
+                return Err(EvalError::ExecutionError(format!(
+                    "db.retrieve strictPolicy {camel_case} is invalid"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn retrieval_rrf(
+    vector_rank: usize,
+    bm25_rank: usize,
+    k: f64,
+    vector_weight: f64,
+    bm25_weight: f64,
+) -> f64 {
+    let mut score = 0.0;
+    if vector_rank > 0 {
+        score += vector_weight / (k + vector_rank as f64);
+    }
+    if bm25_rank > 0 {
+        score += bm25_weight / (k + bm25_rank as f64);
+    }
+    score
 }
 
 struct FulltextCallOptions {

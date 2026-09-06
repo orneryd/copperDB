@@ -1,7 +1,6 @@
 use crate::{StorageError, StorageIterator};
 use fjall::{
-    CompressionType, Database, Keyspace, KeyspaceCreateOptions,
-    config::CompressionPolicy,
+    CompressionType, Database, Keyspace, KeyspaceCreateOptions, config::CompressionPolicy,
 };
 use parking_lot::RwLock;
 use std::collections::BTreeMap;

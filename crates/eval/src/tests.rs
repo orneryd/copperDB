@@ -3888,6 +3888,41 @@ fn test_match_variable_length_relationship_large_chain_consistency() {
     assert_eq!(names, expected);
 }
 
+#[test]
+fn db_retrieve_is_registered_and_strictly_rejects_missing_or_invalid_embeddings() {
+    let engine = make_engine();
+    let parser = Parser::new();
+
+    let permissive = parser
+        .parse("CALL db.retrieve({query: 'copper'})")
+        .expect("retrieve call must parse");
+    let result = engine.execute(&permissive, &HashMap::new()).unwrap();
+    assert_eq!(
+        result.columns,
+        [
+            "node",
+            "score",
+            "rrf_score",
+            "vector_rank",
+            "bm25_rank",
+            "search_method",
+            "fallback_triggered",
+        ]
+    );
+    assert!(result.rows.is_empty());
+
+    for request in [
+        "CALL db.retrieve({query: 'copper', failClosed: true})",
+        "CALL db.retrieve({query: 'copper', fail_closed: true, embedding: []})",
+        "CALL db.retrieve({query: 'copper', failClosed: true, embedding: ['bad']})",
+        "CALL db.retrieve({query: 'copper', failClosed: 'true', embedding: [1.0]})",
+    ] {
+        let query = parser.parse(request).expect("retrieve call must parse");
+        let error = engine.execute(&query, &HashMap::new()).unwrap_err();
+        assert!(error.to_string().contains("strictPolicy") || error.to_string().contains("failClosed"));
+    }
+}
+
 /// Benchmark just the serialization + batch-apply cost of edge creation.
 #[test]
 fn prof_edge_batch_raw_cost() {

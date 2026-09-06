@@ -1967,6 +1967,23 @@ fn procedure_modes_drive_statement_authorization_classification() {
     assert!(statement_requires_write("CALL extension.unknown()"));
 }
 
+#[test]
+fn parsed_statement_permissions_require_write_and_schema_without_false_positives() {
+    assert!(statement_permissions("MATCH (node) SET node.name = 'updated'").write);
+    assert!(!statement_permissions("RETURN 'CREATE' AS keyword").write);
+    assert!(!statement_permissions("// DELETE\nRETURN 1").write);
+    assert!(!statement_permissions("MATCH (`CREATE`) RETURN `CREATE`").write);
+
+    let index = statement_permissions("CREATE INDEX FOR (node:Person) ON (node.email)");
+    assert!(index.write);
+    assert!(index.schema);
+
+    let constraint =
+        statement_permissions("CREATE CONSTRAINT FOR (node:Person) REQUIRE node.email IS UNIQUE");
+    assert!(constraint.write);
+    assert!(constraint.schema);
+}
+
 fn encode_bolt_message(signature: u8, fields: &[copperdb_bolt::packstream::Value]) -> Vec<u8> {
     use bytes::BytesMut;
 

@@ -24,6 +24,7 @@ use copperdb_bolt::server::{
 };
 use copperdb_buildinfo::{BUILD_INFO, display_version, server_announcement, version};
 use copperdb_config::{Config as RuntimeConfig, lookup_setting};
+use copperdb_cypher::{Clause, Parser};
 use copperdb_engine::{
     CopperDb as GraphEngine, DatabaseConfig as EngineConfig, QueryProcedureMode, ResultStats,
     query_procedure_mode,
@@ -797,8 +798,7 @@ impl AppState {
         let catalog_path = storage_root.join("copperdb-multidb");
         let default_database_path = storage_root.join("copperdb");
         let db_manager = Arc::new(
-            DatabaseManager::open(catalog_path)
-                .unwrap_or_else(|_| DatabaseManager::new()),
+            DatabaseManager::open(catalog_path).unwrap_or_else(|_| DatabaseManager::new()),
         );
         let _ = db_manager.create(
             "copperdb",
@@ -2331,6 +2331,20 @@ fn ensure_admin_access(state: &AppState, claims: &Claims) -> Result<(), StatusCo
     ensure_roles_admin_access(state, &claims.roles)
 }
 
+fn ensure_schema_access(state: &AppState, claims: &Claims) -> Result<(), StatusCode> {
+    let authenticator = state
+        .auth
+        .open_authenticator()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if PermissionsForRoles::from_role_names(&claims.roles, Some(&authenticator.entitlements))
+        .contains(&Permission::Schema)
+    {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
+}
+
 fn ensure_roles_admin_access(state: &AppState, roles: &[String]) -> Result<(), StatusCode> {
     let authenticator = state
         .auth
@@ -3193,19 +3207,25 @@ async fn neo4j_tx_commit_handler(
     let write = request
         .statements
         .iter()
-        .any(|statement| statement_requires_write(&statement.statement));
+        .any(|statement| statement_permissions(&statement.statement).write);
     let claims = match authorize_database_access(&state, &headers, &database, write) {
         Ok(claims) => claims,
         Err(status) => return status.into_response(),
     };
-    if request
-        .statements
-        .iter()
-        .any(|statement| statement_requires_admin(&statement.statement))
-        && let Some(claims) = claims.as_ref()
-        && let Err(status) = ensure_admin_access(&state, claims)
-    {
-        return status.into_response();
+    for statement in &request.statements {
+        let permissions = statement_permissions(&statement.statement);
+        if permissions.schema
+            && let Some(claims) = claims.as_ref()
+            && let Err(status) = ensure_schema_access(&state, claims)
+        {
+            return status.into_response();
+        }
+        if permissions.admin
+            && let Some(claims) = claims.as_ref()
+            && let Err(status) = ensure_admin_access(&state, claims)
+        {
+            return status.into_response();
+        }
     }
     let roles = roles_for_claims(claims.as_ref());
     let distributed = distributed_cypher_requested(&state, &headers);
@@ -3992,30 +4012,126 @@ fn parse_database_name(statement: &str, prefix: &str) -> Result<String, String> 
     }
 }
 
-fn statement_requires_write(statement: &str) -> bool {
-    let upper = statement.trim_start().to_ascii_uppercase();
-    let mutates = upper.contains("CREATE")
-        || upper.contains("DELETE")
-        || upper.contains("SET ")
-        || upper.contains("MERGE")
-        || upper.contains("REMOVE ");
-    if mutates {
-        return true;
+#[derive(Debug, Clone, Copy, Default)]
+struct StatementPermissions {
+    write: bool,
+    schema: bool,
+    admin: bool,
+}
+
+fn statement_permissions(statement: &str) -> StatementPermissions {
+    let mut permissions = StatementPermissions::default();
+    let statement = strip_cypher_comments(statement);
+    if let Ok(query) = Parser::new().parse(&statement) {
+        for clause in query.clauses {
+            match clause {
+                Clause::Create(_)
+                | Clause::Delete(_)
+                | Clause::Set(_)
+                | Clause::Merge(_)
+                | Clause::Remove(_)
+                | Clause::CreateDecayProfile(_)
+                | Clause::AlterDecayProfile(_)
+                | Clause::DropDecayProfile(_)
+                | Clause::CreatePromotionProfile(_)
+                | Clause::AlterPromotionProfile(_)
+                | Clause::DropPromotionProfile(_)
+                | Clause::CreatePromotionPolicy(_)
+                | Clause::AlterPromotionPolicy(_)
+                | Clause::DropPromotionPolicy(_) => permissions.write = true,
+                Clause::CreateConstraint(_)
+                | Clause::DropConstraint(_)
+                | Clause::CreateIndex(_)
+                | Clause::DropIndex(_) => {
+                    permissions.write = true;
+                    permissions.schema = true;
+                }
+                _ => {}
+            }
+        }
+    } else {
+        permissions.write = statement_requires_write_fallback(&statement);
+        permissions.schema = contains_cypher_keyword(&statement, "INDEX")
+            || contains_cypher_keyword(&statement, "CONSTRAINT");
+        permissions.write |= permissions.schema;
     }
-    match query_procedure_mode(statement) {
-        Some(QueryProcedureMode::Read | QueryProcedureMode::Dbms) => false,
-        Some(QueryProcedureMode::Write) => true,
-        None => {
-            !(upper.starts_with("MATCH ")
-                || upper.starts_with("RETURN ")
-                || upper.starts_with("WITH ")
-                || upper.starts_with("SHOW "))
+    match query_procedure_mode(&statement) {
+        Some(QueryProcedureMode::Write) => permissions.write = true,
+        Some(QueryProcedureMode::Dbms) => permissions.admin = true,
+        Some(QueryProcedureMode::Read) | None => {}
+    }
+    permissions
+}
+
+fn strip_cypher_comments(statement: &str) -> String {
+    let mut result = String::with_capacity(statement.len());
+    let mut characters = statement.chars().peekable();
+    let mut quote = None;
+    while let Some(character) = characters.next() {
+        if let Some(delimiter) = quote {
+            result.push(character);
+            if character == '\\' {
+                if let Some(escaped) = characters.next() {
+                    result.push(escaped);
+                }
+            } else if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' | '`' => {
+                quote = Some(character);
+                result.push(character);
+            }
+            '/' if characters.peek() == Some(&'/') => {
+                characters.next();
+                for comment_character in characters.by_ref() {
+                    if comment_character == '\n' {
+                        result.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if characters.peek() == Some(&'*') => {
+                characters.next();
+                let mut previous = None;
+                for comment_character in characters.by_ref() {
+                    if previous == Some('*') && comment_character == '/' {
+                        break;
+                    }
+                    if comment_character == '\n' {
+                        result.push('\n');
+                    }
+                    previous = Some(comment_character);
+                }
+            }
+            _ => result.push(character),
         }
     }
+    result
+}
+
+fn contains_cypher_keyword(statement: &str, keyword: &str) -> bool {
+    statement
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .any(|token| token.eq_ignore_ascii_case(keyword))
+}
+
+fn statement_requires_write(statement: &str) -> bool {
+    statement_permissions(statement).write
+}
+
+fn statement_requires_write_fallback(statement: &str) -> bool {
+    let upper = statement.trim_start().to_ascii_uppercase();
+    !(upper.starts_with("MATCH ")
+        || upper.starts_with("RETURN ")
+        || upper.starts_with("WITH ")
+        || upper.starts_with("SHOW "))
 }
 
 fn statement_requires_admin(statement: &str) -> bool {
-    query_procedure_mode(statement) == Some(QueryProcedureMode::Dbms)
+    statement_permissions(statement).admin
 }
 
 fn distributed_cypher_requested(state: &AppState, headers: &HeaderMap) -> bool {

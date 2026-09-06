@@ -974,8 +974,16 @@ impl<'a> ParseContext<'a> {
     }
 
     fn parse_create_index(&mut self, kind: IndexKind) -> Result<CreateIndexClause, CypherError> {
-        let name = self.advance_identifier()?;
-        let if_not_exists = self.consume_if_not_exists()?;
+        let (name, if_not_exists) = if self.peek_is("FOR") {
+            (None, false)
+        } else if self.peek_is("IF") {
+            (None, self.consume_if_not_exists()?)
+        } else {
+            (
+                Some(self.advance_identifier()?),
+                self.consume_if_not_exists()?,
+            )
+        };
         self.expect("FOR")?;
         self.expect("(")?;
         let (entity_type, variable, label) = if self.peek() == Some(")") {
@@ -1054,6 +1062,15 @@ impl<'a> ParseContext<'a> {
             self.advance();
             options = self.parse_options_map()?;
         }
+        let name = name.unwrap_or_else(|| {
+            let entity = label.to_ascii_lowercase();
+            let properties = properties
+                .iter()
+                .map(|property| property.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+                .join("_");
+            format!("index_{entity}_{properties}")
+        });
         Ok(CreateIndexClause {
             name,
             if_not_exists,
@@ -2348,6 +2365,18 @@ mod tests {
         } else {
             panic!("expected CreateIndex clause");
         }
+    }
+
+    #[test]
+    fn test_parse_unnamed_create_index() {
+        let query = Parser::new()
+            .parse("CREATE INDEX IF NOT EXISTS FOR (node:Person) ON (node.Email, node.Name)")
+            .expect("unnamed index must parse");
+        let Clause::CreateIndex(index) = query.clauses.first().expect("clause missing") else {
+            panic!("expected CreateIndex clause");
+        };
+        assert_eq!(index.name, "index_person_email_name");
+        assert!(index.if_not_exists);
     }
 
     #[test]

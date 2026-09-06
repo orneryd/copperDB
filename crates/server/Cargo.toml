@@ -31,6 +31,7 @@ copperdb-apoc = { workspace = true }
 copperdb-bolt = { workspace = true }
 copperdb-buildinfo = { workspace = true }
 copperdb-config = { workspace = true }
+copperdb-cypher = { workspace = true }
 copperdb-engine = { workspace = true }
 copperdb-envutil = { workspace = true }
 copperdb-fabric = { workspace = true }
